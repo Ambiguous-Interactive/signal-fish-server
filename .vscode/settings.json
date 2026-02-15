@@ -1,0 +1,55 @@
+{
+    // Rust Analyzer
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.allTargets": true,
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.imports.granularity.group": "module",
+    "rust-analyzer.inlayHints.chainingHints.enable": true,
+    "rust-analyzer.inlayHints.typeHints.enable": true,
+    "rust-analyzer.inlayHints.parameterHints.enable": true,
+    "rust-analyzer.lens.enable": true,
+    "rust-analyzer.lens.run.enable": true,
+    "rust-analyzer.lens.debug.enable": true,
+    "rust-analyzer.procMacro.enable": true,
+    // Editor
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.rulers": [
+        100
+    ],
+    "editor.bracketPairColorization.enabled": true,
+    "editor.guides.bracketPairs": "active",
+    "editor.semanticHighlighting.enabled": true,
+    // Language-specific formatters
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+        "editor.formatOnSave": true
+    },
+    "[toml]": {
+        "editor.defaultFormatter": "tamasfe.even-better-toml"
+    },
+    // File associations
+    "files.associations": {
+        "*.toml": "toml"
+    },
+    // Exclude build artifacts from file explorer
+    "files.exclude": {
+        "**/target": true
+    },
+    // Exclude build artifacts
+    "search.exclude": {
+        "**/target": true,
+        "**/coverage": true
+    },
+    "files.watcherExclude": {
+        "**/target/**": true,
+        "**/coverage/**": true
+    },
+    // Terminal
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "terminal.integrated.env.linux": {
+        "RUST_LOG": "debug",
+        "RUST_BACKTRACE": "1"
+    }
+}

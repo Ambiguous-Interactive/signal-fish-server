@@ -1,0 +1,165 @@
+// Signal Fish Server — Dev Container Configuration
+// https://github.com/AmbiguousInteractive/signal-fish-server
+{
+    "name": "Signal Fish Server",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    // Forwarded ports
+    "forwardPorts": [
+        3536
+    ],
+    "portsAttributes": {
+        "3536": {
+            "label": "Signal Fish WebSocket",
+            "onAutoForward": "notify"
+        }
+    },
+    // Environment variables
+    "containerEnv": {
+        "RUST_LOG": "debug",
+        "RUST_BACKTRACE": "1"
+    },
+    // Post-create setup
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    // VS Code customizations
+    "customizations": {
+        "vscode": {
+            "settings": {
+                // Rust Analyzer
+                "rust-analyzer.check.command": "clippy",
+                "rust-analyzer.check.allTargets": true,
+                "rust-analyzer.cargo.features": "all",
+                "rust-analyzer.imports.granularity.group": "module",
+                "rust-analyzer.inlayHints.chainingHints.enable": true,
+                "rust-analyzer.inlayHints.typeHints.enable": true,
+                "rust-analyzer.inlayHints.parameterHints.enable": true,
+                "rust-analyzer.lens.enable": true,
+                "rust-analyzer.lens.run.enable": true,
+                "rust-analyzer.lens.debug.enable": true,
+                "rust-analyzer.procMacro.enable": true,
+                "rust-analyzer.check.extraArgs": [
+                    "--",
+                    "-D",
+                    "warnings"
+                ],
+                // Editor
+                "editor.formatOnSave": true,
+                "editor.tabSize": 4,
+                "editor.insertSpaces": true,
+                "editor.rulers": [
+                    100
+                ],
+                "editor.guides.bracketPairs": "active",
+                "editor.semanticHighlighting.enabled": true,
+                // Exclude build artifacts from search and watcher
+                "search.exclude": {
+                    "**/target": true,
+                    "**/coverage": true
+                },
+                "files.watcherExclude": {
+                    "**/target/**": true,
+                    "**/coverage/**": true
+                },
+                "files.exclude": {
+                    "**/target": true
+                },
+                // Terminal
+                "terminal.integrated.defaultProfile.linux": "bash",
+                // Belt-and-suspenders: also set in containerEnv, kept for terminal profiles that don't inherit
+                "terminal.integrated.env.linux": {
+                    "RUST_LOG": "debug",
+                    "RUST_BACKTRACE": "1"
+                },
+                // Language-specific
+                "[rust]": {
+                    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+                },
+                "[toml]": {
+                    "editor.defaultFormatter": "tamasfe.even-better-toml"
+                },
+                "[yaml]": {
+                    "editor.defaultFormatter": "redhat.vscode-yaml",
+                    "editor.tabSize": 2
+                },
+                "[markdown]": {
+                    "editor.wordWrap": "on",
+                    "editor.rulers": []
+                },
+                // YAML schema associations
+                "yaml.schemas": {
+                    "https://json.schemastore.org/github-workflow.json": ".github/workflows/*.yml"
+                },
+                // Markdown lint — relax line length and inline HTML rules
+                "markdownlint.config": {
+                    "MD013": false,
+                    "MD033": false
+                },
+                // Spell checker — project-specific words
+                "cSpell.words": [
+                    "anyhow",
+                    "arrayvec",
+                    "axum",
+                    "chrono",
+                    "clippy",
+                    "crossbeam",
+                    "dashmap",
+                    "dedup",
+                    "dependi",
+                    "fastrand",
+                    "fullmesh",
+                    "gamedev",
+                    "hdrhistogram",
+                    "hmac",
+                    "matchbox",
+                    "mold",
+                    "msrv",
+                    "nextest",
+                    "proptest",
+                    "reqwest",
+                    "rkyv",
+                    "rmp",
+                    "rustfmt",
+                    "rustls",
+                    "semver",
+                    "serde",
+                    "signaling",
+                    "smallvec",
+                    "tarpaulin",
+                    "thiserror",
+                    "tokio",
+                    "tungstenite",
+                    "websocket"
+                ]
+            },
+            "extensions": [
+                // Rust tooling
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "vadimcn.vscode-lldb",
+                "fill-labs.dependi",
+                // Editor enhancements
+                "usernamehw.errorlens",
+                // Git
+                "eamodio.gitlens",
+                "mhutchie.git-graph",
+                // Docker
+                "ms-azuretools.vscode-docker",
+                // AI assistants
+                "GitHub.copilot",
+                "GitHub.copilot-chat",
+                "anthropic.claude-code",
+                // GitHub integration
+                "GitHub.vscode-github-actions",
+                "GitHub.vscode-pull-request-github",
+                // Language support
+                "redhat.vscode-yaml",
+                // Documentation quality
+                "DavidAnson.vscode-markdownlint",
+                "streetsidesoftware.code-spell-checker"
+            ]
+        }
+    },
+    "remoteUser": "vscode"
+}

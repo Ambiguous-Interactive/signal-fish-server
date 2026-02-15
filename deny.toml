@@ -17,10 +17,15 @@ targets = [
 version = 2
 # Fail the check when a yanked dependency is detected
 yanked = "deny"
+# Note: In cargo-deny v2 (0.19+), all advisories (vulnerabilities and unmaintained
+# crates) are checked by default. Use the ignore list below to suppress specific
+# advisories; ignored advisories still emit a note when encountered.
 
 # Ignore specific advisories (use sparingly and document why)
 ignore = [
     # Example: "RUSTSEC-2020-0159",  # Chrono timezone issues (non-exploitable)
+    # TODO(revisit by 2026-09-01): re-evaluate once rustls-pemfile is replaced or advisory is withdrawn
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained — thin wrapper around rustls-pki-types
 ]
 
 [licenses]
@@ -34,6 +39,8 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "0BSD",
+    "ISC",
+    "OpenSSL",
 ]
 # Confidence threshold for license detection
 confidence-threshold = 0.8
@@ -46,9 +53,7 @@ exceptions = [
 [[licenses.clarify]]
 name = "ring"
 expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 }
-]
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 # Warn on multiple versions of the same crate

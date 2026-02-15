@@ -1,0 +1,140 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build",
+            "type": "cargo",
+            "command": "build",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Build (Release)",
+            "type": "cargo",
+            "command": "build",
+            "args": [
+                "--release"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build"
+        },
+        {
+            "label": "Test",
+            "type": "cargo",
+            "command": "test",
+            "args": [
+                "--all-features"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Test (Nextest)",
+            "type": "shell",
+            "command": "cargo nextest run --all-features",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "test"
+        },
+        {
+            "label": "Clippy",
+            "type": "cargo",
+            "command": "clippy",
+            "args": [
+                "--all-targets",
+                "--all-features"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build"
+        },
+        {
+            "label": "Format",
+            "type": "cargo",
+            "command": "fmt",
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Format Check",
+            "type": "cargo",
+            "command": "fmt",
+            "args": [
+                "--",
+                "--check"
+            ],
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Full Check",
+            "detail": "cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features",
+            "type": "shell",
+            "command": "cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "test"
+        },
+        {
+            "label": "Run Server",
+            "type": "cargo",
+            "command": "run",
+            "problemMatcher": [],
+            "group": "none",
+            "isBackground": true
+        },
+        {
+            "label": "Watch Tests",
+            "type": "shell",
+            "command": "cargo watch -x 'test --all-features'",
+            "problemMatcher": [],
+            "group": "test",
+            "isBackground": true
+        },
+        {
+            "label": "Coverage",
+            "type": "shell",
+            "command": "cargo llvm-cov --all-features --html",
+            "problemMatcher": [],
+            "group": "test"
+        },
+        {
+            "label": "Deny Check",
+            "type": "shell",
+            "command": "cargo deny check",
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Benchmark",
+            "type": "cargo",
+            "command": "bench",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "test"
+        },
+        {
+            "label": "Clean",
+            "type": "cargo",
+            "command": "clean",
+            "problemMatcher": [],
+            "group": "build"
+        }
+    ]
+}

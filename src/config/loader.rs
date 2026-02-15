@@ -17,6 +17,11 @@ use std::path::Path;
 /// Additionally, individual fields can be overridden by environment variables with prefix SIGNAL_FISH
 /// using "__" as a nested separator, e.g. `SIGNAL_FISH__PORT=8080` or `SIGNAL_FISH__LOGGING__LEVEL=debug`.
 /// Any errors while reading/parsing are printed to stderr and defaults are used.
+///
+/// **Note:** Validation errors from [`validate_config_security`] are logged to stderr but are
+/// *not* propagated — `load()` always returns a `Config`. Callers who need hard failure
+/// should call [`validate_config_security()`](super::validation::validate_config_security)
+/// on the returned config and handle the error themselves.
 #[must_use]
 pub fn load() -> Config {
     use std::env;
@@ -74,7 +79,8 @@ pub fn load() -> Config {
         }
     };
 
-    // Security validation for sensitive fields
+    // Security validation for sensitive fields — intentional warn-only behaviour;
+    // main.rs calls validate_config_security() again and propagates errors properly.
     if let Err(e) = validate_config_security(&config) {
         eprintln!("Configuration validation error: {e}");
     }

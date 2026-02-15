@@ -47,7 +47,7 @@ COPY benches ./benches
 COPY third_party ./third_party
 
 # Build the application - only recompiles when source changes
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Stage 4: Runtime image (distroless-like slim Debian)
 FROM debian:bookworm-slim AS runtime
@@ -78,6 +78,10 @@ USER appuser
 
 # Default environment (can be overridden at runtime)
 ENV RUST_LOG=info
+# Disable auth by default so the container starts without a config file.
+# Production deployments should mount a config.json or set auth env vars.
+ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
+ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
 
 # Run the server
 CMD ["./signal-fish-server"]

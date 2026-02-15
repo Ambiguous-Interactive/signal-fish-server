@@ -1,0 +1,108 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Server",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=signal-fish-server",
+                    "--package=signal-fish-server"
+                ],
+                "filter": {
+                    "name": "signal-fish-server",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "sourceLanguages": [
+                "rust"
+            ]
+        },
+        {
+            "name": "Debug Tests",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--all-features",
+                    "--lib",
+                    "--package=signal-fish-server"
+                ],
+                "filter": {
+                    "name": "signal-fish-server",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "sourceLanguages": [
+                "rust"
+            ]
+        },
+        {
+            "name": "Debug Test by Selection",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--all-features",
+                    "--package=signal-fish-server"
+                ]
+            },
+            "args": [
+                "${selectedText}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "sourceLanguages": [
+                "rust"
+            ]
+        },
+        {
+            "name": "Debug Integration Tests",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--all-features",
+                    "--test=integration_tests",
+                    "--package=signal-fish-server"
+                ],
+                "filter": {
+                    "name": "integration_tests",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "sourceLanguages": [
+                "rust"
+            ]
+        }
+    ]
+}
