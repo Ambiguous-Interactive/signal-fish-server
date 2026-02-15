@@ -1,0 +1,83 @@
+{
+  "port": 3536,
+  "server": {
+    "default_max_players": 8,
+    "ping_timeout": 30,
+    "room_cleanup_interval": 60,
+    "max_rooms_per_game": 1000,
+    "empty_room_timeout": 300,
+    "inactive_room_timeout": 3600,
+    "reconnection_window": 300,
+    "event_buffer_size": 100,
+    "enable_reconnection": true,
+    "heartbeat_throttle_secs": 30,
+    "region_id": "default"
+  },
+  "rate_limit": {
+    "max_room_creations": 5,
+    "time_window": 60,
+    "max_join_attempts": 20
+  },
+  "protocol": {
+    "max_game_name_length": 64,
+    "room_code_length": 6,
+    "max_player_name_length": 32,
+    "max_players_limit": 100,
+    "enable_message_pack_game_data": true
+  },
+  "logging": {
+    "dir": "logs",
+    "filename": "server.log",
+    "rotation": "daily",
+    "enable_file_logging": true,
+    "format": "Json"
+  },
+  "security": {
+    "cors_origins": "*",
+    "require_websocket_auth": false,
+    "require_metrics_auth": false,
+    "max_message_size": 65536,
+    "max_connections_per_ip": 10,
+    "transport": {
+      "tls": {
+        "enabled": false
+      },
+      "token_binding": {
+        "enabled": false
+      }
+    },
+    "authorized_apps": [
+      {
+        "app_id": "my-game",
+        "app_secret": "CHANGE_ME_BEFORE_PRODUCTION",
+        "app_name": "My Awesome Game",
+        "max_rooms": 100,
+        "max_players_per_room": 16,
+        "rate_limit_per_minute": 60
+      }
+    ]
+  },
+  "coordination": {
+    "dedup_cache": {
+      "capacity": 100000,
+      "ttl_secs": 60,
+      "cleanup_interval_secs": 30
+    },
+    "membership_snapshot_interval_secs": 30
+  },
+  "metrics": {
+    "dashboard_cache_refresh_interval_secs": 5,
+    "dashboard_cache_ttl_secs": 30,
+    "dashboard_cache_history_window_secs": 300
+  },
+  "relay_types": {
+    "default_relay_type": "matchbox",
+    "game_relay_mappings": {}
+  },
+  "websocket": {
+    "enable_batching": true,
+    "batch_size": 10,
+    "batch_interval_ms": 16,
+    "auth_timeout_secs": 10
+  }
+}

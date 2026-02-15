@@ -1,0 +1,11 @@
+services:
+  signal-fish:
+    build: .
+    ports:
+      - "3536:3536"
+    environment:
+      RUST_LOG: info
+    volumes:
+      # Optional: mount a config file
+      - ./config.example.json:/app/config.json:ro
+    restart: unless-stopped

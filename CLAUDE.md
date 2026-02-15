@@ -1,0 +1,3 @@
+# Claude AI - Repository Guidelines
+
+See [`.llm/context.md`](.llm/context.md) for all AI agent guidelines.

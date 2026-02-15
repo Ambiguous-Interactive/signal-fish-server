@@ -1,0 +1,81 @@
+# cargo-deny configuration for dependency vulnerability and license checking
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Safety-focused configuration to ensure production code is correct and secure
+
+[graph]
+# Only check workspace crates and their dependencies (not dev-dependencies in release)
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+version = 2
+# Fail the check when a yanked dependency is detected
+yanked = "deny"
+
+# Ignore specific advisories (use sparingly and document why)
+ignore = [
+    # Example: "RUSTSEC-2020-0159",  # Chrono timezone issues (non-exploitable)
+]
+
+[licenses]
+version = 2
+# Explicit allowlist for permissive licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+]
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+# Allow certain exceptions for dev dependencies
+exceptions = [
+    # Example: { allow = ["LGPL-3.0"], name = "unicode-normalization" },
+]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]
+
+[bans]
+# Warn on multiple versions of the same crate
+multiple-versions = "warn"
+# Deny wildcards in dependencies (security best practice)
+wildcards = "deny"
+# Deny specific crates via [[bans.deny]] entries
+# Allow certain crates despite being duplicated
+skip = []
+# Skip checking specific trees
+skip-tree = []
+# Highlight specific crates that require attention
+highlight = "all"
+# Deny crates with known security or safety issues
+[[bans.deny]]
+name = "atty"
+reason = "Unmaintained - use std::io::IsTerminal instead (Rust 1.70+)"
+
+[[bans.deny]]
+name = "instant"
+reason = "Deprecated - use std::time::Instant directly"
+
+[sources]
+# Deny crates from unknown sources
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# Allow only crates.io
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

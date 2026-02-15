@@ -1,0 +1,28 @@
+#!/bin/sh
+# Pre-commit hook for Signal Fish Server
+# Runs code formatting and panic-prone pattern checks before each commit.
+#
+# To install: ./scripts/enable-hooks.sh
+# To bypass (not recommended): git commit --no-verify
+
+set -e
+
+echo "[pre-commit] Running pre-commit checks..."
+
+# Check code formatting
+echo "[pre-commit] Checking code formatting..."
+if ! cargo fmt --check 2>/dev/null; then
+    echo "[pre-commit] ERROR: Code is not formatted. Run 'cargo fmt' and try again."
+    exit 1
+fi
+
+# Check for panic-prone patterns (fast pattern scan only)
+echo "[pre-commit] Checking for panic-prone patterns..."
+if [ -x scripts/check-no-panics.sh ]; then
+    if ! scripts/check-no-panics.sh patterns; then
+        echo "[pre-commit] ERROR: Panic-prone patterns detected. Fix them and try again."
+        exit 1
+    fi
+fi
+
+echo "[pre-commit] All checks passed."

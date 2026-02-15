@@ -1,0 +1,37 @@
+# Clippy configuration for signal-fish-server
+# https://doc.rust-lang.org/clippy/configuration.html
+
+# Cognitive complexity threshold (default: 25)
+# Lower values encourage simpler functions
+cognitive-complexity-threshold = 30
+
+# Maximum number of lines in a function (default: 100)
+too-many-lines-threshold = 150
+
+# Minimum number of enum variants to trigger large_enum_variant lint
+enum-variant-size-threshold = 200
+
+# Type complexity threshold (default: 250)
+type-complexity-threshold = 300
+
+# Documentation requirement for public items
+# Enable missing_docs warnings gradually
+missing-docs-in-crate-items = false
+
+# Allowed names for single-character variables
+# Stricter than default to encourage descriptive names
+allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
+
+# Disallow wildcards in dependencies (security practice)
+# This is enforced via cargo-deny but noted here for reference
+
+# Stack size threshold for pass-by-value types
+trivial-copy-size-limit = 8
+
+# Threshold for too_many_arguments lint (default: 7)
+too-many-arguments-threshold = 8
+
+# MSRV - Minimum Supported Rust Version
+# Set to ensure compatibility with CI and production environments
+# Note: The codebase uses features from Rust 1.87+ (e.g., is_multiple_of)
+msrv = "1.87.0"

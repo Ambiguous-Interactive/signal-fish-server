@@ -1,0 +1,52 @@
+# Tarpaulin Configuration for Test Coverage
+
+# Coverage tool settings
+[build]
+# Run coverage with: cargo tarpaulin --out Html --out Xml --output-dir coverage
+
+# Ignore patterns
+exclude-files = [
+    "*/tests/*",
+    "*/benches/*",
+    "*/.cargo/*",
+]
+
+# Additional options
+[tarpaulin]
+# Timeout for running tests (in seconds)
+timeout = 300
+
+# Minimum coverage percentage to require
+# Note: The CI now uses cargo-llvm-cov for coverage gates (see .github/workflows/rust-ci.yml)
+# This setting is kept for local development convenience
+fail-under = 30
+
+# Run with all features enabled
+all-features = true
+
+# Include both unit and integration tests
+run-types = ["Tests", "Doctests"]
+
+# Output formats
+out = ["Html", "Xml", "Lcov"]
+
+# Output directory
+output-dir = "coverage"
+
+# Exclude patterns
+exclude = [
+    "::main",
+    "generated::*",
+]
+
+# Don't count lines without code
+count = true
+
+# Follow symbolic links
+follow-links = true
+
+# Verbose output
+verbose = false
+
+# Fail on errors
+fail-on-error = false
