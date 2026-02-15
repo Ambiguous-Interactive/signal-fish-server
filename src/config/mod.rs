@@ -8,18 +8,18 @@
 //!
 //! # Module Structure
 //!
-//! - [`types`]: Root `Config` struct
+//! - [`crate::config::types`]: Root `Config` struct
 //! - [`server`]: Server behavior configuration (rooms, players, timeouts)
 //! - [`protocol`]: Protocol settings (SDK compatibility, player names)
 //! - [`security`]: Security and authentication settings
-//! - [`relay`]: Relay type configuration
+//! - [`crate::config::relay`]: Relay type configuration
 //! - [`logging`]: Logging configuration
 //! - [`coordination`]: Cross-instance coordination settings
 //! - [`metrics`]: Metrics configuration
 //! - [`websocket`]: WebSocket connection settings
-//! - [`loader`]: Configuration loading functions
-//! - [`validation`]: Configuration validation functions
-//! - [`defaults`]: Default value functions
+//! - [`crate::config::loader`]: Configuration loading functions
+//! - [`crate::config::validation`]: Configuration validation functions
+//! - [`crate::config::defaults`]: Default value functions
 
 // Submodules
 pub mod coordination;
