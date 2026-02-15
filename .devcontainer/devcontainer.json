@@ -39,6 +39,11 @@
                 "rust-analyzer.lens.run.enable": true,
                 "rust-analyzer.lens.debug.enable": true,
                 "rust-analyzer.procMacro.enable": true,
+                "rust-analyzer.check.extraArgs": [
+                    "--",
+                    "-D",
+                    "warnings"
+                ],
                 // Editor
                 "editor.formatOnSave": true,
                 "editor.tabSize": 4,
@@ -46,13 +51,8 @@
                 "editor.rulers": [
                     100
                 ],
-                "editor.bracketPairColorization.enabled": true,
                 "editor.guides.bracketPairs": "active",
                 "editor.semanticHighlighting.enabled": true,
-                // File associations
-                "files.associations": {
-                    "*.toml": "toml"
-                },
                 // Exclude build artifacts from search and watcher
                 "search.exclude": {
                     "**/target": true,
@@ -67,30 +67,97 @@
                 },
                 // Terminal
                 "terminal.integrated.defaultProfile.linux": "bash",
+                // Belt-and-suspenders: also set in containerEnv, kept for terminal profiles that don't inherit
                 "terminal.integrated.env.linux": {
                     "RUST_LOG": "debug",
                     "RUST_BACKTRACE": "1"
                 },
                 // Language-specific
                 "[rust]": {
-                    "editor.defaultFormatter": "rust-lang.rust-analyzer",
-                    "editor.formatOnSave": true
+                    "editor.defaultFormatter": "rust-lang.rust-analyzer"
                 },
                 "[toml]": {
                     "editor.defaultFormatter": "tamasfe.even-better-toml"
-                }
+                },
+                "[yaml]": {
+                    "editor.defaultFormatter": "redhat.vscode-yaml",
+                    "editor.tabSize": 2
+                },
+                "[markdown]": {
+                    "editor.wordWrap": "on",
+                    "editor.rulers": []
+                },
+                // YAML schema associations
+                "yaml.schemas": {
+                    "https://json.schemastore.org/github-workflow.json": ".github/workflows/*.yml"
+                },
+                // Markdown lint — relax line length and inline HTML rules
+                "markdownlint.config": {
+                    "MD013": false,
+                    "MD033": false
+                },
+                // Spell checker — project-specific words
+                "cSpell.words": [
+                    "anyhow",
+                    "arrayvec",
+                    "axum",
+                    "chrono",
+                    "clippy",
+                    "crossbeam",
+                    "dashmap",
+                    "dedup",
+                    "dependi",
+                    "fastrand",
+                    "fullmesh",
+                    "gamedev",
+                    "hdrhistogram",
+                    "hmac",
+                    "matchbox",
+                    "mold",
+                    "msrv",
+                    "nextest",
+                    "proptest",
+                    "reqwest",
+                    "rkyv",
+                    "rmp",
+                    "rustfmt",
+                    "rustls",
+                    "semver",
+                    "serde",
+                    "signaling",
+                    "smallvec",
+                    "tarpaulin",
+                    "thiserror",
+                    "tokio",
+                    "tungstenite",
+                    "websocket"
+                ]
             },
             "extensions": [
+                // Rust tooling
                 "rust-lang.rust-analyzer",
                 "tamasfe.even-better-toml",
                 "vadimcn.vscode-lldb",
                 "fill-labs.dependi",
+                // Editor enhancements
                 "usernamehw.errorlens",
+                // Git
                 "eamodio.gitlens",
                 "mhutchie.git-graph",
+                // Docker
                 "ms-azuretools.vscode-docker",
+                // AI assistants
                 "GitHub.copilot",
-                "GitHub.copilot-chat"
+                "GitHub.copilot-chat",
+                "anthropic.claude-code",
+                // GitHub integration
+                "GitHub.vscode-github-actions",
+                "GitHub.vscode-pull-request-github",
+                // Language support
+                "redhat.vscode-yaml",
+                // Documentation quality
+                "DavidAnson.vscode-markdownlint",
+                "streetsidesoftware.code-spell-checker"
             ]
         }
     },
