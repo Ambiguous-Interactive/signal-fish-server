@@ -45,6 +45,9 @@ Thumbs.db
 
 # Third-party embedded repos
 third_party/rmp/.git
+third_party/**/.cargo-ok
+third_party/**/.cargo_vcs_info.json
+third_party/**/Cargo.lock
 
 # Test artifacts
 *.profraw
