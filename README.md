@@ -4,7 +4,7 @@ A lightweight, zero-dependency WebSocket signaling server for peer-to-peer
 game networking. Run locally with Rust or Docker -- no database, no cloud
 services required.
 
-Built by [Ambiguous Interactive](https://github.com/AmbiguousInteractive).
+Built by [Ambiguous Interactive](https://github.com/Ambiguous-Interactive).
 
 ## Quick Start
 
@@ -196,11 +196,13 @@ Values are parsed as the type expected by the corresponding config field.
 signal-fish-server [OPTIONS]
 
 Options:
-  -c, --validate-config    Validate config and exit
+      --validate-config    Validate config and exit
       --print-config       Print resolved config as JSON and exit
   -h, --help               Print help
   -V, --version            Print version
 ```
+
+Note: The server automatically loads `config.json` from the working directory if it exists. Use environment variables to override specific configuration values.
 
 ## Protocol Reference
 
@@ -509,6 +511,6 @@ The minimum supported Rust version is **1.87.0**.
 
 ## License
 
-MIT -- [Ambiguous Interactive](https://github.com/AmbiguousInteractive)
+MIT -- [Ambiguous Interactive](https://github.com/Ambiguous-Interactive)
 
 See [LICENSE](LICENSE) for the full license text.

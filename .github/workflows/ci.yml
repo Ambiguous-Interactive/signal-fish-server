@@ -1,3 +1,24 @@
+# Continuous Integration Workflow
+#
+# Main CI pipeline that runs comprehensive checks on all code changes.
+# This workflow ensures code quality, correctness, and security before merging.
+#
+# Runs on:
+#   - Push to main branch
+#   - Pull requests to main
+#
+# Jobs:
+#   - check: Code formatting (rustfmt) and linting (clippy) with and without features
+#   - test: Unit and integration tests with and without features
+#   - deny: Security audits, license checks, and dependency validation
+#   - docker: Docker image build and smoke test with health check
+#
+# Features:
+#   - Rust toolchain caching for faster builds
+#   - Strict clippy warnings enforced
+#   - Docker health check with retry logic
+#   - Locked dependency resolution for reproducibility
+
 name: CI
 
 on:
@@ -10,6 +31,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -18,31 +42,57 @@ jobs:
     name: Check & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy (default features)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run clippy (all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
-      - run: cargo test --locked --all-features
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      - name: Run tests (default features)
+        run: cargo test --locked
+
+      - name: Run tests (all features)
+        run: cargo test --locked --all-features
 
   deny:
     name: Dependency Audit
     runs-on: ubuntu-latest
+    # This job handles all security audits including vulnerabilities (cargo-audit),
+    # licenses, banned dependencies, and source verification (cargo-deny).
+    # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@f20e90f289e90a40fd814d92ea2935d9db5da04f # v2.0.5
         with:
           arguments: --all-features
 
@@ -50,8 +100,12 @@ jobs:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: docker build -t signal-fish-server:ci .
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build Docker image
+        run: docker build -t signal-fish-server:ci .
+
       - name: Smoke test
         run: |
           docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
@@ -69,6 +123,7 @@ jobs:
           echo "=== Docker logs ==="
           docker logs test-server
           exit 1
+
       - name: Cleanup smoke test
         if: always()
         run: docker stop test-server && docker rm test-server || true

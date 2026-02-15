@@ -5,9 +5,13 @@ edition = "2021"
 license = "MIT"
 authors = ["Ambiguous Interactive"]
 description = "A lightweight, in-memory WebSocket signaling server for peer-to-peer game networking"
-repository = "https://github.com/AmbiguousInteractive/signal-fish-server"
+repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
 keywords = ["gamedev", "signaling", "websocket", "multiplayer", "matchmaking"]
-categories = ["game-engines", "network-programming", "web-programming::websocket"]
+categories = [
+    "game-engines",
+    "network-programming",
+    "web-programming::websocket",
+]
 rust-version = "1.87.0"
 
 [features]
@@ -31,10 +35,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_bytes = "0.11"
 rmp-serde = "1.3"
-rkyv = { version = "0.8", default-features = true, features = ["bytes-1", "uuid-1", "smallvec-1"] }
+rkyv = { version = "0.8", default-features = true, features = [
+    "bytes-1",
+    "uuid-1",
+    "smallvec-1",
+] }
 
 # Identifiers & time
-uuid = { version = "1.20", features = ["v4", "serde"] }
+uuid = { version = "1.21", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 semver = "1.0"
 
@@ -43,7 +51,13 @@ anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
-    "fmt", "env-filter", "json", "time", "std", "ansi", "tracing-log"
+    "fmt",
+    "env-filter",
+    "json",
+    "time",
+    "std",
+    "ansi",
+    "tracing-log",
 ] }
 tracing-appender = "0.2"
 
@@ -63,13 +77,13 @@ base64 = "0.22"
 aes-gcm = { version = "0.10", features = ["aes"] }
 sha2 = "0.10"
 hmac = "0.12"
-getrandom = "0.3"
-subtle = "2"
+getrandom = "0.4"
+subtle = "2.6"
 
 # Data structures
 lru = "0.16"
 hdrhistogram = "7.5"
-rand = "0.9"
+rand = "0.10"
 fastrand = "2.3"
 url = "2.5"
 
@@ -77,7 +91,7 @@ url = "2.5"
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Optional: legacy full-mesh mode
-matchbox_signaling = { version = "0.13.0", optional = true }
+matchbox_signaling = { version = "0.14", optional = true }
 
 # Optional: TLS support
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
@@ -87,15 +101,18 @@ rustls-pki-types = { version = "1.14", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.24"
+tempfile = "3.25"
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 futures = "0.3"
 regex = "1.12"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+] }
 serial_test = "3.3"
 axum-test = "18.7"
-proptest = "1.9"
+proptest = "1.10"
 once_cell = "1.21"
 criterion = "0.8"
 

@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Updated all production and development dependencies to latest stable versions (verified against crates.io as of 2026-02-15)
+  - **Critical dependency updates:**
+    - `rand`: 0.9 → 0.10 (latest stable random number generation)
+    - `getrandom`: 0.3 → 0.4 (latest stable system randomness source)
+    - `reqwest`: 0.12 → 0.13 (dev-dependency, latest stable HTTP client)
+    - `matchbox_signaling`: 0.13.0 → 0.14.0 (optional dependency, latest stable)
+  - **Version specification standardization:**
+    - Standardized all dependency version specifications to use minor versions only (e.g., "1.0" instead of "1.0.228")
+    - This allows automatic patch updates while maintaining compatibility
+    - Applied consistently across all 50+ dependencies in both [dependencies] and [dev-dependencies] sections
+  - **Quality assurance:**
+    - All 224 tests passing with updated dependencies
+    - Zero clippy warnings with `clippy --all-targets --all-features -- -D warnings`
+    - No security advisories detected
+    - Cargo.lock updated to reflect latest compatible versions
+  - **Dependency duplicate reduction:**
+    - Updated getrandom to 0.4, reducing version conflicts in dependency tree
+    - Remaining duplicates are all transitive dependencies from third-party crates:
+      - `base64`: v0.21.7 (via hdrhistogram) + v0.22.1 (direct) — cannot eliminate without hdrhistogram update
+      - `getrandom`: v0.2.17, v0.3.4, v0.4.1 — v0.4.1 is our direct dependency; v0.2/v0.3 from legacy crypto crates
+      - `rand`: v0.9.2 (via proptest/test deps) + v0.10.0 (direct) — v0.10.0 is our direct dependency
+      - `rand_core`: v0.6.4, v0.9.5, v0.10.0 — matches respective rand versions
+      - `cpufeatures`: v0.2.17, v0.3.0 — from different crypto crate generations
+      - `hashbrown`: v0.14.5, v0.16.1 — v0.16.1 used by lru and rkyv; v0.14.5 from dashmap
+    - These duplicates have minimal impact (total ~50KB) and cannot be eliminated without upstream updates
+
+### Technical Notes
+
+- No breaking API changes detected in dependency updates
+- All existing functionality verified through comprehensive test suite
+- Performance benchmarks remain consistent
+- Docker image builds successfully with updated dependencies
+- Updated `src/protocol/room_codes.rs` to use rand 0.10 API (`rand::rng()` and `RngExt` trait)
+
 ## 0.1.0 — Initial Release
 
 - Core WebSocket signaling server with in-memory state

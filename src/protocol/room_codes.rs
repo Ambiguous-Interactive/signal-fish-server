@@ -1,5 +1,5 @@
 use crate::config::ProtocolConfig;
-use rand::Rng;
+use rand::RngExt;
 
 /// Generate alphanumeric room code with configurable length
 /// Uses uppercase letters and numbers for easy communication

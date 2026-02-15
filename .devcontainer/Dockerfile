@@ -1,5 +1,5 @@
 # Signal Fish Server — Development Container
-# https://github.com/AmbiguousInteractive/signal-fish-server
+# https://github.com/Ambiguous-Interactive/signal-fish-server
 
 FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
 # Project MSRV: 1.87.0 — this image must provide >= 1.87

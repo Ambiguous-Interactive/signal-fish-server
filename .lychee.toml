@@ -1,0 +1,70 @@
+# Lychee link checker configuration
+# See: https://github.com/lycheeverse/lychee
+
+# Maximum number of concurrent network requests
+max_concurrency = 16
+
+# Accept status codes
+accept = [
+    "100..=103",
+    "200..=299",
+    "429",  # Too Many Requests (rate limiting)
+]
+
+# Retry settings
+max_retries = 3
+retry_wait_time = 2
+
+# Timeout settings (in seconds)
+timeout = 20
+
+# User agent
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
+
+# Include files (glob patterns)
+include = [
+    "*.md",
+    "*.rs",
+    "*.toml",
+]
+
+# Exclude specific URLs or patterns
+exclude = [
+    # Localhost and examples
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://0.0.0.0",
+    "ws://localhost",
+    "wss://localhost",
+
+    # Email addresses
+    "mailto:*",
+
+    # Relative links that lychee can't resolve
+    "file://",
+
+    # Anchors within the same file
+    "#",
+]
+
+# Exclude specific file paths
+exclude_path = [
+    "target/",
+    ".git/",
+]
+
+# Exclude specific link patterns
+exclude_link_local = true
+
+# Include verbatim sections
+include_verbatim = false
+
+# Remap URLs (useful for local development)
+# remap = [
+#     "https://example.com https://staging.example.com",
+# ]
+
+# Custom headers for specific domains (if needed)
+# [[custom]]
+# pattern = "https://example.com/"
+# headers = ["Authorization: Bearer token"]

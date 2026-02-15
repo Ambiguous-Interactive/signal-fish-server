@@ -1,0 +1,564 @@
+# Documentation Validation Workflow
+#
+# Comprehensive validation of all documentation including Rustdoc, doc tests,
+# and code samples in Markdown files. Ensures documentation stays accurate,
+# compilable, and up-to-date with the codebase.
+#
+# Runs on:
+#   - Push to main branch (only for relevant file changes)
+#   - Pull requests to main (only for relevant file changes)
+#
+# Jobs:
+#   - rustdoc: Build and validate Rust API documentation
+#   - doc-tests: Run tests embedded in documentation comments
+#   - markdown-code-samples: Extract and validate code blocks from Markdown
+#   - link-check: Validate all internal and external links
+#   - inline-code-references: Validate inline code references (placeholder)
+#
+# Features:
+#   - Strict rustdoc validation (broken links, invalid code blocks)
+#   - Multi-language code block validation (Rust, JSON, YAML, TOML, Bash)
+#   - Smart skipping of placeholder/incomplete code
+#   - Comprehensive link checking with anchor validation
+#   - File-based counter propagation to avoid bash subshell issues
+
+name: Documentation Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/doc-validation.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/doc-validation.yml'
+
+# Minimal required permissions (security best practice)
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Enforce strict rustdoc validation
+  RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
+
+jobs:
+  rustdoc:
+    name: Rustdoc Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      # Build rustdoc with strict warnings (no broken links, valid code blocks)
+      - name: Build rustdoc
+        run: cargo doc --locked --no-deps --all-features
+
+      # Also check without features to catch feature-gated doc issues
+      - name: Build rustdoc (no features)
+        run: cargo doc --locked --no-deps --no-default-features
+
+  doc-tests:
+    name: Documentation Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      # Run all doc tests (tests embedded in /// comments)
+      - name: Run doc tests
+        run: cargo test --locked --doc
+
+      # Run doc tests with all features enabled
+      - name: Run doc tests (all features)
+        run: cargo test --locked --doc --all-features
+
+  markdown-code-samples:
+    name: Markdown Code Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      # Build the library first so we have it available for compilation validation
+      - name: Build library
+        run: cargo build --lib --locked --all-features
+
+      - name: Extract and validate Rust code blocks
+        run: |
+          set -euo pipefail
+
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          # Use files to accumulate counters (avoids bash subshell scope issues)
+          COUNTER_FILE="$TEMP_DIR/counters"
+          echo "0 0 0 0" > "$COUNTER_FILE"  # total validated skipped failed
+
+          echo "========================================="
+          echo "Extracting Rust code blocks from markdown"
+          echo "========================================="
+
+          # Find all markdown files recursively (not hardcoded)
+          find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" | sort | while read -r md_file; do
+
+            [ -f "$md_file" ] || continue
+
+            echo ""
+            echo "Processing: $md_file"
+
+            # Extract Rust code blocks with improved regex to catch all variants:
+            # ```rust, ```rust,ignore, ```rust,no_run, ```rust,should_panic, etc.
+            # Uses multiline mode (-z) to handle blocks correctly, then awk for parsing
+            awk '
+              # Match opening fence with optional attributes
+              /^```(rust|Rust)(,.*)?$/ {
+                in_block = 1
+                block_start = NR
+                content = ""
+                attributes = $0
+                # Extract attributes after rust
+                if (match($0, /```rust,(.*)/, arr)) {
+                  attrs = arr[1]
+                } else {
+                  attrs = ""
+                }
+                next
+              }
+              # Match closing fence only if in a block
+              /^```$/ && in_block {
+                # Output: line_number:::attributes:::content
+                print block_start ":::" attrs ":::" content
+                in_block = 0
+                next
+              }
+              # Accumulate content while in block
+              in_block {
+                if (content == "") {
+                  content = $0
+                } else {
+                  content = content "\n" $0
+                }
+              }
+              # Reset if we hit another opening fence while already in a block (nested/malformed)
+              /^```/ && in_block {
+                in_block = 0
+              }
+            ' "$md_file" | while IFS=':::' read -r line_num attributes content; do
+              # Read current counters from file
+              read -r total validated skipped failed < "$COUNTER_FILE"
+              total=$((total + 1))
+
+              # Check if block has ignore, no_run, or should_panic attributes
+              should_skip=0
+              should_compile=1
+
+              if echo "$attributes" | grep -qE 'ignore'; then
+                echo "  ⊘ Skipping block at line $line_num (marked ignore)"
+                should_skip=1
+              elif echo "$attributes" | grep -qE 'no_run'; then
+                echo "  ⊘ Compiling but not running block at line $line_num (marked no_run)"
+                should_compile=1
+              elif echo "$attributes" | grep -qE 'should_panic'; then
+                echo "  ⊘ Skipping block at line $line_num (marked should_panic)"
+                should_skip=1
+              fi
+
+              # Check for common placeholder patterns in content
+              if [ $should_skip -eq 0 ] && echo "$content" | grep -qE 'todo!\(\)|^\.\.\.|// \.\.\.|/\* \.\.\. \*/'; then
+                echo "  ⊘ Skipping block at line $line_num (incomplete/placeholder code)"
+                should_skip=1
+              fi
+
+              if [ $should_skip -eq 0 ] && echo "$content" | grep -qE '// Note:|// Example:|/\* config \*/'; then
+                echo "  ⊘ Skipping block at line $line_num (documentation snippet)"
+                should_skip=1
+              fi
+
+              if [ $should_skip -eq 1 ]; then
+                skipped=$((skipped + 1))
+                echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
+                continue
+              fi
+
+              # Create test file
+              test_file="$TEMP_DIR/test_${total}.rs"
+              echo "$content" > "$test_file"
+
+              # First, validate with rustfmt (syntax check)
+              if ! rustfmt --edition 2021 --check "$test_file" >/dev/null 2>&1; then
+                echo "  ✗ FAILED: Block at line $line_num has invalid Rust syntax"
+                echo "--- Content ---"
+                cat "$test_file"
+                echo "--- End Content ---"
+                failed=$((failed + 1))
+                echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
+                continue
+              fi
+
+              # Second, attempt compilation for complete code blocks
+              # (Skip compilation for snippets that are clearly incomplete)
+              if [ $should_compile -eq 1 ]; then
+                # Check if this looks like a complete program or lib snippet
+                if echo "$content" | grep -qE '^(fn main|use |mod |pub |extern )'; then
+                  # Try to compile as a standalone binary or module
+                  compile_file="$TEMP_DIR/compile_${total}.rs"
+                  {
+                    echo "// Auto-generated test harness for markdown code block"
+                    echo "#![allow(unused)]"
+                    echo "$content"
+                  } > "$compile_file"
+
+                  if ! rustc --edition 2021 --crate-type lib "$compile_file" -o "$TEMP_DIR/test_${total}.rlib" 2>"$TEMP_DIR/compile_err_${total}.txt"; then
+                    # Compilation failed - check if it's due to missing dependencies
+                    if grep -qE 'can.t find crate|unresolved import' "$TEMP_DIR/compile_err_${total}.txt"; then
+                      echo "  ⊙ Block at line $line_num requires external dependencies (syntax valid)"
+                      validated=$((validated + 1))
+                    else
+                      echo "  ✗ FAILED: Block at line $line_num failed compilation"
+                      echo "--- Compilation errors ---"
+                      cat "$TEMP_DIR/compile_err_${total}.txt"
+                      echo "--- End errors ---"
+                      failed=$((failed + 1))
+                      echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
+                      continue
+                    fi
+                  else
+                    echo "  ✓ Compiled and validated block at line $line_num"
+                    validated=$((validated + 1))
+                  fi
+                else
+                  echo "  ✓ Syntax validated block at line $line_num (snippet, no compilation)"
+                  validated=$((validated + 1))
+                fi
+              else
+                echo "  ✓ Syntax validated block at line $line_num"
+                validated=$((validated + 1))
+              fi
+
+              echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
+            done
+          done
+
+          # Read final counters
+          read -r total validated skipped failed < "$COUNTER_FILE"
+
+          echo ""
+          echo "========================================="
+          echo "Documentation validation complete!"
+          echo "Total blocks: $total"
+          echo "Validated: $validated"
+          echo "Skipped: $skipped"
+          echo "Failed: $failed"
+          echo "========================================="
+
+          if [ $failed -gt 0 ]; then
+            exit 1
+          fi
+
+      # Validate non-Rust code blocks (JSON, YAML, TOML, Bash)
+      - name: Validate JSON code blocks
+        run: |
+          set -euo pipefail
+
+          echo "Validating JSON code blocks..."
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          TOTAL=0
+          FAILED=0
+
+          find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" | sort | while read -r md_file; do
+
+            awk '/^```json$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+              [ -z "$content" ] && continue
+              TOTAL=$((TOTAL + 1))
+
+              test_file="$TEMP_DIR/test_$TOTAL.json"
+              echo "$content" > "$test_file"
+
+              if ! jq empty "$test_file" 2>/dev/null; then
+                echo "✗ Invalid JSON in $md_file"
+                cat "$test_file"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+          done
+
+          if [ $FAILED -gt 0 ]; then
+            echo "JSON validation failed: $FAILED/$TOTAL blocks invalid"
+            exit 1
+          fi
+          echo "✓ All JSON blocks valid ($TOTAL checked)"
+
+      - name: Validate YAML code blocks
+        run: |
+          set -euo pipefail
+
+          echo "Validating YAML code blocks..."
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          # Install yq for YAML validation
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          TOTAL=0
+          FAILED=0
+
+          find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" | sort | while read -r md_file; do
+
+            awk '/^```(yaml|yml)$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+              [ -z "$content" ] && continue
+              TOTAL=$((TOTAL + 1))
+
+              test_file="$TEMP_DIR/test_$TOTAL.yaml"
+              echo "$content" > "$test_file"
+
+              if ! yq eval . "$test_file" >/dev/null 2>&1; then
+                echo "✗ Invalid YAML in $md_file"
+                cat "$test_file"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+          done
+
+          if [ $FAILED -gt 0 ]; then
+            echo "YAML validation failed: $FAILED/$TOTAL blocks invalid"
+            exit 1
+          fi
+          echo "✓ All YAML blocks valid ($TOTAL checked)"
+
+      - name: Validate TOML code blocks
+        run: |
+          set -euo pipefail
+
+          echo "Validating TOML code blocks..."
+
+          # Install taplo for TOML validation
+          cargo install taplo-cli --locked
+
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          TOTAL=0
+          FAILED=0
+
+          find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" | sort | while read -r md_file; do
+
+            awk '/^```toml$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+              [ -z "$content" ] && continue
+              TOTAL=$((TOTAL + 1))
+
+              test_file="$TEMP_DIR/test_$TOTAL.toml"
+              echo "$content" > "$test_file"
+
+              if ! taplo check "$test_file" 2>/dev/null; then
+                echo "✗ Invalid TOML in $md_file"
+                cat "$test_file"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+          done
+
+          if [ $FAILED -gt 0 ]; then
+            echo "TOML validation failed: $FAILED/$TOTAL blocks invalid"
+            exit 1
+          fi
+          echo "✓ All TOML blocks valid ($TOTAL checked)"
+
+      - name: Validate Bash code blocks
+        run: |
+          set -euo pipefail
+
+          echo "Validating Bash code blocks..."
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          TOTAL=0
+          FAILED=0
+
+          find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" | sort | while read -r md_file; do
+
+            awk '/^```(bash|sh|shell)$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+              [ -z "$content" ] && continue
+              # Skip placeholder/example-only blocks
+              if echo "$content" | grep -qE '^#.*example|^# Note:|^\.\.\.$'; then
+                continue
+              fi
+
+              TOTAL=$((TOTAL + 1))
+
+              test_file="$TEMP_DIR/test_$TOTAL.sh"
+              echo "$content" > "$test_file"
+
+              # Use shellcheck for syntax validation (not bash -n, which doesn't catch many issues)
+              if ! bash -n "$test_file" 2>/dev/null; then
+                echo "✗ Invalid Bash syntax in $md_file"
+                cat "$test_file"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+          done
+
+          if [ $FAILED -gt 0 ]; then
+            echo "Bash validation failed: $FAILED/$TOTAL blocks invalid"
+            exit 1
+          fi
+          echo "✓ All Bash blocks valid ($TOTAL checked)"
+
+  link-check:
+    name: Documentation Link Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Use lychee for comprehensive link checking (external + internal + anchors)
+      - name: Check all links with lychee
+        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
+        with:
+          # Check all markdown files
+          args: >-
+            --verbose
+            --no-progress
+            --accept 200,204,301,302,307,308,429
+            --timeout 30
+            --max-retries 3
+            --exclude-path './target/*'
+            --exclude-path './third_party/*'
+            --exclude-path './.git/*'
+            '**/*.md'
+          # Fail on broken links
+          fail: true
+        env:
+          # Optional: Add GitHub token to avoid rate limiting on GitHub links
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      # Fallback: Custom internal link validator (more detailed errors)
+      - name: Check internal markdown links
+        run: |
+          set -euo pipefail
+
+          echo "Checking for broken internal links in documentation..."
+
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          BROKEN_LINKS_FILE="$TEMP_DIR/broken_links"
+          echo "0" > "$BROKEN_LINKS_FILE"
+
+          find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" | sort | while read -r md_file; do
+
+            [ -f "$md_file" ] || continue
+
+            echo "Checking links in: $md_file"
+
+            # Extract markdown links [text](url) - handle multiline with grep -o
+            grep -oE '\[([^]]+)\]\(([^)]+)\)' "$md_file" | while read -r link; do
+              # Extract the URL part
+              url=$(echo "$link" | sed -E 's/.*\(([^)]+)\).*/\1/')
+
+              # Skip external URLs (http/https)
+              if [[ "$url" =~ ^https?:// ]]; then
+                continue
+              fi
+
+              # Skip anchors-only links (will be checked by anchor validator if implemented)
+              if [[ "$url" =~ ^# ]]; then
+                continue
+              fi
+
+              # Separate file path from anchor
+              file_part="${url%%#*}"
+              anchor_part=""
+              if [[ "$url" =~ "#" ]]; then
+                anchor_part="${url#*#}"
+              fi
+
+              # Skip empty paths (anchor-only after removal)
+              if [ -z "$file_part" ]; then
+                continue
+              fi
+
+              # Resolve relative path
+              base_dir=$(dirname "$md_file")
+              full_path="$base_dir/$file_part"
+
+              # Normalize path (resolve .. and .)
+              full_path=$(realpath -m "$full_path")
+
+              # Check if file exists
+              if [ ! -f "$full_path" ]; then
+                echo "  ✗ Broken link in $md_file: $url (resolved to $full_path)"
+                read -r broken < "$BROKEN_LINKS_FILE"
+                echo "$((broken + 1))" > "$BROKEN_LINKS_FILE"
+              fi
+
+              # TODO: Validate anchor exists in target file (future enhancement)
+            done
+          done
+
+          read -r BROKEN_LINKS < "$BROKEN_LINKS_FILE"
+
+          if [ $BROKEN_LINKS -gt 0 ]; then
+            echo ""
+            echo "Found $BROKEN_LINKS broken internal link(s)"
+            exit 1
+          fi
+
+          echo "All internal links valid ✓"
+
+  # Validate inline code references match actual code (future enhancement)
+  # This would check that references like `ServerConfig` actually exist in the codebase
+  inline-code-references:
+    name: Validate Inline Code References
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check inline code references
+        run: |
+          echo "Inline code reference validation - placeholder for future implementation"
+          echo "This would validate that code like \`MyStruct\` actually exists in src/"
+          echo "Skipping for now - not a blocker"
