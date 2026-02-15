@@ -1,0 +1,98 @@
+// Signal Fish Server — Dev Container Configuration
+// https://github.com/AmbiguousInteractive/signal-fish-server
+{
+    "name": "Signal Fish Server",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    // Forwarded ports
+    "forwardPorts": [
+        3536
+    ],
+    "portsAttributes": {
+        "3536": {
+            "label": "Signal Fish WebSocket",
+            "onAutoForward": "notify"
+        }
+    },
+    // Environment variables
+    "containerEnv": {
+        "RUST_LOG": "debug",
+        "RUST_BACKTRACE": "1"
+    },
+    // Post-create setup
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    // VS Code customizations
+    "customizations": {
+        "vscode": {
+            "settings": {
+                // Rust Analyzer
+                "rust-analyzer.check.command": "clippy",
+                "rust-analyzer.check.allTargets": true,
+                "rust-analyzer.cargo.features": "all",
+                "rust-analyzer.imports.granularity.group": "module",
+                "rust-analyzer.inlayHints.chainingHints.enable": true,
+                "rust-analyzer.inlayHints.typeHints.enable": true,
+                "rust-analyzer.inlayHints.parameterHints.enable": true,
+                "rust-analyzer.lens.enable": true,
+                "rust-analyzer.lens.run.enable": true,
+                "rust-analyzer.lens.debug.enable": true,
+                "rust-analyzer.procMacro.enable": true,
+                // Editor
+                "editor.formatOnSave": true,
+                "editor.tabSize": 4,
+                "editor.insertSpaces": true,
+                "editor.rulers": [
+                    100
+                ],
+                "editor.bracketPairColorization.enabled": true,
+                "editor.guides.bracketPairs": "active",
+                "editor.semanticHighlighting.enabled": true,
+                // File associations
+                "files.associations": {
+                    "*.toml": "toml"
+                },
+                // Exclude build artifacts from search and watcher
+                "search.exclude": {
+                    "**/target": true,
+                    "**/coverage": true
+                },
+                "files.watcherExclude": {
+                    "**/target/**": true,
+                    "**/coverage/**": true
+                },
+                "files.exclude": {
+                    "**/target": true
+                },
+                // Terminal
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.env.linux": {
+                    "RUST_LOG": "debug",
+                    "RUST_BACKTRACE": "1"
+                },
+                // Language-specific
+                "[rust]": {
+                    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+                    "editor.formatOnSave": true
+                },
+                "[toml]": {
+                    "editor.defaultFormatter": "tamasfe.even-better-toml"
+                }
+            },
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "vadimcn.vscode-lldb",
+                "fill-labs.dependi",
+                "usernamehw.errorlens",
+                "eamodio.gitlens",
+                "mhutchie.git-graph",
+                "ms-azuretools.vscode-docker",
+                "GitHub.copilot",
+                "GitHub.copilot-chat"
+            ]
+        }
+    },
+    "remoteUser": "vscode"
+}
