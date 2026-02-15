@@ -40,7 +40,14 @@
 cargo fmt
 cargo clippy --all-targets --all-features  # Zero warnings allowed
 cargo test --all-features
+
+# 3. Supply chain checks (run before pushing)
+cargo deny --all-features check            # Advisories, licenses, bans, sources
 ```
+
+### Pre-Push Validation
+
+Run `scripts/check-ci-config.sh` before pushing to catch CI configuration issues (e.g., outdated action versions incompatible with the current `Cargo.lock` format). See [supply-chain-security](./supply-chain-security.md) for details.
 
 ---
 
@@ -81,6 +88,8 @@ docs: update protocol documentation
 - [ ] `cargo fmt` — no formatting issues
 - [ ] `cargo clippy --all-targets --all-features` — zero warnings
 - [ ] `cargo test --all-features` — all tests pass
+- [ ] `cargo deny --all-features check` — supply chain checks pass
+- [ ] `scripts/check-ci-config.sh` — CI config validated
 - [ ] New code has exhaustive tests (see [testing-strategies](./testing-strategies.md))
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
 - [ ] CHANGELOG updated for user-facing changes

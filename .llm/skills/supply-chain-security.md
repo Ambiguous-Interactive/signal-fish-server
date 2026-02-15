@@ -7,6 +7,7 @@
 ---
 
 ## When to Use
+
 - Running or configuring `cargo audit` or `cargo deny`
 - Adding, updating, or reviewing third-party dependencies for security
 - Generating or consuming Software Bills of Materials (SBOMs)
@@ -15,6 +16,7 @@
 - Setting up reproducible or hermetic builds
 
 ## When NOT to Use
+
 - Application-level security (see [web-service-security](./web-service-security.md))
 - Container image hardening (see [container-and-deployment](./container-and-deployment.md))
 - Choosing between crates for functionality (see [dependency-management](./dependency-management.md))
@@ -31,6 +33,7 @@
 ---
 
 ## TL;DR
+
 - Run `cargo audit` and `cargo deny check` in CI on every PR — block merges on failure.
 - Pin security-critical dependencies with exact versions (`=1.2.3`) and always commit `Cargo.lock`.
 - Build with `cargo build --locked` in CI to guarantee reproducibility.
@@ -323,6 +326,47 @@ echo "Supply chain checks passed."
 
 ---
 
+## 8. CI Action Version Compatibility
+
+GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when the lockfile format changes. Always verify that CI action versions are compatible with the project's `Cargo.lock` version after upgrading the Rust toolchain.
+
+### `Cargo.lock` Version History
+
+| Lockfile Version | Minimum Rust | Notes |
+|-----------------|--------------|-------|
+| v3 | 1.38+ | Widely supported by older CI actions |
+| v4 | 1.78+ | Requires `cargo-deny-action@v2` or later |
+
+### Rules
+
+- **`Cargo.lock` v4 requires `EmbarkStudios/cargo-deny-action@v2` or later** — `@v1` ships an older Cargo that cannot parse v4 lockfiles and will fail silently or with cryptic errors.
+- **When upgrading the Rust toolchain**, check whether the new version bumps the `Cargo.lock` format. If it does, audit every CI action that touches `Cargo.lock` for compatibility.
+- **When adding or updating CI actions** that invoke Cargo or parse `Cargo.lock`, verify they support the lockfile version used by the project.
+- **Run `scripts/check-ci-config.sh`** before pushing — it detects outdated action versions and lockfile incompatibilities automatically.
+
+```bash
+# ❌ Bad — using v1 with Cargo.lock v4 (will fail in CI)
+- uses: EmbarkStudios/cargo-deny-action@v1
+
+# ✅ Good — v2 supports Cargo.lock v4
+- uses: EmbarkStudios/cargo-deny-action@v2
+```
+
+### Pre-Push Validation
+
+```bash
+# Run the CI config validator to catch version mismatches before pushing
+bash scripts/check-ci-config.sh
+```
+
+This script checks:
+
+- `Cargo.lock` version and warns if actions need upgrading
+- Presence of `deny.toml`
+- CI workflow files for outdated `cargo-deny-action` references
+
+---
+
 ## Agent Checklist
 
 - [ ] `cargo deny check` passes on every PR (advisories, licenses, bans, sources)
@@ -337,6 +381,8 @@ echo "Supply chain checks passed."
 - [ ] Dependency update PRs reviewed against checklist
 - [ ] Docker builds use `--locked` and multi-stage pattern
 - [ ] `audit.toml` ignores documented with rationale and expiry dates
+- [ ] CI action versions compatible with `Cargo.lock` version (run `scripts/check-ci-config.sh`)
+- [ ] `cargo-deny-action@v2` or later used when `Cargo.lock` is v4+
 
 ## Related Skills
 

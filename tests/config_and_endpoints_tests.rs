@@ -394,3 +394,195 @@ async fn test_specific_cors_origins() {
     let response = test_server.get("/health").await;
     response.assert_status_ok();
 }
+
+// ===========================================================================
+// Config validation tests
+// ===========================================================================
+
+use signal_fish_server::config::validate_config_security;
+
+/// A config-validation test scenario: (name, config_modifier, expected_ok).
+type ValidationScenario = (&'static str, Box<dyn Fn(&mut Config)>, bool);
+
+/// The default Config has `require_metrics_auth = true` but no
+/// `metrics_auth_token`, so validation MUST fail.  This is the exact
+/// scenario that caused the Docker CI startup failure.
+#[test]
+fn test_default_config_fails_validation() {
+    let config = Config::default();
+
+    // Preconditions: confirm the defaults that cause the failure
+    assert!(
+        config.security.require_metrics_auth,
+        "default_require_auth() should be true"
+    );
+    assert!(
+        config.security.metrics_auth_token.is_none(),
+        "default metrics_auth_token should be None"
+    );
+
+    let result = validate_config_security(&config);
+    assert!(
+        result.is_err(),
+        "default config should fail validation because metrics auth is required but no token is set"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Metrics authentication is enabled but no credentials are configured"),
+        "error message should mention missing credentials, got: {err_msg}"
+    );
+}
+
+/// Data-driven test covering a matrix of auth configuration scenarios.
+#[test]
+fn test_config_validation_scenarios() {
+    // (name, config_modifier, expected_ok)
+    let scenarios: Vec<ValidationScenario> = vec![
+        (
+            "default config → fails (require_metrics_auth=true, no token)",
+            Box::new(|_c: &mut Config| {
+                // leave defaults untouched
+            }),
+            false,
+        ),
+        (
+            "auth disabled → passes",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+            }),
+            true,
+        ),
+        (
+            "auth enabled with valid long token → passes",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = true;
+                c.security.metrics_auth_token =
+                    Some("a-strong-token-that-is-at-least-32-chars!!".to_string());
+            }),
+            true,
+        ),
+        (
+            "auth enabled with short token → passes (warning only)",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = true;
+                c.security.metrics_auth_token = Some("short".to_string());
+            }),
+            true,
+        ),
+        (
+            "auth enabled with empty token → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = true;
+                c.security.metrics_auth_token = Some(String::new());
+            }),
+            false,
+        ),
+        (
+            "both auth fields disabled → passes (Docker/CI scenario)",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.require_websocket_auth = false;
+            }),
+            true,
+        ),
+        (
+            "metrics auth enabled, websocket auth disabled → fails without token",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = true;
+                c.security.require_websocket_auth = false;
+                c.security.metrics_auth_token = None;
+            }),
+            false,
+        ),
+        (
+            "metrics auth disabled, websocket auth enabled → passes",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.require_websocket_auth = true;
+            }),
+            true,
+        ),
+    ];
+
+    for (name, modifier, expected_ok) in &scenarios {
+        let mut config = Config::default();
+        modifier(&mut config);
+
+        let result = validate_config_security(&config);
+        assert_eq!(
+            result.is_ok(),
+            *expected_ok,
+            "scenario \"{name}\": expected {}, got {:?}",
+            if *expected_ok { "Ok" } else { "Err" },
+            result,
+        );
+    }
+}
+
+/// Regression test: the Docker container disables both auth flags.
+/// This configuration MUST pass validation.
+#[test]
+fn test_docker_default_config_passes_validation() {
+    let mut config = Config::default();
+    config.security.require_metrics_auth = false;
+    config.security.require_websocket_auth = false;
+    config.security.metrics_auth_token = None;
+
+    let result = validate_config_security(&config);
+    assert!(
+        result.is_ok(),
+        "Docker-style config (auth disabled) must pass validation, but got: {:?}",
+        result.unwrap_err(),
+    );
+}
+
+/// Data-driven test for TLS validation edge cases.
+#[test]
+fn test_validate_config_security_tls_validation() {
+    let scenarios: Vec<ValidationScenario> = vec![
+        (
+            "TLS enabled but no cert path → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.transport.tls.enabled = true;
+                c.security.transport.tls.certificate_path = None;
+                c.security.transport.tls.private_key_path = Some("/tmp/key.pem".to_string());
+            }),
+            false,
+        ),
+        (
+            "TLS enabled but no key path → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.transport.tls.enabled = true;
+                c.security.transport.tls.certificate_path = Some("/tmp/cert.pem".to_string());
+                c.security.transport.tls.private_key_path = None;
+            }),
+            false,
+        ),
+        (
+            "TLS disabled → passes regardless of cert/key",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.transport.tls.enabled = false;
+                c.security.transport.tls.certificate_path = None;
+                c.security.transport.tls.private_key_path = None;
+            }),
+            true,
+        ),
+    ];
+
+    for (name, modifier, expected_ok) in &scenarios {
+        let mut config = Config::default();
+        modifier(&mut config);
+
+        let result = validate_config_security(&config);
+        assert_eq!(
+            result.is_ok(),
+            *expected_ok,
+            "TLS scenario \"{name}\": expected {}, got {:?}",
+            if *expected_ok { "Ok" } else { "Err" },
+            result,
+        );
+    }
+}

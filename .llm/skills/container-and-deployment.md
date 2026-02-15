@@ -660,7 +660,7 @@ A regression-prevention script checks that workflows using `--all-features` refe
 
 ```bash
 # Run before pushing CI workflow changes
-scripts/validate-ci-config.sh
+scripts/check-ci-config.sh
 ```
 
 ### When Adding a Cargo Feature with Native Dependencies
@@ -669,8 +669,74 @@ scripts/validate-ci-config.sh
 2. Add required packages to `.github/actions/install-build-deps/action.yml`
 3. Add the same packages to the `Dockerfile` builder stage
 4. Verify all workflows using `--all-features` include the composite action step
-5. Run `scripts/validate-ci-config.sh` to confirm
+5. Run `scripts/check-ci-config.sh` to confirm
 6. Run `actionlint` to validate workflow syntax
+
+---
+
+## Config Validation & Docker Startup
+
+### The "Auth Defaults" Pitfall
+
+When `default_require_auth()` returns `true` (secure-by-default), Docker containers without a
+mounted config file **will crash at startup** unless the Dockerfile explicitly disables auth via
+environment variable overrides:
+
+```dockerfile
+# Disable auth by default so the container starts without a config file.
+# Production deployments should mount a config.json or set auth env vars.
+ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
+ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
+```
+
+### Prevention Checklist
+
+When changing configuration defaults, **always verify**:
+
+1. **Default `Config` validation** — Does `Config::default()` pass `validate_config_security()`?
+   If not, does the Dockerfile set ENV overrides for the failing fields?
+2. **Docker smoke test** — CI must retry the health check (not bare `sleep + curl`),
+   and must dump `docker logs` on failure for diagnostics.
+3. **`check-ci-config.sh`** — Must validate that the Dockerfile contains the required ENV overrides.
+4. **Tests** — Must include a `test_docker_default_config_passes_validation` regression test
+   that simulates the Docker ENV overrides and asserts validation passes.
+
+### Smoke Test Pattern (CI)
+
+Use a retry loop instead of a bare `sleep`:
+
+```yaml
+- name: Smoke test
+  run: |
+    docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
+    for i in $(seq 1 15); do
+      if curl -sf http://localhost:3536/v2/health; then
+        echo ""
+        echo "Health check passed on attempt $i/15"
+        exit 0
+      fi
+      echo "Attempt $i/15: server not ready, retrying in 2s..."
+      sleep 2
+    done
+    echo "ERROR: Server failed to become healthy after 30s"
+    echo "=== Docker logs ==="
+    docker logs test-server
+    exit 1
+```
+
+### Related Test Pattern
+
+Always test that the Docker-style config (auth disabled, no config file) passes validation:
+
+```rust
+#[test]
+fn test_docker_default_config_passes_validation() {
+    let mut config = Config::default();
+    config.security.require_metrics_auth = false;
+    config.security.require_websocket_auth = false;
+    assert!(validate_config_security(&config).is_ok());
+}
+```
 
 ---
 
@@ -689,7 +755,10 @@ scripts/validate-ci-config.sh
 - [ ] Image scanned with Trivy/Grype in CI — critical/high CVEs block deploy
 - [ ] `cargo audit` and `cargo deny check` run in CI pipeline
 - [ ] Native build deps in composite action (`.github/actions/install-build-deps/action.yml`) match Dockerfile builder stage
-- [ ] `scripts/validate-ci-config.sh` passes after CI workflow changes
+- [ ] `scripts/check-ci-config.sh` passes after CI workflow changes
+- [ ] Docker ENV overrides set for any config fields that default to secure-but-crash (e.g., auth)
+- [ ] CI smoke test uses retry loop with `docker logs` dump on failure (no bare `sleep`)
+- [ ] Config validation regression test exists for Docker-style defaults
 - [ ] Images tagged with sha256 digest or git SHA — never `:latest` in production
 - [ ] No secrets baked into image layers
 - [ ] Secrets mounted as read-only volumes, not environment variables
