@@ -51,16 +51,16 @@ The deny.toml configures: `vulnerability = "deny"`, `yanked = "deny"`, allowed l
 
 ## Choosing Between Crates — Evaluation Criteria
 
-| Criterion         | Check                     | Red flag                             |
-| ----------------- | ------------------------- | ------------------------------------ |
-| **Maintenance**   | Last commit date          | >1 year inactive                     |
-| **Downloads**     | crates.io stats           | <1000 total downloads                |
-| **Dependencies**  | `cargo tree -p <crate>`   | Pulls in 50+ transitive deps         |
-| **License**       | Cargo.toml license field  | GPL/AGPL in MIT project              |
-| **Safety**        | `unsafe` usage            | Lots of unsafe without justification |
-| **Build time**    | `cargo build --timings`   | >10s for one crate                   |
-| **MSRV**          | Minimum Rust version      | Higher than project MSRV             |
-| **API stability** | Version number, changelog | Frequent breaking releases           |
+| Criterion         | Check                     | Red flag                             | Notes                                   |
+| ----------------- | ------------------------- | ------------------------------------ | --------------------------------------- |
+| **Maintenance**   | Last commit date          | >1 year inactive                     | Check GitHub activity, not just release |
+| **Downloads**     | crates.io stats           | <1000 total downloads                | Higher downloads = more battle-tested   |
+| **Dependencies**  | `cargo tree -p <crate>`   | Pulls in 50+ transitive deps         | Increases supply chain risk             |
+| **License**       | Cargo.toml license field  | GPL/AGPL in MIT project              | Must be compatible with project license |
+| **Safety**        | `unsafe` usage            | Lots of unsafe without justification | Review unsafe code carefully            |
+| **Build time**    | `cargo build --timings`   | >10s for one crate                   | Impacts developer productivity          |
+| **MSRV**          | Minimum Rust version      | Higher than project MSRV             | **CRITICAL**: See MSRV guidance below   |
+| **API stability** | Version number, changelog | Frequent breaking releases           | Check semver adherence                  |
 
 ### Decision Process
 
@@ -180,7 +180,71 @@ serde = "*"             # Any version — breaks reproducibility
 
 ## Build Time Impact
 
-Use `cargo build --timings` to generate timing reports. Check dependency tree with `cargo tree | wc -l` and duplicates with `cargo tree -d`. This project already uses `lto = "thin"` and `codegen-units = 1` in release. Consider `sccache` or `mold` linker for development.
+Use `cargo build --timings` to generate timing reports. Check dependency tree with `cargo tree | wc -l`
+and duplicates with `cargo tree -d`. This project already uses `lto = "thin"` and `codegen-units = 1`
+in release. Consider `sccache` or `mold` linker for development.
+
+---
+
+## MSRV (Minimum Supported Rust Version) Compliance
+
+**CRITICAL**: Before adding or updating any dependency, verify it supports the project's MSRV.
+
+### Check Dependency MSRV
+
+```bash
+# View dependency's MSRV (if specified)
+cargo metadata --format-version=1 | jq '.packages[] | select(.name == "rand") | .rust_version'
+
+# Or check the dependency's Cargo.toml on crates.io or GitHub
+curl -s https://crates.io/api/v1/crates/rand | jq '.crate.rust_version'
+```
+
+### MSRV Policy
+
+- **Project MSRV**: Defined in `Cargo.toml` (`rust-version = "1.88.0"`)
+- **All dependencies** must support this MSRV or lower
+- **CI validates** MSRV compliance on every PR (`.github/workflows/ci.yml` msrv job)
+- **MSRV updates** are coordinated changes affecting multiple files
+
+### When Dependency Requires Newer Rust
+
+If a dependency update requires a Rust version newer than the project MSRV:
+
+**Option 1: Pin to older version** (preferred if possible)
+
+```toml
+[dependencies]
+rand = "=0.9.0"  # Pin to version compatible with current MSRV
+```
+
+**Option 2: Evaluate alternatives**
+
+- Search for alternative crates with lower MSRV
+- Check if the feature requiring newer Rust is actually needed
+- Consider forking and backporting if critical
+
+**Option 3: Update project MSRV** (coordinated change)
+
+- Follow the MSRV update checklist in [msrv-and-toolchain-management](./msrv-and-toolchain-management.md)
+- Update ALL configuration files: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, `Dockerfile`
+- Run `scripts/check-msrv-consistency.sh` to verify consistency
+- Document the MSRV bump in `CHANGELOG.md`
+
+### MSRV Verification
+
+```bash
+# Verify current dependency tree is MSRV-compatible
+cargo check --locked --all-targets
+
+# Check for dependencies requiring newer Rust
+cargo tree --all-features | grep -i "requires rustc"
+
+# Run MSRV consistency check
+./scripts/check-msrv-consistency.sh
+```
+
+See [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) for comprehensive guidance.
 
 ---
 
@@ -238,9 +302,11 @@ This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "thi
 
 ## Agent Checklist
 
+- [ ] **MSRV compatibility verified** — dependency supports project MSRV (see above section)
+- [ ] `scripts/check-msrv-consistency.sh` passes if MSRV changed
 - [ ] `cargo deny check` passes before adding any dependency
 - [ ] `cargo audit` run regularly (weekly in CI)
-- [ ] New dependencies evaluated against criteria table
+- [ ] New dependencies evaluated against criteria table (including MSRV)
 - [ ] Heavy/optional deps behind feature flags
 - [ ] `Cargo.lock` committed (binary project)
 - [ ] No `*` version wildcards
@@ -253,6 +319,8 @@ This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "thi
 
 ## Related Skills
 
+- [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) — MSRV updates and consistency
 - [clippy-and-linting](./clippy-and-linting.md) — CI integration for dependency checks
+- [supply-chain-security](./supply-chain-security.md) — Dependency security audits
 - [rust-performance-optimization](./rust-performance-optimization.md) — Alternative crate recommendations
 - [testing-strategies](./testing-strategies.md) — Testing with optional dependencies

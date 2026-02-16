@@ -33,6 +33,7 @@ Start here:
     +-- Deployment/Containers? ------> skills/container-and-deployment.md
     +-- Dependencies/Supply Chain? --> skills/supply-chain-security.md
     |                                  skills/dependency-management.md
+    |                                  skills/msrv-and-toolchain-management.md
     +-- Performance Issue? ----------> /performance-audit
     |                                  skills/rust-performance-optimization.md
     +-- Hosting/Provider/Scaling? ---> skills/graceful-degradation.md
@@ -305,6 +306,7 @@ cargo bench                                    # Benchmarks
 | [websocket-session-security](skills/websocket-session-security.md)           | WebSocket session lifecycle security, token rotation, anti-replay |
 | [container-and-deployment](skills/container-and-deployment.md)               | Docker, CI/CD, container security for game servers                |
 | [github-actions-best-practices](skills/github-actions-best-practices.md)     | GitHub Actions workflows, Bash/AWK pipelines, CI/CD debugging     |
+| [msrv-and-toolchain-management](skills/msrv-and-toolchain-management.md)     | MSRV updates, toolchain consistency, dependency compatibility     |
 
 ### Performance & Feature Skills
 

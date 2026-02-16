@@ -47,7 +47,16 @@ cargo deny --all-features check            # Advisories, licenses, bans, sources
 
 ### Pre-Push Validation
 
-Run `scripts/check-ci-config.sh` before pushing to catch CI configuration issues (e.g., outdated action versions incompatible with the current `Cargo.lock` format). See [supply-chain-security](./supply-chain-security.md) for details.
+```bash
+# Always run before pushing
+scripts/check-ci-config.sh           # Catch CI configuration issues
+scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related changes)
+```
+
+- `check-ci-config.sh`: Catches outdated action versions incompatible with current `Cargo.lock`
+  format (see [supply-chain-security](./supply-chain-security.md))
+- `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
+  `Cargo.toml` (see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
 
 ---
 
@@ -71,7 +80,7 @@ rustup component add clippy
 
 ## Commit Format
 
-```
+```text
 <type>: <imperative subject>
 
 feat: add spectator mode to rooms
@@ -79,6 +88,7 @@ fix: resolve WebSocket cleanup race (#152)
 perf: reduce allocations in message broadcast
 test: add concurrency tests for room joins
 docs: update protocol documentation
+chore: update MSRV from 1.87.0 to 1.88.0
 ```
 
 ---
@@ -90,10 +100,12 @@ docs: update protocol documentation
 - [ ] `cargo test --all-features` — all tests pass
 - [ ] `cargo deny --all-features check` — supply chain checks pass
 - [ ] `scripts/check-ci-config.sh` — CI config validated
+- [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
 - [ ] New code has exhaustive tests (see [testing-strategies](./testing-strategies.md))
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
 - [ ] CHANGELOG updated for user-facing changes
 - [ ] Breaking changes documented
+- [ ] MSRV update documented (if applicable, see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
 
 ---
 

@@ -336,6 +336,60 @@ async fn test_websocket_connection() {
 }
 ```
 
+## MSRV and Toolchain Management
+
+### Minimum Supported Rust Version (MSRV)
+
+The project MSRV is defined in `Cargo.toml` (`rust-version = "1.88.0"`). This is the oldest
+Rust compiler version guaranteed to build the project.
+
+### Verifying MSRV Consistency
+
+Before committing changes that update the MSRV, verify all configuration files are consistent:
+
+```bash
+./scripts/check-msrv-consistency.sh
+```
+
+This script validates that the following files all use the same Rust version:
+
+- `Cargo.toml` (source of truth)
+- `rust-toolchain.toml` (developer toolchain)
+- `clippy.toml` (MSRV-aware lints)
+- `Dockerfile` (production build environment)
+
+### Updating MSRV
+
+When a dependency requires a newer Rust version, follow the MSRV update checklist:
+
+1. **Update all configuration files**:
+   - `Cargo.toml`: `rust-version = "1.XX.0"`
+   - `rust-toolchain.toml`: `channel = "1.XX.0"`
+   - `clippy.toml`: `msrv = "1.XX.0"`
+   - `Dockerfile`: `FROM rust:1.XX-bookworm`
+
+2. **Verify consistency**:
+
+   ```bash
+   ./scripts/check-msrv-consistency.sh
+   ```
+
+3. **Test with new MSRV**:
+
+   ```bash
+   cargo clean
+   cargo check --locked --all-targets
+   cargo test --locked --all-features
+   ```
+
+4. **Update documentation**:
+   - Update this file's Prerequisites section
+   - Update `CHANGELOG.md`
+   - Document reason for MSRV bump in commit message
+
+See [`.llm/skills/msrv-and-toolchain-management.md`](../.llm/skills/msrv-and-toolchain-management.md)
+for comprehensive MSRV management guidance.
+
 ## Continuous Integration
 
 The project uses GitHub Actions for CI. All PRs must pass:
@@ -344,6 +398,7 @@ The project uses GitHub Actions for CI. All PRs must pass:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all-features`
 - `cargo build --release`
+- **MSRV verification** (dedicated CI job validates MSRV consistency and builds with exact MSRV)
 
 ## Release Process
 
