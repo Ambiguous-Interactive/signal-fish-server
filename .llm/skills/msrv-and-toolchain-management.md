@@ -560,6 +560,212 @@ git push  # ← CI will fail!
 
 ---
 
+## Nightly-Only CI Tools
+
+### Overview
+
+Some CI analysis tools require nightly Rust because they use unstable compiler features. This is acceptable **only
+for CI-only tools** that never build production artifacts.
+
+### When Nightly is Acceptable
+
+#### Acceptable: CI-only analysis tools
+
+- cargo-udeps (unused dependency detection)
+- cargo-miri (undefined behavior detection)
+- cargo-fuzz (fuzzing infrastructure)
+- Tools that use unstable compiler APIs for analysis
+
+#### Not Acceptable: Production builds
+
+- Building the application binary
+- Building Docker images for deployment
+- Building release artifacts
+- Any code that users depend on
+
+### Current Nightly Usage
+
+This project uses nightly Rust **only** for:
+
+| Tool        | Purpose                     | Workflow File                           | Nightly Version    |
+| ----------- | --------------------------- | --------------------------------------- | ------------------ |
+| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml`     | nightly-2026-01-15 |
+
+### Nightly Version Policy
+
+#### Pinning Strategy
+
+- We pin to a specific nightly date (e.g., `nightly-2026-01-15`)
+- We do NOT use rolling `nightly` (always latest)
+- Pinning provides reproducibility and stability
+
+#### Update Criteria
+
+Update the nightly version when:
+
+1. **Age**: Nightly version is >6 months old
+2. **Security**: Security advisories affect this version
+3. **Features**: Tool requires newer nightly features
+4. **Availability**: Nightly version becomes unavailable/broken
+
+#### Update Frequency
+
+- Review nightly versions quarterly
+- Update proactively before staleness causes issues
+- Document update date in workflow file
+
+### Pinned vs Rolling Nightly
+
+| Aspect          | Pinned (nightly-YYYY-MM-DD)      | Rolling (nightly)                |
+| --------------- | -------------------------------- | -------------------------------- |
+| Reproducibility | ✅ Same version every CI run     | ❌ Changes daily                 |
+| Stability       | ✅ No surprise breakage          | ❌ May break unexpectedly        |
+| Freshness       | ⚠️ Becomes stale over time       | ✅ Always latest                 |
+| Maintenance     | ⚠️ Requires periodic updates     | ✅ No updates needed             |
+| Recommendation  | ✅ Use for CI tools              | ❌ Avoid for stability           |
+
+**Decision:** This project uses **pinned nightly** for reproducibility and stability.
+
+### Nightly Update Checklist
+
+When updating a nightly version in CI:
+
+- [ ] **Identify current nightly version** (check workflow file)
+- [ ] **Choose new nightly version** (within last 30 days preferred)
+- [ ] **Update workflow file** (change `toolchain: nightly-YYYY-MM-DD`)
+- [ ] **Update documentation** (change "Last Updated: YYYY-MM-DD" comment)
+- [ ] **Update all references** (search for old nightly date in workflow)
+- [ ] **Test in CI** (push to branch, verify workflow succeeds)
+- [ ] **Document in commit** (explain reason for nightly update)
+
+### Example: Updating cargo-udeps Nightly
+
+```bash
+# 1. Check current nightly version
+grep -n "nightly-" .github/workflows/unused-deps.yml
+
+# 2. Update workflow file (all occurrences)
+sed -i 's/nightly-2025-02-21/nightly-2026-01-15/g' .github/workflows/unused-deps.yml
+
+# 3. Update "Last Updated" comment
+sed -i 's/Last Updated: .*/Last Updated: 2026-02-16/' .github/workflows/unused-deps.yml
+
+# 4. Verify changes
+git diff .github/workflows/unused-deps.yml
+
+# 5. Commit with explanation
+git add .github/workflows/unused-deps.yml
+git commit -m "chore: update cargo-udeps nightly from 2025-02-21 to 2026-01-15
+
+Update nightly toolchain for cargo-udeps to nightly-2026-01-15 (from
+nightly-2025-02-21, which was 360 days old). The new nightly is 32 days
+old and within our 6-month staleness threshold.
+
+cargo-udeps requires nightly Rust for unstable compiler features used in
+dependency analysis. This does not affect production builds, which continue
+to use stable MSRV (1.88.0) as defined in Cargo.toml.
+
+See .github/workflows/unused-deps.yml for nightly version policy and update
+criteria.
+"
+```
+
+### Documentation Requirements
+
+Every nightly usage **must** be documented in the workflow file:
+
+```yaml
+# cargo-udeps requires nightly Rust because it uses unstable compiler features
+# to analyze dependency usage at a deeper level than stable tools can provide.
+#
+# Nightly Version: nightly-2026-01-15
+# Last Updated: 2026-02-16
+#
+# Update Criteria (when to update this nightly version):
+#   - If the nightly version is >6 months old
+#   - If security advisories affect this version
+#   - If cargo-udeps requires newer nightly features
+#   - If the nightly version becomes unavailable or broken
+#
+# Policy:
+#   - Production code MUST use stable MSRV (see Cargo.toml rust-version)
+#   - CI-only analysis tools MAY use nightly if required by the tool
+#   - Nightly is NEVER used for building production artifacts
+```
+
+### Nightly vs MSRV Relationship
+
+**Key Principle:** Nightly for CI tools is **independent** of production MSRV.
+
+```text
+Production Code (Stable MSRV)
+  ↓
+  rust-version = "1.88.0" in Cargo.toml  ← Single source of truth
+  ↓
+  Used for: Building binaries, Docker images, production artifacts
+
+CI Analysis Tools (Nightly)
+  ↓
+  nightly-2026-01-15 in workflow files  ← Independent of MSRV
+  ↓
+  Used for: cargo-udeps, cargo-miri (analysis only, no artifacts)
+```
+
+#### Relationship
+
+- Nightly version can be NEWER than stable MSRV (usually is)
+- Nightly version can be OLDER than stable MSRV (if recently updated MSRV)
+- No requirement for nightly to match MSRV
+- Nightly is updated independently based on tool needs
+
+#### Common Confusion (Avoid)
+
+- "Nightly must be newer than MSRV" (incorrect)
+- "If MSRV is 1.88, nightly must be from after 1.88 release" (incorrect)
+- "Nightly is for CI tools only; MSRV is for production code" (correct)
+- "Update nightly based on staleness/tool needs, not MSRV changes" (correct)
+
+### Future Consideration: Rolling Nightly
+
+**Current Policy:** Pinned nightly (e.g., `nightly-2026-01-15`)
+
+**Alternative (Not Currently Used):** Rolling nightly (`nightly`)
+
+#### Pros of Rolling
+
+- Always latest features
+- Zero maintenance (no updates needed)
+- Never stale
+
+#### Cons of Rolling
+
+- Unpredictable breakage
+- Non-reproducible CI runs
+- Harder to bisect failures
+
+#### When to Reconsider Rolling
+
+- If pinned nightly requires frequent updates (>monthly)
+- If CI tool explicitly recommends rolling nightly
+- If stability issues become rare/non-existent
+
+**Decision:** Continue with pinned nightly unless evidence suggests rolling is more reliable.
+
+### Agent Workflow: Nightly Version Updates
+
+When asked to update nightly version:
+
+1. **Verify nightly is needed**: Check if tool still requires nightly
+2. **Choose recent nightly**: Within last 30 days (e.g., `nightly-2026-01-15`)
+3. **Update all occurrences**: Search workflow file for old nightly date
+4. **Update documentation**: Change "Last Updated: YYYY-MM-DD" comment
+5. **Explain in workflow file**: Maintain comprehensive comments
+6. **Document in this skill**: Reference workflow file as example
+7. **Test in CI**: Verify workflow passes with new nightly
+8. **Commit with context**: Explain age of old nightly, reason for update
+
+---
+
 ## Related Skills
 
 - [dependency-management](./dependency-management.md) — Choosing and auditing dependencies

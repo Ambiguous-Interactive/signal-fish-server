@@ -91,6 +91,20 @@ For non-trivial changes, dispatch as a subagent or work through manually:
 
 ---
 
+## GitHub Actions / CI Workflow Review
+
+For changes in `.github/workflows/` or CI configuration:
+
+- [ ] **Language ecosystem match**: Caching and tools match project language (Rust = rust-cache, not pip)
+- [ ] **Hash files exist**: Files in `hashFiles()` exist (Cargo.lock for Rust, not requirements.txt)
+- [ ] **Pinned versions recent**: Action SHAs <1 year old, nightly toolchains <6 months old
+- [ ] **Documentation complete**: Workflow has header comment, pinned versions have update criteria
+- [ ] **MSRV consistency**: If Rust version changed, updated in ALL files (Cargo.toml, rust-toolchain.toml,
+  clippy.toml, Dockerfile)
+- [ ] **Tested in CI**: Pushed to branch and verified workflow passes
+- [ ] **Cache keys versioned**: Cache keys include version suffix for invalidation (`v1`, `v2`)
+- [ ] **Permissions minimal**: Only required permissions granted (default: `contents: read`)
+
 ## AWS / Infrastructure Review (CDK / Infra Changes)
 
 For changes in `infra/`, CDK stacks, or Terraform files:

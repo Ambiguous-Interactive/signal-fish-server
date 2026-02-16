@@ -306,6 +306,7 @@ cargo bench                                    # Benchmarks
 | [websocket-session-security](skills/websocket-session-security.md)           | WebSocket session lifecycle security, token rotation, anti-replay |
 | [container-and-deployment](skills/container-and-deployment.md)               | Docker, CI/CD, container security for game servers                |
 | [github-actions-best-practices](skills/github-actions-best-practices.md)     | GitHub Actions workflows, Bash/AWK pipelines, CI/CD debugging     |
+| [ci-cd-troubleshooting](skills/ci-cd-troubleshooting.md)                     | Common CI failures, cache errors, configuration mismatches        |
 | [msrv-and-toolchain-management](skills/msrv-and-toolchain-management.md)     | MSRV updates, toolchain consistency, dependency compatibility     |
 
 ### Performance & Feature Skills

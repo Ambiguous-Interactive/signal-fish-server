@@ -46,7 +46,6 @@ extend-exclude = [
 # === Rust Crates: Core Dependencies ===
 # Web framework and async runtime
 anyhow = "anyhow"
-arrayvec = "arrayvec"
 axum = "axum"
 chrono = "chrono"
 dashmap = "dashmap"

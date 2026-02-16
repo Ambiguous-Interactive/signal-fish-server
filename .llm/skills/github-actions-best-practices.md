@@ -23,6 +23,19 @@
 - Rust-specific testing (see [testing-strategies](./testing-strategies.md))
 - Application code (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 
+## Quick Reference: Preventative Measures
+
+**Before pushing workflow changes:**
+1. Run `./scripts/check-workflow-hygiene.sh` to validate workflow configuration
+2. Run `cargo test --test ci_config_tests` to validate CI consistency
+3. Review `/docs/adr/ci-cd-preventative-measures.md` for systematic issue prevention
+
+**Common issues automatically detected:**
+- Language-specific caching on wrong project type (Python cache on Rust project)
+- Stale nightly toolchains (>180 days old)
+- Missing required CI validation workflows
+- MSRV inconsistency across configuration files
+
 ---
 
 ## TL;DR
@@ -42,7 +55,199 @@
 
 ---
 
-## 1. AWK Multi-Line Content Processing
+## 1. Language-Specific Caching & Configuration Matching
+
+### The Problem: Ecosystem Mismatch
+
+Using caching or tooling from the wrong language ecosystem causes silent failures, cache misses, and cryptic errors. This is surprisingly common when copying workflow templates.
+
+**Critical Rule:** Workflow configuration MUST match the project's primary language.
+
+### Common Mismatches
+
+#### Python Caching on Rust Project (WRONG)
+
+```yaml
+# ❌ WRONG: Python caching for a Rust project
+- uses: actions/cache@v4
+  with:
+    path: ~/.cache/pip           # Python cache directory
+    key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}  # Python dependency file
+
+- name: Build Rust project
+  run: cargo build               # ← Rust, not Python!
+```
+
+**Symptoms:**
+- `ERROR: Cache entry deserialization failed, entry ignored`
+- `ERROR: Unable to locate executable file: pip`
+- Cache always misses (slower CI)
+- Workflow succeeds but caching is broken
+
+#### Rust Caching on Node Project (WRONG)
+
+```yaml
+# ❌ WRONG: Rust caching for a Node project
+- uses: Swatinem/rust-cache@v2
+  # Looks for Cargo.toml, finds nothing, silently does nothing
+
+- name: Build Node project
+  run: npm run build             # ← Node, not Rust!
+```
+
+### Solution: Match Configuration to Project Language
+
+#### Rust Projects (CORRECT)
+
+```yaml
+# ✅ CORRECT: Rust-specific caching and tools
+- name: Cache Rust dependencies
+  uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+  with:
+    prefix-key: "rust"
+
+- name: Build Rust project
+  run: cargo build --locked
+```
+
+**Rust indicators:**
+- Has `Cargo.toml` and `Cargo.lock`
+- Uses `cargo` commands (`cargo build`, `cargo test`)
+- Caches `~/.cargo/`, `target/`
+- Dependencies in `Cargo.toml`, not `requirements.txt` or `package.json`
+
+#### Python Projects (CORRECT)
+
+```yaml
+# ✅ CORRECT: Python-specific caching
+- uses: actions/setup-python@v5
+  with:
+    python-version: '3.11'
+    cache: 'pip'  # Automatically caches pip dependencies
+
+- name: Install dependencies
+  run: pip install -r requirements.txt
+
+- name: Build Python project
+  run: python setup.py build
+```
+
+#### Node Projects (CORRECT)
+
+```yaml
+# ✅ CORRECT: Node-specific caching
+- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+    cache: 'npm'  # Automatically caches npm dependencies
+
+- name: Install dependencies
+  run: npm ci
+
+- name: Build Node project
+  run: npm run build
+```
+
+### Detection: Identifying Ecosystem Mismatches
+
+Run these checks on workflow files:
+
+```bash
+# Check for language-specific patterns
+cd .github/workflows
+
+# For Rust projects, these should NOT appear:
+grep -r "pip\|requirements\.txt\|setup\.py" .       # Python
+grep -r "npm\|yarn\|package\.json\|node_modules" .  # Node
+grep -r "bundle\|Gemfile\|gem install" .            # Ruby
+grep -r "mvn\|gradle\|pom\.xml" .                   # Java/Maven
+
+# For Rust projects, these SHOULD appear:
+grep -r "cargo\|Cargo\.toml\|rust-cache" .          # Rust
+```
+
+**Red flags:**
+
+| Indicator | Rust | Python | Node | Java |
+|-----------|------|--------|------|------|
+| Cache paths | `~/.cargo/`, `target/` | `~/.cache/pip` | `node_modules/`, `.npm/` | `.m2/`, `.gradle/` |
+| Dependency files | `Cargo.toml`, `Cargo.lock` | `requirements.txt`, `Pipfile.lock` | `package.json`, `package-lock.json` | `pom.xml`, `build.gradle` |
+| Build commands | `cargo build` | `pip install`, `python setup.py` | `npm install`, `npm run build` | `mvn package`, `gradle build` |
+| Test commands | `cargo test` | `pytest`, `python -m unittest` | `npm test`, `jest` | `mvn test`, `gradle test` |
+
+### Avoiding Configuration Drift
+
+**Problem:** Copying workflow templates from other projects introduces wrong-ecosystem configuration.
+
+**Prevention checklist:**
+
+Before committing a new or modified workflow:
+
+- [ ] **Identify project language**: Check repository for `Cargo.toml` (Rust), `package.json` (Node), `requirements.txt` (Python), etc.
+- [ ] **Verify cache configuration**: Cache paths must match project language (see table above)
+- [ ] **Check hash files in cache keys**: Files referenced in `hashFiles()` must exist
+- [ ] **Validate tool/action selection**: Use language-appropriate actions (rust-cache for Rust, setup-python for Python, etc.)
+- [ ] **Review dependency install commands**: Must match project language (`cargo build`, not `pip install`)
+- [ ] **Test workflow with cold cache**: Ensure workflow works even when cache misses
+
+**Workflow template validation:**
+
+```bash
+# Run this before committing workflow changes
+./scripts/validate-workflow-ecosystem.sh
+
+# Sample implementation:
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_LANG="rust"  # Detected from Cargo.toml presence
+
+# Check workflows for wrong-ecosystem patterns
+WRONG_PATTERNS=()
+if [ "$PROJECT_LANG" = "rust" ]; then
+  WRONG_PATTERNS=("pip" "npm" "bundle" "mvn" "gradle")
+fi
+
+for pattern in "${WRONG_PATTERNS[@]}"; do
+  if grep -r "$pattern" .github/workflows/ 2>/dev/null; then
+    echo "ERROR: Found $pattern in workflows (Rust project, should not have this)"
+    exit 1
+  fi
+done
+
+echo "✓ Workflow ecosystem configuration validated"
+```
+
+### SHA Pinning for Actions
+
+**Always pin actions with SHA256 digests**, not mutable tags:
+
+```yaml
+# ❌ WRONG: Mutable tags
+- uses: actions/checkout@v4
+- uses: Swatinem/rust-cache@v2
+
+# ✅ CORRECT: SHA256 digest pinning
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+- uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+```
+
+**Benefits:**
+- Reproducible builds (same SHA = same code)
+- Security (prevents tag hijacking)
+- Stability (no surprise breaking changes)
+
+**How to get SHA digests:**
+
+```bash
+# GitHub Actions: Go to releases, find commit SHA
+# Or use gh CLI:
+gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
+```
+
+---
+
+## 2. AWK Multi-Line Content Processing
 
 ### The Problem
 
@@ -808,7 +1013,9 @@ Full `set -x` in CI creates massive logs — use sparingly.
 
 ## Related Skills
 
+- [ci-cd-troubleshooting](./ci-cd-troubleshooting.md) — Diagnosing CI failures, cache errors, configuration mismatches
 - [container-and-deployment](./container-and-deployment.md) — Docker builds, Kubernetes config, health checks
 - [testing-strategies](./testing-strategies.md) — Test design, regression tests, CI integration
 - [supply-chain-security](./supply-chain-security.md) — Dependency auditing, SBOM, reproducible builds
+- [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) — MSRV updates and toolchain consistency
 - [mandatory-workflow](./mandatory-workflow.md) — Required checks before commit/push

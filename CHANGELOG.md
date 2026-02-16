@@ -11,6 +11,14 @@
 
 ### Changed
 
+- **CI: Updated nightly toolchain for cargo-udeps from nightly-2025-02-21 to nightly-2026-01-15**
+  - Updated nightly version used by cargo-udeps from 360-day-old nightly-2025-02-21 to recent nightly-2026-01-15
+  - Added comprehensive documentation explaining why nightly is needed for cargo-udeps
+  - Documented update criteria, policy, and trade-offs between pinned vs rolling nightly
+  - Added "Nightly-Only CI Tools" section to `.llm/skills/msrv-and-toolchain-management.md`
+  - Clarified that nightly is ONLY for CI analysis tools, never for production builds
+  - This does not affect production code, which continues to use stable MSRV (1.88.0) from Cargo.toml
+
 - **MSRV Update: Rust 1.87.0 → 1.88.0**
   - Minimum supported Rust version updated from 1.87.0 to 1.88.0
   - Updated in `Cargo.toml` (Rust-version field) and `rust-toolchain.toml`

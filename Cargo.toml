@@ -22,11 +22,9 @@ tls = ["axum-server", "rustls", "rustls-pemfile", "rustls-pki-types"]
 [dependencies]
 # Async runtime
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros"] }
-tokio-util = "0.7"
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
-tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tokio-tungstenite = "0.28"
 
@@ -69,8 +67,6 @@ futures-util = { version = "0.3", features = ["std"] }
 bytes = "1.11"
 smallvec = { version = "1.15", features = ["union", "const_generics", "serde"] }
 dashmap = "6.1"
-crossbeam = "0.8"
-arrayvec = { version = "0.7", features = ["serde"] }
 
 # Crypto & security
 base64 = "0.22"
@@ -85,7 +81,6 @@ lru = "0.16"
 hdrhistogram = "7.5"
 rand = "0.10"
 fastrand = "2.3"
-url = "2.5"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }

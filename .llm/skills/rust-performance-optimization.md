@@ -27,7 +27,7 @@
 ## TL;DR
 
 - Use `with_capacity()` for all collections where the size is known or estimable.
-- Prefer `SmallVec`, `ArrayVec`, `Bytes`, and `Arc<str>` over heap-heavy alternatives.
+- Prefer `SmallVec`, `Bytes`, and `Arc<str>` over heap-heavy alternatives.
 - Use `DashMap`/`FxHashMap` over `HashMap` in hot paths.
 - Profile before optimizing — use `criterion` for benchmarks, `flamegraph` for profiling.
 - Avoid cloning in hot paths; use `Bytes` for zero-copy network data.
@@ -62,15 +62,15 @@ let mut map: HashMap<K, V> = HashMap::with_capacity(expected_entries);
 let mut s = String::with_capacity(estimated_len);
 ```
 
-### SmallVec / ArrayVec — Stack-First Collections
+### SmallVec — Stack-First Collections
 
 ```rust
 use smallvec::SmallVec;
 let players: SmallVec<[PlayerId; 8]> = SmallVec::new();  // Stack for ≤8, heap otherwise
-
-use arrayvec::ArrayVec;
-let mut errors: ArrayVec<ValidationError, 8> = ArrayVec::new();  // Fixed-cap, no heap ever
 ```
+
+**Note:** This project uses `SmallVec` for stack-first collections. `ArrayVec` (fixed-capacity, never heap) is a
+valid alternative pattern for external projects with hard capacity limits, but is not a dependency of this codebase.
 
 ### `Box<[T]>` / `Arc<str>` Over Heavier Alternatives
 

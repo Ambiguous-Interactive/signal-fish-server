@@ -30,7 +30,7 @@
 - Always use bounded channels with backpressure — never unbounded.
 - Never hold a `std::sync::Mutex` guard across an `.await` point.
 - Use `tokio::select!` with cancellation-safe futures only.
-- Implement graceful shutdown with `CancellationToken` or `broadcast` channels.
+- Implement graceful shutdown with broadcast channels or similar cancellation patterns.
 
 ---
 
@@ -196,7 +196,11 @@ let result = tokio::task::spawn_blocking(move || {
 
 ## Graceful Shutdown
 
+**Note:** The following demonstrates a common shutdown pattern. This project may use alternative approaches such as
+broadcast channels or similar cancellation mechanisms. Check the actual codebase implementation.
+
 ```rust
+// Example pattern (using tokio_util::sync::CancellationToken from external crate)
 use tokio_util::sync::CancellationToken;
 
 async fn run_server(shutdown: CancellationToken) {
@@ -214,7 +218,8 @@ async fn run_server(shutdown: CancellationToken) {
 }
 ```
 
-Use `CancellationToken::child_token()` for per-connection tokens. Set up signal handling by spawning a task that calls `token.cancel()` on `ctrl_c().await`.
+**Alternative pattern:** Use `tokio::sync::broadcast` channels for shutdown signals, or implement custom cancellation
+using atomic flags and condition variables. The key principle is coordinated shutdown across all active connections.
 
 ---
 
@@ -265,7 +270,7 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
 - [ ] No `std::sync::Mutex` guards held across `.await` points
 - [ ] CPU-bound work dispatched via `spawn_blocking`
 - [ ] `tokio::select!` uses only cancellation-safe branches
-- [ ] Graceful shutdown implemented with `CancellationToken`
+- [ ] Graceful shutdown implemented with appropriate cancellation mechanism
 - [ ] Timeouts on all external I/O (database, network, WebSocket)
 - [ ] Connection pools used for database and Redis
 - [ ] `JoinSet` used for structured spawning with cleanup

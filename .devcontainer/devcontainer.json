@@ -99,7 +99,6 @@
                 // Spell checker — project-specific words
                 "cSpell.words": [
                     "anyhow",
-                    "arrayvec",
                     "axum",
                     "chrono",
                     "clippy",

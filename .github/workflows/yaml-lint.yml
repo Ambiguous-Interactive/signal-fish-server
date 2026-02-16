@@ -13,7 +13,6 @@
 # Features:
 #   - Validates YAML syntax and formatting
 #   - Checks GitHub Actions workflow files
-#   - Python dependency caching for faster runs
 #   - Pinned yamllint version for reproducibility
 
 name: YAML Lint
@@ -54,7 +53,9 @@ jobs:
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.12'
-          cache: 'pip'
+          # Pip caching disabled: no requirements.txt in this Rust project.
+          # yamllint install is fast (~3-5s). If optimization needed, see
+          # manual caching example in other workflows.
 
       - name: Install yamllint
         run: pip install yamllint==1.35.1

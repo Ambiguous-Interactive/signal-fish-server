@@ -135,14 +135,188 @@ tracing = { workspace = true }
 
 ## Finding Unused Dependencies
 
+### Quick Detection
+
 ```bash
-# Install cargo-machete
+# Install cargo-machete (fast, stable, fewer false positives)
 cargo install cargo-machete
 
 # Find potentially unused dependencies
 cargo machete
 
-# Note: May have false positives for procedural macros and build deps
+# Install cargo-udeps (slow, nightly, more thorough)
+cargo install cargo-udeps
+
+# Find unused dependencies and features
+cargo +nightly udeps --all-targets
+```
+
+### Understanding the Output
+
+Both tools may report false positives:
+
+- **Procedural macros**: Used at compile-time, not in source
+- **Build dependencies**: Used only in build.rs
+- **Feature-gated dependencies**: May appear unused in default feature set
+- **Platform-specific dependencies**: Used only on certain OS/architectures
+
+### Remove vs Keep Decision Matrix
+
+| Scenario | Decision | Action | Rationale |
+|----------|----------|--------|-----------|
+| Unused, last commit >1 year ago | **Remove immediately** | Delete from Cargo.toml | Unmaintained = security risk |
+| Unused, actively maintained | **Remove** | Delete, can re-add later | Reduces supply chain surface |
+| Unused behind feature flag | **Keep** | Document in comment | Optional dependency, may be used |
+| Unused, added in last week | **Keep temporarily** | Review in 1 week | May be work-in-progress |
+| False positive (proc macro) | **Keep** | Add `# keep:` comment | Actually used, tool limitation |
+| Unused but API-stable | **Remove** | Delete | Stability doesn't justify keeping |
+| Unused experimental dep | **Remove** | Delete | Experimental code should be in branch |
+
+### Commenting Dependencies to Keep
+
+```toml
+[dependencies]
+# Core runtime
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros"] }
+
+# keep: Used by serde derive macros (false positive from cargo-udeps)
+serde_derive = "1.0"
+
+# keep: Platform-specific, used on Windows only
+winapi = { version = "0.3", features = ["winuser"], optional = true }
+
+# keep: Build dependency for code generation
+quote = "1.0"
+```
+
+### Regular Audit Schedule
+
+**Weekly automated audits:**
+
+```yaml
+# .github/workflows/unused-deps.yml
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # Weekly on Monday at 00:00 UTC
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unused-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-machete
+      - run: cargo machete
+```
+
+**Benefits:**
+- Catches dependencies that become unused over time
+- Prevents accumulation of technical debt
+- Maintains clean, auditable dependency tree
+- Reduces CI build times
+
+**Manual quarterly reviews:**
+
+In addition to automated weekly checks, perform manual quarterly reviews:
+
+```bash
+# 1. Run both tools
+cargo machete
+cargo +nightly udeps --all-targets
+
+# 2. Review dependency tree
+cargo tree | wc -l                    # Total dependencies
+cargo tree -d                         # Duplicate dependencies
+cargo tree --invert tokio             # Who depends on tokio?
+
+# 3. Check maintenance status
+cargo outdated --root-deps-only       # Are updates available?
+cargo audit                           # Known vulnerabilities?
+
+# 4. Review feature flags
+cargo tree --features                 # Feature usage
+# Are all features still needed?
+
+# 5. Document findings in issue tracker
+# Create tasks to remove unused deps, upgrade outdated deps
+```
+
+### Handling False Positives
+
+When cargo-machete or cargo-udeps reports a false positive:
+
+**Step 1: Verify it's actually used**
+
+```bash
+# Search for usage in code
+rg "use.*dependency_name" src/
+rg "dependency_name::" src/
+
+# Check if it's a proc macro
+cargo metadata --format-version=1 | jq '.packages[] | select(.name == "dependency_name") | .targets[] | .kind'
+# If output includes "proc-macro", it's used at compile-time
+```
+
+**Step 2: Document why it's kept**
+
+```toml
+[dependencies]
+# keep: Used by serde_derive proc macro for deserialization
+# cargo-udeps reports false positive because proc macros are analyzed differently
+serde = { version = "1.0", features = ["derive"] }
+```
+
+**Step 3: Consider CI configuration**
+
+For known false positives, you can configure tools to ignore them:
+
+```toml
+# .cargo/machete.toml
+[[skip]]
+package = "serde_derive"
+reason = "Used by serde derive macros"
+```
+
+### Audit Report Template
+
+After running audit tools, document findings:
+
+```markdown
+# Dependency Audit Report — 2026-02-16
+
+## Summary
+- Total dependencies: 87
+- Unused dependencies found: 3
+- Action required: Remove 2, keep 1 (false positive)
+
+## Unused Dependencies
+
+### futures (remove)
+- Last used: 2025-08-10 (6 months ago)
+- Reason unused: Refactored to use tokio directly
+- Action: Remove from Cargo.toml
+- PR: #123
+
+### async-trait (remove)
+- Last used: Never (added for experiment)
+- Reason unused: Experiment abandoned
+- Action: Remove from Cargo.toml
+- PR: #123
+
+### proc-macro2 (keep)
+- Reported by: cargo-udeps
+- Reason to keep: Used by quote proc macro
+- False positive: Yes
+- Action: Add `# keep:` comment to Cargo.toml
+- PR: #124
+
+## Follow-up Actions
+- [x] Created PR #123 to remove unused dependencies
+- [x] Created PR #124 to document false positive
+- [ ] Schedule next audit: 2026-05-16 (3 months)
 ```
 
 ---
