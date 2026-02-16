@@ -2,7 +2,7 @@
 # https://github.com/Ambiguous-Interactive/signal-fish-server
 
 FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
-# Project MSRV: 1.87.0 — this image must provide >= 1.87
+# Project MSRV: 1.88.0 — this image must provide >= 1.88
 
 # System dependencies for building with mold linker and TLS
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \

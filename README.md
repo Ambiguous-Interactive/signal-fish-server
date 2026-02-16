@@ -387,7 +387,7 @@ backend if you need persistence beyond the built-in `InMemoryDatabase`.
 
 ### Prerequisites
 
-- Rust 1.87.0 or later (see `rust-version` in `Cargo.toml`)
+- Rust 1.88.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
 ### Build
@@ -507,7 +507,7 @@ production. The example value `CHANGE_ME_BEFORE_PRODUCTION` in
 
 ## MSRV
 
-The minimum supported Rust version is **1.87.0**.
+The minimum supported Rust version is **1.88.0**.
 
 ## License
 

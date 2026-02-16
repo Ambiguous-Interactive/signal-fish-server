@@ -192,7 +192,7 @@ updates:
     # ========================================================================
     #
     # MSRV Policy:
-    # - MSRV is defined in Cargo.toml (rust-version = "1.87.0")
+    # - MSRV is defined in Cargo.toml (rust-version = "1.88.0")
     # - CI enforces MSRV compliance via cargo check --locked
     # - Dockerfile Rust version should track MSRV, not latest stable
     #

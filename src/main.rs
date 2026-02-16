@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     // Handle --print-config: output the loaded configuration as JSON
     if cli.print_config {
         let json = serde_json::to_string_pretty(&*cfg)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
         println!("{json}");
         return Ok(());
     }

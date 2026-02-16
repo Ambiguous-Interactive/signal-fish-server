@@ -111,7 +111,7 @@ too-many-arguments-threshold = 8       # Max function parameters
 missing-docs-in-crate-items = false    # Don't require docs on all crate items
 trivial-copy-size-limit = 8            # Stack size threshold for pass-by-value
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
-msrv = "1.87.0"                        # Minimum supported Rust version
+msrv = "1.88.0"                        # Minimum supported Rust version
 ```
 
 **Additional options to consider:**

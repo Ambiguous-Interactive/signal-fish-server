@@ -272,14 +272,11 @@ mod tests {
             let description = error_code.description();
             assert!(
                 !description.is_empty(),
-                "ErrorCode::{:?} has empty description",
-                error_code
+                "ErrorCode::{error_code:?} has empty description"
             );
             assert!(
                 description.len() > 10,
-                "ErrorCode::{:?} has suspiciously short description: '{}'",
-                error_code,
-                description
+                "ErrorCode::{error_code:?} has suspiciously short description: '{description}'"
             );
         }
     }
@@ -287,7 +284,7 @@ mod tests {
     #[test]
     fn test_display_uses_description() {
         let error = ErrorCode::RoomNotFound;
-        let display_output = format!("{}", error);
+        let display_output = format!("{error}");
         let description_output = error.description();
         assert_eq!(display_output, description_output);
     }

@@ -852,7 +852,7 @@ impl GameDatabase for InMemoryDatabase {
         // Create a cleanup ID with time bucket (5 minute window) to allow re-cleanup
         // if the room somehow gets recreated and becomes empty again
         let time_bucket = chrono::Utc::now().timestamp() / 300;
-        let cleanup_id = format!("{}:{}:{}", room_id, cleanup_type, time_bucket);
+        let cleanup_id = format!("{room_id}:{cleanup_type}:{time_bucket}");
 
         // Try to claim the cleanup operation using entry API
         if let std::collections::hash_map::Entry::Vacant(e) = cleanup_events.entry(cleanup_id) {

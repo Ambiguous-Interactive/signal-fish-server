@@ -4,7 +4,7 @@ Guide for building, testing, and contributing to Signal Fish Server.
 
 ## Prerequisites
 
-- Rust 1.87.0 or later (see `rust-version` in `Cargo.toml`)
+- Rust 1.88.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
 ## Building
