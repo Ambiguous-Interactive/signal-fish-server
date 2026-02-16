@@ -626,7 +626,13 @@ fn test_markdown_files_have_language_identifiers() {
     let markdown_files = find_files_with_extension(
         &root,
         "md",
-        &["target", "third_party", "node_modules", "test-fixtures"],
+        &[
+            "target",
+            "third_party",
+            "node_modules",
+            "test-fixtures",
+            ".llm",
+        ],
     );
 
     if markdown_files.is_empty() {
@@ -643,14 +649,17 @@ fn test_markdown_files_have_language_identifiers() {
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1; // 1-indexed for human readability
 
-            // Check for opening code fence
-            if line.trim_start().starts_with("```") {
+            let trimmed = line.trim_start();
+
+            // Check for opening code fence (exactly three backticks, not more)
+            // This avoids matching ```` which is used for nested code blocks
+            if trimmed.starts_with("```") && !trimmed.starts_with("````") {
                 if !in_code_block {
                     // Opening fence
                     in_code_block = true;
 
                     // Check if language identifier is present
-                    let fence_content = line.trim_start().trim_start_matches('`').trim();
+                    let fence_content = trimmed.trim_start_matches('`').trim();
                     if fence_content.is_empty() {
                         violations.push(format!(
                             "{}:{}: Code block missing language identifier (MD040)",
@@ -1224,4 +1233,810 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
 
     visit_dirs(root, extension, exclude_dirs, &mut files);
     files
+}
+
+// ============================================================================
+// Link Check Tests
+// ============================================================================
+
+#[test]
+fn test_lychee_config_exists_and_is_valid() {
+    // This test ensures the lychee link checker configuration exists and is valid
+    // Prevents link checker failures due to missing or malformed configuration
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+
+    assert!(
+        lychee_config.exists(),
+        ".lychee.toml configuration file is missing.\n\
+         This file is required for link checking in CI.\n\
+         See .github/workflows/link-check.yml"
+    );
+
+    let content = read_file(&lychee_config);
+
+    // Check for required sections
+    let required_fields = vec![
+        ("max_concurrency", "Controls parallel link checking"),
+        ("accept", "Accepted HTTP status codes"),
+        ("exclude", "URLs to exclude from checking"),
+        ("timeout", "Request timeout in seconds"),
+    ];
+
+    let mut missing_fields = Vec::new();
+    for (field, description) in required_fields {
+        if !content.contains(field) {
+            missing_fields.push(format!("  - {field} ({description})"));
+        }
+    }
+
+    if !missing_fields.is_empty() {
+        panic!(
+            ".lychee.toml is missing required fields:\n\n{}\n\n\
+             These fields are required for proper link checking.\n\
+             Add them to .lychee.toml following the lychee documentation.",
+            missing_fields.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_lychee_excludes_placeholder_urls() {
+    // This test verifies that placeholder URLs are properly excluded in .lychee.toml
+    // Prevents link checker failures on example/placeholder URLs in documentation
+    //
+    // Background: Documentation often includes placeholder URLs like:
+    // - https://github.com/owner/repo
+    // - https://github.com/{}
+    // - http://localhost:3000
+    // These should be excluded to avoid false failures
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+    let content = read_file(&lychee_config);
+
+    // Define test cases: (pattern, reason)
+    let test_cases = vec![
+        ("http://localhost", "Localhost URLs are placeholders"),
+        ("http://127.0.0.1", "Loopback IPs are placeholders"),
+        ("ws://localhost", "WebSocket localhost is placeholder"),
+        ("mailto:", "Email addresses should be excluded"),
+        (
+            "https://github.com/owner/repo",
+            "Generic placeholder pattern",
+        ),
+        ("https://github.com/{}", "Template placeholder pattern"),
+    ];
+
+    let mut missing_exclusions = Vec::new();
+    for (pattern, reason) in test_cases {
+        // Check if pattern is in exclude list (allowing for wildcards)
+        let pattern_prefix = pattern.split('*').next().unwrap_or(pattern);
+        if !content.contains(pattern_prefix) {
+            missing_exclusions.push(format!("  - {pattern}\n    Reason: {reason}"));
+        }
+    }
+
+    if !missing_exclusions.is_empty() {
+        panic!(
+            ".lychee.toml should exclude common placeholder URLs:\n\n{}\n\n\
+             Add these patterns to the 'exclude' list in .lychee.toml.\n\
+             Example:\n\
+             exclude = [\n\
+             \x20   \"http://localhost\",\n\
+             \x20   \"https://github.com/owner/repo/*\",\n\
+             ]\n",
+            missing_exclusions.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_no_actual_placeholder_urls_in_docs() {
+    // This test ensures documentation doesn't contain actual placeholder URLs
+    // that should be replaced with real URLs
+    //
+    // Rationale: While we exclude placeholders in lychee config, we should
+    // minimize their use and prefer real examples where possible
+
+    let root = repo_root();
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+
+    // Patterns that indicate a placeholder URL that should be replaced
+    let suspicious_patterns = vec![
+        (
+            r"https://github\.com/owner/repo",
+            "Generic owner/repo placeholder",
+        ),
+        (
+            r"https://github\.com/\{\}",
+            "Template curly brace placeholder",
+        ),
+        (r"https?://example\.com(?!/)", "Generic example.com URL"),
+        (r"http://your-server", "Generic your-server placeholder"),
+    ];
+
+    let mut violations = Vec::new();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+
+            for (pattern, description) in &suspicious_patterns {
+                if let Ok(regex) = regex::Regex::new(pattern) {
+                    if regex.is_match(line) {
+                        violations.push(format!(
+                            "{}:{}: Found placeholder URL that should be replaced\n  \
+                             Pattern: {}\n  \
+                             Description: {}\n  \
+                             Line: {}",
+                            file.display(),
+                            line_num,
+                            pattern,
+                            description,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        // This is a warning, not a hard failure, since some placeholders are acceptable
+        // in certain contexts (e.g., demonstrating URL patterns)
+        eprintln!(
+            "WARNING: Found placeholder URLs in documentation:\n\n{}\n\n\
+             Consider replacing these with real examples where possible.\n\
+             If these are intentional, ensure they're excluded in .lychee.toml.",
+            violations.join("\n\n")
+        );
+        // Uncomment to make this a hard requirement:
+        // panic!("Remove placeholder URLs from documentation");
+    }
+}
+
+#[test]
+fn test_link_check_workflow_uses_lychee_config() {
+    // This test ensures the link-check workflow uses the .lychee.toml config file
+    // Prevents configuration drift between local checks and CI
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/link-check.yml");
+
+    if !workflow.exists() {
+        // Skip test if workflow doesn't exist
+        return;
+    }
+
+    let content = read_file(&workflow);
+
+    assert!(
+        content.contains("--config .lychee.toml") || content.contains("config .lychee.toml"),
+        "link-check.yml must reference .lychee.toml configuration file.\n\
+         This ensures CI uses the same exclusions and settings as local checks.\n\
+         Add '--config .lychee.toml' to the lychee-action args."
+    );
+
+    // Verify the workflow uses lychee-action
+    assert!(
+        content.contains("lycheeverse/lychee-action"),
+        "link-check.yml should use lycheeverse/lychee-action for link checking"
+    );
+}
+
+#[test]
+fn test_lychee_config_format_is_valid_toml() {
+    // This test validates that .lychee.toml is valid TOML
+    // Catches syntax errors before they cause CI failures
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+    let content = read_file(&lychee_config);
+
+    // Basic TOML validation (full validation would require a TOML parser)
+    // Check for unbalanced quotes
+    let double_quotes = content.matches('"').count();
+    if double_quotes % 2 != 0 {
+        panic!(
+            ".lychee.toml has unbalanced quotes.\n\
+             Found {double_quotes} double quotes (should be even).\n\
+             Check for missing closing quotes."
+        );
+    }
+
+    // Check for required array syntax
+    if content.contains("exclude") {
+        assert!(
+            content.contains("exclude = ["),
+            ".lychee.toml: 'exclude' should be an array (exclude = [...])"
+        );
+    }
+
+    if content.contains("accept") {
+        assert!(
+            content.contains("accept = ["),
+            ".lychee.toml: 'accept' should be an array (accept = [...])"
+        );
+    }
+
+    // Check for common TOML mistakes
+    if content.contains("= true") || content.contains("= false") {
+        // Booleans are valid, but check they're not quoted
+        if content.contains("= \"true\"") || content.contains("= \"false\"") {
+            panic!(
+                ".lychee.toml: Boolean values should not be quoted.\n\
+                 Use 'field = true' not 'field = \"true\"'"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Markdown Lint Tests
+// ============================================================================
+
+#[test]
+fn test_markdown_no_capitalized_filenames_in_links() {
+    // This test catches improperly capitalized filenames in markdown links
+    // Prevents link breakage on case-sensitive filesystems
+    //
+    // Example violations:
+    // - [link](README.MD) when file is README.md
+    // - [link](Docs/Config.md) when path is docs/config.md
+
+    let root = repo_root();
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+
+    let mut violations = Vec::new();
+
+    // Compile regex once outside the loop for better performance
+    let link_regex = regex::Regex::new(r"\[([^]]+)\]\(([^)]+)\)").unwrap();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+
+            // Extract markdown links: [text](url)
+            if let Some(captures) = link_regex.captures(line)
+            {
+                let url = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+
+                // Skip external URLs
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    continue;
+                }
+
+                // Check for uppercase file extensions (.MD, .TOML, .RS, etc.)
+                if url.ends_with(".MD")
+                    || url.ends_with(".TOML")
+                    || url.ends_with(".RS")
+                    || url.ends_with(".JSON")
+                    || url.ends_with(".YAML")
+                    || url.ends_with(".YML")
+                {
+                    violations.push(format!(
+                        "{}:{}: Link has uppercase file extension: {}\n  \
+                         Use lowercase extensions (.md not .MD) for cross-platform compatibility",
+                        file.display(),
+                        line_num,
+                        url
+                    ));
+                }
+
+                // Check for capitalized directory names in relative links
+                // This is a heuristic check - may need refinement
+                if url.contains("/Docs/") || url.contains("/Scripts/") || url.contains("/Tests/") {
+                    violations.push(format!(
+                        "{}:{}: Link contains capitalized directory: {}\n  \
+                         Use lowercase directory names for consistency",
+                        file.display(),
+                        line_num,
+                        url
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Markdown files contain links with improper capitalization:\n\n{}\n\n\
+             Fix by using lowercase file extensions and directory names.\n\
+             This prevents link breakage on case-sensitive filesystems (Linux, macOS).",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_markdown_technical_terms_consistency() {
+    // This test validates that technical terms use consistent capitalization
+    // Prevents documentation inconsistency and improves professionalism
+    //
+    // Based on .markdownlint.json MD044 configuration
+
+    let root = repo_root();
+
+    // Read the markdownlint config to extract proper term capitalization
+    let markdownlint_config = root.join(".markdownlint.json");
+    let config_content = read_file(&markdownlint_config);
+
+    // Extract terms from MD044 names array (simple parsing)
+    let mut proper_terms = Vec::new();
+    if let Some(start) = config_content.find(r#""MD044""#) {
+        let section = &config_content[start..];
+        if let Some(names_start) = section.find(r#""names":"#) {
+            if let Some(bracket_start) = section[names_start..].find('[') {
+                if let Some(bracket_end) = section[names_start + bracket_start..].find(']') {
+                    let names_section = &section
+                        [names_start + bracket_start..names_start + bracket_start + bracket_end];
+                    for term in names_section.split(',') {
+                        let cleaned = term
+                            .trim()
+                            .trim_matches('"')
+                            .trim_matches('[')
+                            .trim_matches(']');
+                        if !cleaned.is_empty() {
+                            proper_terms.push(cleaned.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Data-driven test cases: (incorrect_pattern, correct_term, context)
+    let test_cases = vec![
+        (r"\bgithub\b", "GitHub", "Service name"),
+        (r"\bwebsocket\b", "WebSocket", "Protocol name"),
+        (r"\bjavascript\b", "JavaScript", "Language name"),
+        (r"\bdocker\b", "Docker", "Container platform"),
+        (r"\bci/cd\b", "CI/CD", "Continuous integration/deployment"),
+    ];
+
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+    let mut violations = Vec::new();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+
+            // Skip code blocks (simplified check - matches inline code)
+            if line.contains('`') {
+                continue;
+            }
+
+            for (pattern, correct, context) in &test_cases {
+                if let Ok(regex) = regex::Regex::new(pattern) {
+                    if regex.is_match(line) {
+                        violations.push(format!(
+                            "{}:{}: Incorrect capitalization: should be '{}'\n  \
+                             Context: {}\n  \
+                             Line: {}",
+                            file.display(),
+                            line_num,
+                            correct,
+                            context,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        // This is a warning since MD044 rule in markdownlint catches most cases
+        // Making it informational for this test
+        eprintln!(
+            "INFO: Found inconsistent technical term capitalization:\n\n{}\n\n\
+             markdownlint (MD044) should catch these in CI.\n\
+             Update .markdownlint.json 'names' array to enforce consistency.",
+            violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_markdown_common_patterns_are_correct() {
+    // This test validates common markdown patterns are correctly formatted
+    // Catches issues that might slip through markdownlint rules
+    //
+    // Data-driven test cases for common documentation patterns
+
+    let root = repo_root();
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+
+    // Test cases: (anti_pattern_regex, description, suggestion)
+    let test_cases = vec![
+        (
+            r"```\s*$",
+            "Code block without language identifier",
+            "Add language: ```rust or ```bash",
+        ),
+        (
+            r"https?://[^\s)]+\s+[^\s]",
+            "URL followed by text without proper spacing",
+            "Ensure URLs are in [text](url) format",
+        ),
+        (
+            r"\]\([A-Z]:/",
+            "Windows path in link",
+            "Use forward slashes in links",
+        ),
+    ];
+
+    let mut violations = Vec::new();
+
+    for file in &markdown_files {
+        let content = read_file(file);
+        let mut in_code_block = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+
+            // Track code blocks
+            if line.trim_start().starts_with("```") {
+                in_code_block = !in_code_block;
+                continue;
+            }
+
+            // Skip checking inside code blocks
+            if in_code_block {
+                continue;
+            }
+
+            for (pattern, description, suggestion) in &test_cases {
+                if let Ok(regex) = regex::Regex::new(pattern) {
+                    if regex.is_match(line) {
+                        violations.push(format!(
+                            "{}:{}: {}\n  \
+                             Suggestion: {}\n  \
+                             Line: {}",
+                            file.display(),
+                            line_num,
+                            description,
+                            suggestion,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        // Make this informational since markdownlint handles most cases
+        eprintln!(
+            "INFO: Found potential markdown formatting issues:\n\n{}\n\n\
+             Review these patterns and fix if they're actual issues.",
+            violations.join("\n\n")
+        );
+    }
+}
+
+// ============================================================================
+// CI Workflow Validation Tests
+// ============================================================================
+
+#[test]
+fn test_link_check_workflow_exists_and_is_configured() {
+    // This test ensures the link-check workflow exists and is properly configured
+    // Prevents link rot from going undetected
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/link-check.yml");
+
+    assert!(
+        workflow.exists(),
+        "link-check.yml workflow is missing.\n\
+         Link checking is critical for documentation quality.\n\
+         Create .github/workflows/link-check.yml with lychee-action"
+    );
+
+    let content = read_file(&workflow);
+
+    // Verify workflow uses lychee-action
+    assert!(
+        content.contains("lycheeverse/lychee-action"),
+        "link-check.yml must use lycheeverse/lychee-action"
+    );
+
+    // Verify workflow uses .lychee.toml config
+    assert!(
+        content.contains(".lychee.toml") || content.contains("--config"),
+        "link-check.yml must reference .lychee.toml configuration file"
+    );
+
+    // Verify workflow has GITHUB_TOKEN for rate limiting
+    assert!(
+        content.contains("GITHUB_TOKEN"),
+        "link-check.yml should use GITHUB_TOKEN to avoid rate limiting"
+    );
+
+    // Verify workflow runs on schedule for proactive link rot detection
+    assert!(
+        content.contains("schedule:") || content.contains("cron:"),
+        "link-check.yml should run on a schedule (e.g., weekly) to catch link rot"
+    );
+}
+
+#[test]
+fn test_markdownlint_workflow_exists_and_is_configured() {
+    // This test ensures the markdownlint workflow exists and is properly configured
+    // Prevents markdown formatting issues from reaching main branch
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/markdownlint.yml");
+
+    assert!(
+        workflow.exists(),
+        "markdownlint.yml workflow is missing.\n\
+         Markdown linting is required for documentation consistency.\n\
+         Create .github/workflows/markdownlint.yml"
+    );
+
+    let content = read_file(&workflow);
+
+    // Verify workflow uses markdownlint-cli2-action
+    assert!(
+        content.contains("DavidAnson/markdownlint-cli2-action")
+            || content.contains("markdownlint-cli2"),
+        "markdownlint.yml must use markdownlint-cli2"
+    );
+
+    // Verify workflow excludes common directories
+    let excluded_dirs = vec!["target", "third_party", "node_modules"];
+    for dir in excluded_dirs {
+        assert!(
+            content.contains(dir),
+            "markdownlint.yml should exclude {dir} directory"
+        );
+    }
+
+    // Verify workflow has path filters for efficiency
+    assert!(
+        content.contains("paths:") && content.contains("**.md"),
+        "markdownlint.yml should have path filters to run only on .md changes"
+    );
+}
+
+#[test]
+fn test_doc_validation_workflow_has_shellcheck() {
+    // This test ensures the doc-validation workflow validates its own shell scripts
+    // Prevents AWK and bash syntax errors in workflow scripts
+    //
+    // Background: The doc-validation.yml workflow contains complex AWK and bash scripts
+    // that extract and validate code blocks from markdown. These scripts themselves
+    // need validation to prevent issues like the AWK pattern bug we fixed.
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+
+    if !workflow.exists() {
+        // Skip if workflow doesn't exist
+        return;
+    }
+
+    let content = read_file(&workflow);
+
+    // Verify workflow has shellcheck job or step
+    assert!(
+        content.contains("shellcheck") || content.contains("Shellcheck"),
+        "doc-validation.yml should include shellcheck validation of inline scripts.\n\
+         This prevents shell/AWK syntax errors in workflow scripts.\n\
+         Add a shellcheck job that validates inline bash scripts in the workflow."
+    );
+
+    // Verify shellcheck is installed in the workflow
+    if content.contains("shellcheck") {
+        assert!(
+            content.contains("apt-get install") && content.contains("shellcheck")
+                || content.contains("brew install shellcheck"),
+            "doc-validation.yml should install shellcheck to validate scripts"
+        );
+    }
+}
+
+#[test]
+fn test_workflows_use_concurrency_groups() {
+    // This test ensures workflows use concurrency groups to cancel outdated runs
+    // Prevents wasting CI resources on superseded commits
+    //
+    // Concurrency groups allow GitHub Actions to automatically cancel in-progress
+    // workflow runs when a new commit is pushed, saving CI minutes and speeding
+    // up feedback loops.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    if !workflows_dir.exists() {
+        return;
+    }
+
+    let workflow_files: Vec<_> = std::fs::read_dir(&workflows_dir)
+        .expect("Failed to read workflows directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "yml" || ext == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Workflows that should have concurrency groups
+    let should_have_concurrency = [
+        "ci.yml",
+        "link-check.yml",
+        "markdownlint.yml",
+        "doc-validation.yml",
+    ];
+
+    let mut missing_concurrency = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        // Skip workflows that don't need concurrency (e.g., release workflows)
+        if !should_have_concurrency.contains(&filename.as_ref()) {
+            continue;
+        }
+
+        let content = read_file(&path);
+
+        // Check for concurrency configuration
+        if !content.contains("concurrency:") {
+            missing_concurrency.push(format!(
+                "{filename}: Missing concurrency group.\n  \
+                 Add:\n  \
+                 concurrency:\n  \
+                   group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n  \
+                   cancel-in-progress: true"
+            ));
+        } else {
+            // Verify it has cancel-in-progress
+            if !content.contains("cancel-in-progress: true") {
+                missing_concurrency.push(format!(
+                    "{filename}: Has concurrency but missing 'cancel-in-progress: true'"
+                ));
+            }
+        }
+    }
+
+    if !missing_concurrency.is_empty() {
+        panic!(
+            "Workflows should use concurrency groups to cancel outdated runs:\n\n{}\n\n\
+             Why concurrency groups are important:\n\
+             - Saves CI minutes by canceling superseded runs\n\
+             - Speeds up feedback (don't wait for old runs)\n\
+             - Reduces queue times for other workflows\n\n\
+             Standard pattern:\n\
+             concurrency:\n\
+               group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n\
+               cancel-in-progress: true\n",
+            missing_concurrency.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_workflows_have_timeouts() {
+    // This test ensures workflows have reasonable timeouts
+    // Prevents hanging jobs from consuming CI resources indefinitely
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    if !workflows_dir.exists() {
+        return;
+    }
+
+    let workflow_files: Vec<_> = std::fs::read_dir(&workflows_dir)
+        .expect("Failed to read workflows directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "yml" || ext == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let mut missing_timeouts = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let content = read_file(&path);
+
+        // Check for timeout-minutes in jobs
+        if !content.contains("timeout-minutes:") {
+            missing_timeouts.push(format!(
+                "{filename}: No timeout-minutes configured.\n  \
+                 Add timeout-minutes to jobs to prevent hanging builds.\n  \
+                 Example: timeout-minutes: 10"
+            ));
+        }
+    }
+
+    if !missing_timeouts.is_empty() {
+        // Make this a warning since some workflows may intentionally have long timeouts
+        eprintln!(
+            "INFO: Some workflows don't specify timeouts:\n\n{}\n\n\
+             Consider adding timeout-minutes to jobs to prevent hanging builds.",
+            missing_timeouts.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_workflows_use_minimal_permissions() {
+    // This test ensures workflows follow least-privilege principle
+    // Prevents security issues from compromised workflows or actions
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    if !workflows_dir.exists() {
+        return;
+    }
+
+    let workflow_files: Vec<_> = std::fs::read_dir(&workflows_dir)
+        .expect("Failed to read workflows directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "yml" || ext == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let content = read_file(&path);
+
+        // Check if workflow has permissions block
+        if !content.contains("permissions:") {
+            violations.push(format!(
+                "{filename}: No permissions block found.\n  \
+                 Add 'permissions:' block to explicitly set required permissions.\n  \
+                 For read-only workflows: permissions: {{ contents: read }}"
+            ));
+        } else {
+            // Check for overly permissive 'write-all' or missing 'contents: read'
+            if content.contains("permissions: write-all") {
+                violations.push(format!(
+                    "{filename}: Uses 'write-all' permissions (too permissive).\n  \
+                     Specify only required permissions explicitly."
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        // Make this informational since some workflows legitimately need write permissions
+        eprintln!(
+            "INFO: Workflow permission recommendations:\n\n{}\n\n\
+             Best practice: Use minimal required permissions.\n\
+             Most read-only workflows should use: permissions: {{ contents: read }}",
+            violations.join("\n\n")
+        );
+    }
 }

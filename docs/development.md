@@ -13,12 +13,15 @@ Guide for building, testing, and contributing to Signal Fish Server.
 
 ```bash
 cargo build
+
 ```
 
 ### Release Build
 
 ```bash
+
 cargo build --release
+
 ```
 
 Optimized and stripped for production.
@@ -34,6 +37,7 @@ cargo build --features legacy-fullmesh
 
 # All features
 cargo build --all-features
+
 ```
 
 ## Running
@@ -41,7 +45,9 @@ cargo build --all-features
 ### Development
 
 ```bash
+
 cargo run
+
 ```
 
 ### With Custom Config
@@ -50,6 +56,7 @@ cargo run
 # Using -c flag (not implemented - config.json is loaded by default)
 # The server automatically looks for config.json in the working directory
 cargo run
+
 ```
 
 Note: The `-c` flag shown in some examples is not currently implemented. The server automatically loads
@@ -58,13 +65,17 @@ Note: The `-c` flag shown in some examples is not currently implemented. The ser
 ### Validate Config
 
 ```bash
+
 cargo run -- --validate-config
+
 ```
 
 ### Print Resolved Config
 
 ```bash
+
 cargo run -- --print-config
+
 ```
 
 ## Testing
@@ -72,37 +83,49 @@ cargo run -- --print-config
 ### Run All Tests
 
 ```bash
+
 cargo test
+
 ```
 
 ### Test with All Features
 
 ```bash
+
 cargo test --all-features
+
 ```
 
 ### Run Specific Test
 
 ```bash
+
 cargo test test_room_creation
+
 ```
 
 ### Test with Output
 
 ```bash
+
 cargo test -- --nocapture
+
 ```
 
 ### Integration Tests
 
 ```bash
+
 cargo test --test integration_tests
+
 ```
 
 ### E2E Tests
 
 ```bash
+
 cargo test --test e2e_tests
+
 ```
 
 ## Linting
@@ -110,25 +133,33 @@ cargo test --test e2e_tests
 ### Format Check
 
 ```bash
+
 cargo fmt --check
+
 ```
 
 ### Apply Formatting
 
 ```bash
+
 cargo fmt
+
 ```
 
 ### Clippy (Default)
 
 ```bash
+
 cargo clippy --all-targets -- -D warnings
+
 ```
 
 ### Clippy (All Features)
 
 ```bash
+
 cargo clippy --all-targets --all-features -- -D warnings
+
 ```
 
 ### Markdown Linting
@@ -136,13 +167,17 @@ cargo clippy --all-targets --all-features -- -D warnings
 Check markdown files for formatting issues, missing language identifiers, and inconsistencies:
 
 ```bash
+
 ./scripts/check-markdown.sh
+
 ```
 
 Auto-fix markdown issues where possible:
 
 ```bash
+
 ./scripts/check-markdown.sh fix
+
 ```
 
 Common markdown linting rules enforced by CI:
@@ -159,7 +194,9 @@ See `.markdownlint.json` for the complete rule configuration.
 Check for typos in code and documentation:
 
 ```bash
+
 typos
+
 ```
 
 Technical terms that are commonly flagged as typos are configured in `.typos.toml`. If a legitimate
@@ -168,7 +205,9 @@ technical term is flagged, add it to the `[default.extend-words]` section.
 ## Benchmarks
 
 ```bash
+
 cargo bench
+
 ```
 
 View results in `target/criterion/report/index.html`.
@@ -176,8 +215,10 @@ View results in `target/criterion/report/index.html`.
 ## Code Coverage
 
 ```bash
+
 cargo install cargo-tarpaulin
 cargo tarpaulin --out Html --output-dir coverage
+
 ```
 
 Open `coverage/index.html` to view results.
@@ -187,30 +228,39 @@ Open `coverage/index.html` to view results.
 ### Build Image
 
 ```bash
+
 docker build -t signal-fish-server .
+
 ```
 
 ### Build with Cache
 
 ```bash
+
 docker build -t signal-fish-server --cache-from ghcr.io/ambiguousinteractive/signal-fish-server:latest .
+
 ```
 
 ### Run Image
 
 ```bash
+
 docker run -p 3536:3536 signal-fish-server
+
 ```
 
 ### With Custom Config
 
 ```bash
+
 docker run -p 3536:3536 -v ./config.json:/app/config.json:ro signal-fish-server
+
 ```
 
 ## Project Structure
 
 ```text
+
 signal-fish-server/
 ├── src/
 │   ├── main.rs                  # Binary entry point
@@ -229,6 +279,7 @@ signal-fish-server/
 ├── config.example.json          # Example config
 ├── Cargo.toml
 └── Dockerfile
+
 ```
 
 ## Adding a New Feature
@@ -272,18 +323,23 @@ Set log level:
 
 ```bash
 RUST_LOG=debug cargo run
+
 ```
 
 Trace level (very verbose):
 
 ```bash
+
 RUST_LOG=trace cargo run
+
 ```
 
 Module-specific logging:
 
 ```bash
+
 RUST_LOG=signal_fish_server::websocket=debug cargo run
+
 ```
 
 ## Profiling
@@ -291,15 +347,19 @@ RUST_LOG=signal_fish_server::websocket=debug cargo run
 ### CPU Profiling
 
 ```bash
+
 cargo install flamegraph
 cargo flamegraph --bench benchmark_name
+
 ```
 
 ### Memory Profiling
 
 ```bash
+
 cargo install cargo-valgrind
 cargo valgrind --bin signal-fish-server
+
 ```
 
 ## Common Development Tasks
@@ -344,6 +404,7 @@ mod tests {
         assert_eq!(code.len(), 6);
     }
 }
+
 ```
 
 ### Integration Tests
@@ -356,6 +417,7 @@ async fn test_create_and_join_room() {
     let server = create_test_server().await;
     // Test multi-step flows
 }
+
 ```
 
 ### E2E Tests
@@ -369,6 +431,7 @@ async fn test_websocket_connection() {
     let ws = connect_websocket(&addr).await;
     // Test complete session
 }
+
 ```
 
 ## MSRV and Toolchain Management
@@ -383,7 +446,9 @@ Rust compiler version guaranteed to build the project.
 Before committing changes that update the MSRV, verify all configuration files are consistent:
 
 ```bash
+
 ./scripts/check-msrv-consistency.sh
+
 ```
 
 This script validates that the following files all use the same Rust version:
@@ -461,12 +526,15 @@ typos
 
 # MSRV consistency
 ./scripts/check-msrv-consistency.sh
+
 ```
 
 Or use the pre-commit hook to run checks automatically:
 
 ```bash
+
 ./scripts/enable-hooks.sh
+
 ```
 
 ## Release Process

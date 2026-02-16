@@ -37,4 +37,27 @@ else
     echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
 fi
 
+# Check links in modified markdown files (if lychee is installed)
+# Only check staged files to keep this fast
+if command -v lychee >/dev/null 2>&1; then
+    echo "[pre-commit] Checking links in staged markdown files..."
+    STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
+    if [ -n "$STAGED_MD_FILES" ]; then
+        # Use a temporary file to avoid issues with filenames containing spaces
+        TEMP_FILE=$(mktemp)
+        echo "$STAGED_MD_FILES" > "$TEMP_FILE"
+        # Run lychee with fast settings (no network checks by default in pre-commit)
+        # Use --offline flag to skip network checks for speed
+        if ! xargs -a "$TEMP_FILE" lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
+            echo "[pre-commit] WARNING: Link check found issues in staged markdown files."
+            echo "[pre-commit] This is a warning only. Run 'lychee --config .lychee.toml <file>' to check."
+            # Non-blocking warning - don't exit 1
+        fi
+        rm -f "$TEMP_FILE"
+    fi
+else
+    echo "[pre-commit] Skipping link check (lychee not installed)"
+    echo "[pre-commit] Install with: cargo install lychee"
+fi
+
 echo "[pre-commit] All checks passed."

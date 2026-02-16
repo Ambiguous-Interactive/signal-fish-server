@@ -19,7 +19,7 @@
 ## When NOT to Use
 
 - Synchronous-only code paths with no I/O
-- Pure data structure design (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Pure data structure design (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 - CPU-bound computation that should use `spawn_blocking`
 
 ---
@@ -52,13 +52,15 @@ let hash = tokio::task::spawn_blocking(move || {
 
 // ❌ CPU-bound work blocking the async runtime
 let hash = compute_expensive_hash(&data);  // Blocks executor thread!
-```rust
+
+```
 
 ---
 
 ## Bounded Channels with Backpressure
 
 ```rust
+
 // ✅ Bounded channel — provides backpressure
 let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(1024);
 
@@ -90,6 +92,7 @@ match tx.try_send(msg) {
 ## Never Hold Locks Across `.await`
 
 ```rust
+
 // ❌ DEADLOCK: guard held across .await
 let guard = self.state.lock().unwrap();
 let result = database.query(&guard.key).await;  // .await while holding guard!
@@ -110,7 +113,8 @@ let result = database.query(&key).await;
 // ✅ Use DashMap for concurrent read/write access — no lock needed
 let rooms: DashMap<RoomId, Room> = DashMap::new();
 rooms.insert(room_id, room);
-```rust
+
+```
 
 **Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block. Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
 
@@ -119,6 +123,7 @@ rooms.insert(room_id, room);
 ## Cancellation Safety with `tokio::select!`
 
 ```rust
+
 // ✅ Use cancellation-safe operations in select!
 tokio::select! {
     // recv() is cancellation-safe — no data lost on cancel
@@ -146,6 +151,7 @@ tokio::select! {
     result = read_message(&mut stream) => { ... }  // Custom cancel-safe fn
     _ = shutdown.cancelled() => { return; }
 }
+
 ```
 
 **Cancellation-safe:** `recv()`, `oneshot`, `sleep()`, `accept()`. **NOT safe:** `read_exact()`, `read_to_end()`, most streaming mid-read.
@@ -155,6 +161,7 @@ tokio::select! {
 ## Structured Concurrency with JoinSet
 
 ```rust
+
 use tokio::task::JoinSet;
 
 // ✅ JoinSet tracks and cleans up spawned tasks
@@ -175,13 +182,15 @@ while let Some(result) = set.join_next().await {
     }
 }
 // All tasks complete here — no leaked futures
-```rust
+
+```
 
 ---
 
 ## `spawn` vs `spawn_blocking`
 
 ```rust
+
 // ✅ tokio::spawn — for async I/O-bound tasks
 tokio::spawn(async move { handle_websocket(stream).await });
 
@@ -190,6 +199,7 @@ let result = tokio::task::spawn_blocking(move || {
     serde_json::to_string(&large_state)
 }).await?;
 // Don't use spawn_blocking for async work, and don't do CPU work in async tasks.
+
 ```
 
 ---
@@ -200,6 +210,7 @@ let result = tokio::task::spawn_blocking(move || {
 broadcast channels or similar cancellation mechanisms. Check the actual codebase implementation.
 
 ```rust
+
 // Example pattern (using tokio_util::sync::CancellationToken from external crate)
 use tokio_util::sync::CancellationToken;
 
@@ -216,7 +227,8 @@ async fn run_server(shutdown: CancellationToken) {
         }
     }
 }
-```rust
+
+```
 
 **Alternative pattern:** Use `tokio::sync::broadcast` channels for shutdown signals, or implement custom cancellation
 using atomic flags and condition variables. The key principle is coordinated shutdown across all active connections.
@@ -228,6 +240,7 @@ using atomic flags and condition variables. The key principle is coordinated shu
 Use native async traits (Rust 1.75+) for static dispatch. Use `#[async_trait]` when you need `dyn Trait` (trait objects, dependency injection). This project uses `async_trait` for trait objects.
 
 ```rust
+
 // Native async trait (preferred for generics)
 trait Database: Send + Sync {
     async fn get_room(&self, id: &RoomId) -> Result<Option<Room>, DbError>;
@@ -238,6 +251,7 @@ trait Database: Send + Sync {
 trait DatabaseDyn: Send + Sync {
     async fn get_room(&self, id: &RoomId) -> Result<Option<Room>, DbError>;
 }
+
 ```
 
 ---
@@ -245,6 +259,7 @@ trait DatabaseDyn: Send + Sync {
 ## Timeout Patterns
 
 ```rust
+
 use tokio::time::{timeout, Duration};
 
 // ✅ Timeout on any async operation
@@ -260,7 +275,8 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
     .map_err(|_| Error::WebSocketTimeout)?
     .ok_or(Error::ConnectionClosed)?
     .map_err(Error::WebSocket)?;
-```rust
+
+```
 
 ---
 
@@ -282,7 +298,7 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
 
 ## Related Skills
 
-- [rust-performance-optimization](./rust-performance-optimization.md) — Allocation reduction and profiling
+- [Rust-performance-optimization](./rust-performance-optimization.md) — Allocation reduction and profiling
 - [error-handling-guide](./error-handling-guide.md) — Async error propagation patterns
 - [observability-and-logging](./observability-and-logging.md) — Tracing spans for async functions
-- [websocket-protocol-patterns](./websocket-protocol-patterns.md) — Async WebSocket handling
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — Async WebSocket handling

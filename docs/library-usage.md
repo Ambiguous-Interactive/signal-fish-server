@@ -10,11 +10,13 @@ Rust application.
 signal-fish-server = "0.1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+
 ```
 
 ## Basic Embedded Server
 
 ```rust
+
 use signal_fish_server::{
     config,
     database::DatabaseConfig,
@@ -92,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
 ```
 
 ## Custom Storage Backend
@@ -99,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
 Implement the `GameDatabase` trait for custom persistence:
 
 ```rust
+
 use signal_fish_server::database::GameDatabase;
 use signal_fish_server::protocol::{Room, RoomId, PlayerId, PlayerInfo, SpectatorInfo, ConnectionInfo, LobbyState};
 use async_trait::async_trait;
@@ -179,11 +183,13 @@ impl GameDatabase for MyCustomDatabase {
     // ... implement all other required methods from the GameDatabase trait
     // See src/database/mod.rs for the complete trait definition
 }
+
 ```
 
 Use your custom database:
 
 ```rust
+
 let game_server = EnhancedGameServer::new(
     server_config,
     protocol_config,
@@ -196,6 +202,7 @@ let game_server = EnhancedGameServer::new(
     authorized_apps,
 )
 .await?;
+
 ```
 
 ## Custom Router Integration
@@ -203,6 +210,7 @@ let game_server = EnhancedGameServer::new(
 Integrate Signal Fish into an existing Axum application:
 
 ```rust
+
 use axum::{Router, routing::get};
 use signal_fish_server::websocket;
 
@@ -227,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
 ```
 
 ## Programmatic Configuration
@@ -234,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
 Build configuration programmatically instead of from files:
 
 ```rust
+
 use signal_fish_server::config::{
     Config, ServerConfig, ProtocolConfig, SecurityConfig,
 };
@@ -258,6 +268,7 @@ let config = Config {
     },
     ..Default::default()
 };
+
 ```
 
 ## Message Handling
@@ -287,6 +298,7 @@ Enable optional features:
 ```toml
 [dependencies]
 signal-fish-server = { version = "0.1", features = ["tls", "legacy-fullmesh"] }
+
 ```
 
 Available features:
@@ -322,6 +334,7 @@ mod tests {
         assert!(room.is_some());
     }
 }
+
 ```
 
 ## API Documentation
@@ -329,7 +342,9 @@ mod tests {
 Generate full API docs:
 
 ```bash
+
 cargo doc --open --no-deps
+
 ```
 
 ## Next Steps

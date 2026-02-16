@@ -36,6 +36,7 @@ System design and project structure overview.
 │  │  - Reconnection tokens                        │  │
 │  └───────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
+
 ```
 
 ## Core Components
@@ -47,6 +48,7 @@ System design and project structure overview.
 Handles WebSocket upgrade, message serialization, and connection lifecycle.
 
 Key modules:
+
 - `handler.rs` - WebSocket upgrade and initialization
 - `connection.rs` - Connection lifecycle management
 - `batching.rs` - Outbound message batching
@@ -60,6 +62,7 @@ Key modules:
 Core server logic coordinating all operations.
 
 Responsibilities:
+
 - Room creation and lifecycle
 - Player join/leave handling
 - Message routing between players
@@ -74,6 +77,7 @@ Responsibilities:
 Defines message types, validation, and domain types.
 
 Key modules:
+
 - `messages.rs` - `ClientMessage` and `ServerMessage` enums
 - `types.rs` - `PlayerId`, `RoomId`, domain types
 - `room_state.rs` - `Room`, `Player`, `LobbyState`
@@ -87,6 +91,7 @@ Key modules:
 Configuration loading, validation, and defaults.
 
 Structure:
+
 - `loader.rs` - JSON file + environment variable loading
 - `validation.rs` - Config validation rules
 - `defaults.rs` - Default values
@@ -145,11 +150,13 @@ Client                    WebSocket Handler         EnhancedGameServer        Da
   |                              |                         |<-- store room -------|
   |                              |<-- RoomCreated ---------|                      |
   |<-- RoomCreated --------------|                         |                      |
+
 ```
 
 ### Player Join
 
 ```text
+
 Client                    WebSocket Handler         EnhancedGameServer        Database
   |                              |                         |                      |
   |-- JoinRoom ---------------->|                         |                      |
@@ -162,16 +169,19 @@ Client                    WebSocket Handler         EnhancedGameServer        Da
   |                              |                         |                      |
   |<-- PlayerJoined -------------|<-- broadcast to room ---|                      |
 (other clients)                                                                   |
+
 ```
 
 ### Game Data Relay
 
 ```text
+
 Client A                 EnhancedGameServer                    Client B
   |                              |                                  |
   |-- GameData ----------------->|                                  |
   |                              |-- broadcast to room ------------->|
   |                              |                                  |<-- GameData
+
 ```
 
 ## Concurrency Model
@@ -202,6 +212,7 @@ Uses **Tokio** for async I/O and task scheduling.
 ### Single Instance Limits
 
 Recommended per instance:
+
 - **Rooms:** < 500 active rooms
 - **Players:** < 2000 concurrent players
 - **Messages:** < 10,000 messages/second
@@ -209,6 +220,7 @@ Recommended per instance:
 ### Multi-Instance Deployment
 
 For horizontal scaling:
+
 1. **Session affinity** - Route by game_name or room_code at load balancer
 2. **Room sharding** - Distribute rooms across instances
 3. **Coordination** - Use `RoomOperationCoordinator` for distributed locking
@@ -307,6 +319,7 @@ main.rs
        ├── reconnection.rs (In-memory ReconnectionManager)
        ├── retry.rs (Exponential backoff utility)
        └── rkyv_utils.rs (Zero-copy serialization helpers)
+
 ```
 
 ## Architecture Decision Records
@@ -357,6 +370,7 @@ mod tests {
         // ...
     }
 }
+
 ```
 
 ### Integration Tests
@@ -368,6 +382,7 @@ Multi-component tests in `tests/`:
 async fn test_room_lifecycle() {
     // ...
 }
+
 ```
 
 ### E2E Tests
@@ -379,6 +394,7 @@ Full WebSocket session tests:
 async fn test_websocket_flow() {
     // ...
 }
+
 ```
 
 ## Next Steps

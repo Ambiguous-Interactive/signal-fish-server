@@ -19,6 +19,7 @@ the game application.
     "app_id": "my-game"
   }
 }
+
 ```
 
 Optional fields:
@@ -32,6 +33,7 @@ Optional fields:
 Join or create a room for a specific game. If no `room_code` is provided, a new room will be created.
 
 ```json
+
 {
   "type": "JoinRoom",
   "data": {
@@ -39,6 +41,7 @@ Join or create a room for a specific game. If no `room_code` is provided, a new 
     "player_name": "Player1"
   }
 }
+
 ```
 
 Required fields:
@@ -58,6 +61,7 @@ Optional fields:
 Send arbitrary game data to other players in the room.
 
 ```json
+
 {
   "type": "GameData",
   "data": {
@@ -66,6 +70,7 @@ Send arbitrary game data to other players in the room.
     "y": 200
   }
 }
+
 ```
 
 The `data` field can be any JSON-serializable object.
@@ -75,9 +80,11 @@ The `data` field can be any JSON-serializable object.
 Signal readiness to start the game in lobby. Drives lobby state transitions.
 
 ```json
+
 {
   "type": "PlayerReady"
 }
+
 ```
 
 This message has no data payload.
@@ -87,12 +94,14 @@ This message has no data payload.
 Request or release game authority.
 
 ```json
+
 {
   "type": "AuthorityRequest",
   "data": {
     "become_authority": true
   }
 }
+
 ```
 
 ### LeaveRoom
@@ -100,9 +109,11 @@ Request or release game authority.
 Leave the current room.
 
 ```json
+
 {
   "type": "LeaveRoom"
 }
+
 ```
 
 ### Ping
@@ -110,9 +121,11 @@ Leave the current room.
 Heartbeat ping. Server responds with `Pong`.
 
 ```json
+
 {
   "type": "Ping"
 }
+
 ```
 
 ### Reconnect
@@ -120,6 +133,7 @@ Heartbeat ping. Server responds with `Pong`.
 Reconnect to a room after disconnection using authentication token.
 
 ```json
+
 {
   "type": "Reconnect",
   "data": {
@@ -128,6 +142,7 @@ Reconnect to a room after disconnection using authentication token.
     "auth_token": "token-string"
   }
 }
+
 ```
 
 The `auth_token` is provided in the `RoomJoined` response when initially joining a room.
@@ -137,6 +152,7 @@ The `auth_token` is provided in the `RoomJoined` response when initially joining
 Provide connection info for P2P establishment.
 
 ```json
+
 {
   "type": "ProvideConnectionInfo",
   "data": {
@@ -146,6 +162,7 @@ Provide connection info for P2P establishment.
     }
   }
 }
+
 ```
 
 ### JoinAsSpectator
@@ -153,6 +170,7 @@ Provide connection info for P2P establishment.
 Join a room as a spectator (read-only observer).
 
 ```json
+
 {
   "type": "JoinAsSpectator",
   "data": {
@@ -161,6 +179,7 @@ Join a room as a spectator (read-only observer).
     "spectator_name": "Observer1"
   }
 }
+
 ```
 
 Required fields:
@@ -174,9 +193,11 @@ Required fields:
 Leave spectator mode.
 
 ```json
+
 {
   "type": "LeaveSpectator"
 }
+
 ```
 
 This message has no data payload.
@@ -188,6 +209,7 @@ This message has no data payload.
 Authentication successful. Includes app information and rate limits.
 
 ```json
+
 {
   "type": "Authenticated",
   "data": {
@@ -200,9 +222,11 @@ Authentication successful. Includes app information and rate limits.
     }
   }
 }
+
 ```
 
 Optional fields:
+
 - `organization` - Organization name (if any)
 
 ### ProtocolInfo
@@ -210,6 +234,7 @@ Optional fields:
 SDK/protocol compatibility details advertised after authentication.
 
 ```json
+
 {
   "type": "ProtocolInfo",
   "data": {
@@ -218,6 +243,7 @@ SDK/protocol compatibility details advertised after authentication.
     "features": ["reconnection", "spectators", "authority"]
   }
 }
+
 ```
 
 ### AuthenticationError
@@ -225,6 +251,7 @@ SDK/protocol compatibility details advertised after authentication.
 Authentication failed.
 
 ```json
+
 {
   "type": "AuthenticationError",
   "data": {
@@ -232,6 +259,7 @@ Authentication failed.
     "error_code": "INVALID_CREDENTIALS"
   }
 }
+
 ```
 
 ### RoomJoined
@@ -240,6 +268,7 @@ Successfully joined or created a room. This message is sent both when creating a
 existing room.
 
 ```json
+
 {
   "type": "RoomJoined",
   "data": {
@@ -265,6 +294,7 @@ existing room.
     "current_spectators": []
   }
 }
+
 ```
 
 Note: The server also provides an `auth_token` field (not shown above) that should be stored for reconnection purposes.
@@ -274,6 +304,7 @@ Note: The server also provides an `auth_token` field (not shown above) that shou
 Another player joined the room.
 
 ```json
+
 {
   "type": "PlayerJoined",
   "data": {
@@ -286,6 +317,7 @@ Another player joined the room.
     }
   }
 }
+
 ```
 
 ### PlayerLeft
@@ -293,12 +325,14 @@ Another player joined the room.
 A player left the room.
 
 ```json
+
 {
   "type": "PlayerLeft",
   "data": {
     "player_id": "player-id"
   }
 }
+
 ```
 
 ### RoomJoinFailed
@@ -306,6 +340,7 @@ A player left the room.
 Failed to join room.
 
 ```json
+
 {
   "type": "RoomJoinFailed",
   "data": {
@@ -313,6 +348,7 @@ Failed to join room.
     "error_code": "ROOM_FULL"
   }
 }
+
 ```
 
 Note: The `error_code` field is optional.
@@ -322,9 +358,11 @@ Note: The `error_code` field is optional.
 Successfully left room.
 
 ```json
+
 {
   "type": "RoomLeft"
 }
+
 ```
 
 This message has no data payload.
@@ -334,6 +372,7 @@ This message has no data payload.
 Game data relayed from another player.
 
 ```json
+
 {
   "type": "GameData",
   "data": {
@@ -345,6 +384,7 @@ Game data relayed from another player.
     }
   }
 }
+
 ```
 
 ### GameDataBinary
@@ -352,6 +392,7 @@ Game data relayed from another player.
 Binary game data payload from another player. Uses bytes for zero-copy cloning during broadcast.
 
 ```json
+
 {
   "type": "GameDataBinary",
   "data": {
@@ -360,6 +401,7 @@ Binary game data payload from another player. Uses bytes for zero-copy cloning d
     "payload": "<base64-encoded-bytes>"
   }
 }
+
 ```
 
 ### LobbyStateChanged
@@ -367,6 +409,7 @@ Binary game data payload from another player. Uses bytes for zero-copy cloning d
 Lobby state transitioned.
 
 ```json
+
 {
   "type": "LobbyStateChanged",
   "data": {
@@ -375,9 +418,11 @@ Lobby state transitioned.
     "all_ready": true
   }
 }
+
 ```
 
 Possible states:
+
 - `Waiting` - Waiting for players
 - `Countdown` - Ready countdown in progress
 - `Playing` - Game in progress
@@ -387,6 +432,7 @@ Possible states:
 Authority status changed in the room.
 
 ```json
+
 {
   "type": "AuthorityChanged",
   "data": {
@@ -394,6 +440,7 @@ Authority status changed in the room.
     "you_are_authority": false
   }
 }
+
 ```
 
 The `authority_player` field can be `null` if no player currently has authority.
@@ -403,6 +450,7 @@ The `authority_player` field can be `null` if no player currently has authority.
 Authority request response.
 
 ```json
+
 {
   "type": "AuthorityResponse",
   "data": {
@@ -411,6 +459,7 @@ Authority request response.
     "error_code": "ALREADY_AUTHORITY"
   }
 }
+
 ```
 
 Note: The `reason` and `error_code` fields are optional.
@@ -420,6 +469,7 @@ Note: The `reason` and `error_code` fields are optional.
 Game is starting with peer connection information.
 
 ```json
+
 {
   "type": "GameStarting",
   "data": {
@@ -434,6 +484,7 @@ Game is starting with peer connection information.
     ]
   }
 }
+
 ```
 
 ### Error
@@ -441,6 +492,7 @@ Game is starting with peer connection information.
 An error occurred.
 
 ```json
+
 {
   "type": "Error",
   "data": {
@@ -448,11 +500,13 @@ An error occurred.
     "error_code": "ROOM_FULL"
   }
 }
+
 ```
 
 Note: The `error_code` field is optional.
 
 Common error codes:
+
 - `ROOM_FULL` - Room has reached max players
 - `ROOM_NOT_FOUND` - Room code does not exist
 - `INVALID_GAME_NAME` - Game name validation failed
@@ -465,9 +519,11 @@ Common error codes:
 Response to client `Ping`.
 
 ```json
+
 {
   "type": "Pong"
 }
+
 ```
 
 ### Reconnected
@@ -475,6 +531,7 @@ Response to client `Ping`.
 Reconnection successful. Includes current room state and missed events.
 
 ```json
+
 {
   "type": "Reconnected",
   "data": {
@@ -509,6 +566,7 @@ Reconnection successful. Includes current room state and missed events.
     ]
   }
 }
+
 ```
 
 ### ReconnectionFailed
@@ -516,6 +574,7 @@ Reconnection successful. Includes current room state and missed events.
 Reconnection failed.
 
 ```json
+
 {
   "type": "ReconnectionFailed",
   "data": {
@@ -523,6 +582,7 @@ Reconnection failed.
     "error_code": "INVALID_TOKEN"
   }
 }
+
 ```
 
 ### PlayerReconnected
@@ -530,12 +590,14 @@ Reconnection failed.
 Another player reconnected to the room.
 
 ```json
+
 {
   "type": "PlayerReconnected",
   "data": {
     "player_id": "player-id"
   }
 }
+
 ```
 
 ### SpectatorJoined
@@ -543,6 +605,7 @@ Another player reconnected to the room.
 Successfully joined a room as spectator.
 
 ```json
+
 {
   "type": "SpectatorJoined",
   "data": {
@@ -569,6 +632,7 @@ Successfully joined a room as spectator.
     "reason": "joined"
   }
 }
+
 ```
 
 Note: The `reason` field is optional.
@@ -578,6 +642,7 @@ Note: The `reason` field is optional.
 Failed to join as spectator.
 
 ```json
+
 {
   "type": "SpectatorJoinFailed",
   "data": {
@@ -585,6 +650,7 @@ Failed to join as spectator.
     "error_code": "ROOM_NOT_FOUND"
   }
 }
+
 ```
 
 Note: The `error_code` field is optional.
@@ -594,6 +660,7 @@ Note: The `error_code` field is optional.
 Successfully left spectator mode.
 
 ```json
+
 {
   "type": "SpectatorLeft",
   "data": {
@@ -603,6 +670,7 @@ Successfully left spectator mode.
     "current_spectators": []
   }
 }
+
 ```
 
 Note: All fields are optional.
@@ -612,6 +680,7 @@ Note: All fields are optional.
 Another spectator joined the room.
 
 ```json
+
 {
   "type": "NewSpectatorJoined",
   "data": {
@@ -632,6 +701,7 @@ Another spectator joined the room.
     "reason": "joined"
   }
 }
+
 ```
 
 Note: The `reason` field is optional.
@@ -641,6 +711,7 @@ Note: The `reason` field is optional.
 Another spectator left the room.
 
 ```json
+
 {
   "type": "SpectatorDisconnected",
   "data": {
@@ -649,6 +720,7 @@ Another spectator left the room.
     "current_spectators": []
   }
 }
+
 ```
 
 Note: The `reason` field is optional.
@@ -656,6 +728,7 @@ Note: The `reason` field is optional.
 ## Session Flow
 
 ```text
+
 Client                              Server
   |                                    |
   |--- Authenticate ------------------>|
@@ -675,6 +748,7 @@ Client                              Server
   |                                    |
   |--- LeaveRoom --------------------->|
   |<-- RoomLeft -----------------------|
+
 ```
 
 ## Reconnection Flow
@@ -685,6 +759,7 @@ should be stored by the client for reconnection purposes.
 If the connection is lost, the client can reconnect using the stored information:
 
 ```json
+
 {
   "type": "Reconnect",
   "data": {
@@ -693,6 +768,7 @@ If the connection is lost, the client can reconnect using the stored information
     "auth_token": "stored-token"
   }
 }
+
 ```
 
 On successful reconnection, the server sends a `Reconnected` message with the current room state and any

@@ -16,8 +16,8 @@
 
 ## When NOT to Use
 - General authentication/authorization logic (see [web-service-security](./web-service-security.md))
-- WebSocket protocol design unrelated to abuse (see [websocket-protocol-patterns](./websocket-protocol-patterns.md))
-- Performance optimization without a security motivation (see [rust-performance-optimization](./rust-performance-optimization.md))
+- WebSocket protocol design unrelated to abuse (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
+- Performance optimization without a security motivation (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ## Rationalizations to Reject
 
@@ -66,7 +66,8 @@ let gov_conf = GovernorConfigBuilder::default()
 let app = Router::new()
     .route("/ws", get(ws_handler))
     .layer(GovernorLayer { config: Arc::new(gov_conf) });
-```rust
+
+```
 
 ### Tiered Rate Limits
 
@@ -83,6 +84,7 @@ Apply three tiers — reject at the most specific level first:
 Always include `Retry-After` so well-behaved clients back off:
 
 ```rust
+
 use axum::http::{StatusCode, HeaderMap, HeaderValue};
 
 fn rate_limit_response(retry_after_secs: u64) -> (StatusCode, HeaderMap) {
@@ -91,18 +93,21 @@ fn rate_limit_response(retry_after_secs: u64) -> (StatusCode, HeaderMap) {
     headers.insert("x-ratelimit-remaining", HeaderValue::from(0));
     (StatusCode::TOO_MANY_REQUESTS, headers)
 }
+
 ```
 
 ### Anti-Pattern: Unbounded Rate Limiter State
 
 ```rust
+
 // ❌ Grows without bound — attacker sends from millions of spoofed IPs
 let limiters: HashMap<IpAddr, RateLimiter> = HashMap::new();
 
 // ✅ Bounded with TTL eviction — governor handles this internally,
 // or use DashMap with periodic cleanup capped at MAX_TRACKED_IPS
 const MAX_TRACKED_IPS: usize = 100_000;
-```rust
+
+```
 
 ---
 
@@ -113,6 +118,7 @@ const MAX_TRACKED_IPS: usize = 100_000;
 Limit concurrent connections per IP (3–5 for signaling is sufficient):
 
 ```rust
+
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::net::IpAddr;
@@ -138,11 +144,13 @@ impl ConnectionTracker {
         }
     }
 }
+
 ```
 
 ### Global Connection Ceiling with Semaphore
 
 ```rust
+
 use tokio::sync::Semaphore;
 
 const MAX_CONNECTIONS: usize = 10_000;
@@ -158,13 +166,15 @@ async fn ws_handler(
         drop(permit);
     }))
 }
-```rust
+
+```
 
 ### Idle Timeout
 
 Disconnect clients that send no data within the timeout window:
 
 ```rust
+
 use tokio::time::{timeout, Duration};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
@@ -179,6 +189,7 @@ loop {
         }
     }
 }
+
 ```
 
 ### Slow-Loris Prevention
@@ -186,13 +197,15 @@ loop {
 Set header read timeouts at the `hyper` level to prevent slow-loris attacks:
 
 ```rust
+
 use hyper_util::server::conn::auto::Builder;
 
 let builder = Builder::new(TokioExecutor::new());
 builder.http1()
     .header_read_timeout(Duration::from_secs(5))   // 5s to send headers
     .keep_alive(false);                              // no HTTP keep-alive
-```rust
+
+```
 
 ---
 
@@ -203,6 +216,7 @@ builder.http1()
 Throttle messages per connection, differentiated by message type:
 
 ```rust
+
 use governor::{RateLimiter, Quota, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
 use std::num::NonZeroU32;
 
@@ -211,21 +225,25 @@ struct PerConnectionLimits {
     join:   RateLimiter<NotKeyed, InMemoryState, DefaultClock>,   // 2/s
     chat:   RateLimiter<NotKeyed, InMemoryState, DefaultClock>,   // 10/s
 }
+
 ```
 
 ### Frame and Message Size Limits
 
 ```rust
+
 // axum WebSocketUpgrade configuration
 ws.max_frame_size(16_384)      // 16 KB per frame
   .max_message_size(65_536)    // 64 KB per message
   .on_upgrade(move |socket| handle_socket(socket, state))
 // Note: For outbound backpressure, use bounded mpsc channels (see §3 Backpressure)
-```rust
+
+```
 
 ### Ping/Pong with Strict Pong Timeout
 
 ```rust
+
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -237,6 +255,7 @@ async fn heartbeat_loop(sender: &mut SplitSink<WebSocket, Message>) -> bool {
     true
 }
 // In the recv loop: if Instant::now() - last_pong > PING_INTERVAL + PONG_TIMEOUT { break; }
+
 ```
 
 ### Upgrade Handshake Validation
@@ -244,6 +263,7 @@ async fn heartbeat_loop(sender: &mut SplitSink<WebSocket, Message>) -> bool {
 Validate Origin header before accepting WebSocket upgrades. Version negotiation (Sec-WebSocket-Version: 13) is handled automatically by axum/tungstenite — do not re-validate manually.
 
 ```rust
+
 async fn validate_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
     let origin = headers.get("origin")
         .and_then(|v| v.to_str().ok())
@@ -251,13 +271,15 @@ async fn validate_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
     if !ALLOWED_ORIGINS.contains(&origin) { return Err(StatusCode::FORBIDDEN); }
     Ok(())
 }
-```rust
+
+```
 
 ### Backpressure with Bounded Channels
 
 Never use unbounded channels for outgoing messages:
 
 ```rust
+
 // ❌ Unbounded — OOM if client stops reading
 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -267,6 +289,7 @@ if tx.try_send(msg).is_err() {
     tracing::warn!(peer = %addr, "Outbound buffer full — disconnecting slow client");
     break; // close the connection
 }
+
 ```
 
 ---
@@ -291,13 +314,15 @@ fn bounded_sdp<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Err
     if s.len() > 8_192 { return Err(serde::de::Error::custom("SDP too large")); }
     Ok(s)
 }
-```rust
+
+```
 
 ### Computational Complexity Caps
 
 Hard-cap resources to prevent amplification attacks:
 
 ```rust
+
 const MAX_PEERS_PER_ROOM: usize = 64;
 const MAX_ROOMS_PER_USER: usize = 5;
 const MAX_ROOMS_TOTAL: usize = 10_000;
@@ -311,18 +336,21 @@ fn join_room(&self, user: &UserId, room: &RoomId) -> Result<(), JoinError> {
     }
     Ok(())
 }
+
 ```
 
 ### Never Let User Input Control Allocation Sizes
 
 ```rust
+
 // ❌ Attacker sends count=999999999 → OOM
 let items: Vec<Item> = Vec::with_capacity(user_request.count);
 
 // ✅ Clamp to a safe maximum before allocating
 let count = user_request.count.min(MAX_ITEMS);
 let items: Vec<Item> = Vec::with_capacity(count);
-```bash
+
+```
 
 ---
 
@@ -333,6 +361,7 @@ let items: Vec<Item> = Vec::with_capacity(count);
 Configure rate-based rules specifically for WebSocket upgrade requests:
 
 ```json
+
 {
   "Name": "ws-upgrade-rate-limit",
   "Priority": 1,
@@ -351,6 +380,7 @@ Configure rate-based rules specifically for WebSocket upgrade requests:
     }
   }
 }
+
 ```
 
 ### Infrastructure Checklist
@@ -382,7 +412,8 @@ gauge!("connections.active").set(active_count as f64);
 counter!("messages.received", "type" => msg_type).increment(1);
 counter!("rate_limit.rejected", "tier" => "per_ip").increment(1);
 histogram!("message.processing_time_ms").record(elapsed.as_millis() as f64);
-```rust
+
+```
 
 ### Progressive Defense Escalation
 
@@ -415,6 +446,7 @@ async fn health_check(State(health): State<Arc<ServerHealth>>) -> impl IntoRespo
         DegradationLevel::Critical => (StatusCode::SERVICE_UNAVAILABLE, "critical"),
     }
 }
+
 ```
 
 On `SIGTERM`, stop accepting new connections and drain with `axum::serve(...).with_graceful_shutdown(shutdown_signal())`.
@@ -459,6 +491,6 @@ On `SIGTERM`, stop accepting new connections and drain with `axum::serve(...).wi
 ## Related Skills
 
 - [web-service-security](./web-service-security.md) — Authentication, authorization, input validation, TLS
-- [websocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message design, heartbeat
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message design, heartbeat
 - [observability-and-logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting
-- [rust-performance-optimization](./rust-performance-optimization.md) — Bounded allocations, zero-copy, profiling
+- [Rust-performance-optimization](./rust-performance-optimization.md) — Bounded allocations, zero-copy, profiling

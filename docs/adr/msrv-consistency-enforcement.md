@@ -41,6 +41,7 @@ and can cause:
 their Rust version from this field.
 
 **Rationale**: Cargo's native MSRV field provides:
+
 - Standard metadata for crates.io
 - Validation when dependencies require newer Rust
 - Integration with cargo-msrv tooling
@@ -52,6 +53,7 @@ Implemented multi-layered validation:
 #### CI Job: `msrv` (`.github/workflows/ci.yml`)
 
 New dedicated CI job that:
+
 1. Extracts MSRV from `Cargo.toml` (single source of truth)
 2. Validates consistency across all configuration files
 3. Compiles the project with exact MSRV version
@@ -62,6 +64,7 @@ New dedicated CI job that:
 #### Pre-commit Script: `scripts/check-msrv-consistency.sh`
 
 Standalone script that:
+
 - Verifies all configuration files match `Cargo.toml` MSRV
 - Provides actionable error messages with fix instructions
 - Can be run locally before committing
@@ -71,6 +74,7 @@ Standalone script that:
 
 ```bash
 ./scripts/check-msrv-consistency.sh
+
 ```
 
 ### 3. LLM Agent Guidance
@@ -78,6 +82,7 @@ Standalone script that:
 Created comprehensive skill: `.llm/skills/msrv-and-toolchain-management.md`
 
 This skill provides AI agents with:
+
 - MSRV update checklist (all files that must be updated)
 - Common pitfall detection (e.g., updating only Cargo.toml)
 - Verification procedures before committing
@@ -92,22 +97,26 @@ common mistakes and ensures consistent MSRV management practices.
 Enhanced related skills with MSRV awareness:
 
 **`dependency-management.md`**:
+
 - Added MSRV compatibility check as first priority
 - Documented options when dependency requires newer Rust
 - Added MSRV verification to agent checklist
 
 **`mandatory-workflow.md`**:
+
 - Added `check-msrv-consistency.sh` to pre-push validation
 - Updated PR checklist with MSRV verification step
 - Documented MSRV update commit format
 
 **`context.md`**:
+
 - Added MSRV skill to quick decision tree
 - Included in Security & Infrastructure skills table
 
 ### 5. Developer Documentation
 
 Updated `docs/development.md` with:
+
 - MSRV verification procedures
 - Step-by-step MSRV update checklist
 - Testing instructions for new MSRV
@@ -148,6 +157,7 @@ dependency update. This change ensures compatibility with the latest stable
 Rust ecosystem dependencies.
 
 Changes:
+
 - Update rust-version in Cargo.toml to 1.88.0
 - Update rust-toolchain.toml to enforce Rust 1.88.0
 - Update clippy.toml MSRV configuration to 1.88.0
@@ -155,8 +165,11 @@ Changes:
 - Update documentation (README.md, docs/development.md)
 
 Testing:
+
 - All tests passing (cargo test --all-features)
 - CI MSRV verification job passes
+
+
 ```
 
 ---
@@ -166,11 +179,12 @@ Testing:
 The `msrv` CI job runs on every push and pull request:
 
 **Steps**:
+
 1. Extract MSRV from Cargo.toml using `grep` and `sed`
 2. Validate rust-toolchain.toml channel matches (exact match: `1.88.0`)
 3. Validate clippy.toml msrv matches (exact match: `1.88.0`)
-4. Validate Dockerfile rust version matches (normalized comparison: `1.88` ↔ `1.88.0`)
-5. Install exact MSRV toolchain via dtolnay/rust-toolchain
+4. Validate Dockerfile Rust version matches (normalized comparison: `1.88` ↔ `1.88.0`)
+5. Install exact MSRV toolchain via dtolnay/Rust-toolchain
 6. Build with `cargo check --locked --all-targets`
 7. Test with `cargo test --locked --all-features`
 
@@ -200,9 +214,11 @@ MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
 if [ "$DOCKERFILE_RUST" != "$MSRV_SHORT" ]; then
   echo "FAIL"
 fi
+
 ```
 
 **Failure scenarios**:
+
 - Configuration drift: Files have different versions → Clear error with fix instructions
 - Dependency incompatibility: Dep requires newer Rust than MSRV → Build fails with error
 - Code uses features from newer Rust → Build fails with feature stability error
@@ -258,7 +274,9 @@ Current policy: Dependabot ignores Rust version updates; manual MSRV bumps only.
    - Con: May slow down commits; opt-in via `scripts/enable-hooks.sh`
 
 2. **cargo-msrv integration**: Use `cargo-msrv` to automatically determine minimum
+
    required Rust version
+
    - Pro: Finds true minimum version (may be lower than current MSRV)
    - Con: Slow on large codebases; better as manual tool
 
@@ -276,7 +294,7 @@ Current policy: Dependabot ignores Rust version updates; manual MSRV bumps only.
 
 ## References
 
-- [Cargo Book: rust-version field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
-- [Rust RFC 2495: Minimum Supported Rust Version](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)
+- [Cargo Book: rust-version field](https://doc.Rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
+- [Rust RFC 2495: Minimum Supported Rust Version](https://Rust-lang.github.io/rfcs/2495-min-rust-version.html)
 - [cargo-msrv tool](https://github.com/foresterre/cargo-msrv)
 - GitHub Issue: (Link to original CI failure issue once created)

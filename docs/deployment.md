@@ -14,6 +14,7 @@ docker run -d \
   -p 3536:3536 \
   -v ./config.json:/app/config.json:ro \
   ghcr.io/ambiguousinteractive/signal-fish-server:latest
+
 ```
 
 ### Custom Config
@@ -21,49 +22,62 @@ docker run -d \
 Mount your config file:
 
 ```bash
+
 docker run -d \
   -p 3536:3536 \
   -v ./config.json:/app/config.json:ro \
   -v ./logs:/app/logs \
   ghcr.io/ambiguousinteractive/signal-fish-server:latest
+
 ```
 
 ### Environment Variables
 
 ```bash
+
 docker run -d \
   -p 3536:3536 \
   -e SIGNAL_FISH_PORT=8080 \
   -e SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 \
   -e SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
   ghcr.io/ambiguousinteractive/signal-fish-server:latest
+
 ```
 
 ## Docker Compose
 
 ```yaml
+
 services:
   signal-fish:
     image: ghcr.io/ambiguousinteractive/signal-fish-server:latest
     ports:
+
       - "3536:3536"
+
     volumes:
+
       - ./config.json:/app/config.json:ro
       - ./logs:/app/logs
+
     environment:
+
       - RUST_LOG=info
       - SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true
+
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3536/v2/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+
 ```
 
 ## Production Configuration
 
 ```json
+
 {
   "port": 3536,
   "server": {
@@ -99,6 +113,7 @@ services:
     "batch_interval_ms": 16
   }
 }
+
 ```
 
 ## Reverse Proxy Setup
@@ -106,6 +121,7 @@ services:
 ### nginx
 
 ```nginx
+
 upstream signal_fish {
     server 127.0.0.1:3536;
 }
@@ -146,11 +162,13 @@ server {
         deny all;
     }
 }
+
 ```
 
 ### Caddy
 
 ```caddy
+
 signal.yourgame.com {
     reverse_proxy /v2/ws localhost:3536 {
         header_up X-Real-IP {remote_host}
@@ -159,6 +177,7 @@ signal.yourgame.com {
     reverse_proxy /v2/health localhost:3536
     reverse_proxy /metrics localhost:3536
 }
+
 ```
 
 ## Cloud Providers
@@ -166,6 +185,7 @@ signal.yourgame.com {
 ### AWS (ECS Fargate)
 
 ```json
+
 {
   "family": "signal-fish-server",
   "networkMode": "awsvpc",
@@ -199,11 +219,13 @@ signal.yourgame.com {
     }
   ]
 }
+
 ```
 
 ### Google Cloud Run
 
 ```bash
+
 gcloud run deploy signal-fish \
   --image ghcr.io/ambiguousinteractive/signal-fish-server:latest \
   --platform managed \
@@ -212,11 +234,13 @@ gcloud run deploy signal-fish \
   --set-env-vars SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
   --allow-unauthenticated \
   --max-instances 10
+
 ```
 
 ### Kubernetes
 
 ```yaml
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -232,15 +256,23 @@ spec:
         app: signal-fish
     spec:
       containers:
+
       - name: signal-fish
+
         image: ghcr.io/ambiguousinteractive/signal-fish-server:latest
         ports:
+
         - containerPort: 3536
+
         env:
+
         - name: SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH
+
           value: "true"
         volumeMounts:
+
         - name: config
+
           mountPath: /app/config.json
           subPath: config.json
         livenessProbe:
@@ -256,7 +288,9 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
       volumes:
+
       - name: config
+
         configMap:
           name: signal-fish-config
 ---
@@ -268,10 +302,13 @@ spec:
   selector:
     app: signal-fish
   ports:
+
   - protocol: TCP
+
     port: 80
     targetPort: 3536
   type: LoadBalancer
+
 ```
 
 ## Monitoring
@@ -279,7 +316,9 @@ spec:
 ### Health Checks
 
 ```bash
+
 curl http://localhost:3536/v2/health
+
 ```
 
 Returns `200 OK` when healthy.
@@ -289,24 +328,34 @@ Returns `200 OK` when healthy.
 JSON metrics:
 
 ```bash
+
 curl http://localhost:3536/metrics
+
 ```
 
 Prometheus metrics:
 
 ```bash
+
 curl http://localhost:3536/metrics/prom
+
 ```
 
 ### Prometheus Configuration
 
 ```yaml
+
 scrape_configs:
+
   - job_name: 'signal-fish'
+
     scrape_interval: 15s
     static_configs:
+
       - targets: ['signal-fish:3536']
+
     metrics_path: /metrics/prom
+
 ```
 
 ## Scaling Considerations
@@ -328,6 +377,7 @@ Typical resource usage per instance:
 - **Network**: Low bandwidth (WebSocket messages are small)
 
 Scale based on:
+
 - Active rooms per instance (recommend < 500)
 - Active players per instance (recommend < 2000)
 - Messages per second (recommend < 10000)
@@ -338,6 +388,7 @@ Set log level:
 
 ```bash
 RUST_LOG=info cargo run
+
 ```
 
 Levels: `trace`, `debug`, `info`, `warn`, `error`
@@ -345,6 +396,7 @@ Levels: `trace`, `debug`, `info`, `warn`, `error`
 Enable file logging:
 
 ```json
+
 {
   "logging": {
     "enable_file_logging": true,
@@ -354,6 +406,7 @@ Enable file logging:
     "format": "Json"
   }
 }
+
 ```
 
 ## Security Checklist

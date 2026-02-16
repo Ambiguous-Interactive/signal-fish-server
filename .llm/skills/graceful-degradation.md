@@ -14,7 +14,7 @@
 
 ## When NOT to Use
 - Rate limiting or DDoS prevention (see [ddos-and-rate-limiting](./ddos-and-rate-limiting.md))
-- WebSocket protocol design unrelated to availability (see [websocket-protocol-patterns](./websocket-protocol-patterns.md))
+- WebSocket protocol design unrelated to availability (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
 - General error handling without a reliability motivation (see [error-handling-guide](./error-handling-guide.md))
 
 ## Rationalizations to Reject
@@ -67,11 +67,13 @@ impl ServerHealth {
         self.level.store(level as u8, Ordering::Relaxed);
     }
 }
-```rust
+
+```
 
 ### Progressive Feature Shedding
 
 ```rust
+
 // ❌ Bad — binary on/off, no middle ground
 if server_overloaded() { return Err(StatusCode::SERVICE_UNAVAILABLE); }
 
@@ -86,6 +88,7 @@ match health.current() {
     }
     ServiceLevel::Overloaded => { return Err(StatusCode::SERVICE_UNAVAILABLE); }
 }
+
 ```
 
 ---
@@ -93,6 +96,7 @@ match health.current() {
 ## 2. Circuit Breaker Pattern
 
 ```rust
+
 use std::sync::{Mutex, atomic::{AtomicU8, AtomicU32, Ordering}};
 use tokio::time::{Instant, Duration};
 
@@ -133,11 +137,13 @@ impl CircuitBreaker {
         }
     }
 }
-```rust
+
+```
 
 ### Usage for Dependent Services (DB, Redis, Auth)
 
 ```rust
+
 // ❌ Bad — unbounded wait on a hung database
 let user = sqlx::query_as::<_, User>("SELECT ...").fetch_one(&pool).await?;
 
@@ -150,6 +156,7 @@ match tokio::time::timeout(Duration::from_secs(5),
     Ok(Err(e))   => { cb.record_failure(); Err(e.into()) }
     Err(_)       => { cb.record_failure(); Err(AppError::Timeout("database")) }
 }
+
 ```
 
 ---
@@ -159,6 +166,7 @@ match tokio::time::timeout(Duration::from_secs(5),
 Three separate endpoints — never combine them:
 
 ```rust
+
 async fn liveness() -> StatusCode {
     StatusCode::OK  // Process alive — no dependency checks
 }
@@ -180,14 +188,17 @@ fn health_routes() -> Router<Arc<AppState>> {
         .route("/readyz", get(readiness))
         .route("/startupz", get(startup))
 }
-```text
+
+```
 
 ### Kubernetes Probes
 
 ```yaml
+
 livenessProbe:  { httpGet: { path: /healthz, port: 3536 }, periodSeconds: 10, failureThreshold: 3 }
 readinessProbe: { httpGet: { path: /readyz,  port: 3536 }, periodSeconds: 5,  failureThreshold: 2 }
 startupProbe:   { httpGet: { path: /startupz, port: 3536 }, periodSeconds: 3, failureThreshold: 20 }
+
 ```
 
 ---
@@ -195,6 +206,7 @@ startupProbe:   { httpGet: { path: /startupz, port: 3536 }, periodSeconds: 3, fa
 ## 4. Graceful Shutdown with Connection Draining
 
 ```rust
+
 use tokio::sync::watch;
 const DRAIN_PERIOD: Duration = Duration::from_secs(30);
 
@@ -220,11 +232,13 @@ async fn serve_with_graceful_shutdown(app: Router, shutdown_tx: watch::Sender<bo
             tokio::time::sleep(DRAIN_PERIOD).await;
         }).await.unwrap();
 }
-```rust
+
+```
 
 ### Connection Handler with Shutdown Awareness
 
 ```rust
+
 async fn handle_socket(mut socket: WebSocket, mut shutdown_rx: watch::Receiver<bool>) {
     loop {
         tokio::select! {
@@ -242,6 +256,7 @@ async fn handle_socket(mut socket: WebSocket, mut shutdown_rx: watch::Receiver<b
         }
     }
 }
+
 ```
 
 ---
@@ -249,6 +264,7 @@ async fn handle_socket(mut socket: WebSocket, mut shutdown_rx: watch::Receiver<b
 ## 5. Deployment Safety for Stateful Services
 
 ```yaml
+
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata: { name: signaling-pdb }
@@ -265,9 +281,12 @@ spec:
     spec:
       terminationGracePeriodSeconds: 45  # > drain(30s) + preStop(5s) + buffer
       containers:
+
         - lifecycle:
+
             preStop: { exec: { command: ["sh", "-c", "sleep 5"] } }
-```rust
+
+```
 
 | Setting | Value | Reason |
 |---------|-------|--------|
@@ -283,6 +302,7 @@ spec:
 ## 6. Feature Flags for Gradual Rollout
 
 ```rust
+
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
@@ -312,6 +332,7 @@ if state.flags.is_enabled("new_matchmaking_v2", &req.app_id) {
     }
 }
 legacy_matchmaking_algorithm(req).await
+
 ```
 
 ---
@@ -319,6 +340,7 @@ legacy_matchmaking_algorithm(req).await
 ## 7. Connection Management Under Load
 
 ```rust
+
 const MAX_CONNECTIONS: usize = 10_000;
 const MAX_LIFETIME: Duration = Duration::from_secs(4 * 3600);
 
@@ -346,11 +368,13 @@ async fn handle_bounded_connection(
         }
     } // _permit dropped → semaphore slot released
 }
-```rust
+
+```
 
 ### Per-Room Tracking with JoinSet
 
 ```rust
+
 struct Room { id: String, tasks: tokio::task::JoinSet<()> }
 
 impl Room {
@@ -363,6 +387,7 @@ impl Room {
         }
     }
 }
+
 ```
 
 ---
@@ -370,6 +395,7 @@ impl Room {
 ## 8. Database Failover
 
 ```rust
+
 // ❌ Bad — write failure = total failure
 sqlx::query("UPDATE rooms SET state = $1 WHERE id = $2").execute(pool).await?;
 
@@ -391,13 +417,15 @@ async fn update_room_state(
         .query_async(&mut redis.get_async_connection().await?).await?;
     Ok(())
 }
-```rust
+
+```
 
 ### Read Replica Failover
 
 Read replica failover: round-robin across healthy replicas, fall back to writer if all fail:
 
 ```rust
+
 async fn read<T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>>(
     &self, sql: &str,
 ) -> Result<T, AppError> {
@@ -407,11 +435,13 @@ async fn read<T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>>(
     }
     Ok(sqlx::query_as::<_, T>(sql).fetch_one(&self.writer).await?)
 }
+
 ```
 
 ### Checkpoint Room State for Restart Recovery
 
 ```rust
+
 async fn checkpoint_room(redis: &redis::Client, room: &Room) -> Result<(), Error> {
     let key = format!("room:{}:state", room.id);
     redis::cmd("SET").arg(&key).arg(serde_json::to_vec(room)?)
@@ -424,7 +454,8 @@ async fn restore_room(redis: &redis::Client, room_id: &str) -> Result<Option<Roo
         .query_async(&mut redis.get_async_connection().await?).await?;
     Ok(data.and_then(|d| serde_json::from_slice(&d).ok()))
 }
-```bash
+
+```
 
 ---
 
@@ -445,7 +476,7 @@ async fn restore_room(redis: &redis::Client, room_id: &str) -> Result<Option<Roo
 ## Related Skills
 
 - [ddos-and-rate-limiting](./ddos-and-rate-limiting.md) — Rate limiting, connection caps, load shedding
-- [async-rust-best-practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
+- [async-Rust-best-practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
 - [observability-and-logging](./observability-and-logging.md) — Health metrics, tracing spans, alert thresholds
 - [error-handling-guide](./error-handling-guide.md) — Error types, fallible operations, context propagation
-- [websocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, close frames, heartbeat
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, close frames, heartbeat

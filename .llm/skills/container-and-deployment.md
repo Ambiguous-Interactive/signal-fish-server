@@ -1,6 +1,6 @@
 # Skill: Container Security & Deployment
 
-<!-- trigger: docker, container, dockerfile, kubernetes, k8s, deploy, helm, image, registry, ci-cd, pipeline | Container security and deployment patterns for game servers | Infrastructure -->
+<!-- trigger: Docker, container, dockerfile, kubernetes, k8s, deploy, helm, image, registry, ci-cd, pipeline | Container security and deployment patterns for game servers | Infrastructure -->
 
 **Trigger**: When building Docker images, writing Kubernetes manifests, configuring CI/CD pipelines, or hardening container deployments for the signaling server.
 
@@ -18,7 +18,7 @@
 ## When NOT to Use
 
 - Application-level security (see [web-service-security](./web-service-security.md))
-- Rust code changes unrelated to deployment (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Rust code changes unrelated to deployment (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 - Observability instrumentation inside the application (see [observability-and-logging](./observability-and-logging.md))
 
 ## Rationalizations to Reject
@@ -73,7 +73,8 @@ COPY --from=builder /app/target/release/matchbox-signaling-server /usr/local/bin
 EXPOSE 3536
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/server"]
-```bash
+
+```
 
 ### Key Principles
 
@@ -90,6 +91,7 @@ ENTRYPOINT ["/usr/local/bin/server"]
 For a statically linked binary (using musl):
 
 ```dockerfile
+
 FROM rust:1.83-bookworm AS builder
 RUN rustup target add x86_64-unknown-linux-musl
 WORKDIR /app
@@ -103,6 +105,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 USER 65534:65534
 EXPOSE 3536
 ENTRYPOINT ["/server"]
+
 ```
 
 ---
@@ -112,6 +115,7 @@ ENTRYPOINT ["/server"]
 ### Docker Run Flags
 
 ```bash
+
 docker run \
   --read-only \
   --cap-drop=ALL \
@@ -121,11 +125,13 @@ docker run \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   -p 3536:3536 \
   matchbox-signaling-server:latest
-```rust
+
+```
 
 ### Compose Hardening
 
 ```yaml
+
 services:
   signaling:
     image: matchbox-signaling-server:sha-abc1234
@@ -141,12 +147,15 @@ services:
           cpus: "0.25"
           memory: 64M
     tmpfs:
+
       - /tmp:size=16M,noexec,nosuid
+
     healthcheck:
       test: ["/bin/true"] # distroless — use HTTP probe from orchestrator
       interval: 15s
       timeout: 5s
       retries: 3
+
 ```
 
 ### Image Scanning in CI
@@ -154,6 +163,7 @@ services:
 ```yaml
 # GitHub Actions step
 - name: Scan image with Trivy
+
   uses: aquasecurity/trivy-action@v0.28.0
   with:
     image-ref: matchbox-signaling-server:${{ github.sha }}
@@ -163,12 +173,14 @@ services:
     ignore-unfixed: true
 
 - name: Generate SBOM
+
   uses: anchore/sbom-action@v0.17.0
   with:
     image: matchbox-signaling-server:${{ github.sha }}
     format: spdx-json
     output-file: sbom.spdx.json
-```bash
+
+```
 
 ---
 
@@ -177,6 +189,7 @@ services:
 ### Deployment
 
 ```yaml
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -202,10 +215,14 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
+
         - name: signaling
+
           image: ghcr.io/example/matchbox-signaling-server@sha256:abcdef1234567890
           ports:
+
             - containerPort: 3536
+
               protocol: TCP
           securityContext:
             allowPrivilegeEscalation: false
@@ -244,12 +261,15 @@ spec:
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
+
             - weight: 100
+
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
                     app: signaling-server
                 topologyKey: kubernetes.io/hostname
+
 ```
 
 ### PodDisruptionBudget
@@ -257,6 +277,7 @@ spec:
 Critical for WebSocket services — prevents draining too many pods at once:
 
 ```yaml
+
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -266,11 +287,13 @@ spec:
   selector:
     matchLabels:
       app: signaling-server
-```bash
+
+```
 
 ### Service with Session Affinity
 
 ```yaml
+
 apiVersion: v1
 kind: Service
 metadata:
@@ -282,11 +305,14 @@ spec:
     clientIP:
       timeoutSeconds: 600
   ports:
+
     - port: 3536
+
       targetPort: 3536
       protocol: TCP
   selector:
     app: signaling-server
+
 ```
 
 ---
@@ -304,6 +330,7 @@ spec:
 ### Axum Route Handlers
 
 ```rust
+
 use axum::{Router, Json, extract::State, http::StatusCode, routing::get};
 use serde::Serialize;
 use std::sync::Arc;
@@ -346,11 +373,13 @@ pub fn health_routes() -> Router<Arc<AppState>> {
         .route("/readyz", get(readyz))
         .route("/startupz", get(startupz))
 }
-```rust
+
+```
 
 ### Graceful Shutdown for Connection Draining
 
 ```rust
+
 use tokio::signal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -379,6 +408,7 @@ async fn shutdown_signal(state: Arc<AppState>) {
     let drain_timeout = std::time::Duration::from_secs(60);
     tokio::time::timeout(drain_timeout, state.wait_for_connections()).await.ok();
 }
+
 ```
 
 ---
@@ -388,22 +418,28 @@ async fn shutdown_signal(state: Arc<AppState>) {
 ### Image Build and Scan Pipeline (GitHub Actions)
 
 ```yaml
+
 jobs:
   build-and-scan:
     runs-on: ubuntu-latest
     steps:
+
       - uses: actions/checkout@v4
 
       - name: Cargo audit
+
         run: cargo audit --deny warnings
 
       - name: Cargo deny
+
         run: cargo deny check
 
       - name: Build image
+
         run: docker build -t matchbox-signaling-server:${{ github.sha }} .
 
       - name: Scan with Trivy
+
         uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: matchbox-signaling-server:${{ github.sha }}
@@ -411,16 +447,20 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Sign image with Cosign
+
         uses: sigstore/cosign-installer@v3
+
       - run: cosign sign --yes ghcr.io/example/matchbox-signaling-server@${{ steps.push.outputs.digest }}
 
       - name: Push with digest tag
+
         id: push
         run: |
           docker tag matchbox-signaling-server:${{ github.sha }} \
             ghcr.io/example/matchbox-signaling-server:${{ github.sha }}
           docker push ghcr.io/example/matchbox-signaling-server:${{ github.sha }}
-```text
+
+```
 
 ### Immutable Tags — Never `:latest`
 
@@ -433,17 +473,22 @@ image: matchbox-signaling-server:sha-abc1234
 
 # ✅ Digest — cryptographically immutable
 image: ghcr.io/example/matchbox-signaling-server@sha256:abcdef1234567890
+
 ```
 
 ### Deployment Verification
 
 ```yaml
+
+
 - name: Smoke test
+
   run: |
     kubectl rollout status deployment/signaling-server --timeout=120s
     kubectl exec deploy/signaling-server -- /bin/true || true
     curl -sf http://signaling-server.svc:3536/healthz | jq .status
-```bash
+
+```
 
 ---
 
@@ -463,21 +508,28 @@ COPY secrets.json /app/secrets.json
 ### Kubernetes Secrets as Volumes (Preferred)
 
 ```yaml
+
 spec:
   containers:
+
     - name: signaling
+
       volumeMounts:
+
         - name: secrets
+
           mountPath: /etc/secrets
           readOnly: true
   volumes:
+
     - name: secrets
+
       secret:
         secretName: signaling-secrets
         defaultMode: 0400 # Read-only by owner
-```rust
 
 ```rust
+
 // Read secret from mounted file
 let jwt_secret = secrecy::Secret::new(
     std::fs::read_to_string("/etc/secrets/jwt-secret")
@@ -485,11 +537,13 @@ let jwt_secret = secrecy::Secret::new(
         .trim()
         .to_string()
 );
+
 ```
 
 ### External Secrets Operator
 
 ```yaml
+
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
@@ -502,16 +556,20 @@ spec:
   target:
     name: signaling-secrets
   data:
+
     - secretKey: jwt-secret
+
       remoteRef:
         key: prod/signaling/jwt-secret
-```rust
+
+```
 
 ### Secret Rotation Without Restart
 
 Watch the mounted secret file for changes:
 
 ```rust
+
 use notify::{Watcher, RecursiveMode, Event};
 
 async fn watch_secrets(state: Arc<AppState>) -> anyhow::Result<()> {
@@ -529,6 +587,7 @@ async fn watch_secrets(state: Arc<AppState>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
 ```
 
 ---
@@ -540,19 +599,22 @@ async fn watch_secrets(state: Arc<AppState>) -> anyhow::Result<()> {
 Containers must write logs to stdout/stderr for the orchestrator to collect:
 
 ```rust
+
 // ✅ JSON structured logs to stdout — collected by Fluentd/Loki/CloudWatch
 tracing_subscriber::fmt()
     .json()
     .with_target(true)
     .with_env_filter(EnvFilter::from_default_env())
     .init();
-```rust
+
+```
 
 Never write to files inside the container — they are ephemeral and lost on restart.
 
 ### Prometheus Metrics Endpoint
 
 ```rust
+
 use axum::{Router, routing::get, response::IntoResponse};
 use prometheus::{Encoder, TextEncoder, IntGauge, IntCounter, register_int_gauge, register_int_counter};
 use std::sync::LazyLock;
@@ -578,11 +640,13 @@ async fn metrics_handler() -> impl IntoResponse {
 pub fn metrics_routes() -> Router {
     Router::new().route("/metrics", get(metrics_handler))
 }
+
 ```
 
 ### Kubernetes ServiceMonitor
 
 ```yaml
+
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -592,31 +656,42 @@ spec:
     matchLabels:
       app: signaling-server
   endpoints:
+
     - port: http
+
       path: /metrics
       interval: 15s
-```text
+
+```
 
 ### Container Resource Monitoring
 
 Set resource alerts with Prometheus rules:
 
 ```yaml
+
 groups:
+
   - name: signaling-server
+
     rules:
+
       - alert: HighMemoryUsage
+
         expr: container_memory_usage_bytes{container="signaling"} > 200e6
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Signaling server memory usage above 200MB"
+
       - alert: HighCPUThrottling
+
         expr: rate(container_cpu_cfs_throttled_seconds_total{container="signaling"}[5m]) > 0.1
         for: 5m
         labels:
           severity: warning
+
 ```
 
 ---
@@ -632,15 +707,21 @@ When a Cargo feature requires native C libraries (e.g., `kafka` → `rdkafka` �
 All native build dependencies are centralized in a reusable composite action:
 
 ```text
+
 .github/actions/install-build-deps/action.yml
-```rust
+
+```
 
 Every CI job that builds Rust code with `--all-features` **must** use this action:
 
 ```yaml
+
 steps:
+
   - uses: ./.github/actions/install-build-deps
   - run: cargo build --all-features
+
+
 ```
 
 ### Keeping Package Lists in Sync
@@ -661,7 +742,8 @@ A regression-prevention script checks that workflows using `--all-features` refe
 ```bash
 # Run before pushing CI workflow changes
 scripts/check-ci-config.sh
-```bash
+
+```
 
 ### When Adding a Cargo Feature with Native Dependencies
 
@@ -687,6 +769,7 @@ environment variable overrides:
 # Production deployments should mount a config.json or set auth env vars.
 ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
 ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
+
 ```
 
 ### Prevention Checklist
@@ -694,11 +777,16 @@ ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
 When changing configuration defaults, **always verify**:
 
 1. **Default `Config` validation** — Does `Config::default()` pass `validate_config_security()`?
+
    If not, does the Dockerfile set ENV overrides for the failing fields?
+
 2. **Docker smoke test** — CI must retry the health check (not bare `sleep + curl`),
-   and must dump `docker logs` on failure for diagnostics.
+
+   and must dump `Docker logs` on failure for diagnostics.
+
 3. **`check-ci-config.sh`** — Must validate that the Dockerfile contains the required ENV overrides.
 4. **Tests** — Must include a `test_docker_default_config_passes_validation` regression test
+
    that simulates the Docker ENV overrides and asserts validation passes.
 
 ### Smoke Test Pattern (CI)
@@ -706,7 +794,10 @@ When changing configuration defaults, **always verify**:
 Use a retry loop instead of a bare `sleep`:
 
 ```yaml
+
+
 - name: Smoke test
+
   run: |
     docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
     for i in $(seq 1 15); do
@@ -722,7 +813,8 @@ Use a retry loop instead of a bare `sleep`:
     echo "=== Docker logs ==="
     docker logs test-server
     exit 1
-```rust
+
+```
 
 ### Related Test Pattern
 
@@ -736,6 +828,7 @@ fn test_docker_default_config_passes_validation() {
     config.security.require_websocket_auth = false;
     assert!(validate_config_security(&config).is_ok());
 }
+
 ```
 
 ---
@@ -757,7 +850,7 @@ fn test_docker_default_config_passes_validation() {
 - [ ] Native build deps in composite action (`.github/actions/install-build-deps/action.yml`) match Dockerfile builder stage
 - [ ] `scripts/check-ci-config.sh` passes after CI workflow changes
 - [ ] Docker ENV overrides set for any config fields that default to secure-but-crash (e.g., auth)
-- [ ] CI smoke test uses retry loop with `docker logs` dump on failure (no bare `sleep`)
+- [ ] CI smoke test uses retry loop with `Docker logs` dump on failure (no bare `sleep`)
 - [ ] Config validation regression test exists for Docker-style defaults
 - [ ] Images tagged with sha256 digest or git SHA — never `:latest` in production
 - [ ] No secrets baked into image layers

@@ -48,9 +48,11 @@ Player Disconnects → Server registers disconnection
                   → Starts expiration timer (300s default)
 
 Player Reconnects → Client sends Reconnect message with:
+
                    - Original Player ID
                    - Room ID
                    - Reconnection token
+
                  → Server validates token and window
                  → Replays missed events since last_sequence
                  → Restores player to room with same ID
@@ -59,6 +61,7 @@ Player Reconnects → Client sends Reconnect message with:
 
 Expiration       → Background cleanup task removes expired tokens
                  → Event buffers cleared when no pending reconnections
+
 ```
 
 ### 4. Security Considerations
@@ -73,12 +76,14 @@ Expiration       → Background cleanup task removes expired tokens
 Reconnection is optional and can be disabled via:
 
 ```json
+
 {
   "server": {
     "enable_reconnection": true,
     "reconnection_window": 300
   }
 }
+
 ```
 
 ### 6. Metrics
@@ -116,6 +121,7 @@ Core implementation lives in:
 - **Complexity**: Adds state management for disconnected players and event replay logic
 - **Security surface**: Introduces new attack vectors (token guessing, replay attacks) that must be mitigated
 - **Race conditions**: Must handle edge cases like reconnecting while already connected, room deletion
+
   during reconnection, etc.
 
 ### Mitigations

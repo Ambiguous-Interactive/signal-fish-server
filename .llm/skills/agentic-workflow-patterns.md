@@ -49,13 +49,16 @@
 Every significant code change follows this cycle:
 
 ```text
+
 1. IMPLEMENT — Make the change (one logical change at a time)
 2. VERIFY   — Run cargo check, clippy, test
 3. REVIEW   — Check against code-review-checklist
 4. FIX      — Address any issues found
 5. VERIFY   — Run cargo check, clippy, test again
 6. PRESENT  — Provide commit instructions to user (NEVER commit yourself)
-```rust
+
+
+```
 
 **Never skip verification.** Running `cargo clippy` and `cargo test` catches more issues than visual inspection.
 
@@ -74,6 +77,7 @@ Every significant code change follows this cycle:
 ### Subagent Prompt Structure
 
 Effective subagent prompts are:
+
 1. **Specific** — exact files, exact problem, exact expected output
 2. **Constrained** — what NOT to do is as important as what to do
 3. **Self-contained** — all needed context included, no assumptions
@@ -88,25 +92,28 @@ Fix the error handling in src/server/room_manager.rs:
 4. Run `cargo test --lib` to verify no regressions
 
 Do NOT:
+
 - Change function signatures that are part of the public API
 - Modify error types (use existing ones)
 - Touch files other than room_manager.rs
 
 Return: List of changes made with before/after snippets.
-```
 
 ```markdown
 ## Bad Subagent Prompt (too vague)
 Fix the error handling in the server code.
 Make it better and more robust.
-```rust
+
+```
 
 ### Sequential vs Parallel Dispatch
 
 **Sequential** — when tasks depend on each other:
+
 - Refactor struct → Update all usages → Add tests
 
 **Parallel** — when tasks are independent:
+
 - Fix auth module + Fix relay module + Update docs
 - Default batch: 2-3 independent tasks
 
@@ -119,6 +126,7 @@ For complex tasks requiring multiple agents:
 3. **Reviewer** (subagent) — Reviews integrated result with fresh context
 
 **Handoff protocol:**
+
 - Include: exact files, exact problem, expected output format
 - Exclude: exploration context, previous conversation history
 - Constrain: what NOT to change, what NOT to read
@@ -164,6 +172,7 @@ Estimate context needs before starting:
 | Architecture change | 20+ files | MUST use subagents; split into phases |
 
 Rules:
+
 - If estimated tokens > 30K, use subagents for research
 - Read trait/interface definitions BEFORE implementation files
 - Read test files to understand expected behavior
@@ -254,6 +263,8 @@ Confidence: medium
 - [x] cargo clippy clean
 - [x] cargo test passes
 - [ ] New tests added for new behavior
+
+
 ```
 
 ---
@@ -276,7 +287,7 @@ Confidence: medium
 - [git-safety-protocol](./git-safety-protocol.md) — **CRITICAL** - Never commit or configure git
 - [code-review-checklist](./code-review-checklist.md) — Detailed review criteria
 - [solid-principles-enforcement](./solid-principles-enforcement.md) — SOLID checks during review
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow
 - [testing-strategies](./testing-strategies.md) — Test writing methodology
 - [manage-skills](./manage-skills.md) — How to create and maintain skills
 - [agent-self-review-checklist](./agent-self-review-checklist.md) — Pre-commit verification workflow

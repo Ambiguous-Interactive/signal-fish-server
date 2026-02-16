@@ -40,18 +40,23 @@ git commit --fixup
 git commit --all
 git commit -a
 git commit --no-verify
+
 ```
 
 **✅ ALLOWED (Read-only):**
+
 ```bash
+
 git status
 git diff
 git diff --cached
 git log
 git show
+
 ```
 
 **Rationale:**
+
 - Git commits record **your** identity, not the user's
 - Commits create permanent history that may misattribute work
 - Users must control when and what gets committed
@@ -60,23 +65,30 @@ git show
 ### 🚫 NEVER Modify Git Configuration
 
 **❌ FORBIDDEN:**
+
 ```bash
+
 git config user.name
 git config user.email
 git config --global user.name
 git config --global user.email
 git config --local user.name
 git config --system user.name
-```bash
+
+```
 
 **✅ ALLOWED (Read-only):**
+
 ```bash
+
 git config --list
 git config user.name  # Reading only, not setting
 git config --get user.email
+
 ```
 
 **Rationale:**
+
 - Git configuration defines user identity for all future commits
 - Changing user.name or user.email misattributes authorship
 - Configuration changes persist beyond current session
@@ -85,18 +97,23 @@ git config --get user.email
 ### 🚫 NEVER Stage Files Without Explicit User Request
 
 **❌ FORBIDDEN (unless explicitly requested):**
+
 ```bash
+
 git add .
 git add -A
 git add file.rs
 git stage file.rs
-```bash
+
+```
 
 **✅ ALLOWED:**
+
 - Only if user explicitly says "stage these files" or "git add X"
 - Only the specific files user requested
 
 **Rationale:**
+
 - Staging is the first step toward committing
 - User should control what gets included in commits
 - Prevents accidental inclusion of sensitive files
@@ -142,6 +159,7 @@ git config --get user.email
 # Checking remote information
 git remote -v
 git remote show origin
+
 ```
 
 ### ✅ What to Tell the User Instead
@@ -149,37 +167,51 @@ git remote show origin
 When you need git operations performed, provide **clear instructions** for the user:
 
 **Instead of committing:**
+
 ```markdown
+
 I've made the following changes:
+
 - Modified: src/server.rs (added validation)
 - Modified: tests/integration_tests.rs (added test cases)
 
 To commit these changes:
-```bash
+
+```
+
 git add src/server.rs tests/integration_tests.rs
 git commit -m "feat: add input validation to server
 
 - Add validation for room codes
 - Add comprehensive test coverage
+
 "
+
 ```text
+
+
 ```
 
 **Instead of configuring git:**
+
 ```markdown
+
 To ensure commits are attributed correctly, please verify your git configuration:
-```
 
 ```bash
+
 git config user.name   # Should be your name
 git config user.email  # Should be your email
+
 ```
 
 If these need to be set:
 
 ```bash
+
 git config user.name "Your Name"
 git config user.email "your.email@example.com"
+
 ```
 
 ---
@@ -219,26 +251,33 @@ Instead:
 ### Scenario 1: User Asks "Can you commit these changes?"
 
 **❌ BAD Response:**
+
 ```bash
 git add file.rs
 git commit -m "fix: something"
+
 ```
 
 **✅ GOOD Response:**
+
 ```markdown
+
 I've completed the changes. Here's what was modified:
+
 - src/file.rs: Fixed the validation logic
 
 To commit these changes:
-```
 
 ```bash
+
 git add src/file.rs
 git commit -m "fix: correct validation logic in file.rs
 
 - Handle edge case for empty input
 - Add boundary checks
+
 "
+
 ```
 
 You can modify the commit message as needed before running the command.
@@ -246,19 +285,24 @@ You can modify the commit message as needed before running the command.
 ### Scenario 2: User's Git Identity Appears Wrong
 
 **❌ BAD Response:**
-```bash
-git config user.name "Correct Name"
-git config user.email "correct@email.com"
+
 ```bash
 
+git config user.name "Correct Name"
+git config user.email "correct@email.com"
+
+```
+
 **✅ GOOD Response:**
+
 ```markdown
+
 I noticed the git configuration may need updating. Currently:
+
 - user.name: [current value]
 - user.email: [current value]
 
 If this is incorrect, you can update it with:
-```
 
 ```bash
 # For this repository only:
@@ -268,33 +312,40 @@ git config user.email "your.email@example.com"
 # Or globally for all repositories:
 git config --global user.name "Your Name"
 git config --global user.email "your.email@example.com"
+
 ```
 
 ### Scenario 3: CI/CD Requires a Commit
 
 **❌ BAD Response:**
 "I'll commit the changes so CI can run."
+
 ```bash
+
 git commit -m "CI fixes"
+
 ```
 
 **✅ GOOD Response:**
+
 ```markdown
+
 The CI/CD failures have been fixed. For CI to validate the fixes, these changes need to be committed:
 
 - File 1: Description
 - File 2: Description
 
 Suggested commit command:
-```
 
 ```bash
+
 git add file1 file2
 git commit -m "fix: CI/CD issues - [description]
 
 [Detailed explanation]
 "
 git push origin branch-name
+
 ```
 
 Would you like to review the changes before committing?
@@ -360,7 +411,7 @@ This git safety protocol integrates with:
 - **[agentic-workflow-patterns](./agentic-workflow-patterns.md)** - The workflow mentions "commit" but means user commits
 - **[agent-self-review-checklist](./agent-self-review-checklist.md)** - Verification before presenting commit instructions
 - **[mandatory-workflow](./mandatory-workflow.md)** - User's mandatory workflow, not automated
-- **[github-actions-best-practices](./github-actions-best-practices.md)** - CI/CD validation happens after user commits
+- **[GitHub-actions-best-practices](./github-actions-best-practices.md)** - CI/CD validation happens after user commits
 
 **Key principle:** You verify and prepare changes; user commits them.
 
@@ -385,12 +436,14 @@ This git safety protocol integrates with:
 **You prepare the work. The user commits it.**
 
 Your role is to:
+
 1. Make changes to files
 2. Verify changes are correct (cargo check, clippy, test)
 3. Provide clear instructions for user to commit
 4. Answer questions about git operations
 
 The user's role is to:
+
 1. Review your changes
 2. Stage files (`git add`)
 3. Create commits (`git commit`)
@@ -404,4 +457,4 @@ The user's role is to:
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) - Agent workflow that integrates with user commits
 - [agent-self-review-checklist](./agent-self-review-checklist.md) - Pre-commit verification (user commits after)
 - [mandatory-workflow](./mandatory-workflow.md) - User's mandatory workflow requirements
-- [github-actions-best-practices](./github-actions-best-practices.md) - CI/CD patterns
+- [GitHub-actions-best-practices](./github-actions-best-practices.md) - CI/CD patterns

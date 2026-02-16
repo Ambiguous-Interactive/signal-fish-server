@@ -18,7 +18,7 @@
 
 ## When NOT to Use
 
-- Writing code patterns (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Writing code patterns (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 - Understanding error handling (see [error-handling-guide](./error-handling-guide.md))
 
 ---
@@ -94,7 +94,8 @@ semicolon_outside_block = "warn"
 tests_outside_test_module = "warn"
 unnecessary_self_imports = "warn"
 wildcard_enum_match_arm = "warn"
-```bash
+
+```
 
 ---
 
@@ -103,6 +104,7 @@ wildcard_enum_match_arm = "warn"
 The project's [clippy.toml](../../clippy.toml) is already configured:
 
 ```toml
+
 cognitive-complexity-threshold = 30    # Max cognitive complexity per function
 too-many-lines-threshold = 150         # Max lines per function
 enum-variant-size-threshold = 200      # Trigger large_enum_variant above this
@@ -112,6 +114,7 @@ missing-docs-in-crate-items = false    # Don't require docs on all crate items
 trivial-copy-size-limit = 8            # Stack size threshold for pass-by-value
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
 msrv = "1.88.0"                        # Minimum supported Rust version
+
 ```
 
 **Additional options to consider:**
@@ -131,7 +134,8 @@ disallowed-methods = [
 
 # Single-char variable names allowed
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
-```rust
+
+```
 
 ---
 
@@ -200,6 +204,7 @@ dbg!(value);
 
 // ✅ Fix: use tracing
 tracing::debug!(?value, "debugging value");
+
 ```
 
 ---
@@ -207,6 +212,7 @@ tracing::debug!(?value, "debugging value");
 ## Suppressing Lints Properly
 
 ```rust
+
 // ✅ Suppress at the item level with a reason
 #[allow(clippy::too_many_arguments)] // Builder pattern not yet extracted
 fn create_room(
@@ -225,16 +231,18 @@ let re = Regex::new(r"^\d+$").unwrap();
 
 // ❌ NEVER suppress entire categories
 #[allow(clippy::pedantic)]  // Hides real issues
-```bash
+```
 
 ---
 
 ## `cargo clippy --fix`
 
-See [rust-refactoring-guide](./rust-refactoring-guide.md) for the full `clippy --fix` workflow.
+See [Rust-refactoring-guide](./rust-refactoring-guide.md) for the full `clippy --fix` workflow.
 
 ```bash
+
 cargo clippy --all-targets --all-features --fix --allow-dirty
+
 ```
 
 Handles well: redundant clones, match simplification, unnecessary borrows, `use` suggestions. Always review with `git diff` after.
@@ -246,10 +254,12 @@ Handles well: redundant clones, match simplification, unnecessary borrows, `use`
 The project workflow runs:
 
 ```bash
+
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
-```rust
+
+```
 
 Use `-D warnings` in CI to fail on any lint warning.
 
@@ -288,6 +298,7 @@ mod tests {
         assert_eq!(room.code().as_str(), "ABC123");
     }
 }
+
 ```
 
 ---
@@ -309,7 +320,7 @@ mod tests {
 
 ## Related Skills
 
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Code patterns that satisfy lints
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Code patterns that satisfy lints
 - [defensive-programming](./defensive-programming.md) — Patterns enforced by restriction lints
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Using `cargo clippy --fix` for automated fixes
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Using `cargo clippy --fix` for automated fixes
 - [testing-strategies](./testing-strategies.md) — CI pipeline integration

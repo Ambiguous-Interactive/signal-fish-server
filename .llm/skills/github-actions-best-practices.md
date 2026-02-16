@@ -1,6 +1,6 @@
 # Skill: GitHub Actions & CI/CD Best Practices
 
-<!-- trigger: github actions, workflow, ci, cd, pipeline, bash, awk, shell script, continuous integration
+<!-- trigger: GitHub actions, workflow, ci, cd, pipeline, bash, awk, shell script, continuous integration
      | Patterns for writing robust CI/CD workflows and avoiding common pitfalls | Infrastructure -->
 
 **Trigger**: When writing GitHub Actions workflows, Bash scripts in CI, or debugging pipeline failures.
@@ -21,7 +21,7 @@
 
 - Container-specific configuration (see [container-and-deployment](./container-and-deployment.md))
 - Rust-specific testing (see [testing-strategies](./testing-strategies.md))
-- Application code (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Application code (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 
 ## Quick Reference: Preventative Measures
 
@@ -70,7 +70,7 @@
 - Lychee `include` is for URL regex filtering, not file glob patterns
 - Always verify case-sensitive filesystem assumptions on Linux
 - Documentation links must match actual filenames exactly
-- Use retry loops with `docker logs` dumps for smoke tests
+- Use retry loops with `Docker logs` dumps for smoke tests
 - Pin all action versions with SHA256 digests
 - Document magic numbers: timeout values, AWK field offsets, counter file formats
 
@@ -91,15 +91,19 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 ```yaml
 # ❌ WRONG: Python caching for a Rust project
 - uses: actions/cache@v4
+
   with:
     path: ~/.cache/pip           # Python cache directory
     key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}  # Python dependency file
 
 - name: Build Rust project
+
   run: cargo build               # ← Rust, not Python!
-```bash
+
+```
 
 **Symptoms:**
+
 - `ERROR: Cache entry deserialization failed, entry ignored`
 - `ERROR: Unable to locate executable file: pip`
 - Cache always misses (slower CI)
@@ -110,10 +114,13 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 ```yaml
 # ❌ WRONG: Rust caching for a Node project
 - uses: Swatinem/rust-cache@v2
+
   # Looks for Cargo.toml, finds nothing, silently does nothing
 
 - name: Build Node project
+
   run: npm run build             # ← Node, not Rust!
+
 ```
 
 ### Solution: Match Configuration to Project Language
@@ -123,15 +130,19 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 ```yaml
 # ✅ CORRECT: Rust-specific caching and tools
 - name: Cache Rust dependencies
+
   uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
   with:
     prefix-key: "rust"
 
 - name: Build Rust project
+
   run: cargo build --locked
-```bash
+
+```
 
 **Rust indicators:**
+
 - Has `Cargo.toml` and `Cargo.lock`
 - Uses `cargo` commands (`cargo build`, `cargo test`)
 - Caches `~/.cargo/`, `target/`
@@ -142,15 +153,19 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 ```yaml
 # ✅ CORRECT: Python-specific caching
 - uses: actions/setup-python@v5
+
   with:
     python-version: '3.11'
     cache: 'pip'  # Automatically caches pip dependencies
 
 - name: Install dependencies
+
   run: pip install -r requirements.txt
 
 - name: Build Python project
+
   run: python setup.py build
+
 ```
 
 #### Node Projects (CORRECT)
@@ -158,16 +173,20 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 ```yaml
 # ✅ CORRECT: Node-specific caching
 - uses: actions/setup-node@v4
+
   with:
     node-version: '20'
     cache: 'npm'  # Automatically caches npm dependencies
 
 - name: Install dependencies
+
   run: npm ci
 
 - name: Build Node project
+
   run: npm run build
-```bash
+
+```
 
 ### Detection: Identifying Ecosystem Mismatches
 
@@ -185,6 +204,7 @@ grep -r "mvn\|gradle\|pom\.xml" .                   # Java/Maven
 
 # For Rust projects, these SHOULD appear:
 grep -r "cargo\|Cargo\.toml\|rust-cache" .          # Rust
+
 ```
 
 **Red flags:**
@@ -205,13 +225,19 @@ grep -r "cargo\|Cargo\.toml\|rust-cache" .          # Rust
 Before committing a new or modified workflow:
 
 - [ ] **Identify project language**: Check repository for `Cargo.toml` (Rust), `package.json` (Node),
+
       `requirements.txt` (Python), etc.
+
 - [ ] **Verify cache configuration**: Cache paths must match project language (see table above)
 - [ ] **Check hash files in cache keys**: Files referenced in `hashFiles()` must exist
 - [ ] **Validate tool/action selection**: Use language-appropriate actions
+
       (rust-cache for Rust, setup-python for Python, etc.)
+
 - [ ] **Review dependency install commands**: Must match project language
+
       (`cargo build`, not `pip install`)
+
 - [ ] **Test workflow with cold cache**: Ensure workflow works even when cache misses
 
 **Workflow template validation:**
@@ -240,7 +266,8 @@ for pattern in "${WRONG_PATTERNS[@]}"; do
 done
 
 echo "✓ Workflow ecosystem configuration validated"
-```bash
+
+```
 
 ### SHA Pinning for Actions
 
@@ -254,6 +281,8 @@ echo "✓ Workflow ecosystem configuration validated"
 # ✅ CORRECT: SHA256 digest pinning
 - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 - uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+
 ```
 
 **Benefits:**
@@ -268,6 +297,7 @@ echo "✓ Workflow ecosystem configuration validated"
 # GitHub Actions: Go to releases, find commit SHA
 # Or use gh CLI:
 gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
+
 ```
 
 ### Enforcing SHA Pinning with Tests
@@ -278,6 +308,7 @@ security risks.
 **Solution:** Add automated test to enforce SHA pinning:
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 #[test]
@@ -334,6 +365,7 @@ fn test_all_github_actions_are_sha_pinned() {
         unpinned_actions.join("\n")
     );
 }
+
 ```
 
 **Benefits:**
@@ -355,6 +387,8 @@ fn test_all_github_actions_are_sha_pinned() {
 # ❌ BAD: SHA without context
 - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 - uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14
+
+
 ```
 
 **Why version comments matter:**
@@ -386,6 +420,7 @@ FROM rust:1.87-alpine        # Works - official Docker Hub tag
 # ❌ WRONG: Full semantic version (X.Y.Z)
 FROM rust:1.88.0-bookworm    # Tag doesn't exist on Docker Hub
 FROM rust:1.87.0-alpine      # Tag doesn't exist on Docker Hub
+
 ```
 
 **Why Docker Hub uses X.Y tags:**
@@ -418,11 +453,13 @@ if [ "$DOCKERFILE_VERSION" != "$CARGO_VERSION" ]; then
   echo "ERROR: Dockerfile Rust version ($DOCKERFILE_VERSION) doesn't match Cargo.toml ($CARGO_VERSION)"
   exit 1
 fi
+
 ```
 
 **C. CI validation that handles both formats:**
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 fn normalize_version(version: &str) -> String {
@@ -458,6 +495,7 @@ fn test_dockerfile_rust_version_matches_msrv() {
         normalized_cargo, normalized_dockerfile
     );
 }
+
 ```
 
 ### When to Use Full Versions vs Shortened Versions
@@ -485,6 +523,7 @@ FROM Rust:1.88                 # Default (Debian bookworm)
 # NOT available on Docker Hub
 FROM Rust:1.88.0-bookworm      # ❌ Won't work
 FROM Rust:1.88.0               # ❌ Won't work
+
 ```
 
 **Check available tags:**
@@ -494,6 +533,7 @@ FROM Rust:1.88.0               # ❌ Won't work
 docker search Rust --limit 5
 docker pull Rust:1.88-bookworm  # Works
 docker pull Rust:1.88.0-bookworm  # Error: manifest unknown
+
 ```
 
 ### Benefits of Docker Hub Shortened Format
@@ -557,6 +597,7 @@ FROM Rust:1.88-bookworm AS chef
 #          ^^^^ Shortened format for Docker Hub (automatically includes patches)
 RUN cargo install cargo-chef --locked
 WORKDIR /app
+
 ```
 
 ### Real-World Example: The Fix
@@ -572,7 +613,9 @@ FROM Rust:1.88.0-bookworm AS chef
 **Error:**
 
 ```text
+
 ERROR: manifest for Rust:1.88.0-bookworm not found
+
 ```
 
 **After (CORRECT):**
@@ -622,6 +665,7 @@ awk '
   # Entire block arrives as one record
   validate "$block"
 done
+
 ```
 
 ### Multi-Field AWK Output with NUL Delimiters
@@ -629,6 +673,7 @@ done
 When you need multiple fields (e.g., line number, attributes, content), use a custom field separator that won't appear in content:
 
 ```bash
+
 awk '
   /^```rust(,.*)?$/ {
     in_block=1
@@ -659,7 +704,8 @@ awk '
   echo "Processing block at line $line_num with attributes: $attributes"
   echo "$content" | validate_code
 done
-```rust
+
+```
 
 ### AWK Portability: gawk vs mawk
 
@@ -678,6 +724,7 @@ if (match($0, /pattern/, arr))
 printf "%s%c", content, 0
 # Use sub() instead of match() for extraction
 sub(/pattern/, "", var)
+
 ```
 
 **Why This Matters:**
@@ -689,7 +736,7 @@ sub(/pattern/, "", var)
 
 ### AWK Pattern Portability: ERE vs Prefix Matching
 
-**Critical Issue**: Complex AWK patterns with alternation (e.g., `/^```(rust|Rust)(,.*)?$/`)
+**Critical Issue**: Complex AWK patterns with alternation (e.g., `/^```(Rust|Rust)(,.*)?$/`)
 can behave differently across AWK implementations. Prefix patterns are more portable.
 
 #### The Problem: Alternation and Optional Groups
@@ -701,6 +748,7 @@ can behave differently across AWK implementations. Prefix patterns are more port
   # BUT: Doesn't match ```rust ignore (space instead of comma)
   # AND: Fails on ```rust,no_run or other valid fence formats
 }
+
 ```
 
 **Issues with exact pattern matching:**
@@ -727,11 +775,12 @@ can behave differently across AWK implementations. Prefix patterns are more port
 
   next
 }
+
 ```
 
 **Benefits of prefix matching:**
 
-1. **Flexible fence formats** - Works with: `rust,ignore`, `rust ignore`, `Rust,no_run`, etc.
+1. **Flexible fence formats** - Works with: `Rust,ignore`, `Rust ignore`, `Rust,no_run`, etc.
 2. **Future-proof** - New attribute formats automatically supported
 3. **Portable** - Uses POSIX `sub()` instead of gawk-specific `match()`
 4. **Maintainable** - Single pattern handles all variations
@@ -747,11 +796,12 @@ can behave differently across AWK implementations. Prefix patterns are more port
   # Fails on: ```rust ignore (space separator)
   # Fails on: ```rust,ignore no_run (multiple attributes)
 }
+
 ```
 
 **Problems encountered:**
 
-- Fence format: ` ```rust ignore` (space, not comma) didn't match
+- Fence format: ` ```Rust ignore` (space, not comma) didn't match
 - Test suite had 119 code blocks with various fence formats
 - Pattern needed constant updates for new attribute styles
 
@@ -767,12 +817,13 @@ can behave differently across AWK implementations. Prefix patterns are more port
   sub(/^```[Rr]ust,?/, "", attrs)  # Flexible attribute extraction
   next
 }
+
 ```
 
 **Results:**
 
 - All 119 test code blocks now validate correctly
-- Works with: `rust,ignore`, `rust ignore`, `Rust,no_run`, `rust,edition2021`
+- Works with: `Rust,ignore`, `Rust ignore`, `Rust,no_run`, `Rust,edition2021`
 - Future fence formats automatically supported
 - No need to update pattern for new attribute styles
 
@@ -782,8 +833,8 @@ can behave differently across AWK implementations. Prefix patterns are more port
 |--------------------------------|--------------|------------------------|--------------------------------|
 | Code fence detection           | Prefix       | `/^```[Rr]ust/`        | Flexible attribute handling    |
 | Closing fence                  | Exact        | `/^```$/`              | Must match exactly (no prefix) |
-| Language detection (no attrs)  | Exact        | `/^```rust$/`          | Only plain code blocks         |
-| Strict validation              | Exact        | `/^```rust,ignore$/`   | Enforce specific format        |
+| Language detection (no attrs)  | Exact        | `/^```Rust$/`          | Only plain code blocks         |
+| Strict validation              | Exact        | `/^```Rust,ignore$/`   | Enforce specific format        |
 | General extraction             | Prefix       | `/^```python/`         | Handle any Python fence        |
 
 #### Testing AWK Patterns
@@ -838,6 +889,7 @@ for fence in "${test_fences[@]}"; do
     echo "✗ $fence"
   fi
 done
+
 ```
 
 #### Documentation Pattern
@@ -861,6 +913,7 @@ awk '
   }
   # ... rest of AWK script
 '
+
 ```
 
 ### Key AWK Patterns
@@ -894,7 +947,8 @@ if (match($0, /```rust,(.*)/, arr)) {
 # ✅ CORRECT (POSIX-compatible):
 attrs = $0
 sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, leaving only attributes
-```bash
+
+```
 
 ---
 
@@ -905,17 +959,21 @@ sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, leaving only attributes
 GitHub Actions workflows should validate their own inline bash scripts using shellcheck:
 
 ```yaml
+
 jobs:
   shellcheck-workflow:
     name: Shellcheck Workflow Scripts
     runs-on: ubuntu-latest
     steps:
+
       - uses: actions/checkout@<SHA>
 
       - name: Install shellcheck
+
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Extract and validate inline shell scripts
+
         run: |
           set -euo pipefail
           TEMP_DIR=$(mktemp -d)
@@ -933,6 +991,7 @@ jobs:
             echo "✗ Shellcheck found issues"
             exit 1
           fi
+
 ```
 
 ### Variable Quoting Best Practices
@@ -953,7 +1012,8 @@ rm "$TEMP_DIR"/*.txt         # Quote variable, not glob
 # ✅ CORRECT: Arrays for multiple arguments
 files=("file1.txt" "file with spaces.txt")
 cat "${files[@]}"            # Proper array expansion
-```bash
+
+```
 
 ### Common Shellcheck Warnings in CI
 
@@ -967,6 +1027,7 @@ file=$FILE_PATH
 # ✅ CORRECT
 total="$COUNTER"
 file="$FILE_PATH"
+
 ```
 
 #### SC2034: Unused variable
@@ -976,7 +1037,8 @@ file="$FILE_PATH"
 # Suppress with comment:
 # shellcheck disable=SC2034
 EXAMPLE_VAR="for documentation only"
-```bash
+
+```
 
 #### SC2046: Unquoted command substitution
 
@@ -989,6 +1051,7 @@ cat $files
 while IFS= read -r file; do
   cat "$file"
 done < <(find . -name "*.txt")
+
 ```
 
 ### Shellcheck + AWK Limitations
@@ -1002,7 +1065,8 @@ awk '
   BEGIN { print "hello" }    # Shellcheck ignores this
   { invalid_awk_syntax }     # Shellcheck won't catch this
 ' file.txt
-```bash
+
+```
 
 **Solution**: AWK scripts are validated through actual execution in CI. If an AWK script has syntax errors, the workflow will fail at runtime.
 
@@ -1021,6 +1085,7 @@ for file in *.md; do
   total=$((total + 1))
   validate "$file"
 done
+
 ```
 
 ---
@@ -1043,7 +1108,8 @@ done
 
 # TOTAL and FAILED are still 0 here — changes were in subshell!
 echo "Failed: $FAILED / $TOTAL"
-```bash
+
+```
 
 ### The Solution: File-Based Counters
 
@@ -1075,6 +1141,7 @@ echo "Failed: $failed / $total"
 if [ $failed -gt 0 ]; then
   exit 1
 fi
+
 ```
 
 ### Alternative: Process Substitution (No Subshell)
@@ -1092,11 +1159,12 @@ while read -r file; do
 done < <(find . -name "*.md")
 
 echo "Failed: $FAILED / $TOTAL"
-```bash
+
+```
 
 ---
 
-## 6. Lychee Link Checker Configuration
+## 6. Lychee Link Checker Configuration and Best Practices
 
 ### The Problem
 
@@ -1108,6 +1176,7 @@ include = [
     "**/*.md",
     "src/**/*.rs",
 ]
+
 ```
 
 ### The Solution: Use Command-Line Args for File Selection
@@ -1117,11 +1186,13 @@ Specify file patterns as CLI arguments in the workflow, not in the config file:
 ```yaml
 # ✅ CORRECT: File patterns in workflow args
 - name: Link Checker
+
   uses: lycheeverse/lychee-action@v2.7.0
   with:
     # File patterns are CLI args, NOT in .lychee.toml
     args: --verbose --no-progress --cache --max-cache-age 7d './**/*.md' './**/*.rs' './**/*.toml' --config .lychee.toml
-```bash
+
+```
 
 ### Lychee Config (.lychee.toml) Best Practices
 
@@ -1156,6 +1227,7 @@ exclude_path = [
 
 # Exclude local file:// links
 exclude_link_local = true
+
 ```
 
 ### When Lychee Fails: Case-Sensitive Paths
@@ -1163,14 +1235,17 @@ exclude_link_local = true
 Lychee follows filesystem case sensitivity. On Linux, `Skills/foo.md` ≠ `skills/foo.md`.
 
 ```markdown
+
 <!-- ❌ WRONG: Case mismatch breaks on Linux -->
 See [testing guide](Skills/testing-strategies.md)
 
 <!-- ✅ CORRECT: Exact case match -->
 See [testing guide](skills/testing-strategies.md)
-```bash
+
+```
 
 **Prevention:**
+
 - Verify link case matches actual filename case exactly
 - Use tab completion when creating links
 - Test on Linux before pushing (WSL, Docker, or CI)
@@ -1191,6 +1266,7 @@ ls Skills/testing.md    # Finds skills/testing.md
 
 # CI (Linux): Fails
 ls Skills/testing.md    # No such file or directory
+
 ```
 
 ### Prevention Checklist
@@ -1226,7 +1302,8 @@ find . -name "*.md" -not -path "./target/*" | while read -r md_file; do
     fi
   done
 done
-```text
+
+```
 
 ---
 
@@ -1241,6 +1318,7 @@ Bare `sleep` followed by `curl` is unreliable — the server may not be ready, c
 docker run -d --name test-server -p 3536:3536 myapp:ci
 sleep 3
 curl -f http://localhost:3536/health  # May fail if server takes >3s
+
 ```
 
 ### The Solution: Retry Loop with Diagnostics
@@ -1265,14 +1343,19 @@ echo "ERROR: Server failed to become healthy after 30s"
 echo "=== Docker logs ==="
 docker logs test-server
 exit 1
-```text
+
+```
 
 ### Always Include Cleanup
 
 ```yaml
+
+
 - name: Cleanup smoke test
+
   if: always()
   run: docker stop test-server && docker rm test-server || true
+
 ```
 
 ---
@@ -1293,6 +1376,8 @@ Using mutable tags (`@v2`, `@main`) allows actions to change behavior between ru
 # ✅ CORRECT: SHA256 digest is cryptographically immutable
 - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 - uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
+
+
 ```
 
 **How to get SHA256 digests:**
@@ -1301,9 +1386,11 @@ Using mutable tags (`@v2`, `@main`) allows actions to change behavior between ru
 # GitHub Actions: Go to releases, find commit SHA
 # Or use gh CLI:
 gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
+
 ```
 
 **Benefits:**
+
 - Reproducible builds (same digest = same code)
 - Security (prevents tag hijacking)
 - Auditable (comment shows human-readable version)
@@ -1324,7 +1411,8 @@ jobs:
 jobs:
   test:
     timeout-minutes: 15  # Generous timeout for building docs with all features
-```bash
+
+```
 
 ### Document AWK Field Extraction
 
@@ -1337,6 +1425,7 @@ print substr($0, 11)
 # (6 spaces for YAML step level + 4 for script content)
 # plus line number + tab from workflow YAML structure = 11 characters to skip
 print substr($0, 11)
+
 ```
 
 ### Document Counter File Formats
@@ -1349,7 +1438,8 @@ echo "0 0 0 0" > "$COUNTER_FILE"
 # Counter file format: 4 space-separated integers (total validated skipped failed)
 # Example: "10 7 2 1" means 10 total blocks, 7 validated, 2 skipped, 1 failed
 echo "0 0 0 0" > "$COUNTER_FILE"
-```text
+
+```
 
 ---
 
@@ -1358,23 +1448,29 @@ echo "0 0 0 0" > "$COUNTER_FILE"
 ### Trigger on Relevant Changes Only
 
 ```yaml
+
 on:
   push:
     branches: [main]
     paths:
+
       - '**/*.md'
       - '**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/this-workflow.yml'
+
   pull_request:
     branches: [main]
     paths:
+
       - '**/*.md'
       - '**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/this-workflow.yml'
+
+
 ```
 
 **Always include the workflow file itself** — changes to the workflow should trigger a run to validate them.
@@ -1382,10 +1478,12 @@ on:
 ### Concurrency Control
 
 ```yaml
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
-```text
+
+```
 
 Prevents duplicate runs on rapid pushes.
 
@@ -1399,6 +1497,7 @@ Prevents duplicate runs on rapid pushes.
 # NEVER omit permissions — defaults to full write access
 permissions:
   contents: read
+
 ```
 
 ### Grant Only What's Needed
@@ -1409,7 +1508,8 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-```bash
+
+```
 
 ---
 
@@ -1425,6 +1525,7 @@ result=$(command_that_fails | grep foo)  # Grep failure ignored!
 # ✅ CORRECT: Strict error handling
 set -euo pipefail
 result=$(command_that_fails | grep foo)  # Pipeline fails if any stage fails
+
 ```
 
 ### Not Using `trap` for Cleanup
@@ -1439,7 +1540,8 @@ rm -rf "$TEMP_DIR"  # Never runs if process_files fails
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 process_files "$TEMP_DIR"
-```bash
+
+```
 
 ### Hardcoded File Lists
 
@@ -1455,6 +1557,7 @@ find . -type f -name "*.md" \
   -not -path "./.git/*" | while read -r file; do
   validate "$file"
 done
+
 ```
 
 ---
@@ -1464,10 +1567,12 @@ done
 ### Enable Debug Logging
 
 ```yaml
+
 env:
   ACTIONS_STEP_DEBUG: true
   RUNNER_DEBUG: 1
-```bash
+
+```
 
 Or set repository secret `ACTIONS_STEP_DEBUG=true`.
 
@@ -1478,6 +1583,7 @@ Or set repository secret `ACTIONS_STEP_DEBUG=true`.
 echo "DEBUG: total=$total, failed=$failed, file=$file"
 echo "DEBUG: block content:"
 echo "$content" | head -20
+
 ```
 
 ### Use `set -x` Selectively
@@ -1489,7 +1595,8 @@ complicated_pipeline | awk '...' | while read -r x; do
   process "$x"
 done
 set +x
-```rust
+
+```
 
 Full `set -x` in CI creates massive logs — use sparingly.
 
@@ -1502,6 +1609,7 @@ Full `set -x` in CI creates massive logs — use sparingly.
 Instead of waiting for CI to fail, use data-driven tests to validate configuration consistency:
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 #[test]
@@ -1602,6 +1710,7 @@ fn test_typos_config_exists_and_is_valid() {
         ".typos.toml must have [default.extend-words] section"
     );
 }
+
 ```
 
 ### Benefits of Configuration Tests
@@ -1615,6 +1724,7 @@ fn test_typos_config_exists_and_is_valid() {
 **Actionable Errors:**
 
 ```rust
+
 // Error messages include fix instructions
 assert_eq!(
     toolchain_version, msrv,
@@ -1623,7 +1733,8 @@ assert_eq!(
      Found: {toolchain_version}\n\
      Fix: Update rust-toolchain.toml to use channel = \"{msrv}\""
 );
-```rust
+
+```
 
 **Prevents Regression:**
 
@@ -1662,6 +1773,7 @@ fn test_markdownlint_config_exact_content() {
     let content = read_file(".markdownlint.json");
     assert_eq!(content, r#"{"MD040": true, ...}"#); // Too brittle
 }
+
 ```
 
 ### Integration with CI
@@ -1674,7 +1786,8 @@ cargo test --test ci_config_tests
 
 # CI workflow
 cargo test --all-features  # Includes ci_config_tests
-```rust
+
+```
 
 **Fast execution:**
 
@@ -1698,6 +1811,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+
 ```
 
 **Issues:**
@@ -1721,7 +1835,10 @@ on:
     branches: [main]
   schedule:
     # Daily security audit at noon UTC to catch new CVEs
+
     - cron: '0 12 * * *'
+
+
 ```
 
 ### When to Use Scheduled Workflows
@@ -1740,6 +1857,7 @@ on:
 From `/workspaces/signal-fish-server/.github/workflows/ci.yml`:
 
 ```yaml
+
 name: CI
 
 on:
@@ -1749,6 +1867,7 @@ on:
     branches: [main]
   schedule:
     # Daily security audit at noon UTC to catch new CVEs
+
     - cron: '0 12 * * *'
 
 jobs:
@@ -1759,13 +1878,17 @@ jobs:
     # licenses, banned dependencies, and source verification (cargo-deny).
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
+
       - name: Checkout repository
+
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Run cargo-deny
+
         uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
         with:
           arguments: --all-features
+
 ```
 
 **Benefits:**
@@ -1792,6 +1915,8 @@ jobs:
 
 # Every 6 hours
 - cron: '0 */6 * * *'
+
+
 ```
 
 ### Preventing Alert Fatigue
@@ -1802,26 +1927,35 @@ jobs:
 # High priority: Daily security audits
 security-audit:
   schedule:
+
     - cron: '0 12 * * *'  # Daily at noon
 
 # Medium priority: Weekly dependency cleanup
 unused-deps:
   schedule:
+
     - cron: '0 0 * * 1'  # Weekly on Monday
 
 # Low priority: Monthly workflow hygiene
 workflow-hygiene:
   schedule:
+
     - cron: '0 6 1 * *'  # First of month at 6 AM
+
+
 ```
 
 **Add clear comments explaining schedule choices:**
 
 ```yaml
+
 schedule:
   # Daily security audit at noon UTC to catch new CVEs
   # More frequent than code changes because advisory DB updates independently
+
   - cron: '0 12 * * *'
+
+
 ```
 
 ### Notification Configuration
@@ -1829,17 +1963,22 @@ schedule:
 **For scheduled workflows that may fail:**
 
 ```yaml
+
 jobs:
   security-audit:
     runs-on: ubuntu-latest
     steps:
+
       - name: Run cargo-deny
+
         uses: EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15
         with:
           arguments: --all-features
 
       # Send notification on failure (scheduled runs only)
+
       - name: Notify on failure
+
         if: failure() && github.event_name == 'schedule'
         uses: actions/github-script@<SHA>
         with:
@@ -1853,6 +1992,7 @@ jobs:
                      actions/runs/${{ github.run_id }}',
               labels: ['security', 'automated']
             })
+
 ```
 
 ### Best Practices for Scheduled Workflows
@@ -1870,6 +2010,7 @@ jobs:
 ```yaml
 # Test both push/PR and scheduled triggers
 - name: Run security audit
+
   run: |
     if [ "${{ github.event_name }}" = "schedule" ]; then
       echo "Running scheduled security audit (daily check for new CVEs)"
@@ -1877,6 +2018,7 @@ jobs:
       echo "Running security audit (triggered by code change)"
     fi
     cargo deny check advisories
+
 ```
 
 ### Preventing Duplicate Runs
@@ -1884,9 +2026,11 @@ jobs:
 **Use concurrency control to prevent overlap:**
 
 ```yaml
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}
   cancel-in-progress: true
+
 ```
 
 This ensures that:
@@ -1920,7 +2064,7 @@ This ensures that:
 
 - [ ] Lychee file patterns in CLI args, not `.lychee.toml` `include` field
 - [ ] All Markdown links use exact case matching actual filenames
-- [ ] Docker smoke tests use retry loops with `docker logs` on failure
+- [ ] Docker smoke tests use retry loops with `Docker logs` on failure
 - [ ] Action versions pinned with SHA256 digests (not mutable tags)
 - [ ] SHA pins include version comment (e.g., `# v4.2.2`)
 - [ ] Permissions are minimal (`contents: read` by default)

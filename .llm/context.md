@@ -8,7 +8,9 @@
 - **Company:** Ambiguous Interactive
 - **Product:** A lightweight, in-memory WebSocket signaling server for peer-to-peer game networking
 - **Repository:** `signal-fish-server` — extracted from the matchbox-signaling-server with production-ready signaling
+
   stripped down to a single self-contained binary
+
 - **Crate name:** Binary: `signal-fish-server` | Library: `signal_fish_server`
 - **Code name:** Signal Fish
 - **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team. The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon, but our product and infrastructure are our own
@@ -67,11 +69,13 @@ Start here:
     +-- Performance Issue? ----------> /performance-audit
     |                                  skills/rust-performance-optimization.md
     +-- Hosting/Provider/Scaling? ---> skills/graceful-degradation.md
+
 ```
 
 ### Should I Add a Test?
 
 ```text
+
 YES - ALWAYS. Every change requires comprehensive tests.
   +-- Happy path + positive variations
   +-- Negative cases + error conditions
@@ -80,6 +84,7 @@ YES - ALWAYS. Every change requires comprehensive tests.
 
 CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 -> See skills/testing-strategies.md for full methodology.
+
 ```
 
 ---
@@ -87,6 +92,7 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 ## Architecture At-a-Glance
 
 ```text
+
 +-----------------------------------------------------+
 |  CLIENTS: Game Engines | Browser WebRTC | Custom     |
 +------------------------+----------------------------+
@@ -98,6 +104,7 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 |  EnhancedGameServer (Room/Player/Authority Mgmt)     |
 |  Storage: In-Memory Only                             |
 +-----------------------------------------------------+
+
 ```
 
 ---
@@ -109,6 +116,7 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 ```bash
 # Rust changes (ALWAYS run in order)
 cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features
+
 ```
 
 **Zero warnings policy** -- all linters enforce strict compliance. See skill for full table.
@@ -258,16 +266,19 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 {"type": "AuthorityRequest", "data": {"become_authority": true}}
 {"type": "LeaveRoom"}
 {"type": "Ping"}
+
 ```
 
 ### v2 Server Messages
 
 ```json
+
 {"type": "Authenticated", "data": {"server_version": "2.0.0"}}
 {"type": "RoomJoined", "data": {"room_id": "...", "room_code": "ABC123"}}
 {"type": "PlayerJoined", "data": {"player": {"id": "...", "name": "..."}}}
 {"type": "GameData", "data": {"from_player": "...", "data": {}}}
 {"type": "Error", "data": {"reason": "Room is full"}}
+
 ```
 
 ---
@@ -292,6 +303,7 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 ```bash
 RUST_LOG=signal_fish_server=trace cargo run   # Trace logging
 cargo bench                                    # Benchmarks
+
 ```
 
 ### Commit Format: `<type>: <imperative subject>` (feat|fix|perf|test|docs|refactor|chore)
@@ -322,6 +334,7 @@ cargo bench                                    # Benchmarks
 | [graceful-degradation](skills/graceful-degradation.md)               | Reliability patterns: circuit breakers, health checks, graceful shutdown |
 | [manage-skills](skills/manage-skills.md)                             | Creating, editing, and maintaining skill files                           |
 | [mandatory-workflow](skills/mandatory-workflow.md)                   | Mandatory linting, formatting, and validation workflow for every change  |
+| [markdown-best-practices](skills/markdown-best-practices.md)         | Markdown documentation, code blocks, proper nouns, link validation       |
 | [rust-idioms-and-patterns](skills/rust-idioms-and-patterns.md)       | Canonical Rust patterns for writing and reviewing code                   |
 | [rust-refactoring-guide](skills/rust-refactoring-guide.md)           | Safe incremental Rust refactoring workflows                              |
 | [solid-principles-enforcement](skills/solid-principles-enforcement.md) | Enforcing SOLID principles in Rust                                     |

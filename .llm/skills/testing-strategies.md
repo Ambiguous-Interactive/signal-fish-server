@@ -21,7 +21,7 @@
 
 - Configuring testing tools or frameworks (see [testing-tools-and-frameworks](./testing-tools-and-frameworks.md))
 - Production error handling (see [error-handling-guide](./error-handling-guide.md))
-- Benchmark-specific setup (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Benchmark-specific setup (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -64,19 +64,20 @@ mod tests {
         assert_eq!(code.as_str(), "ABC123");
     }
 }
-```text
+
+```
 
 ### Test Naming Convention
 
 ```text
+
 test_<unit>_<condition>_<expected_behavior>
-```
 
 ```rust
 #[test] fn room_code_empty_input_returns_invalid_length() { ... }
 #[test] fn player_join_room_full_returns_room_full_error() { ... }
 #[test] fn broadcast_no_recipients_succeeds_silently() { ... }
-```rust
+```
 
 ---
 
@@ -102,6 +103,7 @@ fn test_room_code_validation() {
         );
     }
 }
+
 ```
 
 Include a `desc` string in every case for clear failure messages.
@@ -137,13 +139,15 @@ async fn test_concurrent_joins() {
         .into_iter().map(|r| r.unwrap()).collect();
     assert!(results.iter().all(|r| r.is_ok()));
 }
-```rust
+
+```
 
 ---
 
 ## Mocking and Test Doubles
 
 ```rust
+
 struct MockDatabase {
     rooms: HashMap<String, Room>,
     should_fail: bool,
@@ -167,6 +171,7 @@ async fn test_join_room_db_failure() {
     let server = GameServer::new(Box::new(db));
     assert!(matches!(server.join_room("ABC123").await, Err(JoinError::Internal(_))));
 }
+
 ```
 
 ---
@@ -190,7 +195,8 @@ async fn test_double_join_same_player() {
     server.join_room_as(&room.code, &player).await.unwrap();
     assert!(matches!(server.join_room_as(&room.code, &player).await, Err(JoinError::AlreadyJoined)));
 }
-```rust
+
+```
 
 Always test: empty collections, Unicode input, zero-value parameters, concurrent access.
 
@@ -220,6 +226,7 @@ async fn test_no_data_race_on_room_state() {
         result.expect("Task panicked");
     }
 }
+
 ```
 
 ---
@@ -227,12 +234,15 @@ async fn test_no_data_race_on_room_state() {
 ## Regression Testing Discipline
 
 ```text
+
+
 1. Bug reported → write a failing test FIRST
 2. Fix the bug → test passes
 3. Test stays forever → prevents regression
-```rust
+
 
 ```rust
+
 // Regression test: Issue #142 — player count not updated on disconnect
 #[tokio::test]
 async fn regression_142_player_count_after_disconnect() {
@@ -245,6 +255,7 @@ async fn regression_142_player_count_after_disconnect() {
     let info = server.room_info(&room.code).await.unwrap();
     assert_eq!(info.player_count, 0, "Player count must be 0 after disconnect");
 }
+
 ```
 
 ---
@@ -254,6 +265,7 @@ async fn regression_142_player_count_after_disconnect() {
 Use `serial_test` (in dev-dependencies) for tests that share global state:
 
 ```rust
+
 use serial_test::serial;
 
 #[tokio::test]
@@ -262,7 +274,8 @@ async fn test_database_migration() {
     // This test modifies shared database state
     // #[serial] ensures no parallel execution
 }
-```rust
+
+```
 
 ---
 
@@ -273,6 +286,7 @@ async fn test_database_migration() {
 Test failures without context are hard to debug:
 
 ```rust
+
 // ❌ BAD: Cryptic failure message
 #[test]
 fn test_msrv_consistency() {
@@ -281,6 +295,7 @@ fn test_msrv_consistency() {
     // left: `1.88`, right: `1.88.0`
     // ← What do I do to fix this?
 }
+
 ```
 
 **Issues:**
@@ -293,6 +308,7 @@ fn test_msrv_consistency() {
 ### The Solution: Actionable Error Messages
 
 ```rust
+
 // ✅ GOOD: Clear, actionable failure message
 #[test]
 fn test_msrv_consistency_across_config_files() {
@@ -313,6 +329,7 @@ fn test_msrv_consistency_across_config_files() {
         msrv_short, dockerfile_short, msrv_short
     );
 }
+
 ```
 
 **Benefits:**
@@ -325,6 +342,7 @@ fn test_msrv_consistency_across_config_files() {
 ### Pattern: Collect All Errors Before Failing
 
 ```rust
+
 // ❌ BAD: Fails on first error (hides other issues)
 #[test]
 fn test_all_config_files_consistent() {
@@ -373,6 +391,7 @@ fn test_all_config_files_consistent() {
         );
     }
 }
+
 ```
 
 ### Pattern: Include Examples in Error Messages
@@ -410,6 +429,7 @@ fn test_github_actions_sha_pinning() {
         unpinned_actions.join("\n")
     );
 }
+
 ```
 
 ### Error Message Checklist
@@ -451,6 +471,7 @@ fn test_dockerfile_rust_version_matches_msrv() {
         normalized_cargo, normalized_dockerfile, normalized_cargo
     );
 }
+
 ```
 
 **This error message includes:**
@@ -499,6 +520,7 @@ fn test_config_with_all_features_loads() {
     let config = Config::from_env().unwrap();
     assert!(config.validate().is_ok());
 }
+
 ```
 
 ### Smoke Test Patterns
@@ -508,6 +530,7 @@ CI smoke tests must verify the complete deployment artifact:
 ```yaml
 # GitHub Actions example
 - name: Smoke test
+
   run: |
     docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
     # Retry loop instead of bare sleep
@@ -523,7 +546,8 @@ CI smoke tests must verify the complete deployment artifact:
     echo "=== Docker logs ==="
     docker logs test-server
     exit 1
-```rust
+
+```
 
 **Key smoke test requirements:**
 
@@ -546,6 +570,7 @@ fn test_skill_links_case_sensitive() {
         );
     }
 }
+
 ```
 
 ### CI-Specific Integration Tests
@@ -572,15 +597,149 @@ mod ci_integration_tests {
         }
     }
 }
-```text
+
+```
+
+### Markdown Validation Tests
+
+Validate markdown quality and link integrity as part of the test suite:
+
+```rust
+#[test]
+fn test_markdown_files_have_language_identifiers() {
+    let markdown_files = find_markdown_files(&repo_root());
+    let mut violations = Vec::new();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        for (line_num, line) in content.lines().enumerate() {
+            // Check for opening code fence without language
+            let fence_marker = "```";
+            if line.trim_start().starts_with(fence_marker) {
+                let fence_content = line.trim_start()
+                    .trim_start_matches('`')
+                    .trim();
+
+                if fence_content.is_empty() {
+                    violations.push(format!(
+                        "{}:{}: Code block missing language identifier (MD040)",
+                        file.display(),
+                        line_num + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Found code blocks without language identifiers:\n{}\n\n\
+         Fix: Add language after opening backticks (e.g., ```rust, ```bash, ```text)",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_markdown_links_case_sensitive() {
+    // Verify all internal markdown links use correct filename case
+    let markdown_files = find_markdown_files(&repo_root());
+    let mut broken_links = Vec::new();
+
+    for md_file in markdown_files {
+        let content = read_file(&md_file);
+        let links = extract_internal_links(&content);
+
+        for (line_num, link) in links {
+            let target = resolve_link_target(&md_file, &link);
+
+            if let Some(target_path) = target {
+                if !target_path.exists() {
+                    broken_links.push(format!(
+                        "{}:{}: Broken link (case sensitivity?): {}",
+                        md_file.display(),
+                        line_num,
+                        link
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        broken_links.is_empty(),
+        "Found broken internal links:\n{}\n\n\
+         Note: Links are case-sensitive on Linux. Verify exact filename case.",
+        broken_links.join("\n")
+    );
+}
+
+#[test]
+fn test_lychee_config_exists() {
+    let lychee_config = repo_root().join(".lychee.toml");
+
+    assert!(
+        lychee_config.exists(),
+        ".lychee.toml is required for link checking in CI"
+    );
+
+    let content = read_file(&lychee_config);
+
+    // Verify critical exclusions are present
+    assert!(
+        content.contains("exclude = ["),
+        ".lychee.toml must have exclusion patterns for placeholder URLs"
+    );
+}
+
+#[test]
+fn test_markdownlint_config_exists() {
+    let config = repo_root().join(".markdownlint.json");
+
+    assert!(
+        config.exists(),
+        ".markdownlint.json is required for markdown linting.\n\
+         Create with: echo '{{\"MD040\": true, \"MD013\": false}}' > .markdownlint.json"
+    );
+}
+
+#[test]
+fn test_typos_config_has_required_sections() {
+    let typos_config = repo_root().join(".typos.toml");
+
+    assert!(
+        typos_config.exists(),
+        ".typos.toml is required for spell checking"
+    );
+
+    let content = read_file(&typos_config);
+
+    assert!(
+        content.contains("[default.extend-words]"),
+        ".typos.toml must have [default.extend-words] section for lowercase technical terms"
+    );
+
+    assert!(
+        content.contains("[default.extend-identifiers]"),
+        ".typos.toml must have [default.extend-identifiers] section for mixed-case company names"
+    );
+}
+```
+
+**Key patterns for markdown validation:**
+
+1. **Data-driven approach**: Test all markdown files, don't hardcode filenames
+2. **Clear error messages**: Include file path, line number, and fix instructions
+3. **Fast execution**: Pure file reading, no external tools
+4. **CI integration**: Run as part of `cargo test`, no special setup needed
 
 ---
 
 ## Related Skills
 
 - [testing-tools-and-frameworks](./testing-tools-and-frameworks.md) — Testing tools, frameworks, and coverage measurement
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Tests must pass before and after refactoring
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Tests must pass before and after refactoring
 - [error-handling-guide](./error-handling-guide.md) — Testing error conditions
 - [defensive-programming](./defensive-programming.md) — Edge cases to test
 - [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
-- [github-actions-best-practices](./github-actions-best-practices.md) — GitHub Actions workflow patterns and debugging
+- [GitHub-actions-best-practices](./github-actions-best-practices.md) — GitHub Actions workflow patterns and debugging

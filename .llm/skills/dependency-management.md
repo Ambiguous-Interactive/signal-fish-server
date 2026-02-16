@@ -19,7 +19,7 @@
 ## When NOT to Use
 
 - Designing APIs for your own crate (see [api-design-guidelines](./api-design-guidelines.md))
-- Performance tuning unrelated to dependencies (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Performance tuning unrelated to dependencies (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -43,7 +43,8 @@ cargo deny check advisories   # Known vulnerabilities
 cargo deny check licenses     # License compliance
 cargo deny check bans         # Banned crates
 cargo deny check sources      # Crate source restrictions
-```bash
+
+```
 
 The deny.toml configures: `vulnerability = "deny"`, `yanked = "deny"`, allowed licenses (MIT, Apache-2.0, BSD, ISC, etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
 
@@ -82,6 +83,7 @@ postgres = ["sqlx", "tokio-postgres", "refinery", "sea-orm"]
 aws-ses = ["aws-config", "aws-sdk-sesv2"]
 aws-cost = ["aws-config", "aws-sdk-costexplorer"]
 kafka = ["rdkafka"]
+
 ```
 
 ### Best Practices
@@ -93,22 +95,26 @@ Put heavy/optional dependencies behind feature flags. Use `#[cfg(feature = "..."
 ### Testing All Feature Combinations
 
 ```bash
+
 cargo test                          # No features
 cargo test --all-features           # All features
 cargo test --features "postgres,kafka"  # Specific combinations
-```rust
+
+```
 
 ---
 
 ## Minimizing Dependency Count
 
 ```rust
+
 // ❌ Adding a crate for one function (once_cell)
 use once_cell::sync::Lazy;
 
 // ✅ Use std (stabilized in Rust 1.80)
 use std::sync::LazyLock;
 static CONFIG: LazyLock<Config> = LazyLock::new(|| load_config());
+
 ```
 
 **Rule of thumb:** If you can write it in <50 lines without sacrificing correctness, don't add a dependency.
@@ -129,7 +135,8 @@ tracing = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-```text
+
+```
 
 ---
 
@@ -149,6 +156,7 @@ cargo install cargo-udeps
 
 # Find unused dependencies and features
 cargo +nightly udeps --all-targets
+
 ```
 
 ### Understanding the Output
@@ -187,7 +195,8 @@ winapi = { version = "0.3", features = ["winuser"], optional = true }
 
 # keep: Build dependency for code generation
 quote = "1.0"
-```text
+
+```
 
 ### Regular Audit Schedule
 
@@ -197,7 +206,9 @@ quote = "1.0"
 # .github/workflows/unused-deps.yml
 on:
   schedule:
+
     - cron: '0 0 * * 1'  # Weekly on Monday at 00:00 UTC
+
   push:
     branches: [main]
   pull_request:
@@ -207,12 +218,16 @@ jobs:
   unused-deps:
     runs-on: ubuntu-latest
     steps:
+
       - uses: actions/checkout@v4
       - run: cargo install cargo-machete
       - run: cargo machete
+
+
 ```
 
 **Benefits:**
+
 - Catches dependencies that become unused over time
 - Prevents accumulation of technical debt
 - Maintains clean, auditable dependency tree
@@ -242,7 +257,7 @@ cargo tree --features                 # Feature usage
 
 # 5. Document findings in issue tracker
 # Create tasks to remove unused deps, upgrade outdated deps
-```rust
+```
 
 ### Handling False Positives
 
@@ -263,11 +278,13 @@ cargo metadata --format-version=1 | jq '.packages[] | select(.name == "dependenc
 **Step 2: Document why it's kept**
 
 ```toml
+
 [dependencies]
 # keep: Used by serde_derive proc macro for deserialization
 # cargo-udeps reports false positive because proc macros are analyzed differently
 serde = { version = "1.0", features = ["derive"] }
-```bash
+
+```
 
 **Step 3: Consider CI configuration**
 
@@ -278,6 +295,7 @@ For known false positives, you can configure tools to ignore them:
 [[skip]]
 package = "serde_derive"
 reason = "Used by serde derive macros"
+
 ```
 
 ### Audit Report Template
@@ -317,17 +335,21 @@ After running audit tools, document findings:
 - [x] Created PR #123 to remove unused dependencies
 - [x] Created PR #124 to document false positive
 - [ ] Schedule next audit: 2026-05-16 (3 months)
-```bash
+
+
+```
 
 ---
 
 ## Keeping Dependencies Up to Date
 
 ```bash
+
 cargo outdated                     # See what's available
 cargo update                       # Update patch versions (safe)
 cargo update -p tokio              # Update specific crate
 cargo outdated --root-deps-only    # Focus on direct deps
+
 ```
 
 **Update workflow:** Update one dep at a time → `cargo check` → `cargo test --all-features` → `cargo deny check` → commit as `deps: update <crate> to <version>`.
@@ -348,7 +370,8 @@ rustls = "=0.23.36"    # Exact version — no automatic updates
 
 # ❌ Don't use "*" wildcard
 serde = "*"             # Any version — breaks reproducibility
-```bash
+
+```
 
 ---
 
@@ -372,6 +395,7 @@ cargo metadata --format-version=1 | jq '.packages[] | select(.name == "rand") | 
 
 # Or check the dependency's Cargo.toml on crates.io or GitHub
 curl -s https://crates.io/api/v1/crates/rand | jq '.crate.rust_version'
+
 ```
 
 ### MSRV Policy
@@ -388,9 +412,11 @@ If a dependency update requires a Rust version newer than the project MSRV:
 **Option 1: Pin to older version** (preferred if possible)
 
 ```toml
+
 [dependencies]
 rand = "=0.9.0"  # Pin to version compatible with current MSRV
-```bash
+
+```
 
 **Option 2: Evaluate alternatives**
 
@@ -416,6 +442,7 @@ cargo tree --all-features | grep -i "requires rustc"
 
 # Run MSRV consistency check
 ./scripts/check-msrv-consistency.sh
+
 ```
 
 See [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) for comprehensive guidance.
@@ -496,5 +523,5 @@ This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "thi
 - [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) — MSRV updates and consistency
 - [clippy-and-linting](./clippy-and-linting.md) — CI integration for dependency checks
 - [supply-chain-security](./supply-chain-security.md) — Dependency security audits
-- [rust-performance-optimization](./rust-performance-optimization.md) — Alternative crate recommendations
+- [Rust-performance-optimization](./rust-performance-optimization.md) — Alternative crate recommendations
 - [testing-strategies](./testing-strategies.md) — Testing with optional dependencies

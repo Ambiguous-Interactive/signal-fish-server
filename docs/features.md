@@ -19,11 +19,13 @@ Create a room by joining without a room code:
     "max_players": 8
   }
 }
+
 ```
 
 Response:
 
 ```json
+
 {
   "type": "RoomJoined",
   "data": {
@@ -41,11 +43,13 @@ Response:
     "current_spectators": []
   }
 }
+
 ```
 
 Players join using the room code:
 
 ```json
+
 {
   "type": "JoinRoom",
   "data": {
@@ -54,6 +58,7 @@ Players join using the room code:
     "player_name": "Player2"
   }
 }
+
 ```
 
 ### Room Limits
@@ -61,16 +66,19 @@ Players join using the room code:
 Configure per-game room limits:
 
 ```json
+
 {
   "server": {
     "max_rooms_per_game": 1000
   }
 }
+
 ```
 
 When auth is enabled, per-app limits apply:
 
 ```json
+
 {
   "security": {
     "authorized_apps": [
@@ -82,6 +90,7 @@ When auth is enabled, per-app limits apply:
     ]
   }
 }
+
 ```
 
 ## Lobby State Machine
@@ -103,15 +112,18 @@ Game in progress.
 ### State Transitions
 
 ```text
+
 Waiting --> Countdown (all players ready)
 Countdown --> Waiting (player unready)
 Countdown --> Playing (countdown complete)
 Playing --> Waiting (manual reset or all players leave)
+
 ```
 
 Clients are notified of state changes:
 
 ```json
+
 {
   "type": "LobbyStateChanged",
   "data": {
@@ -120,6 +132,7 @@ Clients are notified of state changes:
     "all_ready": true
   }
 }
+
 ```
 
 ## Player Ready State
@@ -127,9 +140,11 @@ Clients are notified of state changes:
 Players signal their ready state:
 
 ```json
+
 {
   "type": "PlayerReady"
 }
+
 ```
 
 When all players are ready, the lobby transitions to Countdown, then Playing.
@@ -139,17 +154,20 @@ When all players are ready, the lobby transitions to Countdown, then Playing.
 Players can request game authority (e.g., for server-authoritative gameplay):
 
 ```json
+
 {
   "type": "AuthorityRequest",
   "data": {
     "become_authority": true
   }
 }
+
 ```
 
 When granted, all players are notified:
 
 ```json
+
 {
   "type": "AuthorityChanged",
   "data": {
@@ -157,6 +175,7 @@ When granted, all players are notified:
     "you_are_authority": false
   }
 }
+
 ```
 
 Only one player can hold authority at a time.
@@ -166,6 +185,7 @@ Only one player can hold authority at a time.
 Join rooms as a spectator without participating in gameplay:
 
 ```json
+
 {
   "type": "JoinAsSpectator",
   "data": {
@@ -174,6 +194,7 @@ Join rooms as a spectator without participating in gameplay:
     "spectator_name": "Observer1"
   }
 }
+
 ```
 
 Spectators:
@@ -205,6 +226,7 @@ If the connection is lost, reconnect using the stored credentials:
     "auth_token": "stored-token"
   }
 }
+
 ```
 
 ### Event Replay
@@ -215,6 +237,7 @@ events that occurred during the disconnection window.
 ### Configuration
 
 ```json
+
 {
   "server": {
     "enable_reconnection": true,
@@ -222,6 +245,7 @@ events that occurred during the disconnection window.
     "event_buffer_size": 100
   }
 }
+
 ```
 
 ## Message Batching
@@ -229,6 +253,7 @@ events that occurred during the disconnection window.
 Batch outbound messages for improved throughput.
 
 ```json
+
 {
   "websocket": {
     "enable_batching": true,
@@ -236,6 +261,7 @@ Batch outbound messages for improved throughput.
     "batch_interval_ms": 16
   }
 }
+
 ```
 
 - `batch_size` - Max messages per batch
@@ -248,6 +274,7 @@ Batching is transparent to clients.
 In-memory rate limiting for room creation and join attempts.
 
 ```json
+
 {
   "rate_limit": {
     "max_room_creations": 5,
@@ -255,6 +282,7 @@ In-memory rate limiting for room creation and join attempts.
     "max_join_attempts": 20
   }
 }
+
 ```
 
 - `max_room_creations` - Max rooms per IP per time window
@@ -264,6 +292,7 @@ In-memory rate limiting for room creation and join attempts.
 When auth is enabled, per-app rate limits apply:
 
 ```json
+
 {
   "security": {
     "authorized_apps": [
@@ -274,6 +303,7 @@ When auth is enabled, per-app rate limits apply:
     ]
   }
 }
+
 ```
 
 ## Metrics
@@ -281,12 +311,15 @@ When auth is enabled, per-app rate limits apply:
 ### JSON Metrics
 
 ```bash
+
 curl http://localhost:3536/metrics
+
 ```
 
 Returns:
 
 ```json
+
 {
   "active_rooms": 42,
   "active_players": 156,
@@ -294,12 +327,15 @@ Returns:
   "total_messages_sent": 50000,
   "uptime_seconds": 3600
 }
+
 ```
 
 ### Prometheus Metrics
 
 ```bash
+
 curl http://localhost:3536/metrics/prom
+
 ```
 
 Returns Prometheus text format for scraping.
@@ -309,18 +345,22 @@ Returns Prometheus text format for scraping.
 Protect metrics endpoints:
 
 ```json
+
 {
   "security": {
     "require_metrics_auth": true
   }
 }
+
 ```
 
 Access with:
 
 ```bash
+
 curl -H "Authorization: Bearer app_id:app_secret" \
   http://localhost:3536/metrics
+
 ```
 
 ## Authentication
@@ -328,6 +368,7 @@ curl -H "Authorization: Bearer app_id:app_secret" \
 Optional app-based authentication with per-app limits.
 
 ```json
+
 {
   "security": {
     "require_websocket_auth": true,
@@ -342,6 +383,7 @@ Optional app-based authentication with per-app limits.
     ]
   }
 }
+
 ```
 
 See [Authentication](authentication.md) for full details.
@@ -351,11 +393,13 @@ See [Authentication](authentication.md) for full details.
 Enable MessagePack encoding for game data:
 
 ```json
+
 {
   "protocol": {
     "enable_message_pack_game_data": true
   }
 }
+
 ```
 
 Game data messages can be sent in MessagePack format for reduced bandwidth.
@@ -365,31 +409,37 @@ Game data messages can be sent in MessagePack format for reduced bandwidth.
 Configure allowed origins:
 
 ```json
+
 {
   "security": {
     "cors_origins": "https://yourgame.com"
   }
 }
+
 ```
 
 Multiple origins (comma-separated):
 
 ```json
+
 {
   "security": {
     "cors_origins": "https://game.com,https://beta.game.com"
   }
 }
+
 ```
 
 Allow all (development only):
 
 ```json
+
 {
   "security": {
     "cors_origins": "*"
   }
 }
+
 ```
 
 ## Connection Limits
@@ -397,11 +447,13 @@ Allow all (development only):
 Limit concurrent connections per IP:
 
 ```json
+
 {
   "security": {
     "max_connections_per_ip": 10
   }
 }
+
 ```
 
 ## Message Size Limits
@@ -409,11 +461,13 @@ Limit concurrent connections per IP:
 Limit maximum WebSocket message size:
 
 ```json
+
 {
   "security": {
     "max_message_size": 65536
   }
 }
+
 ```
 
 Messages exceeding this size are rejected.
@@ -423,6 +477,7 @@ Messages exceeding this size are rejected.
 Automatic cleanup of empty and inactive rooms:
 
 ```json
+
 {
   "server": {
     "room_cleanup_interval": 60,
@@ -430,6 +485,7 @@ Automatic cleanup of empty and inactive rooms:
     "inactive_room_timeout": 3600
   }
 }
+
 ```
 
 - `room_cleanup_interval` - Seconds between cleanup sweeps
@@ -441,11 +497,13 @@ Automatic cleanup of empty and inactive rooms:
 Keep-alive mechanism to detect dead connections:
 
 ```json
+
 {
   "server": {
     "ping_timeout": 30
   }
 }
+
 ```
 
 Clients should send periodic `Ping` messages. Server disconnects clients that are silent for longer than `ping_timeout`.
@@ -455,6 +513,7 @@ Clients should send periodic `Ping` messages. Server disconnects clients that ar
 JSON-formatted structured logs for production observability:
 
 ```json
+
 {
   "logging": {
     "enable_file_logging": true,
@@ -464,6 +523,7 @@ JSON-formatted structured logs for production observability:
     "format": "Json"
   }
 }
+
 ```
 
 ## Zero External Dependencies

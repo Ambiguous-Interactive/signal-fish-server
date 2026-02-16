@@ -39,6 +39,7 @@ After fixing multiple CI/CD issues in the Signal Fish Server repository, we iden
 ### Risk Assessment
 
 Without systematic preventative measures, these types of issues will recur as the project evolves:
+
 - CI failures become harder to debug
 - Configuration drift causes mysterious failures
 - Developer productivity decreases
@@ -51,10 +52,12 @@ Implement comprehensive CI/CD preventative measures across six layers:
 ### 1. Workflow Hygiene Validation
 
 **New Files:**
+
 - `/scripts/check-workflow-hygiene.sh` - Standalone validation script
 - `/.github/workflows/workflow-hygiene.yml` - CI integration
 
 **Checks Implemented:**
+
 - **Language-specific caching validation**: Detects Python/Node cache on Rust projects
 - **Nightly toolchain staleness**: Warns at 180 days, errors at 365 days
 - **Workflow self-validation**: Ensures actionlint, yamllint, shellcheck are present
@@ -63,6 +66,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 - **Action pinning**: Validates GitHub Actions are pinned to SHA hashes
 
 **Schedule:**
+
 - Runs on workflow file changes (push/PR to main)
 - Weekly cron job (Monday 06:00 UTC) for proactive staleness detection
 
@@ -71,9 +75,10 @@ Implement comprehensive CI/CD preventative measures across six layers:
 **New File:** `/tests/ci_config_tests.rs`
 
 **Test Coverage:**
+
 - **MSRV consistency**: Validates rust-version matches across Cargo.toml, rust-toolchain.toml, clippy.toml, Dockerfile
 - **Required workflows exist**: Ensures critical workflows (ci.yml, yaml-lint.yml, etc.) are present
-- **CI workflow jobs**: Validates main CI has required jobs (check, test, deny, msrv, docker)
+- **CI workflow jobs**: Validates main CI has required jobs (check, test, deny, msrv, Docker)
 - **YAML validity**: Basic YAML syntax validation (balanced quotes, required fields)
 - **Cache configuration**: Prevents language-specific cache mismatches
 - **Script permissions**: Ensures shell scripts have executable permissions
@@ -82,6 +87,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 - **Markdownlint configuration**: Validates .markdownlint.json exists and is properly configured
 
 **Integration:**
+
 - Runs as part of `cargo test` (included in standard test suite)
 - Fast execution (< 1 second)
 - Clear, actionable error messages
@@ -89,11 +95,13 @@ Implement comprehensive CI/CD preventative measures across six layers:
 ### 3. Enhanced MSRV Enforcement
 
 **Already Implemented (commit d9eac0f):**
+
 - `/scripts/check-msrv-consistency.sh` - Standalone MSRV validation
 - CI job in `.github/workflows/ci.yml` - MSRV verification job
 - `/.llm/skills/msrv-and-toolchain-management.md` - Comprehensive guide
 
 **Improvements Made:**
+
 - Single source of truth (Cargo.toml `rust-version`)
 - Automated consistency validation across all config files
 - Build and test with exact MSRV in CI
@@ -102,16 +110,19 @@ Implement comprehensive CI/CD preventative measures across six layers:
 ### 4. Markdown Linting and Validation
 
 **New Files:**
+
 - `/scripts/check-markdown.sh` - Local markdown validation script
 - Tests added to `/tests/ci_config_tests.rs` - Markdown validation tests
 
 **Checks Implemented:**
+
 - **MD040 validation**: Ensures all code blocks have language identifiers
 - **Configuration validation**: Validates .markdownlint.json exists and is properly configured
 - **Auto-fix capability**: Script can automatically fix common markdown issues
 - **Test coverage**: Validates markdown files during `cargo test`
 
 **Integration:**
+
 - Pre-commit hook runs markdown linting (if markdownlint-cli2 is installed)
 - CI validates markdown files on every PR
 - VS Code extension recommendations for real-time linting
@@ -119,10 +130,12 @@ Implement comprehensive CI/CD preventative measures across six layers:
 ### 5. Spell Checking Configuration
 
 **Enhanced Files:**
+
 - `.typos.toml` - Comprehensive technical term configuration
 - Tests added to `/tests/ci_config_tests.rs` - Typos config validation
 
 **Configuration Coverage:**
+
 - Rust crate names and tooling terms
 - Build tools and infrastructure (HashiCorp, GitHub, Docker, etc.)
 - Game engines and networking protocols
@@ -130,6 +143,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 - Project-specific terms
 
 **Validation:**
+
 - Test ensures .typos.toml exists and has required sections
 - Warns if common technical terms are missing
 - CI runs typos check on every commit
@@ -137,16 +151,19 @@ Implement comprehensive CI/CD preventative measures across six layers:
 ### 6. Documentation and Guidance
 
 **New Documentation:**
+
 - `/docs/adr/ci-cd-preventative-measures.md` (this document)
 - Enhanced workflow comments explaining cache decisions
 - Nightly toolchain documentation in unused-deps.yml
 - Markdown linting section in `/docs/development.md`
 
 **New VS Code Configuration:**
+
 - `/.vscode/extensions.json` - Recommended extensions for markdown linting and spell checking
 - `/.vscode/settings.json` - Enhanced with markdown formatting and spell check configuration
 
 **Existing Documentation Enhanced:**
+
 - `.llm/skills/msrv-and-toolchain-management.md` - Toolchain management
 - `.llm/skills/github-actions-best-practices.md` - Workflow best practices
 - `.llm/skills/dependency-management.md` - Dependency hygiene
@@ -210,28 +227,33 @@ Implement comprehensive CI/CD preventative measures across six layers:
 ### Workflow Hygiene Script
 
 **Key Features:**
+
 - Color-coded output (info/warn/error)
 - Exit code 0 for warnings, 1 for errors
 - Can run locally or in CI
 - Shellcheck validated (no warnings)
 
 **Example Output:**
+
 ```text
 [OK] No language-specific caching mismatches found
 [OK] unused-deps.yml: Nightly toolchain is recent (< 6 months old)
 [WARN] ci.yml: No timeout-minutes found (consider adding)
 [OK] All 44 actions are pinned to SHA hashes
+
 ```
 
 ### CI Config Tests
 
 **Test Philosophy:**
+
 - **Intent-based**: Test what matters (MSRV consistency), not formatting
 - **Actionable failures**: Error messages include fix instructions
 - **Fast execution**: No external tools, pure Rust file reading
 - **Data-driven**: Easy to add new validation rules
 
 **Example Test:**
+
 ```rust
 #[test]
 fn test_msrv_consistency_across_config_files() {
@@ -241,16 +263,19 @@ fn test_msrv_consistency_across_config_files() {
     // Validate rust-toolchain.toml
     assert_eq!(toolchain_version, msrv, "Fix: Update rust-toolchain.toml");
 }
+
 ```
 
 ### Integration Strategy
 
 **Local Development:**
+
 1. Run `./scripts/check-workflow-hygiene.sh` before pushing workflow changes
 2. Run `cargo test` (includes CI config tests automatically)
 3. Optional: Add to git pre-commit hook
 
 **CI Pipeline:**
+
 1. Workflow hygiene runs on workflow file changes (fast path)
 2. CI config tests run as part of standard test suite
 3. Weekly cron for proactive staleness detection
@@ -369,6 +394,7 @@ ls -la scripts/*.sh
 **Next Review:** 2026-05-16
 
 **Review Checklist:**
+
 - [ ] Are all checks still relevant?
 - [ ] Have new issues emerged that need detection?
 - [ ] Are error messages still clear and actionable?
@@ -378,6 +404,7 @@ ls -la scripts/*.sh
 ---
 
 **Changelog:**
+
 - 2026-02-16: Initial ADR created with comprehensive preventative measures
 - 2026-02-16: Updated with markdown linting and spell checking preventative measures (layers 4-5)
 - 2026-02-16: Fixed HashiCorp typo false positive by adding to [default.extend-identifiers] section

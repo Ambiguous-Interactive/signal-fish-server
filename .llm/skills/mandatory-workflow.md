@@ -43,7 +43,8 @@ cargo test --all-features
 
 # 3. Supply chain checks (run before pushing)
 cargo deny --all-features check            # Advisories, licenses, bans, sources
-```bash
+
+```
 
 ### Pre-Push Validation
 
@@ -51,11 +52,15 @@ cargo deny --all-features check            # Advisories, licenses, bans, sources
 # Always run before pushing
 scripts/check-ci-config.sh           # Catch CI configuration issues
 scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related changes)
+
 ```
 
 - `check-ci-config.sh`: Catches outdated action versions incompatible with current `Cargo.lock`
+
   format (see [supply-chain-security](./supply-chain-security.md))
+
 - `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
+
   `Cargo.toml` (see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
 
 ---
@@ -74,7 +79,8 @@ scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related 
 # Rust toolchain
 rustup component add rustfmt
 rustup component add clippy
-```bash
+
+```
 
 ---
 
@@ -85,6 +91,7 @@ rustup component add clippy
 Suggested commit message format for user:
 
 ```text
+
 <type>: <imperative subject>
 
 feat: add spectator mode to rooms
@@ -93,6 +100,7 @@ perf: reduce allocations in message broadcast
 test: add concurrency tests for room joins
 docs: update protocol documentation
 chore: update MSRV from 1.87.0 to 1.88.0
+
 ```
 
 **When changes are ready:**

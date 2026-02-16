@@ -40,9 +40,11 @@ For each issue found, use this structured format:
 Issue: One-line description of the problem
 Fix: Concrete suggested resolution
 Confidence: high | medium | low
-```rust
+
+```
 
 Severity levels:
+
 - **CRITICAL** — Bugs, security vulnerabilities, data loss, crashes
 - **WARNING** — Logic errors, missing error handling, performance issues
 - **SUGGESTION** — Improvements, better patterns, readability
@@ -78,6 +80,7 @@ room.add_player(player_id);
 // ✅ All paths handled
 let room = rooms.get(&code).ok_or(JoinError::RoomNotFound)?;
 room.add_player(player_id).map_err(JoinError::RoomFull)?;
+
 ```
 
 ---
@@ -123,7 +126,8 @@ async fn load_config() -> Result<Config, ConfigError> {
     let data = tokio::fs::read_to_string("config.json").await?;
     Ok(serde_json::from_str(&data)?)
 }
-```rust
+
+```
 
 ---
 
@@ -197,7 +201,7 @@ For agentic workflows, use a separate subagent for review. See [agentic-workflow
 ## Related Skills
 
 - [solid-principles-enforcement](./solid-principles-enforcement.md) — Detailed SOLID principle guidance
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflows
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflows
 - [defensive-programming](./defensive-programming.md) — Zero runtime panics
 - [error-handling-guide](./error-handling-guide.md) — Proper error propagation
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Subagent review workflows

@@ -16,33 +16,41 @@ See [`config.example.json`](../config.example.json) for all available options.
 {
   "port": 3536
 }
+
 ```
 
 Environment override:
 
 ```bash
+
 SIGNAL_FISH_PORT=8080 cargo run
+
 ```
 
 ### Max Players
 
 ```json
+
 {
   "server": {
     "default_max_players": 8
   }
 }
+
 ```
 
 Environment override:
 
 ```bash
+
 SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
+
 ```
 
 ### Room Limits
 
 ```json
+
 {
   "server": {
     "max_rooms_per_game": 1000,
@@ -50,6 +58,7 @@ SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
     "inactive_room_timeout": 3600
   }
 }
+
 ```
 
 - `max_rooms_per_game` - Maximum concurrent rooms per game name
@@ -59,6 +68,7 @@ SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
 ### Reconnection
 
 ```json
+
 {
   "server": {
     "enable_reconnection": true,
@@ -66,6 +76,7 @@ SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
     "event_buffer_size": 100
   }
 }
+
 ```
 
 - `enable_reconnection` - Enable token-based reconnection (default: true)
@@ -87,6 +98,7 @@ SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=8
 
 # Nested field: rate_limit.max_room_creations
 SIGNAL_FISH_RATE_LIMIT__MAX_ROOM_CREATIONS=10
+
 ```
 
 ## Configuration Reference
@@ -119,10 +131,10 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH_SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`          | `false`   | Require auth token for metrics endpoints               |
 | `SIGNAL_FISH_SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`              | `65536`   | Max WebSocket message size in bytes                    |
 | `SIGNAL_FISH_SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`        | `10`      | Max concurrent connections from one IP                 |
-| `SIGNAL_FISH_WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`              | `true`    | Enable outbound message batching                       |
-| `SIGNAL_FISH_WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`                   | `10`      | Max messages per batch                                 |
-| `SIGNAL_FISH_WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`            | `16`      | Batch flush interval in milliseconds                   |
-| `SIGNAL_FISH_WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`            | `10`      | Seconds to wait for auth after connect                 |
+| `SIGNAL_FISH_WEBSOCKET__ENABLE_BATCHING`         | `WebSocket.enable_batching`              | `true`    | Enable outbound message batching                       |
+| `SIGNAL_FISH_WEBSOCKET__BATCH_SIZE`              | `WebSocket.batch_size`                   | `10`      | Max messages per batch                                 |
+| `SIGNAL_FISH_WEBSOCKET__BATCH_INTERVAL_MS`       | `WebSocket.batch_interval_ms`            | `16`      | Batch flush interval in milliseconds                   |
+| `SIGNAL_FISH_WEBSOCKET__AUTH_TIMEOUT_SECS`       | `WebSocket.auth_timeout_secs`            | `10`      | Seconds to wait for auth after connect                 |
 | `RUST_LOG`                                       | --                                       | `info`    | Standard `tracing` log filter                          |
 
 ## Common Configurations
@@ -144,11 +156,13 @@ Complete reference of all configuration options with environment variable overri
     "require_websocket_auth": false
   }
 }
+
 ```
 
 ### Production
 
 ```json
+
 {
   "port": 3536,
   "server": {
@@ -171,11 +185,13 @@ Complete reference of all configuration options with environment variable overri
     "max_connections_per_ip": 10
   }
 }
+
 ```
 
 ## Rate Limiting
 
 ```json
+
 {
   "rate_limit": {
     "max_room_creations": 5,
@@ -183,6 +199,7 @@ Complete reference of all configuration options with environment variable overri
     "max_join_attempts": 20
   }
 }
+
 ```
 
 - `max_room_creations` - Max room creations per IP per time window
@@ -192,6 +209,7 @@ Complete reference of all configuration options with environment variable overri
 ## Protocol Settings
 
 ```json
+
 {
   "protocol": {
     "max_game_name_length": 64,
@@ -201,11 +219,13 @@ Complete reference of all configuration options with environment variable overri
     "enable_message_pack_game_data": true
   }
 }
+
 ```
 
 ## WebSocket Settings
 
 ```json
+
 {
   "websocket": {
     "enable_batching": true,
@@ -214,6 +234,7 @@ Complete reference of all configuration options with environment variable overri
     "auth_timeout_secs": 10
   }
 }
+
 ```
 
 - `enable_batching` - Batch outbound messages for better throughput
@@ -226,13 +247,17 @@ Complete reference of all configuration options with environment variable overri
 Validate your config without starting the server:
 
 ```bash
+
 cargo run -- --validate-config
+
 ```
 
 Print the resolved config (with environment overrides):
 
 ```bash
+
 cargo run -- --print-config
+
 ```
 
 ## Next Steps

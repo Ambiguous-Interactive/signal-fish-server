@@ -1,6 +1,6 @@
 # Skill: CI/CD Troubleshooting Guide
 
-<!-- trigger: ci failure, ci error, workflow failure, github actions failure, ci debug, cache error, configuration mismatch | Common CI failures and their solutions | Infrastructure -->
+<!-- trigger: ci failure, ci error, workflow failure, GitHub actions failure, ci debug, cache error, configuration mismatch | Common CI failures and their solutions | Infrastructure -->
 
 **Trigger**: When debugging CI/CD pipeline failures, diagnosing workflow issues, or investigating configuration problems.
 
@@ -20,8 +20,8 @@
 
 ## When NOT to Use
 
-- Writing new workflows from scratch (see [github-actions-best-practices](./github-actions-best-practices.md))
-- Performance optimization (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Writing new workflows from scratch (see [GitHub-actions-best-practices](./github-actions-best-practices.md))
+- Performance optimization (see [Rust-performance-optimization](./rust-performance-optimization.md))
 - Security audits (see [supply-chain-security](./supply-chain-security.md))
 
 ---
@@ -58,7 +58,8 @@
 # CI fails with:
 ERROR: Cache entry deserialization failed, entry ignored
 ERROR: Unable to locate executable file: pip
-```bash
+
+```
 
 #### Root Cause
 
@@ -67,11 +68,14 @@ Workflow uses caching/tooling for wrong language ecosystem:
 ```yaml
 # ❌ WRONG: Python caching on a Rust project
 - uses: actions/cache@v4
+
   with:
     path: ~/.cache/pip        # ← Python cache path
     key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
 
 - run: cargo build            # ← Rust project, not Python!
+
+
 ```
 
 #### Solution
@@ -81,11 +85,14 @@ Workflow uses caching/tooling for wrong language ecosystem:
 ```yaml
 # ✅ CORRECT: Rust caching for Rust project
 - uses: Swatinem/rust-cache@v2.7.5
+
   with:
     prefix-key: "rust"
 
 - run: cargo build
-```rust
+
+
+```
 
 #### Prevention Checklist
 
@@ -114,6 +121,7 @@ grep -r "pip\|requirements\.txt\|python" .    # Python patterns
 grep -r "npm\|package\.json\|node" .          # Node patterns
 grep -r "bundle\|Gemfile\|ruby" .             # Ruby patterns
 grep -r "cargo\|Cargo\.toml\|rust" .          # Rust patterns (should be present)
+
 ```
 
 ---
@@ -123,9 +131,11 @@ grep -r "cargo\|Cargo\.toml\|rust" .          # Rust patterns (should be present
 #### Symptom
 
 ```text
+
 ERROR: Cache entry deserialization failed, entry ignored
 WARNING: Failed to restore cache, continuing without cache
-```bash
+
+```
 
 #### Root Causes
 
@@ -141,10 +151,12 @@ WARNING: Failed to restore cache, continuing without cache
 ```yaml
 # Temporary: Add cache-busting suffix to key
 - uses: actions/cache@v4
+
   with:
     path: ~/.cargo
     key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
     #                            ^^^ increment version to bust cache
+
 ```
 
 **Or via GitHub UI:**
@@ -161,14 +173,16 @@ WARNING: Failed to restore cache, continuing without cache
 # ✅ GOOD: Versioned cache key
 key: ${{ runner.os }}-rust-v1-${{ hashFiles('**/Cargo.lock') }}
 #                          ^^^ version allows cache invalidation
-```text
+```
 
 **Use action-managed caching when available:**
 
 ```yaml
 # ✅ BEST: Let Swatinem/rust-cache handle cache management
 - uses: Swatinem/rust-cache@v2.7.5
+
   # Automatically manages cache keys, invalidation, and restoration
+
 ```
 
 ---
@@ -178,13 +192,15 @@ key: ${{ runner.os }}-rust-v1-${{ hashFiles('**/Cargo.lock') }}
 #### Symptom
 
 ```text
+
 error: package `rand v0.10.0` cannot be built because it requires rustc 1.88.0 or newer,
 while the currently active rustc version is 1.87.0
 
 # OR
 
 error[E0658]: use of unstable library feature 'foo'
-```text
+
+```
 
 #### Root Cause
 
@@ -193,8 +209,10 @@ error[E0658]: use of unstable library feature 'foo'
 ```yaml
 # ❌ PROBLEM: Nightly from 360 days ago
 - uses: dtolnay/rust-toolchain@stable
+
   with:
     toolchain: nightly-2025-02-21  # ← 360 days old!
+
 ```
 
 **Why this happens:**
@@ -211,9 +229,11 @@ error[E0658]: use of unstable library feature 'foo'
 ```yaml
 # ✅ CORRECT: Recent nightly (within last 30 days)
 - uses: dtolnay/rust-toolchain@stable
+
   with:
     toolchain: nightly-2026-01-15  # ← 32 days old, acceptable
-```bash
+
+```
 
 **For stable MSRV issues, update MSRV across all files:**
 
@@ -256,7 +276,8 @@ done
 # Check age of Rust stable version
 MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
 rustc --version  # Compare with latest stable
-```text
+
+```
 
 ---
 
@@ -265,6 +286,7 @@ rustc --version  # Compare with latest stable
 #### Symptom
 
 ```text
+
 warning: unused dependency: `futures`
 warning: unused dependency: `async-trait`
 # ... 15+ unused dependencies
@@ -292,7 +314,8 @@ cargo machete
 
 # Find unused dependencies and features (slow, nightly, more thorough)
 cargo +nightly udeps --all-targets
-```rust
+
+```
 
 **Remove confirmed unused dependencies:**
 
@@ -310,6 +333,7 @@ rand = "0.10"
 tokio = "1.49"
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.10"
+
 ```
 
 #### Prevention
@@ -320,15 +344,22 @@ rand = "0.10"
 # .github/workflows/unused-deps.yml
 on:
   schedule:
+
     - cron: '0 0 * * 1'  # Weekly on Monday
-```bash
+
+
+```
 
 **CI enforcement:**
 
 ```yaml
+
+
 - name: Check for unused dependencies
+
   run: cargo machete
   # Fails workflow if unused dependencies detected
+
 ```
 
 **Keep vs Remove Decision Matrix:**
@@ -344,13 +375,15 @@ on:
 **Documentation pattern:**
 
 ```toml
+
 [dependencies]
 # Core async runtime
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros"] }
 
 # keep: Used by serde derive macros (false positive from cargo-udeps)
 serde_derive = "1.0"
-```text
+
+```
 
 ---
 
@@ -359,6 +392,7 @@ serde_derive = "1.0"
 #### Symptom
 
 ```text
+
 Local: cargo test  → ✓ Passes
 CI:    cargo test  → ✗ Fails with compilation errors
 
@@ -366,6 +400,7 @@ CI:    cargo test  → ✗ Fails with compilation errors
 
 Local: cargo test  → ✗ Fails
 CI:    cargo test  → ✓ Passes
+
 ```
 
 #### Root Causes
@@ -379,7 +414,8 @@ rustc 1.89.0
 
 # CI (using MSRV from rust-toolchain.toml)
 rustc 1.88.0
-```text
+
+```
 
 **B. Different feature flags:**
 
@@ -389,6 +425,7 @@ cargo test --all-features   # Tests WITH all features
 
 # CI
 cargo test                  # Tests WITHOUT features
+
 ```
 
 **C. Different OS:**
@@ -399,7 +436,8 @@ use crate::Config;  // finds config.rs, Config.rs, or CONFIG.rs
 
 # CI: Linux (case-sensitive filesystem)
 use crate::Config;  // ONLY finds config.rs (exact match)
-```bash
+
+```
 
 **D. Different environment variables:**
 
@@ -430,7 +468,8 @@ docker run --rm -v $(pwd):/app -w /app rust:1.88-bookworm cargo test
 
 # 4. Clear env vars
 env -i PATH=$PATH HOME=$HOME cargo test
-```text
+
+```
 
 **Identify differences systematically:**
 
@@ -452,7 +491,8 @@ env -i PATH=$PATH HOME=$HOME cargo test
 [toolchain]
 channel = "1.88.0"
 components = ["rustfmt", "clippy"]
-```bash
+
+```
 
 **Test both feature configurations locally:**
 
@@ -461,6 +501,7 @@ components = ["rustfmt", "clippy"]
 cargo test --locked                     # Default features
 cargo test --locked --all-features      # All features
 cargo test --locked --no-default-features  # Minimal features
+
 ```
 
 **Document environment requirements:**
@@ -471,12 +512,16 @@ cargo test --locked --no-default-features  # Minimal features
 ## Environment Setup
 
 Required:
+
 - Rust 1.88.0 (enforced by rust-toolchain.toml)
 - No additional environment variables needed
 
 Optional (for integration tests):
+
 - DATABASE_URL for postgres feature tests
-```text
+
+
+```
 
 ---
 
@@ -485,8 +530,10 @@ Optional (for integration tests):
 #### Symptom
 
 ```text
+
 Local: docker build -t myapp .  → ✓ Success
 CI:    docker build -t myapp .  → ✗ Fails with package not found
+
 ```
 
 #### Root Causes
@@ -496,7 +543,7 @@ CI:    docker build -t myapp .  → ✗ Fails with package not found
 ```dockerfile
 # Local: Has cached layers from previous builds
 # CI: Starts fresh every time
-```bash
+```
 
 **B. Platform differences:**
 
@@ -512,15 +559,19 @@ CI:    docker build -t myapp .  → ✗ Fails with package not found
 COPY . /app  # Includes target/, .git/, etc. (breaks build)
 
 # CI: Fails because copied files interfere
-```text
+```
 
 #### Solution
 
 **Disable Docker build cache in CI:**
 
 ```yaml
+
+
 - name: Build Docker image
+
   run: docker build --no-cache -t myapp:ci .
+
 ```
 
 **Specify platform explicitly:**
@@ -528,7 +579,8 @@ COPY . /app  # Includes target/, .git/, etc. (breaks build)
 ```dockerfile
 # Multi-platform support
 FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS builder
-```text
+
+```
 
 **Improve .dockerignore:**
 
@@ -542,6 +594,7 @@ target/
 .vscode/
 .idea/
 **/.DS_Store
+
 ```
 
 **Test Docker build in clean environment:**
@@ -552,7 +605,8 @@ docker build --no-cache --progress=plain -t test .
 
 # Or use BuildKit (shows more details)
 DOCKER_BUILDKIT=1 docker build --no-cache -t test .
-```bash
+
+```
 
 ---
 
@@ -563,6 +617,7 @@ When CI fails, work through this systematic diagnostic process:
 ### Step 1: Identify Failure Type
 
 ```text
+
 CI Failure
     |
     ├─ Compilation error ──► Check Rust version, dependencies, features
@@ -571,6 +626,7 @@ CI Failure
     ├─ Cache error ────────► Check cache keys, action versions
     ├─ Docker error ───────► Check base image, build context, platform
     └─ Workflow error ─────► Check syntax, permissions, secrets
+
 ```
 
 ### Step 2: Check Recent Changes
@@ -584,7 +640,8 @@ git diff HEAD~1 HEAD -- Cargo.toml Cargo.lock
 
 # Did we change Rust version?
 git diff HEAD~1 HEAD -- rust-toolchain.toml clippy.toml Dockerfile
-```text
+
+```
 
 ### Step 3: Reproduce Locally
 
@@ -597,6 +654,7 @@ git diff HEAD~1 HEAD -- rust-toolchain.toml clippy.toml Dockerfile
 cargo clean
 rustc --version  # Verify matches MSRV
 cargo test --locked --all-features
+
 ```
 
 ### Step 4: Compare Configurations
@@ -608,7 +666,8 @@ cargo test --locked --all-features
 # Check for ecosystem mismatches
 grep -r "pip\|npm\|bundle" .github/workflows/  # Should be empty for Rust-only project
 grep -r "cargo\|rust" .github/workflows/       # Should be present
-```bash
+
+```
 
 ### Step 5: Check Staleness
 
@@ -692,6 +751,7 @@ Before committing workflow changes, verify:
 CI fails with:
 ERROR: Typo found: HashiCorp (did you mean: Hashicorp?)
 ERROR: Typo found in file.md:42: HashiCorp
+
 ```
 
 Even though you've added `hashicorp = "hashicorp"` to `.typos.toml`.
@@ -731,11 +791,13 @@ rustc = "rustc"
 HashiCorp = "HashiCorp"  # Company name (capital H, capital C)
 GitHub = "GitHub"        # Company name (capital H)
 WebSocket = "WebSocket"  # Protocol name (capital W, capital S)
+
 ```
 
 **B. Add both lowercase and mixed-case variants if needed:**
 
 ```toml
+
 [default.extend-words]
 # Lowercase variant (for general use)
 hashicorp = "hashicorp"
@@ -747,6 +809,7 @@ websocket = "websocket"
 HashiCorp = "HashiCorp"
 GitHub = "GitHub"
 WebSocket = "WebSocket"
+
 ```
 
 ### Common Mixed-Case Terms That Need extend-identifiers
@@ -784,11 +847,13 @@ HashiCorp = "HashiCorp"  # Won't work - needs exact case matching
 # ✅ CORRECT: Mixed-case in extend-identifiers
 [default.extend-identifiers]
 HashiCorp = "HashiCorp"  # Works - preserves exact case
+
 ```
 
 **Pattern B: Organize .typos.toml by category:**
 
 ```toml
+
 [default.extend-words]
 # === Rust Crates ===
 tokio = "tokio"
@@ -814,6 +879,7 @@ GitHub = "GitHub"
 # === Protocol Names ===
 WebSocket = "WebSocket"
 WebRTC = "WebRTC"
+
 ```
 
 ### Testing .typos.toml Configuration
@@ -832,11 +898,13 @@ typos --write-changes
 
 # Verify configuration is valid
 typos --dump-config
+
 ```
 
 **Add CI test to validate .typos.toml exists:**
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 #[test]
@@ -880,6 +948,7 @@ fn test_typos_config_has_common_rust_terms() {
         );
     }
 }
+
 ```
 
 ### Key Insights
@@ -915,6 +984,7 @@ dockerfile = "dockerfile"
 [default.extend-identifiers]
 # Proper nouns and company names with mixed case
 HashiCorp = "HashiCorp"  # Company name, proper capitalization
+
 ```
 
 ---
@@ -924,17 +994,20 @@ HashiCorp = "HashiCorp"  # Company name, proper capitalization
 ### Symptom
 
 ```text
+
 CI fails with:
 ERROR: MD040/fenced-code-language: Fenced code blocks should have a language specified
 ERROR: MD060/table-alignment: Table column alignment is inconsistent
 ERROR: typos found: HashiCorp (did you mean: Hashicorp?)
-```bash
+
+```
 
 ### Root Causes
 
 **A. Code blocks without language identifiers:**
 
 ```markdown
+
 ❌ WRONG: Missing language identifier
 
 (triple backticks with no language)
@@ -946,6 +1019,7 @@ some code here
 (triple backticks)bash
 some code here
 (triple backticks)
+
 ```
 
 **B. Spell checker flagging technical terms:**
@@ -955,15 +1029,18 @@ some code here
 Error: Unknown word: HashiCorp
 Error: Unknown word: WebSocket
 Error: Unknown word: rustc
-```text
+
+```
 
 **C. Table formatting inconsistencies:**
 
 ```markdown
+
 ❌ WRONG: Inconsistent table column alignment
 | Column | Value |
 |--------|-------|
 |  foo   | bar  |
+
 ```
 
 **D. Markdown linting not run locally:**
@@ -986,7 +1063,8 @@ grep -r '^```$' --include="*.md" .
 
 # Automated fix with markdownlint-cli2:
 ./scripts/check-markdown.sh fix
-```bash
+
+```
 
 **B. Configure spell checker to whitelist technical terms:**
 
@@ -998,6 +1076,7 @@ websocket = "websocket"  # WebSocket protocol
 rustc = "rustc"          # Rust compiler
 axum = "axum"            # Axum web framework
 tokio = "tokio"          # Tokio async runtime
+
 ```
 
 **C. Use automated markdown formatter:**
@@ -1005,7 +1084,8 @@ tokio = "tokio"          # Tokio async runtime
 ```bash
 # Auto-fix table alignment and other issues
 markdownlint-cli2 --fix '**/*.md' '#target/**' '#third_party/**'
-```bash
+
+```
 
 **D. Set up local validation tools:**
 
@@ -1039,11 +1119,13 @@ fi
 
 # Check markdown files (excluding build artifacts)
 markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'
-```rust
+
+```
 
 **Add CI config validation tests:**
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 #[test]
@@ -1107,6 +1189,7 @@ fn test_markdownlint_config_exists() {
         ".markdownlint.json must include MD040 rule"
     );
 }
+
 ```
 
 **Document in pre-commit hook:**
@@ -1125,11 +1208,13 @@ if command -v markdownlint-cli2 >/dev/null 2>&1; then
 else
     echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
 fi
-```bash
+
+```
 
 **Add VS Code integration:**
 
 ```json
+
 // .vscode/extensions.json
 {
   "recommendations": [
@@ -1152,6 +1237,7 @@ fi
     "WebSocket"
   ]
 }
+
 ```
 
 ### Key Patterns
@@ -1164,7 +1250,8 @@ markdownlint-cli2 'docs/**/*.md'
 
 # ✅ CORRECT: Checks all markdown files in repository
 markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'
-```bash
+
+```
 
 **Pattern B: Markdown linting should be part of the standard workflow:**
 
@@ -1174,23 +1261,29 @@ jobs:
   markdownlint:
     runs-on: ubuntu-latest
     steps:
+
       - uses: actions/checkout@<SHA>
 
       - name: Setup Node.js
+
         uses: actions/setup-node@<SHA>
         with:
           node-version: '20'
 
       - name: Install markdownlint-cli2
+
         run: npm install -g markdownlint-cli2
 
       - name: Check markdown files
+
         run: markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'
+
 ```
 
 **Pattern C: Configuration files need validation tests:**
 
 ```rust
+
 // Always test that required config files exist and are valid
 #[test]
 fn test_required_config_files_exist() {
@@ -1198,7 +1291,8 @@ fn test_required_config_files_exist() {
     assert!(Path::new(".markdownlint.json").exists());
     assert!(Path::new(".githooks/pre-commit").exists());
 }
-```bash
+
+```
 
 **Pattern D: Auto-fix capability is essential:**
 
@@ -1206,6 +1300,7 @@ fn test_required_config_files_exist() {
 # Always provide an auto-fix option for markdown issues
 ./scripts/check-markdown.sh       # Check only
 ./scripts/check-markdown.sh fix   # Auto-fix where possible
+
 ```
 
 ### Common Markdown Linting Rules
@@ -1251,11 +1346,13 @@ api = "api"
 json = "json"
 yaml = "yaml"
 toml = "toml"
-```bash
+
+```
 
 **Organization-specific terms:**
 
 ```toml
+
 [default.extend-words]
 # Project-specific terms
 matchbox = "matchbox"
@@ -1263,11 +1360,207 @@ signalfish = "signalfish"
 
 # Company names
 ambiguous = "ambiguous"
+
 ```
 
 ---
 
-## Pattern 10: cargo-deny CVSS 4.0 Parsing Issue
+## Pattern 10: Link Check Failures (lychee)
+
+### Symptom
+
+```text
+CI fails with:
+ERROR: Failed to check links in documentation
+✗ [404] https://example.com/broken-link | docs/guide.md:42:15
+✗ [FILE] docs/missing-file.md | README.md:10:5
+```
+
+### Root Causes
+
+**A. Placeholder URLs in test fixtures or documentation examples:**
+
+```markdown
+<!-- Documentation example that shouldn't be validated -->
+Example error message format:
+  Broken link: https://github.com/owner/repo/issues/123
+```
+
+**B. Case-sensitive path mismatch (Linux vs macOS/Windows):**
+
+```markdown
+<!-- ❌ WRONG: Case mismatch -->
+See [testing guide](Skills/testing-strategies.md)
+<!-- Actual file: skills/testing-strategies.md -->
+```
+
+**C. External link rot (third-party sites changed/removed):**
+
+```text
+✗ [404] https://external-site.com/old-path
+```
+
+**D. Relative path errors:**
+
+```markdown
+<!-- ❌ WRONG: Incorrect relative path -->
+[config](config.md)  <!-- Should be: ../config.md or ./docs/config.md -->
+```
+
+### Solution
+
+**A. Exclude placeholder URLs by pattern in `.lychee.toml`:**
+
+```toml
+# .lychee.toml
+exclude = [
+    # Test fixture and example URLs (from tests/ci_config_tests.rs)
+    "https://github.com/owner/repo/*",     # Template placeholder
+    "https://github.com/%7B%7B%7D/*",      # URL-encoded {{{}}} placeholder
+    "https://github.com/{}/*",             # Brace placeholder
+    "https://example.com/*",               # RFC 2606 example domain
+    "http://localhost*",                   # Local development
+]
+```
+
+**Why exclude by pattern, not file path:**
+- Allows placeholder URLs in test fixtures without excluding the entire file
+- Other links in the same file are still validated
+- Prevents false positives from documentation examples
+
+**B. Fix case sensitivity issues:**
+
+```bash
+# Find actual filename case
+find . -name "testing-strategies.md" -type f
+# Output: ./skills/testing-strategies.md (lowercase 's')
+
+# Fix link to match exactly
+sed -i 's|Skills/testing-strategies.md|skills/testing-strategies.md|g' docs/*.md
+```
+
+**Prevention:**
+```bash
+# Use tab completion when creating links (respects case)
+# Test on Linux before pushing (WSL, Docker, or CI)
+```
+
+**C. Update or remove broken external links:**
+
+```markdown
+<!-- If link is permanently broken, remove or replace -->
+<!-- If temporarily broken, add to .lychee.toml temporarily -->
+exclude = [
+    "https://temporarily-down-site.com/*",
+]
+```
+
+**D. Fix relative path issues:**
+
+```markdown
+✅ CORRECT: Relative path from current file
+<!-- From: docs/guide.md -->
+[config](../config.md)          <!-- Up one directory -->
+[other](./development.md)       <!-- Same directory -->
+```
+
+### Prevention
+
+**Add CI test to validate link configuration:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_lychee_config_exists_and_valid() {
+    let lychee_config = repo_root().join(".lychee.toml");
+
+    assert!(
+        lychee_config.exists(),
+        ".lychee.toml is required for link checking in CI"
+    );
+
+    let content = read_file(&lychee_config);
+
+    // Verify critical exclusions are present
+    assert!(
+        content.contains("exclude = ["),
+        ".lychee.toml must have exclusion patterns"
+    );
+
+    // Verify placeholder URL exclusions
+    assert!(
+        content.contains("https://example.com/*")
+            || content.contains("localhost"),
+        ".lychee.toml should exclude placeholder/localhost URLs"
+    );
+}
+
+#[test]
+fn test_markdown_links_case_sensitive() {
+    // Verify all markdown links use correct case
+    for md_file in find_markdown_files() {
+        let content = read_file(&md_file);
+        let links = extract_internal_links(&content);
+
+        for (line_num, link) in links {
+            let target = resolve_link_target(&md_file, &link);
+
+            if let Some(target_path) = target {
+                assert!(
+                    target_path.exists(),
+                    "{}:{}: Broken link (case sensitivity?): {}",
+                    md_file.display(),
+                    line_num,
+                    link
+                );
+            }
+        }
+    }
+}
+```
+
+**Document link validation in development workflow:**
+
+```markdown
+# docs/development.md
+
+## Before Committing
+
+```bash
+# Check links locally
+lychee --config .lychee.toml './**/*.md'
+
+# Fix broken links or add to exclusions
+```
+```
+
+### Key Insights
+
+**Link validation is environment-specific:**
+1. **Filesystem case sensitivity** - macOS/Windows are case-insensitive, Linux is case-sensitive
+2. **External link availability** - Sites change, get rate-limited, or go offline temporarily
+3. **Placeholder vs real URLs** - Documentation examples shouldn't cause CI failures
+
+**Lychee configuration best practices:**
+- `exclude` field is for URL patterns (regex), not file globs
+- Use URL patterns to exclude placeholder links while keeping real ones
+- File path filtering is done via CLI args, not config
+- Test locally before pushing: `lychee --config .lychee.toml './**/*.md'`
+
+**When to exclude vs fix:**
+
+| Scenario | Action | Rationale |
+|----------|--------|-----------|
+| Placeholder URL in test fixture | Exclude by pattern | Intentional example, not a real link |
+| Broken external link | Fix or replace | Real documentation should work |
+| Temporarily unavailable site | Exclude temporarily | Re-enable when site returns |
+| localhost/example.com URLs | Exclude permanently | RFC 2606 reserved domains |
+| Case mismatch | Fix link case | Must work on Linux |
+
+---
+
+## Pattern 11: cargo-deny CVSS 4.0 Parsing Issue
 
 ### Symptom
 
@@ -1276,6 +1569,7 @@ ambiguous = "ambiguous"
 Error: failed to parse advisory database
 Error: CVSS v4.0 vectors are not supported by this version
 ERROR: cargo-deny-action v2.0.5 cannot parse CVSS 4.0 entries
+
 ```
 
 ### Root Cause
@@ -1301,8 +1595,10 @@ The RustSec advisory database was updated to include CVSS 4.0 vulnerability scor
 
 # ✅ CORRECT: v2.0.15+ includes rustsec 0.31 with CVSS 4.0 support
 - uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+
   with:
     arguments: --all-features
+
 ```
 
 **Key changes in v2.0.15:**
@@ -1316,6 +1612,7 @@ The RustSec advisory database was updated to include CVSS 4.0 vulnerability scor
 **Add test to enforce minimum cargo-deny-action version:**
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 #[test]
@@ -1340,6 +1637,7 @@ fn test_cargo_deny_action_version_supports_cvss_4() {
         deny_line.trim()
     );
 }
+
 ```
 
 **Document version requirement:**
@@ -1349,6 +1647,8 @@ fn test_cargo_deny_action_version_supports_cvss_4() {
 # cargo-deny v2.0.15+ required for CVSS 4.0 advisory parsing
 # Earlier versions fail when RustSec DB includes CVSS 4.0 entries
 - uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+
+
 ```
 
 ### Key Insights
@@ -1388,6 +1688,7 @@ between commits.
 **Solution:** Add daily cron schedule for dependency audit job:
 
 ```yaml
+
 on:
   push:
     branches: [main]
@@ -1395,7 +1696,10 @@ on:
     branches: [main]
   schedule:
     # Daily security audit at noon UTC to catch new CVEs
+
     - cron: '0 12 * * *'
+
+
 ```
 
 **Benefits:**
@@ -1420,6 +1724,7 @@ error: cannot run .git/hooks/pre-commit: Permission denied
 # OR in CI
 ERROR: Script ./scripts/check-markdown.sh is not executable
 Fix: chmod +x ./scripts/check-markdown.sh
+
 ```
 
 ### Root Cause
@@ -1444,7 +1749,8 @@ ls -la .githooks/pre-commit
 chmod +x .githooks/pre-commit
 chmod +x scripts/check-markdown.sh
 chmod +x scripts/*.sh
-```bash
+
+```
 
 **B. Tell Git to track executable bit:**
 
@@ -1466,13 +1772,15 @@ chmod +x .githooks/pre-commit
 git update-index --chmod=+x .githooks/pre-commit
 git add .githooks/pre-commit
 git commit -m "fix: ensure pre-commit hook is executable"
-```rust
+
+```
 
 ### Prevention
 
 **Add CI test to validate script permissions:**
 
 ```rust
+
 // tests/ci_config_tests.rs
 
 #[test]
@@ -1513,6 +1821,7 @@ fn test_scripts_are_executable() {
         }
     }
 }
+
 ```
 
 **Document the two-step process:**
@@ -1535,7 +1844,8 @@ git update-index --chmod=+x .githooks/pre-commit
 git config core.hooksPath .githooks
 
 echo "Git hooks enabled successfully"
-```bash
+
+```
 
 ### Key Insights
 
@@ -1563,6 +1873,7 @@ git commit -m "Add pre-commit hook"
 # CI clones on Linux
 git clone repo
 .githooks/pre-commit           # ← Permission denied!
+
 ```
 
 **Correct pattern:**
@@ -1578,13 +1889,14 @@ git commit -m "Add pre-commit hook"
 # CI clones on Linux
 git clone repo
 .githooks/pre-commit           # ← Works! Git restored executable bit
-```bash
+
+```
 
 ---
 
 ## Related Skills
 
-- [github-actions-best-practices](./github-actions-best-practices.md) — Workflow patterns and best practices
+- [GitHub-actions-best-practices](./github-actions-best-practices.md) — Workflow patterns and best practices
 - [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) — MSRV updates and consistency
 - [dependency-management](./dependency-management.md) — Adding and auditing dependencies
 - [supply-chain-security](./supply-chain-security.md) — Security audits and vulnerability scanning
@@ -1598,56 +1910,70 @@ git clone repo
 ### Example 1: Python Cache on Rust Project (RESOLVED)
 
 **Problem:**
+
 ```yaml
 # CI workflow had Python caching for a Rust project
 - uses: actions/cache@v4
+
   with:
     path: ~/.cache/pip
     key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
 ```
 
 **Symptoms:**
+
 - Cache deserialization failures
 - `pip` executable not found
 - CI slower than expected (cache always missing)
 
 **Solution:**
+
 ```yaml
 # Replaced with Rust-specific caching
 - uses: Swatinem/rust-cache@v2.7.5
-```text
+
+
+```
 
 **Prevention:** Before adding caching, verify language ecosystem matches project.
 
 ### Example 2: 360-Day-Old Nightly Toolchain (RESOLVED)
 
 **Problem:**
+
 ```yaml
 # Nightly pinned to very old date
 toolchain: nightly-2025-02-21  # 360 days old
+
 ```
 
 **Symptoms:**
+
 - Dependencies fail to compile with old nightly
 - Features available in stable but not in old nightly
 - Security vulnerabilities in old toolchain
 
 **Solution:**
+
 ```yaml
 # Updated to recent nightly
 toolchain: nightly-2026-01-15  # 32 days old
-```bash
+
+```
 
 **Prevention:** Document update criteria and review quarterly.
 
 ### Example 3: Accumulated Unused Dependencies (RESOLVED)
 
 **Problem:**
+
 - 15+ unused dependencies in Cargo.toml
 - No regular audit process
 - Dependencies added for experiments, never removed
 
 **Solution:**
+
 ```bash
 # Added weekly CI job
 cargo machete  # Detect unused dependencies

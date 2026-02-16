@@ -18,7 +18,7 @@
 
 ## When NOT to Use
 
-- Performance-specific optimizations (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Performance-specific optimizations (see [Rust-performance-optimization](./rust-performance-optimization.md))
 - Error type design specifically (see [error-handling-guide](./error-handling-guide.md))
 
 ---
@@ -56,17 +56,20 @@ impl RoomCode {
     fn get_str(&self) -> &str { &self.0 }         // Don't use get_
     fn into_uppercase(&self) -> String { todo!() }      // into_ implies ownership
 }
-```rust
+
+```
 
 ### Getter Naming — No `get_` Prefix
 
 ```rust
+
 impl Player {
     fn name(&self) -> &str { &self.name }
     fn id(&self) -> PlayerId { self.id }
     fn is_ready(&self) -> bool { self.ready }       // is_ for booleans
     fn has_authority(&self) -> bool { self.authority }// has_ for booleans
 }
+
 ```
 
 ### Iterator Naming
@@ -114,7 +117,8 @@ impl TryFrom<&str> for RoomCode {
 impl AsRef<str> for RoomCode {
     fn as_ref(&self) -> &str { &self.0 }
 }
-```rust
+
+```
 
 **In function signatures:** Use `impl Into<T>` for owned+flexibility, `&str`/`AsRef<T>` for read-only, `impl AsRef<Path>` for file paths.
 
@@ -125,6 +129,7 @@ impl AsRef<str> for RoomCode {
 Wrap primitive types to add type safety and domain semantics.
 
 ```rust
+
 // ✅ Newtype: prevents mixing up PlayerId and RoomId
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlayerId(pub(crate) Uuid);
@@ -150,6 +155,7 @@ fn transfer_authority(from: Uuid, to: Uuid, room: String) { todo!() }
 
 // ✅ With newtypes: compiler catches mistakes
 fn transfer_authority(from: PlayerId, to: PlayerId, room: RoomCode) { todo!() }
+
 ```
 
 ---
@@ -157,6 +163,7 @@ fn transfer_authority(from: PlayerId, to: PlayerId, room: RoomCode) { todo!() }
 ## Enums Instead of Booleans
 
 ```rust
+
 // ❌ Unclear: create_room("ABC123", true, false)
 
 #[derive(Debug, Clone, Copy)]
@@ -166,13 +173,15 @@ pub enum Visibility { Private, Public }
 
 // ✅ Self-documenting
 create_room("ABC123", Persistence::Persistent, Visibility::Private);
-```rust
+
+```
 
 ---
 
 ## Builder Pattern
 
 ```rust
+
 // ✅ Builder for complex configuration
 pub struct ServerConfig { /* private fields */ }
 
@@ -200,6 +209,7 @@ impl ServerConfigBuilder {
 }
 
 // Usage: ServerConfigBuilder::new(8080).max_rooms(50).tls(tls).build()?
+
 ```
 
 ---
@@ -209,6 +219,7 @@ impl ServerConfigBuilder {
 Compile-time state machine — invalid transitions are unrepresentable:
 
 ```rust
+
 pub struct Connection<S: ConnectionState> { inner: TcpStream, _state: PhantomData<S> }
 pub struct Disconnected;
 pub struct Connected;
@@ -224,7 +235,8 @@ impl Connection<Authenticated> {
     pub fn send(&self, msg: &Message) -> Result<(), Error> { todo!() }
 }
 // conn.send(&msg) on Connected won't compile — must authenticate first.
-```rust
+
+```
 
 ---
 
@@ -239,12 +251,14 @@ See [api-design-guidelines.md](api-design-guidelines.md) for the sealed trait pa
 ## Temporary Mutability
 
 ```rust
+
 // ✅ Limit mutable scope with a block
 let sorted_players = {
     let mut players = room.players().to_vec();
     players.sort_by_key(|p| p.join_time);
     players // Now immutable
 };
+
 ```
 
 ---
@@ -277,13 +291,15 @@ fn format_error(code: u16, msg: Option<&str>) -> Cow<'_, str> {
         None => Cow::Owned(format!("Error {code}")),
     }
 }
-```rust
+
+```
 
 ---
 
 ## Return `impl Iterator`, Accept Borrows
 
 ```rust
+
 // ✅ Return impl Iterator — lazy, no allocation
 fn active_players(&self) -> impl Iterator<Item = &Player> {
     self.players.iter().filter(|p| p.is_connected())
@@ -291,6 +307,7 @@ fn active_players(&self) -> impl Iterator<Item = &Player> {
 
 // ✅ Accept borrows, return owned
 fn normalize(input: &str) -> String { input.trim().to_lowercase() }
+
 ```
 
 ---
@@ -298,13 +315,15 @@ fn normalize(input: &str) -> String { input.trim().to_lowercase() }
 ## Use `clone_from()` Over `= .clone()`
 
 ```rust
+
 // ✅ Reuse existing allocation
 let mut buffer = String::with_capacity(1024);
 buffer.clone_from(&new_data);  // Reuses buffer's allocation
 
 // ❌ Discards existing allocation
 buffer = new_data.clone();  // Allocates new, drops old
-```rust
+
+```
 
 ---
 
@@ -330,4 +349,4 @@ buffer = new_data.clone();  // Allocates new, drops old
 - [api-design-guidelines](./api-design-guidelines.md) — Public API design patterns
 - [defensive-programming](./defensive-programming.md) — Safety-first coding patterns
 - [error-handling-guide](./error-handling-guide.md) — Error type conventions
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Modernizing code to idiomatic patterns
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Modernizing code to idiomatic patterns

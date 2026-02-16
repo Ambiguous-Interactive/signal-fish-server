@@ -19,8 +19,8 @@
 
 ## When NOT to Use
 
-- Writing brand new code from scratch (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
-- Performance-focused changes (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Writing brand new code from scratch (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Performance-focused changes (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -54,6 +54,7 @@
 ## Safe Refactoring Workflow
 
 ```text
+
 1. Ensure all tests pass:     cargo test --all-features
 2. Make ONE change
 3. Compile:                    cargo check
@@ -62,7 +63,9 @@
 6. Run tests:                  cargo test --all-features
 7. Commit
 8. Repeat from step 2
-```rust
+
+
+```
 
 **Never skip step 1.** If tests don't pass before you start, you can't verify your refactoring is correct.
 
@@ -71,6 +74,7 @@
 ## Extracting Modules and Types
 
 ```rust
+
 // Before: src/server.rs — 2000 lines with 30+ methods on GameServer
 
 // Step 1: Create src/server/room_manager.rs
@@ -91,6 +95,7 @@ impl GameServer {
     }
 }
 // Step 4: Compile, test, commit. Then move more implementation details.
+
 ```
 
 ---
@@ -105,7 +110,8 @@ src/server/
 ├── room_manager.rs   (300 lines)
 ├── player_manager.rs (250 lines)
 └── message_handler.rs(400 lines)
-```rust
+
+```
 
 Move `src/server.rs` to `src/server/mod.rs`, then extract one section at a time, compiling after each.
 
@@ -114,6 +120,7 @@ Move `src/server.rs` to `src/server/mod.rs`, then extract one section at a time,
 ## Replacing Magic Numbers/Strings with Constants/Enums
 
 ```rust
+
 // ❌ Before: magic numbers scattered
 if room.players.len() >= 8 { return Err(Error::Full); }
 if timeout > 300 { return Err(Error::Timeout); }
@@ -127,6 +134,7 @@ const MAX_MESSAGE_BYTES: usize = 65_536;
 if room.players.len() >= MAX_PLAYERS_PER_ROOM { ... }
 if timeout > CONNECTION_TIMEOUT_SECS { ... }
 if msg.len() > MAX_MESSAGE_BYTES { ... }
+
 ```
 
 **Workflow:**
@@ -166,7 +174,7 @@ Replace `Arc<Mutex<HashMap<K,V>>>` with `DashMap<K,V>`, remove `.lock().unwrap()
 
 ## Converting Synchronous Code to Async
 
-See [async-rust-best-practices](./async-rust-best-practices.md) for async patterns.
+See [async-Rust-best-practices](./async-rust-best-practices.md) for async patterns.
 
 **Quick workflow:** Add `async`, replace blocking I/O with async equivalents (e.g., `tokio::fs`), add `.await`, update callers, check for `std::sync::Mutex` → `tokio::sync::Mutex`, test with `#[tokio::test]`.
 
@@ -194,13 +202,14 @@ struct GameServer<D: Database> { db: D }
 struct InMemoryDatabase { rooms: DashMap<String, Room> }
 #[async_trait]
 impl Database for InMemoryDatabase { ... }
-```rust
+
+```
 
 ---
 
 ## Reducing `clone()` Usage
 
-See [rust-performance-optimization](./rust-performance-optimization.md) for detailed clone reduction and zero-copy patterns.
+See [Rust-performance-optimization](./rust-performance-optimization.md) for detailed clone reduction and zero-copy patterns.
 
 **Quick checks:** Can you pass `&T` instead? Use `Arc<T>` for shared ownership across tasks? Use `Bytes` for network data? Use `Cow<str>` for conditional ownership?
 
@@ -233,6 +242,7 @@ REFACTOR: [description]
   Risk: low/medium/high
   Verification: cargo check && cargo test --all-features
   Rollback: git checkout -- [files]
+
 ```
 
 See [code-review-checklist](./code-review-checklist.md) for review patterns and
@@ -267,16 +277,19 @@ See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration 
 ## Agent Checklist
 
 Before refactoring:
+
 - [ ] All tests pass
 - [ ] Code is committed (can revert)
 
 During refactoring:
+
 - [ ] One type of change at a time
 - [ ] Compile after each change
 - [ ] Test after each logical step
 - [ ] Commit working increments
 
 Common refactorings:
+
 - [ ] `unwrap()` → `?` / `.ok_or()` / `.unwrap_or_default()`
 - [ ] `String` params → `&str` (or `impl Into<String>`)
 - [ ] Magic numbers → named constants
@@ -291,7 +304,7 @@ Common refactorings:
 
 ## Related Skills
 
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Target patterns for refactoring
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Target patterns for refactoring
 - [clippy-and-linting](./clippy-and-linting.md) — Automated fixes with clippy
 - [error-handling-guide](./error-handling-guide.md) — Refactoring unwrap chains
 - [testing-strategies](./testing-strategies.md) — Tests must pass before and after refactoring

@@ -1,6 +1,6 @@
 # Skill: WebSocket Protocol Patterns
 
-<!-- trigger: websocket, ws, connection, message, broadcast, heartbeat, close, upgrade | WebSocket lifecycle, message design, and broadcast patterns | Feature -->
+<!-- trigger: WebSocket, ws, connection, message, broadcast, heartbeat, close, upgrade | WebSocket lifecycle, message design, and broadcast patterns | Feature -->
 
 **Trigger**: When working with WebSocket handlers, message protocol design, or broadcast patterns.
 
@@ -19,7 +19,7 @@
 ## When NOT to Use
 
 - General HTTP API endpoints (see [api-design-guidelines](./api-design-guidelines.md))
-- Generic async patterns (see [async-rust-best-practices](./async-rust-best-practices.md))
+- Generic async patterns (see [async-Rust-best-practices](./async-rust-best-practices.md))
 
 ---
 
@@ -63,11 +63,13 @@ async fn handle_connection(
     let (mut sender, mut receiver) = socket.split();
     // Connection is now established — proceed with auth handshake
 }
-```rust
+
+```
 
 ### Authentication During Connection
 
 ```rust
+
 async fn authenticate(
     receiver: &mut SplitStream<WebSocket>, server: &GameServer,
 ) -> Result<PlayerId, AuthError> {
@@ -85,11 +87,13 @@ async fn authenticate(
         _ => Err(AuthError::InvalidMessage),
     }
 }
+
 ```
 
 ### Heartbeat / Ping-Pong
 
 ```rust
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -111,13 +115,15 @@ async fn connection_loop(mut sender: SplitSink<WebSocket, Message>, mut receiver
         }
     }
 }
-```rust
+
+```
 
 ### Graceful Disconnection
 
 Use a `CleanupGuard` (RAII) to ensure server state cleanup runs even on panic or early return:
 
 ```rust
+
 struct CleanupGuard { player_id: PlayerId, server: Arc<GameServer> }
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
@@ -128,6 +134,7 @@ impl Drop for CleanupGuard {
 
 let _cleanup = CleanupGuard { player_id, server: server.clone() };
 connection_loop(sender, receiver, server.clone()).await;
+
 ```
 
 Use timeouts at every stage: upgrade (10s), auth (5s), idle (300s).
@@ -143,6 +150,7 @@ This project supports both JSON and MessagePack (via `rmp-serde`). Dispatch on `
 ### Enum-Based Message Types with Serde Tagging
 
 ```rust
+
 // ✅ Internally tagged — each message carries its type as a field
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -167,7 +175,8 @@ pub enum ServerMessage {
     IceCandidate { candidate: String, from: PlayerId },
     Error { code: String, message: String },
 }
-```rust
+
+```
 
 ### Message Framing and Versioning
 
@@ -178,12 +187,14 @@ Include a `version: u32` field in the handshake for forward compatibility. Use r
 Distinguish text from binary messages. Use `Bytes` for zero-copy sharing of binary relay data.
 
 ```rust
+
 match msg {
     Message::Text(text) => handle_signaling(serde_json::from_str(&text)?).await,
     Message::Binary(data) => relay_to_peer(Bytes::from(data)).await,
     Message::Ping(_) | Message::Pong(_) => { /* handled by framework */ }
     Message::Close(_) => break,
 }
+
 ```
 
 ---
@@ -193,6 +204,7 @@ match msg {
 ### Room-Based Broadcasting with Backpressure
 
 ```rust
+
 impl RoomHandle {
     /// Broadcast to all players except the sender; use try_send for backpressure
     async fn broadcast_except(&self, from: PlayerId, msg: Bytes) {
@@ -205,7 +217,8 @@ impl RoomHandle {
         }
     }
 }
-```rust
+
+```
 
 `Bytes::clone()` is O(1) (reference-counted). Always use bounded `mpsc` channels per client — drop or disconnect slow receivers rather than buffering unboundedly.
 
@@ -218,11 +231,13 @@ impl RoomHandle {
 Treat disconnection as normal, not an error:
 
 ```rust
+
 match receiver.next().await {
     Some(Ok(msg)) => process(msg).await,
     Some(Err(e)) => { tracing::debug!(error = %e, "connection error"); break; }
     None => { tracing::info!(player_id = %pid, "client disconnected"); break; }
 }
+
 ```
 
 ### Reconnection Protocol
@@ -277,7 +292,8 @@ async fn test_join_and_peer_signaling() {
     ).expect("invalid JSON");
     assert_eq!(parsed["type"], "peer_joined");
 }
-```rust
+
+```
 
 For load tests, measure: connections/sec, message throughput, P50/P95/P99 latency, memory per connection.
 
@@ -300,7 +316,7 @@ For load tests, measure: connections/sec, message throughput, P50/P95/P99 latenc
 
 ## Related Skills
 
-- [async-rust-best-practices](./async-rust-best-practices.md) — Async patterns for connection handling
+- [async-Rust-best-practices](./async-rust-best-practices.md) — Async patterns for connection handling
 - [api-design-guidelines](./api-design-guidelines.md) — Message type design
 - [error-handling-guide](./error-handling-guide.md) — WebSocket error codes and handling
 - [observability-and-logging](./observability-and-logging.md) — Connection lifecycle tracing

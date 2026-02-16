@@ -48,7 +48,8 @@ Consider `tikv-jemallocator` (multi-threaded server workloads) or `mimalloc` (go
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-```rust
+
+```
 
 ---
 
@@ -57,17 +58,21 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ### Pre-allocation with `with_capacity`
 
 ```rust
+
 let mut players: Vec<Player> = Vec::with_capacity(room.max_players());
 let mut map: HashMap<K, V> = HashMap::with_capacity(expected_entries);
 let mut s = String::with_capacity(estimated_len);
+
 ```
 
 ### SmallVec — Stack-First Collections
 
 ```rust
+
 use smallvec::SmallVec;
 let players: SmallVec<[PlayerId; 8]> = SmallVec::new();  // Stack for ≤8, heap otherwise
-```rust
+
+```
 
 **Note:** This project uses `SmallVec` for stack-first collections. `ArrayVec` (fixed-capacity, never heap) is a
 valid alternative pattern for external projects with hard capacity limits, but is not a dependency of this codebase.
@@ -75,8 +80,10 @@ valid alternative pattern for external projects with hard capacity limits, but i
 ### `Box<[T]>` / `Arc<str>` Over Heavier Alternatives
 
 ```rust
+
 let frozen: Box<[Player]> = players.into_boxed_slice();  // Saves capacity field
 let name: Arc<str> = "room_alpha".into();  // One fewer indirection vs Arc<String>
+
 ```
 
 ---
@@ -125,13 +132,15 @@ struct RoomConfig {
 
 // ✅ Assert sizes at compile time
 const _: () = assert!(std::mem::size_of::<Message>() <= 64);
-```rust
+
+```
 
 ---
 
 ## Iterator Optimization
 
 ```rust
+
 // Chain iterators — avoid intermediate collections
 let active_count = players.iter().filter(|p| p.is_connected()).count();
 
@@ -147,6 +156,7 @@ let ids: Vec<PlayerId> = players.iter()
 
 // .copied() for Copy types, chunks_exact over chunks
 let ids: Vec<u32> = id_refs.iter().copied().collect();
+
 ```
 
 ---
@@ -156,6 +166,7 @@ let ids: Vec<u32> = id_refs.iter().copied().collect();
 This project uses `bytes::Bytes` extensively for network data:
 
 ```rust
+
 use bytes::Bytes;
 
 // ✅ Bytes: reference-counted, zero-copy slice/clone
@@ -172,13 +183,15 @@ fn process(input: &[u8]) -> Cow<'_, [u8]> {
         Cow::Borrowed(input)         // Zero-copy for the common case
     }
 }
-```rust
+
+```
 
 ### rkyv for Zero-Copy Deserialization
 
 This project uses `rkyv` for zero-copy serialization:
 
 ```rust
+
 use rkyv::{Archive, Serialize, Deserialize};
 
 #[derive(Archive, Serialize, Deserialize)]
@@ -190,6 +203,7 @@ struct GameState {
 // Deserialize without copying — access archived data directly
 let archived = rkyv::access::<ArchivedGameState, rkyv::rancor::Error>(&bytes)?;
 println!("Tick: {}", archived.tick);  // No allocation
+
 ```
 
 ---
@@ -199,13 +213,15 @@ println!("Tick: {}", archived.tick);  // No allocation
 Prefer struct-of-arrays for batch processing over array-of-structs. Use contiguous storage (`Vec<T>`) over linked structures (`LinkedList`). `Vec<T>` has O(1) cache-friendly iteration.
 
 ```rust
+
 // Struct-of-arrays for batch processing
 struct Players {
     ids: Vec<PlayerId>,
     positions: Vec<Position>,
     health: Vec<u16>,
 }
-```rust
+
+```
 
 ---
 
@@ -222,6 +238,7 @@ struct Players {
 ### Criterion Benchmark Example
 
 ```rust
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn bench_room_lookup(c: &mut Criterion) {
@@ -235,6 +252,7 @@ fn bench_room_lookup(c: &mut Criterion) {
 
 criterion_group!(benches, bench_room_lookup);
 criterion_main!(benches);
+
 ```
 
 ---
@@ -242,6 +260,7 @@ criterion_main!(benches);
 ## String Optimization
 
 ```rust
+
 fn validate(input: &str) -> Result<(), Error> { ... }  // &str params
 
 use std::fmt::Write;
@@ -249,7 +268,8 @@ let mut out = String::with_capacity(256);
 write!(out, "Player {} in room {}", player_id, room_code)?; // Pre-allocated
 
 const GREETING: &str = concat!("matchbox-signaling-server/", env!("CARGO_PKG_VERSION"));  // Compile-time
-```rust
+
+```
 
 ---
 
@@ -258,13 +278,15 @@ const GREETING: &str = concat!("matchbox-signaling-server/", env!("CARGO_PKG_VER
 Use references/borrows, `Arc` for shared ownership across tasks, and `Bytes` for network data sharing (O(1) clone via refcount bump).
 
 ```rust
+
 let shared_msg = Bytes::from(message);
 for peer in peers {
     peer.send(shared_msg.clone()).await?;  // Just bumps refcount
 }
+
 ```
 
-See [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for `clone_from()` and `Cow<str>` patterns.
+See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for `clone_from()` and `Cow<str>` patterns.
 
 ---
 
@@ -287,7 +309,7 @@ See [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for `clone_from()`
 
 ## Related Skills
 
-- [async-rust-best-practices](./async-rust-best-practices.md) — Async performance and task management
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Iterator patterns and zero-cost abstractions
+- [async-Rust-best-practices](./async-rust-best-practices.md) — Async performance and task management
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Iterator patterns and zero-cost abstractions
 - [dependency-management](./dependency-management.md) — Alternative crate recommendations
 - [observability-and-logging](./observability-and-logging.md) — Metrics for performance monitoring

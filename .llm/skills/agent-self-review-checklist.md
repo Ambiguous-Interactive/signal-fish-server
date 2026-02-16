@@ -50,7 +50,8 @@ cargo check --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo fmt --check
-```bash
+
+```
 
 If any command fails, fix the issue and re-run the full set.
 
@@ -61,10 +62,12 @@ If any command fails, fix the issue and re-run the full set.
 For changes in `dashboard/`, `frontend/`, `client-portal/`, or `infra/`:
 
 ```bash
+
 cd <project-dir>
 npm run format
 npm run lint
 npm run build
+
 ```
 
 Run from the specific project directory. All three must pass.
@@ -102,7 +105,9 @@ For changes in `.github/workflows/` or CI configuration:
 - [ ] **Pinned versions recent**: Action SHAs <1 year old, nightly toolchains <6 months old
 - [ ] **Documentation complete**: Workflow has header comment, pinned versions have update criteria
 - [ ] **MSRV consistency**: If Rust version changed, updated in ALL files (Cargo.toml, rust-toolchain.toml,
+
   clippy.toml, Dockerfile)
+
 - [ ] **Tested in CI**: Pushed to branch and verified workflow passes
 - [ ] **Cache keys versioned**: Cache keys include version suffix for invalidation (`v1`, `v2`)
 - [ ] **Permissions minimal**: Only required permissions granted (default: `contents: read`)
@@ -180,7 +185,8 @@ Git safety verified? ─── NO ──► Remove git commits/config; provide i
     │ YES
     ▼
 ✅ DONE — present to user with commit instructions
-```rust
+
+```
 
 **Key rule**: Never modify test expectations to make tests pass. If a test fails, understand *why* the existing expectation exists before changing anything.
 
@@ -205,12 +211,15 @@ When dispatching a review subagent, use this prompt structure:
 
 ```text
 Review the following changes against the self-review checklist:
+
 1. Run Quick Review commands
 2. Apply Deep Review checklist items relevant to the change type
 3. Apply Security Review if auth/input/networking touched
 4. Apply AWS Review if infrastructure touched
 5. Walk the "Am I Done?" decision tree
 6. Report: PASS with summary, or FAIL with specific items to fix
+
+
 ```
 
 ---
@@ -239,14 +248,19 @@ After the checklist passes, provide these instructions to the user:
 ```text
 Changes are ready. To commit:
 
-```bash
+```
+
 git add src/file.rs tests/test_file.rs
 git commit -m "feat: add new validation
 
 - Add input validation for room codes
 - Add comprehensive tests
+
 "
+
 ```text
+
+
 ```
 
 ---

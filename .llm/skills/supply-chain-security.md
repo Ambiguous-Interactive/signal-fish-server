@@ -47,26 +47,31 @@
 ```bash
 cargo audit              # Check against RustSec Advisory Database
 cargo audit --json       # JSON output for CI parsing
-```bash
+
+```
 
 Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`), or **Deny** (replace the crate).
 
 ```rust
+
 // ❌ Bad — silently ignoring an advisory with no justification
 // Just add RUSTSEC-2024-0001 to the ignore list and move on
 // ✅ Good — documented ignore with expiry and rationale in audit.toml
 // ignore RUSTSEC-2024-0001: "Utc-only usage, not exploitable", expires 2026-06-01
+
 ```
 
 ### `audit.toml` Configuration
 
 ```toml
+
 [advisories]
 ignore = [
     # RUSTSEC-2024-0001: Utc-only, not exploitable. Revisit by 2026-06-01.
     "RUSTSEC-2024-0001",
 ]
-```bash
+
+```
 
 ---
 
@@ -77,30 +82,35 @@ This project's [deny.toml](../../deny.toml) enforces four policy areas:
 ### `[advisories]` — deny vulnerabilities, deny yanked crates
 
 ```toml
+
 [advisories]
 vulnerability = "deny"
 yanked = "deny"
 unmaintained = "workspace"
+
 ```
 
 ### `[licenses]` — allowlist of permissive licenses
 
 ```toml
+
 [licenses]
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
          "BSD-2-Clause", "BSD-3-Clause", "ISC", "OpenSSL",
          "Unicode-DFS-2016", "Unicode-3.0", "Zlib", "0BSD", "CC0-1.0"]
-```text
 
 ```rust
+
 // ❌ Bad — adding a GPL-licensed crate to a permissive project
 // Cargo.toml: my-gpl-dep = "1.0"  # License: GPL-3.0
 // ✅ Good — verify license before adding: cargo deny check licenses
+
 ```
 
 ### `[bans]` — block problematic crates, detect duplicates
 
 ```toml
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
@@ -109,31 +119,34 @@ wildcards = "deny"
 name = "openssl"
 wrappers = ["native-tls"]
 reason = "Prefer rustls for TLS - openssl has had numerous CVEs"
-```text
 
 ```rust
+
 // ❌ Bad — pulling in openssl via native-tls feature
 // reqwest = { version = "0.12", features = ["native-tls"] }
 // ✅ Good — using rustls backend to stay off the banned list
 // reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 ```
 
 ### `[sources]` — no git dependencies in production
 
 ```toml
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
-```rust
 
 ```rust
+
 // ❌ Bad — git dep bypasses crates.io auditing
 // my-crate = { git = "https://github.com/user/my-crate" }
 // ✅ Good — use crates.io or vendor locally
 // my-crate = "1.2.3"
 // Or: [patch.crates-io] my-crate = { path = "third_party/my-crate" }
+
 ```
 
 ---
@@ -143,12 +156,14 @@ allow-git = []
 ### Exact Pinning for Security-Critical Deps
 
 ```toml
+
 [dependencies]
 rustls = "=0.23.20"        # TLS — pin exactly
 ring = "=0.17.8"           # Crypto — pin exactly
 jsonwebtoken = "=9.3.0"    # Auth tokens — pin exactly
 serde = "1.0"              # Non-security — semver range OK
-```bash
+
+```
 
 ### Always Commit `Cargo.lock`
 
@@ -162,6 +177,7 @@ cargo build
 # ✅ Good — fails if lockfile is stale or missing
 cargo build --locked
 cargo test --locked
+
 ```
 
 ---
@@ -171,25 +187,32 @@ cargo test --locked
 ### `--locked` Everywhere in CI
 
 ```yaml
+
 steps:
+
   - run: cargo build --release --locked
   - run: cargo test --locked
   - run: cargo clippy --locked -- -D warnings
-```bash
+
+
+```
 
 ### Deterministic Compilation
 
 ```toml
+
 [profile.release]
 lto = "thin"
 codegen-units = 1        # Single codegen unit for deterministic output
 strip = "symbols"
 overflow-checks = true
+
 ```
 
 ### Docker Multi-Stage with Locked Deps
 
 ```dockerfile
+
 FROM rust:1.83-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -202,34 +225,43 @@ RUN cargo build --release --locked
 FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /app/target/release/matchbox-server /
 ENTRYPOINT ["/matchbox-server"]
-```text
+
+```
 
 ---
 
 ## 5. SBOM Generation
 
 ```bash
+
 cargo install cargo-sbom
 cargo sbom --output-format cyclonedx-json > sbom.cdx.json   # CycloneDX
 cargo sbom --output-format spdx-json > sbom.spdx.json       # SPDX
+
 ```
 
 ### Integration with Vulnerability Scanners
 
 ```bash
+
 grype sbom:sbom.cdx.json --output table              # Grype
 trivy sbom sbom.cdx.json --severity HIGH,CRITICAL     # Trivy
-```text
+
+```
 
 ### CI Artifact Upload
 
 ```yaml
+
+
 - run: cargo sbom --output-format cyclonedx-json > sbom.cdx.json
 - uses: actions/upload-artifact@v4
+
   with:
     name: sbom-${{ github.sha }}
     path: sbom.cdx.json
     retention-days: 90
+
 ```
 
 ---
@@ -242,7 +274,9 @@ trivy sbom sbom.cdx.json --severity HIGH,CRITICAL     # Trivy
 # .github/dependabot.yml
 version: 2
 updates:
+
   - package-ecosystem: "cargo"
+
     directory: "/"
     schedule:
       interval: "weekly"
@@ -250,7 +284,8 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
-```bash
+
+```
 
 ### Update Urgency Guide
 
@@ -283,12 +318,14 @@ on:
     branches: [main]
   pull_request:
   schedule:
+
     - cron: "0 8 * * *"  # Daily scan
 
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
+
       - uses: actions/checkout@v4
       - run: cargo install cargo-audit cargo-deny cargo-sbom
       - run: cargo deny check
@@ -296,9 +333,11 @@ jobs:
       - run: cargo build --release --locked
       - run: cargo sbom --output-format cyclonedx-json > sbom.cdx.json
       - uses: actions/upload-artifact@v4
+
         with:
           name: sbom-${{ github.sha }}
           path: sbom.cdx.json
+
 ```
 
 ### Local Pre-Push Hook
@@ -309,19 +348,22 @@ jobs:
 set -e
 cargo deny check && cargo audit
 echo "Supply chain checks passed."
-```text
+
+```
 
 ### Alerting on New Advisories
 
 ```yaml
 # In scheduled workflow — notify on failure
 - name: Notify on vulnerability
+
   if: failure()
   uses: slackapi/slack-github-action@v2
   with:
     webhook: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
     payload: |
       {"text": "🚨 cargo audit found new advisories in matchbox-signaling-server"}
+
 ```
 
 ---
@@ -350,13 +392,16 @@ GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when
 
 # ✅ Good — v2 supports Cargo.lock v4
 - uses: EmbarkStudios/cargo-deny-action@v2
-```bash
+
+
+```
 
 ### Pre-Push Validation
 
 ```bash
 # Run the CI config validator to catch version mismatches before pushing
 bash scripts/check-ci-config.sh
+
 ```
 
 This script checks:

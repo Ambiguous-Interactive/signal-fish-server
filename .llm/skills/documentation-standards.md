@@ -58,6 +58,7 @@
 ## Rust Doc Comment Template
 
 ````rust
+````rust
 /// Creates a new room with the specified configuration.
 ///
 /// # Arguments
@@ -77,7 +78,8 @@
 ///
 /// *Added in v2.3.0*
 pub async fn create_room(&self, config: RoomConfig) -> Result<RoomCode, RoomError>
-````
+
+`````
 
 ---
 
@@ -112,7 +114,9 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 ### Security
 
 - Fix authentication bypass in admin API (#250)
-```rust
+
+
+```
 
 **Rules:**
 
@@ -133,6 +137,7 @@ All markdown files must follow consistent formatting rules enforced by markdownl
 All fenced code blocks MUST have a language identifier:
 
 ````markdown
+
 ❌ WRONG: Missing language identifier
 
 (triple backticks with no language)
@@ -144,7 +149,8 @@ cargo build
 (triple backticks)bash
 cargo build
 (triple backticks)
-````
+
+`````
 
 **Common language identifiers:**
 
@@ -161,12 +167,14 @@ cargo build
 Tables must have consistent column alignment:
 
 ```markdown
+
 ✅ CORRECT: Properly aligned table
 
 | Column | Description | Example |
 |--------|-------------|---------|
 | Foo    | First item  | abc     |
 | Bar    | Second item | xyz     |
+
 ```
 
 ### Local Validation
@@ -179,7 +187,8 @@ Tables must have consistent column alignment:
 
 # Auto-fix issues where possible
 ./scripts/check-markdown.sh fix
-```text
+
+```
 
 **Install local tools:**
 
@@ -189,6 +198,7 @@ npm install -g markdownlint-cli2
 
 # Verify installation
 markdownlint-cli2 --version
+
 ```
 
 **VS Code integration:**
@@ -210,7 +220,7 @@ The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is
 # 1. Code formatting (cargo fmt)
 # 2. Panic-prone patterns
 # 3. Markdown linting (if markdownlint-cli2 installed)
-```bash
+```
 
 ### Common Markdown Linting Issues
 
@@ -232,6 +242,7 @@ Technical terms must be whitelisted in `.typos.toml`:
 rustc = "rustc"
 tokio = "tokio"
 websocket = "websocket"
+
 ```
 
 **CI checks:**

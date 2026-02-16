@@ -31,6 +31,13 @@ exclude = [
 
     # lib.rs returns 403 for automated checks but works in browsers
     "https://lib.rs/*",
+
+    # Test fixture and example URLs (from tests/ci_config_tests.rs)
+    # These are placeholder/example URLs in error messages and documentation
+    # URL pattern exclusions handle test placeholder URLs, making file-level exclusion unnecessary
+    "https://github.com/owner/repo/*",
+    "https://github.com/%7B%7B%7D/*",  # URL-encoded {{{}}} placeholder (defensive: rarely occurs but ensures coverage)
+    "https://github.com/{}/*",          # Template placeholder
 ]
 
 # Retry settings

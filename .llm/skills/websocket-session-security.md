@@ -1,6 +1,6 @@
 # Skill: WebSocket Session Security
 
-<!-- trigger: session, hijack, token-rotation, peer-identity, replay, csrf, cswsh, websocket-auth, session-fixation, session-timeout | WebSocket session lifecycle security for game signaling | Security -->
+<!-- trigger: session, hijack, token-rotation, peer-identity, replay, csrf, cswsh, WebSocket-auth, session-fixation, session-timeout | WebSocket session lifecycle security for game signaling | Security -->
 
 **Trigger**: When implementing, reviewing, or hardening WebSocket session management, token handling, reconnection security, peer identity verification, or anti-replay mechanisms in the signaling server.
 
@@ -17,7 +17,7 @@
 ## When NOT to Use
 - General HTTP auth patterns without WebSocket context (see [web-service-security](./web-service-security.md))
 - Rate limiting and connection caps (see [ddos-and-rate-limiting](./ddos-and-rate-limiting.md))
-- WebSocket framing, protocol design, or heartbeat (see [websocket-protocol-patterns](./websocket-protocol-patterns.md))
+- WebSocket framing, protocol design, or heartbeat (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
 
 ## Rationalizations to Reject
 
@@ -59,11 +59,13 @@ pub struct SessionId(Uuid);
 impl SessionId {
     pub fn generate() -> Self { Self(Uuid::new_v4()) }
 }
-```rust
+
+```
 
 ### Idle + Absolute Timeouts
 
 ```rust
+
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);       // 30 min
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60); // 4 hr
 
@@ -76,6 +78,7 @@ impl PlayerSession {
         now - self.last_activity > IDLE_TIMEOUT || now - self.created_at > ABSOLUTE_TIMEOUT
     }
 }
+
 ```
 
 ### Session-to-Connection Mapping for Instant Invalidation
@@ -83,6 +86,7 @@ impl PlayerSession {
 On logout or ban, close ALL WebSocket connections for that user immediately:
 
 ```rust
+
 struct SessionRegistry {
     connections: DashMap<SessionId, Vec<mpsc::Sender<SessionAction>>>,
 }
@@ -100,13 +104,15 @@ impl SessionRegistry {
         }
     }
 }
-```rust
+
+```
 
 ## 2. Token Security for WebSocket Connections
 
 ### Token Delivery
 
 ```rust
+
 // ❌ Bad — token in query string leaks to access logs, referrer, browser history
 let url = format!("ws://{}/ws?token={}", host, token);
 
@@ -122,6 +128,7 @@ async fn ws_handler(
     Ok(ws.protocols(["bearer"])
         .on_upgrade(move |socket| handle_socket(socket, claims, state)))
 }
+
 ```
 
 ### GameClaims (Short-Lived: 5–15 min)
@@ -136,11 +143,13 @@ pub struct GameClaims {
     pub exp: usize, pub nbf: usize, pub iat: usize,
     pub jti: String,           // unique token ID for revocation
 }
-```rust
+
+```
 
 ### JWT Validation — Explicit Everything
 
 ```rust
+
 // ❌ Bad — lets the token choose its own algorithm (alg:none attack)
 let data = decode::<GameClaims>(token, &key, &Validation::default())?;
 
@@ -154,23 +163,26 @@ fn validate_token(token: &str, keys: &JwtKeys) -> Result<GameClaims, AuthError> 
     if keys.denylist.contains(&data.claims.jti) { return Err(AuthError::Revoked); }
     Ok(data.claims)
 }
+
 ```
 
 ### Token Denylist (JTI Hashes Until Expiry) + Algorithm Choice
 
 ```rust
+
 struct TokenDenylist { denied: DashSet<[u8; 32]> }
 impl TokenDenylist {
     fn revoke(&self, jti: &str) { self.denied.insert(Sha256::digest(jti.as_bytes()).into()); }
     fn contains(&self, jti: &str) -> bool { self.denied.contains(&Sha256::digest(jti.as_bytes()).into()) }
 }
-```rust
 
 ```rust
+
 // ❌ Bad — HMAC: shared secret; if it leaks, attacker forges tokens for ALL services
 let key = EncodingKey::from_secret(b"shared-across-services");
 // ✅ Good — ECDSA: private key on auth server only, public key on signaling
 let decoding_key = DecodingKey::from_ec_pem(PUBLIC_KEY_PEM)?;
+
 ```
 
 ---
@@ -180,6 +192,7 @@ let decoding_key = DecodingKey::from_ec_pem(PUBLIC_KEY_PEM)?;
 ### Bind Sessions to IP + User-Agent
 
 ```rust
+
 impl PlayerSession {
     fn validate_fingerprint(&self, ip: IpAddr, ua: &str) -> Result<(), SecurityEvent> {
         if self.ip_address != ip {
@@ -193,11 +206,13 @@ impl PlayerSession {
         Ok(())
     }
 }
-```rust
+
+```
 
 ### Session Fixation Protection
 
 ```rust
+
 // ❌ Bad — same session ID after privilege change
 async fn join_room(&mut self, room: &RoomId) { self.room = Some(room.clone()); }
 
@@ -207,11 +222,13 @@ async fn join_room(&mut self, room: &RoomId, registry: &SessionRegistry) {
     self.room = Some(room.clone());
     registry.migrate(old, self.session_id.clone()).await;
 }
+
 ```
 
 ### Constant-Time Comparison + Zeroize
 
 ```rust
+
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
@@ -223,7 +240,8 @@ fn verify(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.ct_eq(b).into() 
 // Zeroize secrets on drop
 struct TokenSecret { key: Vec<u8> }
 impl Drop for TokenSecret { fn drop(&mut self) { self.key.zeroize(); } }
-```rust
+
+```
 
 ## 4. Cross-Site WebSocket Hijacking (CSWSH)
 
@@ -232,6 +250,7 @@ CORS does **not** protect WebSocket upgrades. Browsers send cookies on cross-ori
 ### Origin Allowlist
 
 ```rust
+
 fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), StatusCode> {
     match headers.get("origin").and_then(|v| v.to_str().ok()) {
         // ❌ Bad — silently accepting missing Origin
@@ -248,6 +267,7 @@ fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), Status
         }
     }
 }
+
 ```
 
 ---
@@ -257,6 +277,7 @@ fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), Status
 ### Sequence Numbers
 
 ```rust
+
 struct PeerState { expected_seq: AtomicU64 }
 impl PeerState {
     fn validate_seq(&self, received: u64) -> Result<(), ProtocolError> {
@@ -270,11 +291,13 @@ impl PeerState {
         Ok(())
     }
 }
-```rust
+
+```
 
 ### Nonce-Based Prevention for Critical Operations
 
 ```rust
+
 struct NonceRegistry { seen: DashSet<String> }
 impl NonceRegistry {
     fn check_and_consume(&self, nonce: &str) -> Result<(), ProtocolError> {
@@ -291,7 +314,9 @@ enum SignalingMessage {
     CreateRoom { room: RoomCode, nonce: String, seq: u64 },     // nonce required
     TransferAuthority { to: PeerId, nonce: String, seq: u64 },  // nonce required
 }
+
 ```
+
 Replay scenarios: room-creation replay exhausts limits; authority-transfer replay steals host; SDP replay enables MITM.
 
 ---
@@ -301,17 +326,20 @@ Replay scenarios: room-creation replay exhausts limits; authority-transfer repla
 ### Cryptographic Reconnect Tokens (HMAC-SHA256)
 
 ```rust
+
 fn generate_reconnect_token(session: &PlayerSession, secret: &[u8]) -> String {
     let payload = format!("{}:{}:{}", session.session_id, session.player_id, Utc::now().timestamp());
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
     mac.update(payload.as_bytes());
     format!("{}.{}", base64_url::encode(payload.as_bytes()), base64_url::encode(&mac.finalize().into_bytes()))
 }
-```rust
+
+```
 
 ### One-Time Use (Atomic CAS) + Short TTL + IP Binding
 
 ```rust
+
 struct ReconnectToken {
     session_id: SessionId,
     created_at: DateTime<Utc>,
@@ -332,6 +360,7 @@ impl ReconnectToken {
         Ok(())
     }
 }
+
 ```
 
 ---
@@ -341,6 +370,7 @@ impl ReconnectToken {
 Re-validate long-lived sessions every 30 min — check for revocation, bans, permission changes:
 
 ```rust
+
 async fn revalidation_loop(
     session: Arc<RwLock<PlayerSession>>, action_tx: mpsc::Sender<SessionAction>,
     auth: Arc<AuthService>,
@@ -359,15 +389,18 @@ async fn revalidation_loop(
         }
     }
 }
-```rust
+
+```
 
 Graceful disconnect: send close reason then close frame (code 4001):
 
 ```rust
+
 let _ = ws_tx.send(Message::Text(r#"{"type":"session_expired"}"#.into())).await;
 let _ = ws_tx.send(Message::Close(Some(CloseFrame {
     code: 4001, reason: "Session expired".into(),
 }))).await;
+
 ```
 
 ---
@@ -377,6 +410,7 @@ let _ = ws_tx.send(Message::Close(Some(CloseFrame {
 ### Never Trust Client-Claimed Identity
 
 ```rust
+
 async fn handle_signal(
     msg: SignalingMessage, session: &PlayerSession, state: &AppState,
 ) -> Result<(), ProtocolError> {
@@ -399,7 +433,8 @@ async fn handle_signal(
         _ => Ok(()),
     }
 }
-```rust
+
+```
 
 ## Agent Checklist
 
@@ -422,6 +457,6 @@ async fn handle_signal(
 ## Related Skills
 
 - [web-service-security](./web-service-security.md) — Input validation, auth patterns, TLS, secrets management
-- [websocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message framing, heartbeat
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message framing, heartbeat
 - [container-and-deployment](./container-and-deployment.md) — Infrastructure-level security, container hardening
 - [ddos-and-rate-limiting](./ddos-and-rate-limiting.md) — Rate limiting, connection caps, abuse prevention

@@ -58,7 +58,8 @@ struct GameServer {
     auth: Authenticator,
     metrics: MetricsCollector,
 }
-```rust
+
+```
 
 **File-level SRP**: One concern per file. `src/server.rs` with 2000 lines → split into `src/server/room_manager.rs`, `src/server/player_handler.rs`, `src/server/message_router.rs`.
 
@@ -73,6 +74,7 @@ struct GameServer {
 **Pattern**: New transport types, new database backends, new message types.
 
 ```rust
+
 // ✅ Open for extension: new transports without modifying existing code
 #[async_trait]
 pub trait RelayTransport: Send + Sync {
@@ -87,17 +89,20 @@ struct WebSocketTransport { /* ... */ }
 // Adding a new transport = new struct + impl, zero changes to existing code
 struct WebTransportRelay { /* ... */ }
 impl RelayTransport for WebTransportRelay { /* ... */ }
+
 ```
 
 **In TypeScript**: Use interfaces and factory functions, not class hierarchies.
 
 ```typescript
+
 // ✅ Extend with new chart types without modifying existing code
 interface DashboardWidget {
     render(data: MetricsData): HTMLElement;
     update(data: MetricsData): void;
 }
-```rust
+
+```
 
 ---
 
@@ -106,6 +111,7 @@ interface DashboardWidget {
 **Rule**: Every trait implementation must honor the trait's documented contract. Callers must not need to know which concrete type they're using.
 
 ```rust
+
 // ✅ Both implementations honor the Database contract identically
 #[async_trait]
 pub trait Database: Send + Sync {
@@ -117,6 +123,7 @@ pub trait Database: Send + Sync {
 // - find_room returns None for missing rooms (not an error)
 // - save_room overwrites existing rooms with same code
 // - Both return DbError for infrastructure failures only
+
 ```
 
 **Violation smell**: An implementation that panics, returns different error types, or has different side effects than other implementations of the same trait.
@@ -128,6 +135,7 @@ pub trait Database: Send + Sync {
 **Rule**: Many small, focused traits beat one large trait. No implementor should be forced to provide methods it doesn't use.
 
 ```rust
+
 // (simplified signatures — use concrete error types in real code)
 // ❌ Fat interface: test implementations must stub 8+ methods
 trait GameOperations {
@@ -157,7 +165,8 @@ trait Messaging {
 trait Authentication {
     fn authenticate(&self) -> Result<Token>;
 }
-```rust
+
+```
 
 **Guideline**: 2-5 methods per trait. If a trait has 8+ methods, it probably needs splitting.
 
@@ -168,6 +177,7 @@ trait Authentication {
 **Rule**: High-level modules depend on abstractions (traits), not concrete implementations.
 
 ```rust
+
 // ❌ Direct dependency on concrete type
 struct GameServer {
     db: PostgresDatabase,  // Tightly coupled to Postgres
@@ -181,6 +191,7 @@ struct GameServer<D: Database> {
 // Production: GameServer<PostgresDatabase>
 // Testing:    GameServer<InMemoryDatabase>
 // Serverless: GameServer<DynamoDatabase>
+
 ```
 
 **In TypeScript**: Use dependency injection, not direct imports of concrete implementations.
@@ -229,7 +240,8 @@ mod player_authentication;
 mod protocol_serialization;
 mod connection_health;
 mod relay_transport;
-```rust
+
+```
 
 ---
 
@@ -251,7 +263,7 @@ mod relay_transport;
 ## Related Skills
 
 - [code-review-checklist](./code-review-checklist.md) — Review process incorporating SOLID checks
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Refactoring workflow for fixing violations
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Idiomatic Rust patterns
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Refactoring workflow for fixing violations
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Idiomatic Rust patterns
 - [api-design-guidelines](./api-design-guidelines.md) — API design following SOLID
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) — AI agent workflow patterns for code review
