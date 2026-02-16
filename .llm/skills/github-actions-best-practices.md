@@ -257,6 +257,7 @@ echo "✓ Workflow ecosystem configuration validated"
 ```
 
 **Benefits:**
+
 - Reproducible builds (same SHA = same code)
 - Security (prevents tag hijacking)
 - Stability (no surprise breaking changes)
@@ -267,7 +268,101 @@ echo "✓ Workflow ecosystem configuration validated"
 # GitHub Actions: Go to releases, find commit SHA
 # Or use gh CLI:
 gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
-```bash
+```
+
+### Enforcing SHA Pinning with Tests
+
+**Problem:** Developers may forget to pin actions with SHA hashes, introducing
+security risks.
+
+**Solution:** Add automated test to enforce SHA pinning:
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_all_github_actions_are_sha_pinned() {
+    let workflows_dir = std::path::Path::new(".github/workflows");
+    let mut unpinned_actions = Vec::new();
+
+    for entry in std::fs::read_dir(workflows_dir).unwrap() {
+        let path = entry.unwrap().path();
+        let is_workflow = path.extension()
+            .map(|ext| ext == "yml" || ext == "yaml")
+            .unwrap_or(false);
+
+        if is_workflow {
+            let content = std::fs::read_to_string(&path).unwrap();
+
+            for (line_num, line) in content.lines().enumerate() {
+                // Match "uses: owner/repo@ref" pattern
+                if line.trim().starts_with("uses:") {
+                    let action_ref = line.split('@').nth(1);
+
+                    if let Some(ref_part) = action_ref {
+                        let ref_value = ref_part
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("");
+
+                        // Check if it's a SHA (40 hex characters)
+                        let is_sha = ref_value.len() == 40
+                            && ref_value.chars().all(|c| c.is_ascii_hexdigit());
+
+                        if !is_sha {
+                            unpinned_actions.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                line_num + 1,
+                                line.trim()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        unpinned_actions.is_empty(),
+        "All GitHub Actions must be pinned to SHA hashes for security.\n\n\
+         Unpinned actions found:\n{}\n\n\
+         Example fix:\n\
+         ❌ WRONG: uses: actions/checkout@v4\n\
+         ✅ CORRECT: uses: actions/checkout@11bd7190... # v4.2.2\n\n\
+         Get SHA: gh api repos/OWNER/REPO/commits/TAG --jq .sha",
+        unpinned_actions.join("\n")
+    );
+}
+```
+
+**Benefits:**
+
+- Catches unpinned actions during `cargo test`
+- Prevents security risks from reaching production
+- Clear error messages with fix instructions
+- Self-documenting security requirement
+
+### SHA Pinning Comments Best Practice
+
+**Always include version comment after SHA:**
+
+```yaml
+# ✅ GOOD: SHA with version comment
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+- uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+
+# ❌ BAD: SHA without context
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+- uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14
+```
+
+**Why version comments matter:**
+
+1. **Human readability** - Know what version the SHA represents
+2. **Update tracking** - Easy to see which actions need updating
+3. **Dependency auditing** - Tools can parse version from comment
+4. **Documentation** - Self-documenting workflow configuration
 
 ---
 
@@ -382,23 +477,23 @@ fn test_dockerfile_rust_version_matches_msrv() {
 
 ```dockerfile
 # Primary patterns (CORRECT for Docker Hub)
-FROM rust:1.88-bookworm        # Debian 12 base
-FROM rust:1.88-alpine          # Alpine base
-FROM rust:1.88-slim            # Slim Debian
-FROM rust:1.88                 # Default (Debian bookworm)
+FROM Rust:1.88-bookworm        # Debian 12 base
+FROM Rust:1.88-alpine          # Alpine base
+FROM Rust:1.88-slim            # Slim Debian
+FROM Rust:1.88                 # Default (Debian bookworm)
 
 # NOT available on Docker Hub
-FROM rust:1.88.0-bookworm      # ❌ Won't work
-FROM rust:1.88.0               # ❌ Won't work
+FROM Rust:1.88.0-bookworm      # ❌ Won't work
+FROM Rust:1.88.0               # ❌ Won't work
 ```
 
 **Check available tags:**
 
 ```bash
-# List available tags for rust image
-docker search rust --limit 5
-docker pull rust:1.88-bookworm  # Works
-docker pull rust:1.88.0-bookworm  # Error: manifest unknown
+# List available tags for Rust image
+docker search Rust --limit 5
+docker pull Rust:1.88-bookworm  # Works
+docker pull Rust:1.88.0-bookworm  # Error: manifest unknown
 ```
 
 ### Benefits of Docker Hub Shortened Format
@@ -406,8 +501,8 @@ docker pull rust:1.88.0-bookworm  # Error: manifest unknown
 **Automatic security updates:**
 
 ```dockerfile
-# Using rust:1.88 automatically pulls latest patch
-FROM rust:1.88-bookworm
+# Using Rust:1.88 automatically pulls latest patch
+FROM Rust:1.88-bookworm
 # Today: Gets 1.88.0
 # Tomorrow: Automatically gets 1.88.1 (with security fixes)
 # Next week: Automatically gets 1.88.2 (with bug fixes)
@@ -417,7 +512,7 @@ FROM rust:1.88-bookworm
 
 ```dockerfile
 # Using full version requires manual updates
-FROM rust:1.88.0-bookworm
+FROM Rust:1.88.0-bookworm
 # Stuck on 1.88.0 forever
 # Must manually update Dockerfile to get 1.88.1
 ```
@@ -435,7 +530,7 @@ FROM rust:1.88.0-bookworm
 
 ```dockerfile
 # Custom registry: Use full versions for reproducibility
-FROM my-registry.example.com/rust:1.88.0-bookworm
+FROM my-registry.example.com/Rust:1.88.0-bookworm
 # Not Docker Hub, so full version is appropriate
 ```
 
@@ -458,7 +553,7 @@ Before committing Dockerfile changes:
 # Using bookworm (Debian 12) which has mold in its repositories
 # Version 1.88 matches MSRV in Cargo.toml
 # Docker Hub uses X.Y format, not X.Y.Z
-FROM rust:1.88-bookworm AS chef
+FROM Rust:1.88-bookworm AS chef
 #          ^^^^ Shortened format for Docker Hub (automatically includes patches)
 RUN cargo install cargo-chef --locked
 WORKDIR /app
@@ -470,21 +565,21 @@ WORKDIR /app
 
 ```dockerfile
 # Dockerfile:7
-FROM rust:1.88.0-bookworm AS chef
+FROM Rust:1.88.0-bookworm AS chef
 #          ^^^^^^ Full version - tag doesn't exist on Docker Hub
 ```
 
 **Error:**
 
 ```text
-ERROR: manifest for rust:1.88.0-bookworm not found
+ERROR: manifest for Rust:1.88.0-bookworm not found
 ```
 
 **After (CORRECT):**
 
 ```dockerfile
 # Dockerfile:7
-FROM rust:1.88-bookworm AS chef
+FROM Rust:1.88-bookworm AS chef
 #          ^^^^ Shortened format - matches Docker Hub convention
 ```
 
@@ -1198,7 +1293,7 @@ Using mutable tags (`@v2`, `@main`) allows actions to change behavior between ru
 # ✅ CORRECT: SHA256 digest is cryptographically immutable
 - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 - uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
-```rust
+```
 
 **How to get SHA256 digests:**
 
@@ -1590,6 +1685,218 @@ cargo test --all-features  # Includes ci_config_tests
 
 ---
 
+## 16. Scheduled Workflows for Proactive Monitoring
+
+### The Problem: Reactive vs Proactive Security
+
+Running security audits and maintenance tasks only on code changes is reactive:
+
+```yaml
+# ❌ REACTIVE: Only runs when code changes
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+```
+
+**Issues:**
+
+- New CVEs published overnight won't trigger workflow
+- Advisory databases update independently of code
+- Stale dependencies accumulate between changes
+- Link rot occurs in documentation
+- Nightly toolchains become outdated
+
+### The Solution: Scheduled Workflows
+
+Add cron schedules for proactive monitoring:
+
+```yaml
+# ✅ PROACTIVE: Runs on code changes AND on schedule
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily security audit at noon UTC to catch new CVEs
+    - cron: '0 12 * * *'
+```
+
+### When to Use Scheduled Workflows
+
+| Workflow Type                | Recommended Schedule | Rationale                              |
+|------------------------------|----------------------|----------------------------------------|
+| Security audits (cargo-deny) | Daily                | New CVEs published frequently          |
+| Dependency updates           | Weekly               | Balance freshness with stability       |
+| Link checking                | Weekly               | Catch external link rot                |
+| Workflow hygiene             | Weekly               | Detect stale toolchains                |
+| Unused dependencies          | Weekly               | Proactive dependency cleanup           |
+| Documentation validation     | Weekly               | Catch formatting drift                 |
+
+### Real-World Example: Daily Security Audits
+
+From `/workspaces/signal-fish-server/.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily security audit at noon UTC to catch new CVEs
+    - cron: '0 12 * * *'
+
+jobs:
+  deny:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    # This job handles all security audits including vulnerabilities (cargo-audit),
+    # licenses, banned dependencies, and source verification (cargo-deny).
+    # Runs on push/PR and daily via schedule (see workflow triggers).
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+        with:
+          arguments: --all-features
+```
+
+**Benefits:**
+
+- Detects new vulnerabilities published overnight
+- Catches RustSec advisory database updates
+- Alerts team to security issues even without code changes
+- Proactive security posture instead of reactive
+
+### Common Cron Schedules
+
+```yaml
+# Every day at noon UTC
+- cron: '0 12 * * *'
+
+# Every Monday at midnight UTC
+- cron: '0 0 * * 1'
+
+# Every week on Monday at 6 AM UTC
+- cron: '0 6 * * 1'
+
+# First day of every month
+- cron: '0 0 1 * *'
+
+# Every 6 hours
+- cron: '0 */6 * * *'
+```
+
+### Preventing Alert Fatigue
+
+**Use different schedules for different priorities:**
+
+```yaml
+# High priority: Daily security audits
+security-audit:
+  schedule:
+    - cron: '0 12 * * *'  # Daily at noon
+
+# Medium priority: Weekly dependency cleanup
+unused-deps:
+  schedule:
+    - cron: '0 0 * * 1'  # Weekly on Monday
+
+# Low priority: Monthly workflow hygiene
+workflow-hygiene:
+  schedule:
+    - cron: '0 6 1 * *'  # First of month at 6 AM
+```
+
+**Add clear comments explaining schedule choices:**
+
+```yaml
+schedule:
+  # Daily security audit at noon UTC to catch new CVEs
+  # More frequent than code changes because advisory DB updates independently
+  - cron: '0 12 * * *'
+```
+
+### Notification Configuration
+
+**For scheduled workflows that may fail:**
+
+```yaml
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15
+        with:
+          arguments: --all-features
+
+      # Send notification on failure (scheduled runs only)
+      - name: Notify on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@<SHA>
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Scheduled security audit failed',
+              body: 'Daily security audit detected new vulnerabilities.\n\n\
+                     Workflow: ${{ github.server_url }}/${{ github.repository }}/\
+                     actions/runs/${{ github.run_id }}',
+              labels: ['security', 'automated']
+            })
+```
+
+### Best Practices for Scheduled Workflows
+
+1. **Document why the schedule exists** - Comment explaining frequency choice
+2. **Use appropriate frequency** - Balance freshness with noise
+3. **Different schedules for different priorities** - Daily for security, weekly for cleanup
+4. **Include workflow trigger in comments** - Document that job runs on schedule
+5. **Test scheduled logic** - Ensure workflow behaves correctly for cron triggers
+6. **Stagger schedules** - Don't run everything at midnight UTC (spread load)
+7. **Configure notifications** - Alert on failures for scheduled runs
+
+### Testing Scheduled Workflow Logic
+
+```yaml
+# Test both push/PR and scheduled triggers
+- name: Run security audit
+  run: |
+    if [ "${{ github.event_name }}" = "schedule" ]; then
+      echo "Running scheduled security audit (daily check for new CVEs)"
+    else
+      echo "Running security audit (triggered by code change)"
+    fi
+    cargo deny check advisories
+```
+
+### Preventing Duplicate Runs
+
+**Use concurrency control to prevent overlap:**
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}
+  cancel-in-progress: true
+```
+
+This ensures that:
+
+- Scheduled run won't overlap with push/PR runs
+- Multiple scheduled runs won't queue up if workflow is slow
+- Resources are used efficiently
+
+---
+
 ## Agent Checklist
 
 ### AWK Best Practices
@@ -1615,10 +1922,13 @@ cargo test --all-features  # Includes ci_config_tests
 - [ ] All Markdown links use exact case matching actual filenames
 - [ ] Docker smoke tests use retry loops with `docker logs` on failure
 - [ ] Action versions pinned with SHA256 digests (not mutable tags)
+- [ ] SHA pins include version comment (e.g., `# v4.2.2`)
 - [ ] Permissions are minimal (`contents: read` by default)
 - [ ] Workflow path filters include the workflow file itself
 - [ ] Concurrency control prevents duplicate runs
 - [ ] Timeout values documented with comments explaining duration
+- [ ] Security audits run on schedule (daily), not just on code changes
+- [ ] Scheduled workflows have clear comments explaining frequency choice
 
 ---
 

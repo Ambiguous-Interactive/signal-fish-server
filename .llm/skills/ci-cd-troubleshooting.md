@@ -1267,7 +1267,149 @@ ambiguous = "ambiguous"
 
 ---
 
-## Pattern 10: Git Hook Permission Issues
+## Pattern 10: cargo-deny CVSS 4.0 Parsing Issue
+
+### Symptom
+
+```text
+# cargo-deny fails with CVSS 4.0 parsing errors
+Error: failed to parse advisory database
+Error: CVSS v4.0 vectors are not supported by this version
+ERROR: cargo-deny-action v2.0.5 cannot parse CVSS 4.0 entries
+```
+
+### Root Cause
+
+**cargo-deny-action versions prior to v2.0.15 cannot parse CVSS 4.0 entries** in the RustSec advisory database.
+
+The RustSec advisory database was updated to include CVSS 4.0 vulnerability scores. Older versions of cargo-deny (using rustsec < 0.31) cannot parse these entries and fail.
+
+**Why this matters:**
+
+- CVSS 4.0 is the newest Common Vulnerability Scoring System standard
+- RustSec advisory database now includes CVSS 4.0 scores for newer vulnerabilities
+- Using old cargo-deny versions causes CI failures when new advisories are published
+- Security audits become blocked, preventing detection of real vulnerabilities
+
+### Solution
+
+**Update to cargo-deny-action v2.0.15 or later:**
+
+```yaml
+# ❌ WRONG: Old version cannot parse CVSS 4.0
+- uses: EmbarkStudios/cargo-deny-action@f20e90f289e90a40fd814d92ea2935d9db5da04f # v2.0.5
+
+# ✅ CORRECT: v2.0.15+ includes rustsec 0.31 with CVSS 4.0 support
+- uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+  with:
+    arguments: --all-features
+```
+
+**Key changes in v2.0.15:**
+
+1. Updates rustsec dependency to 0.31+ (CVSS 4.0 support)
+2. Handles both CVSS 3.x and CVSS 4.0 advisory entries
+3. Backward compatible with existing configurations
+
+### Prevention
+
+**Add test to enforce minimum cargo-deny-action version:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_cargo_deny_action_version_supports_cvss_4() {
+    let ci_workflow = read_file(".github/workflows/ci.yml");
+
+    // Extract cargo-deny-action version
+    let deny_line = ci_workflow
+        .lines()
+        .find(|line| line.contains("cargo-deny-action@"))
+        .expect("cargo-deny-action not found in ci.yml");
+
+    // Version should be v2.0.15 or later (CVSS 4.0 support)
+    assert!(
+        deny_line.contains("v2.0.15")
+            || deny_line.contains("v2.0.16")
+            || deny_line.contains("v2.1")
+            || deny_line.contains("v3"),
+        "cargo-deny-action must be v2.0.15+ for CVSS 4.0 support.\n\
+         Found: {}\n\
+         Fix: Update to EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15",
+        deny_line.trim()
+    );
+}
+```
+
+**Document version requirement:**
+
+```yaml
+# .github/workflows/ci.yml
+# cargo-deny v2.0.15+ required for CVSS 4.0 advisory parsing
+# Earlier versions fail when RustSec DB includes CVSS 4.0 entries
+- uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+```
+
+### Key Insights
+
+**Why version pinning matters for security tools:**
+
+1. **Advisory database evolves** - New vulnerability scoring systems get added
+2. **Old tools break** - Incompatible with new formats
+3. **Security blocked** - Can't run audits when tool fails to parse
+4. **Silent failures** - May not notice until a new CVSS 4.0 advisory is published
+
+**When to update security tool versions:**
+
+| Trigger                          | Action                                      | Urgency    |
+|----------------------------------|---------------------------------------------|------------|
+| Parsing error in CI              | Update immediately                          | Critical   |
+| New CVSS version released        | Update proactively within 1 month           | High       |
+| Security tool >6 months old      | Review for updates                          | Medium     |
+| Quarterly maintenance            | Check for updates and improvements          | Low        |
+
+**Testing pattern:**
+
+```bash
+# Test cargo-deny locally with latest advisory DB
+cargo install cargo-deny --locked
+cargo deny check advisories
+
+# If this fails with CVSS 4.0 error, your cargo-deny is too old
+# Update to 0.16+ which includes rustsec 0.31+
+```
+
+### Related Pattern: Scheduled Security Audits
+
+**Problem:** Security audits only ran on code changes, missing new CVEs published
+between commits.
+
+**Solution:** Add daily cron schedule for dependency audit job:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily security audit at noon UTC to catch new CVEs
+    - cron: '0 12 * * *'
+```
+
+**Benefits:**
+
+- Detects new vulnerabilities published overnight
+- Catches advisories added to RustSec database
+- Alerts team to new CVEs even without code changes
+- Proactive security posture
+
+**Best practice:** Run security tools on a schedule, not just on push/PR.
+
+---
+
+## Pattern 11: Git Hook Permission Issues
 
 ### Symptom
 
@@ -1278,7 +1420,7 @@ error: cannot run .git/hooks/pre-commit: Permission denied
 # OR in CI
 ERROR: Script ./scripts/check-markdown.sh is not executable
 Fix: chmod +x ./scripts/check-markdown.sh
-```bash
+```
 
 ### Root Cause
 

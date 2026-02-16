@@ -300,16 +300,29 @@ fn test_required_ci_workflows_exist() {
         ("workflow-hygiene.yml", "Workflow configuration validation"),
     ];
 
-    for (workflow_file, description) in required_workflows {
+    let mut missing_workflows = Vec::new();
+
+    for (workflow_file, description) in &required_workflows {
         let workflow_path = workflows_dir.join(workflow_file);
-        assert!(
-            workflow_path.exists(),
-            "Required workflow missing: {} ({})\n\
-             Path: {}\n\
-             This workflow is required for CI/CD hygiene.",
-            workflow_file,
-            description,
-            workflow_path.display()
+        if !workflow_path.exists() {
+            missing_workflows.push(format!(
+                "  - {} ({})\n    Expected at: {}",
+                workflow_file,
+                description,
+                workflow_path.display()
+            ));
+        }
+    }
+
+    if !missing_workflows.is_empty() {
+        panic!(
+            "Required workflows are missing:\n\n{}\n\n\
+             These workflows are required for CI/CD hygiene.\n\
+             To fix:\n\
+             1. Restore missing workflow files from git history\n\
+             2. Or create new workflow files following project patterns\n\
+             3. Ensure all workflows are in .github/workflows/",
+            missing_workflows.join("\n")
         );
     }
 }
@@ -323,22 +336,43 @@ fn test_ci_workflow_has_required_jobs() {
     let ci_workflow = root.join(".github/workflows/ci.yml");
     let content = read_file(&ci_workflow);
 
-    // Required job names in CI workflow
+    // Required job names in CI workflow with descriptions
     let required_jobs = vec![
-        "check",  // Code formatting and linting
-        "test",   // Unit and integration tests
-        "deny",   // Security audits and license checks
-        "msrv",   // MSRV verification
-        "docker", // Docker build and smoke test
+        ("check", "Code formatting and linting"),
+        ("test", "Unit and integration tests"),
+        ("deny", "Security audits and license checks"),
+        ("msrv", "MSRV verification"),
+        ("docker", "Docker build and smoke test"),
     ];
 
-    for job_name in required_jobs {
+    let mut missing_jobs = Vec::new();
+    let mut found_jobs = Vec::new();
+
+    for (job_name, description) in &required_jobs {
         // Look for "job-name:" pattern at the beginning of a line
         let job_pattern = format!("  {job_name}:");
-        assert!(
-            content.contains(&job_pattern),
-            "CI workflow missing required job: '{job_name}'\n\
-             This job is critical for CI/CD validation."
+        if content.contains(&job_pattern) {
+            found_jobs.push(format!("  ✓ {job_name} ({description})"));
+        } else {
+            missing_jobs.push(format!("  ✗ {job_name} ({description})"));
+        }
+    }
+
+    if !missing_jobs.is_empty() {
+        panic!(
+            "CI workflow is missing required jobs:\n\n\
+             Missing:\n{}\n\n\
+             Found:\n{}\n\n\
+             File: {}\n\n\
+             These jobs are critical for CI/CD validation.\n\
+             To fix:\n\
+             1. Review git history to see when the job was removed\n\
+             2. Restore the job definition in the jobs: section\n\
+             3. Ensure the job name matches exactly (case-sensitive)\n\
+             4. Verify the job has proper indentation (2 spaces)",
+            missing_jobs.join("\n"),
+            found_jobs.join("\n"),
+            ci_workflow.display()
         );
     }
 }
@@ -369,12 +403,16 @@ fn test_workflow_files_are_valid_yaml() {
 
     assert!(
         !workflow_files.is_empty(),
-        "No workflow files found in .github/workflows/"
+        "No workflow files found in .github/workflows/\n\
+         Expected workflow files (*.yml or *.yaml) to exist in this directory."
     );
+
+    let mut errors = Vec::new();
 
     for entry in workflow_files {
         let path = entry.path();
         let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
 
         // Basic YAML validation checks
         // Note: This is not a full YAML parser, but catches common errors
@@ -382,34 +420,57 @@ fn test_workflow_files_are_valid_yaml() {
         // Check for balanced quotes
         let single_quotes = content.matches('\'').count();
         let double_quotes = content.matches('"').count();
-        assert_eq!(
-            single_quotes % 2,
-            0,
-            "Unbalanced single quotes in {}",
-            path.display()
-        );
-        assert_eq!(
-            double_quotes % 2,
-            0,
-            "Unbalanced double quotes in {}",
-            path.display()
-        );
+
+        if single_quotes % 2 != 0 {
+            errors.push(format!(
+                "{filename}: Unbalanced single quotes (found {single_quotes} quotes)\n  \
+                 Check for missing closing quotes in strings"
+            ));
+        }
+
+        if double_quotes % 2 != 0 {
+            errors.push(format!(
+                "{filename}: Unbalanced double quotes (found {double_quotes} quotes)\n  \
+                 Check for missing closing quotes in strings"
+            ));
+        }
 
         // Check for required GitHub Actions fields
-        assert!(
-            content.contains("name:"),
-            "{} missing 'name:' field",
-            path.display()
-        );
-        assert!(
-            content.contains("on:") || content.contains("'on':"),
-            "{} missing 'on:' field",
-            path.display()
-        );
-        assert!(
-            content.contains("jobs:"),
-            "{} missing 'jobs:' field",
-            path.display()
+        let mut missing_fields = Vec::new();
+
+        if !content.contains("name:") {
+            missing_fields.push("name:");
+        }
+        if !content.contains("on:") && !content.contains("'on':") {
+            missing_fields.push("on:");
+        }
+        if !content.contains("jobs:") {
+            missing_fields.push("jobs:");
+        }
+
+        if !missing_fields.is_empty() {
+            errors.push(format!(
+                "{}: Missing required fields: {}\n  \
+                 GitHub Actions workflows must have: name, on, jobs",
+                filename,
+                missing_fields.join(", ")
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Workflow files have YAML validation errors:\n\n{}\n\n\
+             To fix:\n\
+             1. Use a YAML validator/linter (yamllint, prettier, or IDE plugin)\n\
+             2. Check for missing quotes, colons, or indentation errors\n\
+             3. Ensure all required fields (name, on, jobs) are present\n\
+             4. Verify quotes are balanced (each opening quote has a closing quote)\n\n\
+             Common issues:\n\
+             - Missing closing quote: name: \"My Workflow\n\
+             - Missing colon: name My Workflow\n\
+             - Wrong indentation: jobs should be at root level, not nested",
+            errors.join("\n")
         );
     }
 }
@@ -487,6 +548,9 @@ fn test_scripts_are_executable() {
     let root = repo_root();
     let directories_to_check = vec![root.join("scripts"), root.join(".githooks")];
 
+    #[cfg(unix)]
+    let mut non_executable_scripts = Vec::new();
+
     for dir in directories_to_check {
         if !dir.exists() {
             continue;
@@ -511,14 +575,13 @@ fn test_scripts_are_executable() {
                     let mode = metadata.permissions().mode();
                     let is_executable = mode & 0o111 != 0;
 
-                    assert!(
-                        is_executable,
-                        "{} is not executable.\n\
-                         Fix: chmod +x {} && git update-index --chmod=+x {}",
-                        path.display(),
-                        path.display(),
-                        path.display()
-                    );
+                    if !is_executable {
+                        non_executable_scripts.push(format!(
+                            "  - {}\n    Current permissions: {:o}",
+                            path.display(),
+                            mode & 0o777
+                        ));
+                    }
                 }
 
                 // On non-Unix platforms, just check the file exists
@@ -528,6 +591,26 @@ fn test_scripts_are_executable() {
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    if !non_executable_scripts.is_empty() {
+        panic!(
+            "Shell scripts are not executable:\n\n{}\n\n\
+             Scripts must have executable permissions to run in CI and locally.\n\n\
+             To fix:\n\
+             1. Make scripts executable:\n\
+                chmod +x <script-path>\n\n\
+             2. Update git index to track executable bit:\n\
+                git update-index --chmod=+x <script-path>\n\n\
+             3. Verify with: git ls-files --stage <script-path>\n\
+                Should show: 100755 (executable) not 100644 (non-executable)\n\n\
+             Example:\n\
+                chmod +x scripts/check-markdown.sh\n\
+                git update-index --chmod=+x scripts/check-markdown.sh\n\
+                git add scripts/check-markdown.sh\n",
+            non_executable_scripts.join("\n")
+        );
     }
 }
 
@@ -677,8 +760,8 @@ fn test_typos_passes_on_known_files() {
 
     // Files that are known to contain technical terms that should be allowed
     let files_to_check = vec![
-        root.join("docs/authentication.md"),                       // Contains "HashiCorp Vault"
-        root.join("docs/adr/ci-cd-preventative-measures.md"),      // Contains "HashiCorp"
+        root.join("docs/authentication.md"), // Contains "HashiCorp Vault"
+        root.join("docs/adr/ci-cd-preventative-measures.md"), // Contains "HashiCorp"
     ];
 
     for file in files_to_check {
@@ -787,6 +870,329 @@ fn test_dockerfile_uses_docker_version_format() {
          - CI normalization logic handles format differences\n\n\
          Fix: Change 'FROM rust:{version}' to 'FROM rust:{{major}}.{{minor}}' in Dockerfile"
     );
+}
+
+#[test]
+fn test_github_actions_are_pinned_to_sha() {
+    // This test validates that all GitHub Actions use SHA pinning instead of mutable tags
+    // SHA pinning prevents supply chain attacks where action maintainers could push
+    // malicious code to an existing tag (e.g., v4.2.2 could be changed after we reference it)
+    //
+    // Required format: uses: owner/repo@<64-char-sha> # vX.Y.Z
+    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    if !workflows_dir.exists() {
+        panic!(
+            "Workflows directory not found at {}",
+            workflows_dir.display()
+        );
+    }
+
+    let workflow_files: Vec<_> = std::fs::read_dir(&workflows_dir)
+        .expect("Failed to read workflows directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "yml" || ext == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed for human readability
+            let trimmed = line.trim();
+
+            // Look for "uses:" lines that reference actions
+            if trimmed.starts_with("uses:") {
+                let uses_value = trimmed.trim_start_matches("uses:").trim();
+
+                // Skip local actions (e.g., ./.github/actions/setup)
+                if uses_value.starts_with("./") {
+                    continue;
+                }
+
+                // Skip docker:// references (different security model)
+                if uses_value.starts_with("docker://") {
+                    continue;
+                }
+
+                // Extract the action reference (owner/repo@ref)
+                let parts: Vec<&str> = uses_value.split('@').collect();
+                if parts.len() < 2 {
+                    violations.push(format!(
+                        "{filename}:{line_num}: Invalid action reference (missing @): {uses_value}"
+                    ));
+                    continue;
+                }
+
+                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
+
+                // Check if it's a SHA (64 hex characters)
+                let is_sha =
+                    action_ref.len() == 40 && action_ref.chars().all(|c| c.is_ascii_hexdigit());
+
+                if !is_sha {
+                    violations.push(format!(
+                        "{}:{}: Action not pinned to SHA: {}\n  \
+                         Found: {}\n  \
+                         Action references must use full 40-character SHA instead of tags.\n  \
+                         Tags are mutable and can be changed by maintainers (supply chain risk).\n  \
+                         Find the SHA for the tag at: https://github.com/{}/releases",
+                        filename, line_num, parts[0], action_ref, parts[0]
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "GitHub Actions must be pinned to SHA for security:\n\n{}\n\n\
+             Why SHA pinning is required:\n\
+             - Tags (v1, v1.2.3) are mutable and can be changed by action maintainers\n\
+             - Attackers could compromise maintainer accounts and push malicious code to existing tags\n\
+             - SHA pinning ensures the exact code version is locked\n\n\
+             How to fix:\n\
+             1. Find the release/tag on GitHub: https://github.com/owner/repo/releases\n\
+             2. Click on the commit SHA for that tag\n\
+             3. Copy the full 40-character SHA\n\
+             4. Use format: uses: owner/repo@<SHA> # vX.Y.Z\n\n\
+             Example:\n\
+             - Bad:  uses: actions/checkout@v4.2.2\n\
+             - Good: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_cargo_deny_action_minimum_version() {
+    // This test ensures cargo-deny-action is at least v2.0.15
+    // v2.0.15+ includes important security and stability fixes
+    //
+    // Background: Earlier versions had issues with:
+    // - Advisory database sync failures
+    // - False positives in license checking
+    // - Performance issues with large dependency graphs
+
+    let root = repo_root();
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_workflow);
+
+    // Find the cargo-deny-action reference
+    let mut found_cargo_deny = false;
+    let mut violations = Vec::new();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1; // 1-indexed
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("uses:") && trimmed.contains("cargo-deny-action") {
+            found_cargo_deny = true;
+
+            // Extract the SHA and check for version comment
+            let parts: Vec<&str> = trimmed.split('@').collect();
+            if parts.len() < 2 {
+                violations.push(format!(
+                    "Line {line_num}: cargo-deny-action reference is malformed: {trimmed}"
+                ));
+                continue;
+            }
+
+            let after_at = parts[1];
+
+            // Check if there's a version comment (# vX.Y.Z)
+            if !after_at.contains('#') {
+                violations.push(format!(
+                    "Line {line_num}: cargo-deny-action missing version comment\n  \
+                     Expected format: uses: EmbarkStudios/cargo-deny-action@<SHA> # vX.Y.Z"
+                ));
+                continue;
+            }
+
+            // Extract version from comment
+            if let Some(comment_part) = after_at.split('#').nth(1) {
+                let version_str = comment_part.trim();
+
+                // Parse version (should be vX.Y.Z format)
+                if !version_str.starts_with('v') {
+                    violations.push(format!(
+                        "Line {line_num}: Version comment should start with 'v': {version_str}"
+                    ));
+                    continue;
+                }
+
+                let version_numbers = version_str.trim_start_matches('v');
+                let version_parts: Vec<&str> = version_numbers.split('.').collect();
+
+                if version_parts.len() < 3 {
+                    violations.push(format!(
+                        "Line {line_num}: Invalid version format (expected vX.Y.Z): {version_str}"
+                    ));
+                    continue;
+                }
+
+                // Parse major, minor, patch
+                let major: u32 = version_parts[0].parse().unwrap_or(0);
+                let minor: u32 = version_parts[1].parse().unwrap_or(0);
+                let patch: u32 = version_parts[2].parse().unwrap_or(0);
+
+                // Check against minimum version: v2.0.15
+                let min_major = 2;
+                let min_minor = 0;
+                let min_patch = 15;
+
+                let is_sufficient = major > min_major
+                    || (major == min_major && minor > min_minor)
+                    || (major == min_major && minor == min_minor && patch >= min_patch);
+
+                if !is_sufficient {
+                    violations.push(format!(
+                        "Line {line_num}: cargo-deny-action version too old: {version_str}\n  \
+                         Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
+                         Found: v{major}.{minor}.{patch}\n  \
+                         Please update to v2.0.15 or newer for security and stability fixes."
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_cargo_deny,
+        "cargo-deny-action not found in CI workflow.\n\
+         Expected to find 'uses: EmbarkStudios/cargo-deny-action@...' in {}",
+        ci_workflow.display()
+    );
+
+    if !violations.is_empty() {
+        panic!(
+            "cargo-deny-action version check failed:\n\n{}\n",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_action_version_comments_exist() {
+    // This test validates that all GitHub Actions with SHA pinning have version comments
+    // Version comments make it easy to understand what version is being used without
+    // looking up the SHA on GitHub
+    //
+    // Required format: uses: owner/repo@<sha> # vX.Y.Z or # tag-name
+    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    if !workflows_dir.exists() {
+        panic!(
+            "Workflows directory not found at {}",
+            workflows_dir.display()
+        );
+    }
+
+    let workflow_files: Vec<_> = std::fs::read_dir(&workflows_dir)
+        .expect("Failed to read workflows directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "yml" || ext == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("uses:") {
+                let uses_value = trimmed.trim_start_matches("uses:").trim();
+
+                // Skip local actions and docker references
+                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
+                    continue;
+                }
+
+                // Extract the action reference
+                let parts: Vec<&str> = uses_value.split('@').collect();
+                if parts.len() < 2 {
+                    continue; // Already caught by SHA pinning test
+                }
+
+                let after_at = parts[1];
+                let action_ref = after_at.split_whitespace().next().unwrap_or("");
+
+                // Check if it's a SHA (40 hex characters)
+                let is_sha =
+                    action_ref.len() == 40 && action_ref.chars().all(|c| c.is_ascii_hexdigit());
+
+                if is_sha {
+                    // SHA-pinned action should have a version comment
+                    if !after_at.contains('#') {
+                        violations.push(format!(
+                            "{}:{}: SHA-pinned action missing version comment: {}\n  \
+                             Add a comment with the version/tag for readability.\n  \
+                             Format: uses: {}@{} # vX.Y.Z or # tag-name",
+                            filename, line_num, parts[0], parts[0], action_ref
+                        ));
+                    } else {
+                        // Verify comment is not empty
+                        if let Some(comment_part) = after_at.split('#').nth(1) {
+                            let comment = comment_part.trim();
+                            if comment.is_empty() {
+                                violations.push(format!(
+                                    "{}:{}: Version comment is empty: {}\n  \
+                                     Provide the version/tag for this SHA (e.g., # v4.2.2)",
+                                    filename, line_num, parts[0]
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "GitHub Actions with SHA pinning must have version comments:\n\n{}\n\n\
+             Why version comments are required:\n\
+             - Makes it easy to understand which version is being used\n\
+             - Helps identify when updates are needed\n\
+             - Improves code review (reviewers can see version changes)\n\
+             - Enables automated version tracking tools\n\n\
+             Format: uses: owner/repo@<40-char-SHA> # vX.Y.Z\n\
+             Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+            violations.join("\n")
+        );
+    }
 }
 
 /// Helper function to find all files with a given extension, excluding specified directories
