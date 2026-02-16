@@ -437,4 +437,3 @@ Set alerting thresholds for security anomalies:
 - [observability-and-logging](./observability-and-logging.md) — Structured logging, tracing spans, log hygiene
 - [dependency-management](./dependency-management.md) — Cargo.lock, version pinning, audit workflows
 - [ddos-and-rate-limiting](./ddos-and-rate-limiting.md) — Rate limiting, connection management, DDoS prevention
-- [aws-production-security](./aws-production-security.md) — AWS infrastructure hardening for production deployment

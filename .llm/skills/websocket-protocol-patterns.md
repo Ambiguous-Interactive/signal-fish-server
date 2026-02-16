@@ -227,7 +227,8 @@ match receiver.next().await {
 
 ### Reconnection Protocol
 
-See [ADR-003: Reconnection Protocol](../../adr/003-reconnection-protocol.md). Support reconnection with session tokens and server-side replay buffers for message continuity.
+See [ADR-001: Reconnection Protocol](../../docs/adr/reconnection-protocol.md). Support reconnection with session
+tokens and server-side replay buffers for message continuity.
 
 ### Close Frame Reasons
 
@@ -292,7 +293,7 @@ For load tests, measure: connections/sec, message throughput, P50/P95/P99 latenc
 - [ ] Binary data uses `Bytes` for zero-copy broadcast
 - [ ] Broadcast channels are bounded — slow clients get dropped
 - [ ] Disconnections logged at `debug`/`info`, not `error`
-- [ ] Reconnection restores session state (see ADR-003)
+- [ ] Reconnection restores session state (see ADR-001)
 - [ ] Integration tests cover multi-client scenarios with timeouts
 
 ---

@@ -133,16 +133,25 @@ jobs:
 
             # Extract Rust code blocks with improved regex to catch all variants:
             # ```rust, ```rust,ignore, ```rust,no_run, ```rust,should_panic, etc.
-            # Uses multiline mode (-z) to handle blocks correctly, then awk for parsing
+            #
+            # IMPORTANT: AWK outputs records separated by NUL bytes (\0) instead of newlines
+            # to preserve multi-line code blocks. The bash read loop uses -d '' to read
+            # NUL-delimited records. Without this, multi-line blocks would be split across
+            # multiple records, causing validation failures.
+            #
+            # Bug fixes applied:
+            # 1. Content accumulation: Fixed to handle empty first lines correctly
+            # 2. END block: Added to handle unclosed blocks at EOF
+            # 3. Case-insensitive matching: Fixed attribute extraction for Rust/rust
             awk '
-              # Match opening fence with optional attributes
-              /^```(rust|Rust)(,.*)?$/ {
+              # Match opening fence with optional attributes (case-insensitive)
+              /^```[Rr]ust(,.*)?$/ {
                 in_block = 1
                 block_start = NR
                 content = ""
                 attributes = $0
-                # Extract attributes after rust
-                if (match($0, /```rust,(.*)/, arr)) {
+                # Extract attributes after rust (case-insensitive)
+                if (match($0, /```[Rr]ust,(.*)/, arr)) {
                   attrs = arr[1]
                 } else {
                   attrs = ""
@@ -151,12 +160,14 @@ jobs:
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
-                # Output: line_number:::attributes:::content
-                print block_start ":::" attrs ":::" content
+                # Output with NUL byte separator to preserve multi-line content
+                # Format: line_number:::attributes:::content\0
+                printf "%s:::%s:::%s\0", block_start, attrs, content
                 in_block = 0
                 next
               }
               # Accumulate content while in block
+              # FIXED: Always append lines with newline separator, handling empty first lines
               in_block {
                 if (content == "") {
                   content = $0
@@ -168,10 +179,24 @@ jobs:
               /^```/ && in_block {
                 in_block = 0
               }
-            ' "$md_file" | while IFS=':::' read -r line_num attributes content; do
+              # FIXED: Handle unclosed blocks at end of file
+              END {
+                if (in_block) {
+                  printf "%s:::%s:::%s\0", block_start, attrs, content
+                }
+              }
+            ' "$md_file" | while IFS=':::' read -r -d '' line_num attributes content; do
               # Read current counters from file
               read -r total validated skipped failed < "$COUNTER_FILE"
               total=$((total + 1))
+
+              # Validate: Skip empty code blocks
+              if [ -z "$content" ] || [ "$content" = $'\n' ]; then
+                echo "  ⊘ Skipping empty block at line $line_num"
+                skipped=$((skipped + 1))
+                echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
+                continue
+              fi
 
               # Check if block has ignore, no_run, or should_panic attributes
               should_skip=0
@@ -289,8 +314,9 @@ jobs:
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
-          TOTAL=0
-          FAILED=0
+          # Use files to accumulate counters (avoids bash subshell scope issues)
+          COUNTER_FILE="$TEMP_DIR/counters"
+          echo "0 0" > "$COUNTER_FILE"  # total failed
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
@@ -299,6 +325,9 @@ jobs:
 
             awk '/^```json$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
+
+              # Read current counters from file
+              read -r TOTAL FAILED < "$COUNTER_FILE"
               TOTAL=$((TOTAL + 1))
 
               test_file="$TEMP_DIR/test_$TOTAL.json"
@@ -309,8 +338,14 @@ jobs:
                 cat "$test_file"
                 FAILED=$((FAILED + 1))
               fi
+
+              # Write updated counters back to file
+              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
             done
           done
+
+          # Read final counters
+          read -r TOTAL FAILED < "$COUNTER_FILE"
 
           if [ $FAILED -gt 0 ]; then
             echo "JSON validation failed: $FAILED/$TOTAL blocks invalid"
@@ -330,8 +365,9 @@ jobs:
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-          TOTAL=0
-          FAILED=0
+          # Use files to accumulate counters (avoids bash subshell scope issues)
+          COUNTER_FILE="$TEMP_DIR/counters"
+          echo "0 0" > "$COUNTER_FILE"  # total failed
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
@@ -340,6 +376,9 @@ jobs:
 
             awk '/^```(yaml|yml)$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
+
+              # Read current counters from file
+              read -r TOTAL FAILED < "$COUNTER_FILE"
               TOTAL=$((TOTAL + 1))
 
               test_file="$TEMP_DIR/test_$TOTAL.yaml"
@@ -350,8 +389,14 @@ jobs:
                 cat "$test_file"
                 FAILED=$((FAILED + 1))
               fi
+
+              # Write updated counters back to file
+              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
             done
           done
+
+          # Read final counters
+          read -r TOTAL FAILED < "$COUNTER_FILE"
 
           if [ $FAILED -gt 0 ]; then
             echo "YAML validation failed: $FAILED/$TOTAL blocks invalid"
@@ -371,8 +416,9 @@ jobs:
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
-          TOTAL=0
-          FAILED=0
+          # Use files to accumulate counters (avoids bash subshell scope issues)
+          COUNTER_FILE="$TEMP_DIR/counters"
+          echo "0 0" > "$COUNTER_FILE"  # total failed
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
@@ -381,6 +427,9 @@ jobs:
 
             awk '/^```toml$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
+
+              # Read current counters from file
+              read -r TOTAL FAILED < "$COUNTER_FILE"
               TOTAL=$((TOTAL + 1))
 
               test_file="$TEMP_DIR/test_$TOTAL.toml"
@@ -391,8 +440,14 @@ jobs:
                 cat "$test_file"
                 FAILED=$((FAILED + 1))
               fi
+
+              # Write updated counters back to file
+              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
             done
           done
+
+          # Read final counters
+          read -r TOTAL FAILED < "$COUNTER_FILE"
 
           if [ $FAILED -gt 0 ]; then
             echo "TOML validation failed: $FAILED/$TOTAL blocks invalid"
@@ -408,8 +463,9 @@ jobs:
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
-          TOTAL=0
-          FAILED=0
+          # Use files to accumulate counters (avoids bash subshell scope issues)
+          COUNTER_FILE="$TEMP_DIR/counters"
+          echo "0 0" > "$COUNTER_FILE"  # total failed
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
@@ -423,6 +479,8 @@ jobs:
                 continue
               fi
 
+              # Read current counters from file
+              read -r TOTAL FAILED < "$COUNTER_FILE"
               TOTAL=$((TOTAL + 1))
 
               test_file="$TEMP_DIR/test_$TOTAL.sh"
@@ -434,8 +492,14 @@ jobs:
                 cat "$test_file"
                 FAILED=$((FAILED + 1))
               fi
+
+              # Write updated counters back to file
+              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
             done
           done
+
+          # Read final counters
+          read -r TOTAL FAILED < "$COUNTER_FILE"
 
           if [ $FAILED -gt 0 ]; then
             echo "Bash validation failed: $FAILED/$TOTAL blocks invalid"

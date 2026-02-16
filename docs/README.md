@@ -21,6 +21,7 @@ Welcome to the Signal Fish Server documentation. These guides will help you get 
 - **[Library Usage](library-usage.md)** - Using Signal Fish as a library
 - **[Development](development.md)** - Building from source and testing
 - **[Architecture](architecture.md)** - Project structure and design
+- **[ADRs](adr/)** - Architecture Decision Records
 
 ## Documentation Index
 
@@ -35,6 +36,7 @@ Welcome to the Signal Fish Server documentation. These guides will help you get 
 | [development.md](development.md) | Building, testing, and contributing |
 | [features.md](features.md) | Feature overview and examples |
 | [architecture.md](architecture.md) | System design and internals |
+| [adr/](adr/) | Architecture Decision Records |
 
 ## Common Tasks
 
@@ -66,6 +68,9 @@ Welcome to the Signal Fish Server documentation. These guides will help you get 
 
 **Understand the architecture**
 → [Architecture](architecture.md)
+
+**Review architecture decisions**
+→ [ADRs](adr/)
 
 ## Additional Resources
 

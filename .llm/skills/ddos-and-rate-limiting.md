@@ -462,4 +462,3 @@ On `SIGTERM`, stop accepting new connections and drain with `axum::serve(...).wi
 - [websocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message design, heartbeat
 - [observability-and-logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting
 - [rust-performance-optimization](./rust-performance-optimization.md) — Bounded allocations, zero-copy, profiling
-- [aws-production-security](./aws-production-security.md) — AWS WAF, Shield, CloudFront infrastructure-layer DDoS protection

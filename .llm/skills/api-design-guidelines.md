@@ -280,7 +280,8 @@ impl IntoResponse for AppError {
 }
 ```
 
-Keep [openapi.yaml](../../openapi.yaml) in sync. Use versioned routes (`/v2/...`). Return structured JSON errors. Log internal errors server-side; return generic messages to clients.
+Use versioned routes (`/v2/...`). Return structured JSON errors. Log internal errors server-side; return generic messages
+to clients. For REST APIs with multiple endpoints, maintain an OpenAPI specification to document the API contract.
 
 ---
 

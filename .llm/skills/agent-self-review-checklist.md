@@ -195,5 +195,3 @@ After the checklist passes:
 - [code-review-checklist](./code-review-checklist.md) — For reviewing others' code
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Implement → Verify → Review cycle
 - [testing-strategies](./testing-strategies.md) — How to write effective tests
-- [aws-production-security](./aws-production-security.md) — AWS security review criteria
-- [aws-cost-optimization](./aws-cost-optimization.md) — Cost review for infrastructure changes

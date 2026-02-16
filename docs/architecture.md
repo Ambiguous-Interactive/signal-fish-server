@@ -309,6 +309,14 @@ main.rs
        └── rkyv_utils.rs (Zero-copy serialization helpers)
 ```
 
+## Architecture Decision Records
+
+Key architectural decisions are documented in [Architecture Decision Records (ADRs)](adr/).
+
+Current ADRs:
+
+- [ADR-001: Reconnection Protocol](adr/reconnection-protocol.md) - WebSocket reconnection and event replay
+
 ## Design Principles
 
 ### Zero-Cost Abstractions

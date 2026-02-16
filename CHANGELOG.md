@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Architecture Decision Records (ADRs) documentation structure
+  - Created docs/adr/ directory with comprehensive index
+  - Added ADR-001: Reconnection Protocol documenting WebSocket reconnection design
+  - Integrated ADR references into main documentation navigation (docs/README.md, docs/architecture.md)
+
 ### Changed
 
 - Updated all production and development dependencies to latest stable versions (verified against crates.io as of 2026-02-15)

@@ -279,6 +279,105 @@ async fn test_database_migration() {
 
 ---
 
+## CI/CD Test Coverage
+
+### Config Validation Tests
+
+Always test that configuration defaults work in production deployment scenarios:
+
+```rust
+#[test]
+fn test_docker_default_config_passes_validation() {
+    // Simulate Docker ENV overrides (auth disabled, no config file)
+    let mut config = Config::default();
+    config.security.require_metrics_auth = false;
+    config.security.require_websocket_auth = false;
+    assert!(validate_config_security(&config).is_ok());
+}
+
+#[test]
+fn test_config_with_all_features_loads() {
+    // Ensure config loads with all cargo features enabled
+    let config = Config::from_env().unwrap();
+    assert!(config.validate().is_ok());
+}
+```
+
+### Smoke Test Patterns
+
+CI smoke tests must verify the complete deployment artifact:
+
+```yaml
+# GitHub Actions example
+- name: Smoke test
+  run: |
+    docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
+    # Retry loop instead of bare sleep
+    for i in $(seq 1 15); do
+      if curl -sf http://localhost:3536/v2/health; then
+        echo "Health check passed on attempt $i/15"
+        exit 0
+      fi
+      echo "Attempt $i/15: server not ready, retrying in 2s..."
+      sleep 2
+    done
+    echo "ERROR: Server failed to become healthy after 30s"
+    echo "=== Docker logs ==="
+    docker logs test-server
+    exit 1
+```
+
+**Key smoke test requirements:**
+
+- Retry loop with timeout (not bare `sleep`)
+- Dump logs on failure for diagnostics
+- Test default configuration (no mounted config files)
+- Verify all critical endpoints (health, metrics, WebSocket upgrade)
+
+### File Path Case Sensitivity Tests
+
+```rust
+#[test]
+fn test_skill_links_case_sensitive() {
+    // Verify all skill file links use correct case (prevents Linux CI failures)
+    let context_file = std::fs::read_to_string(".llm/context.md").unwrap();
+    for (skill_name, skill_path) in extract_skill_links(&context_file) {
+        assert!(
+            std::path::Path::new(skill_path).exists(),
+            "Skill link broken: {skill_name} -> {skill_path}"
+        );
+    }
+}
+```
+
+### CI-Specific Integration Tests
+
+```rust
+#[cfg(test)]
+mod ci_integration_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "runs only in CI"]
+    fn test_all_features_compile() {
+        // This test verifies --all-features builds succeed
+        // Ignored by default, runs only in CI via `cargo test -- --ignored`
+    }
+
+    #[test]
+    fn test_native_deps_available() {
+        // Verify native dependencies required by optional features are present
+        #[cfg(feature = "kafka")]
+        {
+            // Test that rdkafka native lib is available
+            let _ = rdkafka::ClientConfig::new();
+        }
+    }
+}
+```
+
+---
+
 ## Related Skills
 
 - [testing-tools-and-frameworks](./testing-tools-and-frameworks.md) — Testing tools, frameworks, and coverage measurement
@@ -286,3 +385,4 @@ async fn test_database_migration() {
 - [error-handling-guide](./error-handling-guide.md) — Testing error conditions
 - [defensive-programming](./defensive-programming.md) — Edge cases to test
 - [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
+- [github-actions-best-practices](./github-actions-best-practices.md) — GitHub Actions workflow patterns and debugging

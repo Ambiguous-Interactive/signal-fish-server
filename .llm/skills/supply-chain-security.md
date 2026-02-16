@@ -390,4 +390,3 @@ This script checks:
 - [web-service-security](./web-service-security.md) — Application-level security, auth, input validation, TLS
 - [container-and-deployment](./container-and-deployment.md) — Dockerfile hardening, image scanning, CI/CD pipelines
 - [clippy-and-linting](./clippy-and-linting.md) — CI integration for static analysis gates
-- [incident-response-patterns](./incident-response-patterns.md) — Responding to disclosed vulnerabilities

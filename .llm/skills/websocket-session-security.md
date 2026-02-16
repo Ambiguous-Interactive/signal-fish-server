@@ -423,5 +423,5 @@ async fn handle_signal(
 
 - [web-service-security](./web-service-security.md) — Input validation, auth patterns, TLS, secrets management
 - [websocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message framing, heartbeat
-- [hosting-provider-architecture](./hosting-provider-architecture.md) — Infrastructure-level security, TLS termination
+- [container-and-deployment](./container-and-deployment.md) — Infrastructure-level security, container hardening
 - [ddos-and-rate-limiting](./ddos-and-rate-limiting.md) — Rate limiting, connection caps, abuse prevention

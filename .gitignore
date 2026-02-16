@@ -25,6 +25,8 @@ target
 # Logs
 logs/
 *.log
+*.zip
+logs_*
 
 # Environment files
 .env
