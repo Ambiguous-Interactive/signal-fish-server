@@ -207,7 +207,7 @@ jobs:
               #   attrs        - extracted attributes from fence (e.g., "ignore", "no_run")
 
               # Match opening fence with optional attributes (case-insensitive)
-              /^```[Rr]ust(,.*)?$/ {
+              /^```[Rr]ust/ {
                 in_block = 1          # Enter code block state
                 block_start = NR      # Record starting line number
                 content = ""          # Reset content accumulator

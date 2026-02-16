@@ -495,7 +495,7 @@ fn test_typos_config_exists_and_is_valid() {
     for (term, description) in recommended_terms {
         // Case-insensitive search since typos.toml entries are lowercase
         if !content.to_lowercase().contains(&format!("{term} =")) {
-            missing_terms.push(format!("  - {} ({})", term, description));
+            missing_terms.push(format!("  - {term} ({description})"));
         }
     }
 
