@@ -78,7 +78,11 @@ rustup component add clippy
 
 ---
 
-## Commit Format
+## Commit Format (User Executes, Not You)
+
+**⛔ CRITICAL: YOU NEVER CREATE COMMITS. Provide these instructions to the user.**
+
+Suggested commit message format for user:
 
 ```text
 <type>: <imperative subject>
@@ -90,6 +94,12 @@ test: add concurrency tests for room joins
 docs: update protocol documentation
 chore: update MSRV from 1.87.0 to 1.88.0
 ```
+
+**When changes are ready:**
+
+1. ✅ Verify all checks pass (fmt, clippy, test)
+2. ✅ Provide commit instructions to user
+3. ❌ NEVER execute `git commit` yourself
 
 ---
 

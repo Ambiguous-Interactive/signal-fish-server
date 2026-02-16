@@ -4,7 +4,7 @@ RMP is a pure Rust [MessagePack](http://msgpack.org) implementation of an effici
 serialization format. This crate provides low-level core functionality, writers and readers for
 primitive values with direct mapping between binary MessagePack format.
 
-[Looking for Serde support](https://lib.rs/crates/rmp-serde)?
+[Looking for Serde support](https://docs.rs/rmp-serde)?
 
 This crate represents the very basic functionality needed to work with MessagePack format.
 Ideologically it is developed as a basis for building high-level abstractions.
@@ -108,7 +108,7 @@ let buf = [0xcd, 0x1, 0x2c];
 rmp::decode::read_u32(&mut &buf[..]).err().unwrap();
 ```
 
-But sometimes all you want is just to encode an integer that *must* fit in the specified type
+But sometimes all you want is just to encode an integer that _must_ fit in the specified type
 no matter how it was encoded. RMP provides [`such`][read_int] function to ease integration with
 other MessagePack libraries.
 

@@ -1,6 +1,7 @@
 # Signal Fish Server Documentation
 
-Welcome to the Signal Fish Server documentation. These guides will help you get started, configure, deploy, and extend the server.
+Welcome to the Signal Fish Server documentation. These guides will help you get started, configure, deploy,
+and extend the server.
 
 ## Quick Links
 
@@ -25,18 +26,18 @@ Welcome to the Signal Fish Server documentation. These guides will help you get 
 
 ## Documentation Index
 
-| Document | Description |
-|----------|-------------|
+| Document                                 | Description                           |
+| ---------------------------------------- | ------------------------------------- |
 | [getting-started.md](getting-started.md) | Quick setup guide with basic examples |
-| [configuration.md](configuration.md) | Complete configuration reference |
-| [protocol.md](protocol.md) | WebSocket message types and flow |
-| [authentication.md](authentication.md) | App-based authentication setup |
-| [deployment.md](deployment.md) | Docker, Kubernetes, cloud deployment |
-| [library-usage.md](library-usage.md) | Embedding Signal Fish in Rust apps |
-| [development.md](development.md) | Building, testing, and contributing |
-| [features.md](features.md) | Feature overview and examples |
-| [architecture.md](architecture.md) | System design and internals |
-| [adr/](adr/) | Architecture Decision Records |
+| [configuration.md](configuration.md)     | Complete configuration reference      |
+| [protocol.md](protocol.md)               | WebSocket message types and flow      |
+| [authentication.md](authentication.md)   | App-based authentication setup        |
+| [deployment.md](deployment.md)           | Docker, Kubernetes, cloud deployment  |
+| [library-usage.md](library-usage.md)     | Embedding Signal Fish in Rust apps    |
+| [development.md](development.md)         | Building, testing, and contributing   |
+| [features.md](features.md)               | Feature overview and examples         |
+| [architecture.md](architecture.md)       | System design and internals           |
+| [adr/](adr/)                             | Architecture Decision Records         |
 
 ## Common Tasks
 

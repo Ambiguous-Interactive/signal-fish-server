@@ -93,37 +93,37 @@ SIGNAL_FISH_RATE_LIMIT__MAX_ROOM_CREATIONS=10
 
 Complete reference of all configuration options with environment variable overrides:
 
-| Environment Variable                                | Config Path                                  | Default   | Description                              |
-| --------------------------------------------------- | -------------------------------------------- | --------- | ---------------------------------------- |
-| `SIGNAL_FISH_PORT`                                  | `port`                                       | `3536`    | Server listen port                       |
-| `SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS`            | `server.default_max_players`                 | `8`       | Default max players per room             |
-| `SIGNAL_FISH_SERVER__PING_TIMEOUT`                   | `server.ping_timeout`                        | `30`      | Seconds before a silent client is dropped |
-| `SIGNAL_FISH_SERVER__ROOM_CLEANUP_INTERVAL`          | `server.room_cleanup_interval`               | `60`      | Seconds between room cleanup sweeps      |
-| `SIGNAL_FISH_SERVER__MAX_ROOMS_PER_GAME`             | `server.max_rooms_per_game`                  | `1000`    | Max rooms allowed per game name          |
-| `SIGNAL_FISH_SERVER__EMPTY_ROOM_TIMEOUT`             | `server.empty_room_timeout`                  | `300`     | Seconds before an empty room is removed  |
-| `SIGNAL_FISH_SERVER__INACTIVE_ROOM_TIMEOUT`          | `server.inactive_room_timeout`               | `3600`    | Seconds before an inactive room is removed |
-| `SIGNAL_FISH_SERVER__RECONNECTION_WINDOW`            | `server.reconnection_window`                 | `300`     | Seconds a reconnection token stays valid |
-| `SIGNAL_FISH_SERVER__EVENT_BUFFER_SIZE`              | `server.event_buffer_size`                   | `100`     | Max events buffered for reconnection replay |
-| `SIGNAL_FISH_SERVER__ENABLE_RECONNECTION`            | `server.enable_reconnection`                 | `true`    | Enable reconnection support              |
-| `SIGNAL_FISH_SERVER__HEARTBEAT_THROTTLE_SECS`        | `server.heartbeat_throttle_secs`             | `30`      | Min seconds between heartbeat logs       |
-| `SIGNAL_FISH_SERVER__REGION_ID`                      | `server.region_id`                           | `default` | Region identifier for metrics            |
-| `SIGNAL_FISH_RATE_LIMIT__MAX_ROOM_CREATIONS`         | `rate_limit.max_room_creations`              | `5`       | Max room creations per IP per window     |
-| `SIGNAL_FISH_RATE_LIMIT__TIME_WINDOW`                | `rate_limit.time_window`                     | `60`      | Rate limit window in seconds             |
-| `SIGNAL_FISH_RATE_LIMIT__MAX_JOIN_ATTEMPTS`          | `rate_limit.max_join_attempts`               | `20`      | Max join attempts per IP per window      |
-| `SIGNAL_FISH_PROTOCOL__MAX_GAME_NAME_LENGTH`         | `protocol.max_game_name_length`              | `64`      | Max characters in a game name            |
-| `SIGNAL_FISH_PROTOCOL__ROOM_CODE_LENGTH`             | `protocol.room_code_length`                  | `6`       | Length of generated room codes           |
-| `SIGNAL_FISH_PROTOCOL__MAX_PLAYER_NAME_LENGTH`       | `protocol.max_player_name_length`            | `32`      | Max characters in a player name          |
-| `SIGNAL_FISH_PROTOCOL__MAX_PLAYERS_LIMIT`            | `protocol.max_players_limit`                 | `100`     | Hard ceiling on players per room         |
-| `SIGNAL_FISH_SECURITY__CORS_ORIGINS`                 | `security.cors_origins`                      | `*`       | Allowed CORS origins (comma-separated or `*`) |
-| `SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH`       | `security.require_websocket_auth`            | `false`   | Require app authentication on WebSocket connect |
-| `SIGNAL_FISH_SECURITY__REQUIRE_METRICS_AUTH`         | `security.require_metrics_auth`              | `false`   | Require auth token for metrics endpoints |
-| `SIGNAL_FISH_SECURITY__MAX_MESSAGE_SIZE`             | `security.max_message_size`                  | `65536`   | Max WebSocket message size in bytes      |
-| `SIGNAL_FISH_SECURITY__MAX_CONNECTIONS_PER_IP`       | `security.max_connections_per_ip`            | `10`      | Max concurrent connections from one IP   |
-| `SIGNAL_FISH_WEBSOCKET__ENABLE_BATCHING`             | `websocket.enable_batching`                  | `true`    | Enable outbound message batching         |
-| `SIGNAL_FISH_WEBSOCKET__BATCH_SIZE`                  | `websocket.batch_size`                       | `10`      | Max messages per batch                   |
-| `SIGNAL_FISH_WEBSOCKET__BATCH_INTERVAL_MS`           | `websocket.batch_interval_ms`                | `16`      | Batch flush interval in milliseconds     |
-| `SIGNAL_FISH_WEBSOCKET__AUTH_TIMEOUT_SECS`           | `websocket.auth_timeout_secs`                | `10`      | Seconds to wait for auth after connect   |
-| `RUST_LOG`                                           | --                                           | `info`    | Standard `tracing` log filter            |
+| Environment Variable                             | Config Path                              | Default   | Description                                            |
+| ------------------------------------------------ | ---------------------------------------- | --------- | ------------------------------------------------------ |
+| `SIGNAL_FISH_PORT`                               | `port`                                   | `3536`    | Server listen port                                     |
+| `SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS`        | `server.default_max_players`             | `8`       | Default max players per room                           |
+| `SIGNAL_FISH_SERVER__PING_TIMEOUT`               | `server.ping_timeout`                    | `30`      | Seconds before a silent client is dropped              |
+| `SIGNAL_FISH_SERVER__ROOM_CLEANUP_INTERVAL`      | `server.room_cleanup_interval`           | `60`      | Seconds between room cleanup sweeps                    |
+| `SIGNAL_FISH_SERVER__MAX_ROOMS_PER_GAME`         | `server.max_rooms_per_game`              | `1000`    | Max rooms allowed per game name                        |
+| `SIGNAL_FISH_SERVER__EMPTY_ROOM_TIMEOUT`         | `server.empty_room_timeout`              | `300`     | Seconds before an empty room is removed                |
+| `SIGNAL_FISH_SERVER__INACTIVE_ROOM_TIMEOUT`      | `server.inactive_room_timeout`           | `3600`    | Seconds before an inactive room is removed             |
+| `SIGNAL_FISH_SERVER__RECONNECTION_WINDOW`        | `server.reconnection_window`             | `300`     | Seconds a reconnection token stays valid               |
+| `SIGNAL_FISH_SERVER__EVENT_BUFFER_SIZE`          | `server.event_buffer_size`               | `100`     | Max events buffered for reconnection replay            |
+| `SIGNAL_FISH_SERVER__ENABLE_RECONNECTION`        | `server.enable_reconnection`             | `true`    | Enable reconnection support                            |
+| `SIGNAL_FISH_SERVER__HEARTBEAT_THROTTLE_SECS`    | `server.heartbeat_throttle_secs`         | `30`      | Min seconds between heartbeat logs                     |
+| `SIGNAL_FISH_SERVER__REGION_ID`                  | `server.region_id`                       | `default` | Region identifier for metrics                          |
+| `SIGNAL_FISH_RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`          | `5`       | Max room creations per IP per window                   |
+| `SIGNAL_FISH_RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`                 | `60`      | Rate limit window in seconds                           |
+| `SIGNAL_FISH_RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`           | `20`      | Max join attempts per IP per window                    |
+| `SIGNAL_FISH_PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`          | `64`      | Max characters in a game name                          |
+| `SIGNAL_FISH_PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`              | `6`       | Length of generated room codes                         |
+| `SIGNAL_FISH_PROTOCOL__MAX_PLAYER_NAME_LENGTH`   | `protocol.max_player_name_length`        | `32`      | Max characters in a player name                        |
+| `SIGNAL_FISH_PROTOCOL__MAX_PLAYERS_LIMIT`        | `protocol.max_players_limit`             | `100`     | Hard ceiling on players per room                       |
+| `SIGNAL_FISH_SECURITY__CORS_ORIGINS`             | `security.cors_origins`                  | `*`       | Allowed CORS origins (comma-separated or `*`)          |
+| `SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH`   | `security.require_websocket_auth`        | `false`   | Require app authentication on WebSocket connect        |
+| `SIGNAL_FISH_SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`          | `false`   | Require auth token for metrics endpoints               |
+| `SIGNAL_FISH_SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`              | `65536`   | Max WebSocket message size in bytes                    |
+| `SIGNAL_FISH_SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`        | `10`      | Max concurrent connections from one IP                 |
+| `SIGNAL_FISH_WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`              | `true`    | Enable outbound message batching                       |
+| `SIGNAL_FISH_WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`                   | `10`      | Max messages per batch                                 |
+| `SIGNAL_FISH_WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`            | `16`      | Batch flush interval in milliseconds                   |
+| `SIGNAL_FISH_WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`            | `10`      | Seconds to wait for auth after connect                 |
+| `RUST_LOG`                                       | --                                       | `info`    | Standard `tracing` log filter                          |
 
 ## Common Configurations
 

@@ -311,7 +311,8 @@ scrape_configs:
 
 ## Scaling Considerations
 
-Signal Fish Server uses in-memory storage, so each instance maintains its own room state. For multi-instance deployments:
+Signal Fish Server uses in-memory storage, so each instance maintains its own room state. For multi-instance
+deployments:
 
 1. **Session affinity** - Use sticky sessions at the load balancer
 2. **Room sharding** - Route by game_name or room_code

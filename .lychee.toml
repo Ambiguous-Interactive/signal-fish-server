@@ -11,17 +11,7 @@ accept = [
     "429",  # Too Many Requests (rate limiting)
 ]
 
-# Retry settings
-max_retries = 3
-retry_wait_time = 2
-
-# Timeout settings (in seconds)
-timeout = 20
-
-# User agent
-user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
-
-# Exclude specific URLs or patterns
+# Exclude specific domains that return 403 for automated checks
 exclude = [
     # Localhost and examples
     "http://localhost",
@@ -38,12 +28,27 @@ exclude = [
 
     # Anchors within the same file
     "#",
+
+    # lib.rs returns 403 for automated checks but works in browsers
+    "https://lib.rs/*",
 ]
+
+# Retry settings
+max_retries = 3
+retry_wait_time = 2
+
+# Timeout settings (in seconds)
+timeout = 20
+
+# User agent
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
+
 
 # Exclude specific file paths
 exclude_path = [
     "target/",
     ".git/",
+    "third_party/",  # Vendored dependencies, check once during updates
 ]
 
 # Exclude specific link patterns

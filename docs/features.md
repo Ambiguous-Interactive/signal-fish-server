@@ -177,6 +177,7 @@ Join rooms as a spectator without participating in gameplay:
 ```
 
 Spectators:
+
 - Don't count toward max_players
 - Can't mark ready
 - Receive all game data
@@ -188,7 +189,8 @@ Token-based reconnection with event replay.
 
 ### Initial Join
 
-When a player joins a room, the server provides an authentication token in the `RoomJoined` response. This token should be stored by the client for reconnection purposes.
+When a player joins a room, the server provides an authentication token in the `RoomJoined` response. This token
+should be stored by the client for reconnection purposes.
 
 ### Reconnecting
 
@@ -207,7 +209,8 @@ If the connection is lost, reconnect using the stored credentials:
 
 ### Event Replay
 
-On successful reconnection, the server sends a `Reconnected` message with the current room state and replays any events that occurred during the disconnection window.
+On successful reconnection, the server sends a `Reconnected` message with the current room state and replays any
+events that occurred during the disconnection window.
 
 ### Configuration
 
@@ -466,12 +469,14 @@ JSON-formatted structured logs for production observability:
 ## Zero External Dependencies
 
 Everything runs in-memory:
+
 - No database required
 - No message broker
 - No cloud services
 - No external runtime dependencies
 
 Perfect for:
+
 - Local development
 - LAN games
 - Self-hosted deployments

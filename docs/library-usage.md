@@ -1,6 +1,7 @@
 # Library Usage
 
-Signal Fish Server is published as both a binary and a library crate. Embed the signaling server into your own Rust application.
+Signal Fish Server is published as both a binary and a library crate. Embed the signaling server into your own
+Rust application.
 
 ## Add Dependency
 
@@ -261,15 +262,20 @@ let config = Config {
 
 ## Message Handling
 
-> **Note:** The `EnhancedGameServer` does not currently expose public APIs for directly sending messages to players. The server automatically handles message routing based on client connections and room membership. This is an internal implementation detail.
+> **Note:** The `EnhancedGameServer` does not currently expose public APIs for directly sending messages to
+> players. The server automatically handles message routing based on client connections and room membership. This
+> is an internal implementation detail.
 >
-> If you need to send custom server-initiated messages, you would need to extend the server implementation or use the internal message coordinator interfaces.
+> If you need to send custom server-initiated messages, you would need to extend the server implementation or use
+> the internal message coordinator interfaces.
 
 ## Event Hooks
 
-> **Note:** The `EnhancedGameServer` does not currently expose a public event subscription API. Server events are handled internally for metrics, logging, and coordination.
+> **Note:** The `EnhancedGameServer` does not currently expose a public event subscription API. Server events are
+> handled internally for metrics, logging, and coordination.
 >
 > If you need to monitor server events, consider:
+>
 > - Using the metrics endpoints (`/metrics` or `/metrics/prom`) to track room and player counts
 > - Implementing custom logging by extending the server modules
 > - Monitoring structured logs with a log aggregation system (all events are logged with `tracing`)
@@ -284,6 +290,7 @@ signal-fish-server = { version = "0.1", features = ["tls", "legacy-fullmesh"] }
 ```
 
 Available features:
+
 - `tls` - Built-in TLS/mTLS support
 - `legacy-fullmesh` - Upstream matchbox full-mesh signaling mode
 

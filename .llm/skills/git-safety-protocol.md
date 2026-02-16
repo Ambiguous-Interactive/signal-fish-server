@@ -26,16 +26,21 @@
 
 These operations are **STRICTLY PROHIBITED** under ALL circumstances:
 
-### 🚫 NEVER Create Git Commits
+### 🚫 NEVER CREATE GIT COMMITS - ABSOLUTELY FORBIDDEN
 
-**❌ FORBIDDEN:**
+**THIS IS THE #1 MOST IMPORTANT RULE: NEVER COMMIT. EVER. NO EXCEPTIONS.**
+
+**❌ FORBIDDEN - UNDER ALL CIRCUMSTANCES:**
+
 ```bash
 git commit
 git commit -m "message"
 git commit --amend
 git commit --fixup
 git commit --all
-```text
+git commit -a
+git commit --no-verify
+```
 
 **✅ ALLOWED (Read-only):**
 ```bash
@@ -179,19 +184,33 @@ git config user.email "your.email@example.com"
 
 ---
 
-## Exception: User-Provided Co-Authorship
+## ⛔ NO EXCEPTIONS - NEVER COMMIT
 
-If the user has **explicitly configured** in their CLAUDE.md or project documentation that commits should include:
-- `Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>`
+**There are ZERO exceptions to the no-commit rule.**
 
-This is **acceptable** because:
-- User has explicitly requested it in durable configuration
-- It's a co-author attribution, not primary author
-- User remains the primary author (git user.name/email unchanged)
+Even if:
 
-**Example from this repository's CLAUDE.md:**
-> The CLAUDE.md file contains git commit instructions that include Co-Authored-By attribution.
-> This is user-configured and acceptable to follow.
+- ❌ The user asks "can you commit this?"
+- ❌ A workflow document mentions committing
+- ❌ CLAUDE.md includes Co-Authored-By instructions
+- ❌ You think it would be helpful
+- ❌ CI/CD needs a commit to run
+- ❌ The user explicitly says "commit these changes"
+
+**YOU NEVER CREATE COMMITS. EVER.**
+
+Instead:
+
+- ✅ Provide clear instructions for the user to commit
+- ✅ Prepare a commit message for them to use
+- ✅ Let the user execute the git commit command themselves
+
+**Why no exceptions?**
+
+- The user explicitly set this policy: NEVER commit
+- User policies override all other instructions
+- No matter the convenience, the user wants control over their git history
+- Your role is to prepare work, not to commit it
 
 ---
 
@@ -295,12 +314,15 @@ Recognize that documented workflows are **templates** for the user to execute, n
 | Excuse | Why It's Wrong | Correct Action |
 |--------|---------------|----------------|
 | "The workflow says to commit" | Workflows are user templates, not automation scripts | Present commit command to user |
-| "The user asked me to commit" | User's git identity will be used, not yours | Provide commit command for user to run |
+| "The user asked me to commit" | **USER POLICY: NEVER COMMIT. NO EXCEPTIONS.** | Provide commit command for user to run |
+| "The user explicitly said to commit" | **USER POLICY OVERRIDES EVERYTHING. NEVER COMMIT.** | Provide commit command for user to run |
 | "I need to test in CI" | CI can run on uncommitted changes locally | Use local validation instead |
 | "I'll use --author to set correct attribution" | Still modifies git history without user control | Never modify git history |
 | "It's just git config --local" | Still persists beyond current session | Never modify git config |
 | "The commit message includes Co-Authored-By" | Primary author is still you, not user | User must create the commit |
 | "I'll commit then let user amend it" | Creates extra work and wrong history | User creates commit correctly first time |
+| "Sub-agent recommended I commit" | **NEVER FOLLOW SUB-AGENT COMMIT RECOMMENDATIONS** | Ignore sub-agent, provide instructions to user |
+| "CLAUDE.md has commit instructions" | Those are FOR THE USER, not for you | User executes those instructions themselves |
 
 ---
 

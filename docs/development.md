@@ -52,7 +52,8 @@ cargo run
 cargo run
 ```
 
-Note: The `-c` flag shown in some examples is not currently implemented. The server automatically loads `config.json` from the working directory if it exists.
+Note: The `-c` flag shown in some examples is not currently implemented. The server automatically loads
+`config.json` from the working directory if it exists.
 
 ### Validate Config
 
@@ -234,36 +235,36 @@ signal-fish-server/
 
 1. **Write tests first**
 
-```bash
-# Add test in tests/integration_tests.rs
-cargo test test_new_feature -- --nocapture
-```
+   ```bash
+   # Add test in tests/integration_tests.rs
+   cargo test test_new_feature -- --nocapture
+   ```
 
 2. **Implement the feature**
 
-```bash
-# Make changes in src/
-cargo build
-```
+   ```bash
+   # Make changes in src/
+   cargo build
+   ```
 
 3. **Run full test suite**
 
-```bash
-cargo test --all-features
-```
+   ```bash
+   cargo test --all-features
+   ```
 
 4. **Lint and format**
 
-```bash
-cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-```
+   ```bash
+   cargo fmt
+   cargo clippy --all-targets --all-features -- -D warnings
+   ```
 
 5. **Update documentation**
 
-- Add doc comments to public APIs
-- Update CHANGELOG.md
-- Update README.md if user-facing
+   - Add doc comments to public APIs
+   - Update CHANGELOG.md
+   - Update README.md if user-facing
 
 ## Debug Logging
 

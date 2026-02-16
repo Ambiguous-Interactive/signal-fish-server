@@ -24,7 +24,8 @@ Set `require_websocket_auth` to `true` and add authorized apps:
 }
 ```
 
-**Important:** Change the default `app_secret` before deploying to production. The example value `CHANGE_ME_BEFORE_PRODUCTION` in `config.example.json` is intentionally insecure.
+**Important:** Change the default `app_secret` before deploying to production. The example value
+`CHANGE_ME_BEFORE_PRODUCTION` in `config.example.json` is intentionally insecure.
 
 ## Client Authentication
 
