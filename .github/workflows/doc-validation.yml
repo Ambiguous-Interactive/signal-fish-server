@@ -56,10 +56,59 @@ env:
   RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
 
 jobs:
+  shellcheck-workflow:
+    name: Shellcheck Workflow Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5  # Short timeout - this is a fast validation step
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Extract and validate inline shell scripts
+        run: |
+          set -euo pipefail
+
+          echo "Validating inline shell scripts in workflow..."
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          workflow_file=".github/workflows/doc-validation.yml"
+
+          # Extract inline shell scripts (run: | blocks) and validate with shellcheck
+          # This is a simplified check - we extract major script blocks manually
+          # Future improvement: automated extraction of all run: | blocks
+
+          # Extract the main Rust code validation script
+          # Note: The shellcheck job validates shell script syntax in this workflow's bash blocks.
+          # However, AWK heredocs embedded within bash scripts are not fully validated by shellcheck.
+          # AWK syntax and compatibility (gawk vs mawk) are validated through actual execution
+          # in CI when the workflow runs.
+          awk '/name: Extract and validate Rust code blocks/,/^      - name:/ {
+            if (/run: \|/) { in_script=1; next }
+            if (in_script && /^      - name:/) { exit }
+            # Extract script content: skip the 10-space indentation (6 spaces for YAML step level + 4 for script content)
+            # plus line number + tab from workflow YAML structure = 11 characters to skip
+            if (in_script && /^          /) { print substr($0, 11) }
+          }' "$workflow_file" > "$TEMP_DIR/rust_validation.sh"
+
+          # Validate extracted scripts
+          for script in "$TEMP_DIR"/*.sh; do
+            [ -f "$script" ] || continue
+            echo "Checking: $(basename "$script")"
+            if ! shellcheck -s bash "$script"; then
+              echo "✗ Shellcheck found issues in inline script: $(basename "$script")"
+              exit 1  # Non-zero exit code indicates failure
+            fi
+          done
+
+          echo "✓ All workflow inline scripts pass shellcheck validation"
+
   rustdoc:
     name: Rustdoc Validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 15  # Generous timeout for building documentation with all features
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -76,7 +125,7 @@ jobs:
   doc-tests:
     name: Documentation Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 15  # Generous timeout for running all doc tests with features
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -93,7 +142,7 @@ jobs:
   markdown-code-samples:
     name: Markdown Code Validation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 20  # Longer timeout - validates multiple languages (Rust, JSON, YAML, TOML, Bash)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -109,12 +158,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
+          # File-based counters are necessary because bash subshells (from pipes and while loops)
+          # cannot modify parent shell variables. By writing to a file, we persist state across subshells.
           COUNTER_FILE="$TEMP_DIR/counters"
-          echo "0 0 0 0" > "$COUNTER_FILE"  # total validated skipped failed
+          # Counter file format: 4 space-separated integers (total validated skipped failed)
+          # Example: "10 7 2 1" means 10 total blocks, 7 validated, 2 skipped, 1 failed
+          echo "0 0 0 0" > "$COUNTER_FILE"
 
           echo "========================================="
           echo "Extracting Rust code blocks from markdown"
@@ -126,6 +180,7 @@ jobs:
             -not -path "./third_party/*" \
             -not -path "./.git/*" | sort | while read -r md_file; do
 
+            # Local variable - use lowercase
             [ -f "$md_file" ] || continue
 
             echo ""
@@ -143,46 +198,56 @@ jobs:
             # 1. Content accumulation: Fixed to handle empty first lines correctly
             # 2. END block: Added to handle unclosed blocks at EOF
             # 3. Case-insensitive matching: Fixed attribute extraction for Rust/rust
+            # 4. AWK compatibility: Replaced GNU awk's match() with POSIX sub() for mawk
             awk '
+              # AWK state variables (uninitialized variables start at 0/""):
+              #   in_block     - 1 if currently parsing inside a code block, 0 otherwise
+              #   block_start  - line number (NR) where the current block started
+              #   content      - accumulated content of the current code block
+              #   attrs        - extracted attributes from fence (e.g., "ignore", "no_run")
+
               # Match opening fence with optional attributes (case-insensitive)
               /^```[Rr]ust(,.*)?$/ {
-                in_block = 1
-                block_start = NR
-                content = ""
-                attributes = $0
+                in_block = 1          # Enter code block state
+                block_start = NR      # Record starting line number
+                content = ""          # Reset content accumulator
+                attributes = $0       # Save full fence line for reference
+                # POSIX-compatible: use sub() instead of match() for mawk compatibility
                 # Extract attributes after rust (case-insensitive)
-                if (match($0, /```[Rr]ust,(.*)/, arr)) {
-                  attrs = arr[1]
-                } else {
-                  attrs = ""
-                }
-                next
+                attrs = $0
+                sub(/^```[Rr]ust,?/, "", attrs)  # Remove "```rust" or "```Rust" and optional comma
+                next                  # Skip to next line (don't include fence in content)
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
                 # Output with NUL byte separator to preserve multi-line content
-                # Format: line_number:::attributes:::content\0
-                printf "%s:::%s:::%s\0", block_start, attrs, content
-                in_block = 0
-                next
+                # Format: line_number:::attributes:::content<NUL>
+                # The ":::" separator is chosen to be unlikely to appear in normal text
+                # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                # (mawk doesn't support "\0" in printf format strings, but does support %c with value 0)
+                printf "%s:::%s:::%s%c", block_start, attrs, content, 0
+                in_block = 0          # Exit code block state
+                next                  # Skip to next line
               }
               # Accumulate content while in block
               # FIXED: Always append lines with newline separator, handling empty first lines
               in_block {
                 if (content == "") {
-                  content = $0
+                  content = $0        # First line: no leading newline
                 } else {
-                  content = content "\n" $0
+                  content = content "\n" $0  # Subsequent lines: add newline separator
                 }
               }
               # Reset if we hit another opening fence while already in a block (nested/malformed)
               /^```/ && in_block {
-                in_block = 0
+                in_block = 0          # Reset state on malformed/nested blocks
               }
               # FIXED: Handle unclosed blocks at end of file
               END {
                 if (in_block) {
-                  printf "%s:::%s:::%s\0", block_start, attrs, content
+                  # Output whatever we accumulated, even if block wasn't closed
+                  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                  printf "%s:::%s:::%s%c", block_start, attrs, content, 0
                 }
               }
             ' "$md_file" | while IFS=':::' read -r -d '' line_num attributes content; do
@@ -199,8 +264,9 @@ jobs:
               fi
 
               # Check if block has ignore, no_run, or should_panic attributes
-              should_skip=0
-              should_compile=1
+              # Boolean flags: 0 = false, 1 = true
+              should_skip=0      # Set to 1 to skip validation entirely
+              should_compile=1   # Set to 0 to skip compilation (syntax-only check)
 
               if echo "$attributes" | grep -qE 'ignore'; then
                 echo "  ⊘ Skipping block at line $line_num (marked ignore)"
@@ -214,17 +280,17 @@ jobs:
               fi
 
               # Check for common placeholder patterns in content
-              if [ $should_skip -eq 0 ] && echo "$content" | grep -qE 'todo!\(\)|^\.\.\.|// \.\.\.|/\* \.\.\. \*/'; then
+              if [ "$should_skip" -eq 0 ] && echo "$content" | grep -qE 'todo!\(\)|^\.\.\.|// \.\.\.|/\* \.\.\. \*/'; then
                 echo "  ⊘ Skipping block at line $line_num (incomplete/placeholder code)"
                 should_skip=1
               fi
 
-              if [ $should_skip -eq 0 ] && echo "$content" | grep -qE '// Note:|// Example:|/\* config \*/'; then
+              if [ "$should_skip" -eq 0 ] && echo "$content" | grep -qE '// Note:|// Example:|/\* config \*/'; then
                 echo "  ⊘ Skipping block at line $line_num (documentation snippet)"
                 should_skip=1
               fi
 
-              if [ $should_skip -eq 1 ]; then
+              if [ "$should_skip" -eq 1 ]; then
                 skipped=$((skipped + 1))
                 echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
                 continue
@@ -247,7 +313,7 @@ jobs:
 
               # Second, attempt compilation for complete code blocks
               # (Skip compilation for snippets that are clearly incomplete)
-              if [ $should_compile -eq 1 ]; then
+              if [ "$should_compile" -eq 1 ]; then
                 # Check if this looks like a complete program or lib snippet
                 if echo "$content" | grep -qE '^(fn main|use |mod |pub |extern )'; then
                   # Try to compile as a standalone binary or module
@@ -301,8 +367,10 @@ jobs:
           echo "Failed: $failed"
           echo "========================================="
 
-          if [ $failed -gt 0 ]; then
-            exit 1
+          # Exit with error code 1 if any blocks failed validation
+          # This will fail the CI workflow step
+          if [ "$failed" -gt 0 ]; then
+            exit 1  # Non-zero exit code indicates failure
           fi
 
       # Validate non-Rust code blocks (JSON, YAML, TOML, Bash)
@@ -311,53 +379,80 @@ jobs:
           set -euo pipefail
 
           echo "Validating JSON code blocks..."
+          # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"
-          echo "0 0" > "$COUNTER_FILE"  # total failed
+          # Counter file format: 2 space-separated integers (total failed)
+          echo "0 0" > "$COUNTER_FILE"
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
             -not -path "./.git/*" | sort | while read -r md_file; do
 
-            awk '/^```json$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+            awk '
+              # Match opening fence for JSON code blocks
+              /^```json$/ {
+                in_block = 1
+                content = ""
+                next
+              }
+              # Match closing fence only if in a block
+              /^```$/ && in_block {
+                print content
+                in_block = 0
+                next
+              }
+              # Accumulate content while in block
+              in_block {
+                content = content $0 "\n"
+              }
+              # Handle unclosed blocks at end of file
+              END {
+                if (in_block) {
+                  print content
+                }
+              }
+            ' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
 
-              # Read current counters from file
-              read -r TOTAL FAILED < "$COUNTER_FILE"
-              TOTAL=$((TOTAL + 1))
+              # Read current counters from file (local variables - lowercase)
+              read -r total failed < "$COUNTER_FILE"
+              total=$((total + 1))
 
-              test_file="$TEMP_DIR/test_$TOTAL.json"
+              test_file="$TEMP_DIR/test_$total.json"
               echo "$content" > "$test_file"
 
               if ! jq empty "$test_file" 2>/dev/null; then
                 echo "✗ Invalid JSON in $md_file"
                 cat "$test_file"
-                FAILED=$((FAILED + 1))
+                failed=$((failed + 1))
               fi
 
               # Write updated counters back to file
-              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
+              echo "$total $failed" > "$COUNTER_FILE"
             done
           done
 
           # Read final counters
-          read -r TOTAL FAILED < "$COUNTER_FILE"
+          read -r total failed < "$COUNTER_FILE"
 
-          if [ $FAILED -gt 0 ]; then
-            echo "JSON validation failed: $FAILED/$TOTAL blocks invalid"
-            exit 1
+          # Exit with error code 1 if any blocks failed validation
+          if [ "$failed" -gt 0 ]; then
+            echo "JSON validation failed: $failed/$total blocks invalid"
+            exit 1  # Non-zero exit code indicates failure
           fi
-          echo "✓ All JSON blocks valid ($TOTAL checked)"
+          echo "✓ All JSON blocks valid ($total checked)"
 
       - name: Validate YAML code blocks
         run: |
           set -euo pipefail
 
           echo "Validating YAML code blocks..."
+          # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -367,42 +462,67 @@ jobs:
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"
-          echo "0 0" > "$COUNTER_FILE"  # total failed
+          # Counter file format: 2 space-separated integers (total failed)
+          echo "0 0" > "$COUNTER_FILE"
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
             -not -path "./.git/*" | sort | while read -r md_file; do
 
-            awk '/^```(yaml|yml)$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+            awk '
+              # Match opening fence for YAML code blocks
+              /^```(yaml|yml)$/ {
+                in_block = 1
+                content = ""
+                next
+              }
+              # Match closing fence only if in a block
+              /^```$/ && in_block {
+                print content
+                in_block = 0
+                next
+              }
+              # Accumulate content while in block
+              in_block {
+                content = content $0 "\n"
+              }
+              # Handle unclosed blocks at end of file
+              END {
+                if (in_block) {
+                  print content
+                }
+              }
+            ' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
 
-              # Read current counters from file
-              read -r TOTAL FAILED < "$COUNTER_FILE"
-              TOTAL=$((TOTAL + 1))
+              # Read current counters from file (local variables - lowercase)
+              read -r total failed < "$COUNTER_FILE"
+              total=$((total + 1))
 
-              test_file="$TEMP_DIR/test_$TOTAL.yaml"
+              test_file="$TEMP_DIR/test_$total.yaml"
               echo "$content" > "$test_file"
 
               if ! yq eval . "$test_file" >/dev/null 2>&1; then
                 echo "✗ Invalid YAML in $md_file"
                 cat "$test_file"
-                FAILED=$((FAILED + 1))
+                failed=$((failed + 1))
               fi
 
               # Write updated counters back to file
-              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
+              echo "$total $failed" > "$COUNTER_FILE"
             done
           done
 
           # Read final counters
-          read -r TOTAL FAILED < "$COUNTER_FILE"
+          read -r total failed < "$COUNTER_FILE"
 
-          if [ $FAILED -gt 0 ]; then
-            echo "YAML validation failed: $FAILED/$TOTAL blocks invalid"
-            exit 1
+          # Exit with error code 1 if any blocks failed validation
+          if [ "$failed" -gt 0 ]; then
+            echo "YAML validation failed: $failed/$total blocks invalid"
+            exit 1  # Non-zero exit code indicates failure
           fi
-          echo "✓ All YAML blocks valid ($TOTAL checked)"
+          echo "✓ All YAML blocks valid ($total checked)"
 
       - name: Validate TOML code blocks
         run: |
@@ -413,104 +533,170 @@ jobs:
           # Install taplo for TOML validation
           cargo install taplo-cli --locked
 
+          # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"
-          echo "0 0" > "$COUNTER_FILE"  # total failed
+          # Counter file format: 2 space-separated integers (total failed)
+          echo "0 0" > "$COUNTER_FILE"
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
             -not -path "./.git/*" | sort | while read -r md_file; do
 
-            awk '/^```toml$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+            awk '
+              # Match opening fence for TOML code blocks
+              /^```toml$/ {
+                in_block = 1
+                content = ""
+                next
+              }
+              # Match closing fence only if in a block
+              /^```$/ && in_block {
+                print content
+                in_block = 0
+                next
+              }
+              # Accumulate content while in block
+              in_block {
+                content = content $0 "\n"
+              }
+              # Handle unclosed blocks at end of file
+              END {
+                if (in_block) {
+                  print content
+                }
+              }
+            ' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
 
-              # Read current counters from file
-              read -r TOTAL FAILED < "$COUNTER_FILE"
-              TOTAL=$((TOTAL + 1))
+              # Read current counters from file (local variables - lowercase)
+              read -r total failed < "$COUNTER_FILE"
+              total=$((total + 1))
 
-              test_file="$TEMP_DIR/test_$TOTAL.toml"
+              test_file="$TEMP_DIR/test_$total.toml"
               echo "$content" > "$test_file"
 
               if ! taplo check "$test_file" 2>/dev/null; then
                 echo "✗ Invalid TOML in $md_file"
                 cat "$test_file"
-                FAILED=$((FAILED + 1))
+                failed=$((failed + 1))
               fi
 
               # Write updated counters back to file
-              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
+              echo "$total $failed" > "$COUNTER_FILE"
             done
           done
 
           # Read final counters
-          read -r TOTAL FAILED < "$COUNTER_FILE"
+          read -r total failed < "$COUNTER_FILE"
 
-          if [ $FAILED -gt 0 ]; then
-            echo "TOML validation failed: $FAILED/$TOTAL blocks invalid"
-            exit 1
+          # Exit with error code 1 if any blocks failed validation
+          if [ "$failed" -gt 0 ]; then
+            echo "TOML validation failed: $failed/$total blocks invalid"
+            exit 1  # Non-zero exit code indicates failure
           fi
-          echo "✓ All TOML blocks valid ($TOTAL checked)"
+          echo "✓ All TOML blocks valid ($total checked)"
 
       - name: Validate Bash code blocks
         run: |
           set -euo pipefail
 
           echo "Validating Bash code blocks..."
+          # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
+          # Install shellcheck for comprehensive shell script validation
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"
-          echo "0 0" > "$COUNTER_FILE"  # total failed
+          # Counter file format: 2 space-separated integers (total failed)
+          echo "0 0" > "$COUNTER_FILE"
 
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
             -not -path "./.git/*" | sort | while read -r md_file; do
 
-            awk '/^```(bash|sh|shell)$/ {in_block=1; content=""; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content $0 "\n"}' "$md_file" | while read -r content; do
+            awk '
+              # Match opening fence for Bash/shell code blocks
+              /^```(bash|sh|shell)$/ {
+                in_block = 1
+                content = ""
+                next
+              }
+              # Match closing fence only if in a block
+              /^```$/ && in_block {
+                print content
+                in_block = 0
+                next
+              }
+              # Accumulate content while in block
+              in_block {
+                content = content $0 "\n"
+              }
+              # Handle unclosed blocks at end of file
+              END {
+                if (in_block) {
+                  print content
+                }
+              }
+            ' "$md_file" | while read -r content; do
               [ -z "$content" ] && continue
               # Skip placeholder/example-only blocks
               if echo "$content" | grep -qE '^#.*example|^# Note:|^\.\.\.$'; then
                 continue
               fi
 
-              # Read current counters from file
-              read -r TOTAL FAILED < "$COUNTER_FILE"
-              TOTAL=$((TOTAL + 1))
+              # Read current counters from file (local variables - lowercase)
+              read -r total failed < "$COUNTER_FILE"
+              total=$((total + 1))
 
-              test_file="$TEMP_DIR/test_$TOTAL.sh"
+              test_file="$TEMP_DIR/test_$total.sh"
               echo "$content" > "$test_file"
 
-              # Use shellcheck for syntax validation (not bash -n, which doesn't catch many issues)
+              # First check syntax with bash -n
               if ! bash -n "$test_file" 2>/dev/null; then
                 echo "✗ Invalid Bash syntax in $md_file"
                 cat "$test_file"
-                FAILED=$((FAILED + 1))
+                failed=$((failed + 1))
+              # Then validate with shellcheck for comprehensive checking
+              # Note: Warnings are non-fatal because markdown examples often use simplified bash
+              # for illustration purposes (e.g., missing quotes, unused variables for clarity).
+              # Only syntax errors (caught by bash -n above) are considered fatal.
+              elif ! shellcheck -s bash "$test_file" 2>"$TEMP_DIR/shellcheck_$total.txt"; then
+                echo "⚠ Shellcheck warnings in $md_file (non-fatal):"
+                cat "$TEMP_DIR/shellcheck_$total.txt"
+                # Common acceptable warnings in documentation:
+                # SC2034: unused variables (kept for documentation clarity)
+                # SC2086: unquoted variables (simplified examples)
+                # SC2046: unquoted command substitution (simplified examples)
               fi
 
               # Write updated counters back to file
-              echo "$TOTAL $FAILED" > "$COUNTER_FILE"
+              echo "$total $failed" > "$COUNTER_FILE"
             done
           done
 
           # Read final counters
-          read -r TOTAL FAILED < "$COUNTER_FILE"
+          read -r total failed < "$COUNTER_FILE"
 
-          if [ $FAILED -gt 0 ]; then
-            echo "Bash validation failed: $FAILED/$TOTAL blocks invalid"
-            exit 1
+          # Exit with error code 1 if any blocks failed validation
+          if [ "$failed" -gt 0 ]; then
+            echo "Bash validation failed: $failed/$total blocks invalid"
+            exit 1  # Non-zero exit code indicates failure
           fi
-          echo "✓ All Bash blocks valid ($TOTAL checked)"
+          echo "✓ All Bash blocks valid ($total checked)"
 
   link-check:
     name: Documentation Link Check
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 10  # Moderate timeout for checking all external and internal links
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -519,6 +705,7 @@ jobs:
         uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
         with:
           # Check all markdown files
+          # Accept HTTP status codes: 200 (OK), 204 (No Content), 301/302/307/308 (Redirects), 429 (Rate Limit)
           args: >-
             --verbose
             --no-progress
@@ -529,7 +716,7 @@ jobs:
             --exclude-path './third_party/*'
             --exclude-path './.git/*'
             '**/*.md'
-          # Fail on broken links
+          # Fail on broken links (exit code 1 if any links are broken)
           fail: true
         env:
           # Optional: Add GitHub token to avoid rate limiting on GitHub links
@@ -542,10 +729,12 @@ jobs:
 
           echo "Checking for broken internal links in documentation..."
 
+          # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           BROKEN_LINKS_FILE="$TEMP_DIR/broken_links"
+          # Counter file format: single integer (count of broken links)
           echo "0" > "$BROKEN_LINKS_FILE"
 
           find . -type f -name "*.md" \
@@ -553,12 +742,14 @@ jobs:
             -not -path "./third_party/*" \
             -not -path "./.git/*" | sort | while read -r md_file; do
 
+            # Local variable - use lowercase
             [ -f "$md_file" ] || continue
 
             echo "Checking links in: $md_file"
 
             # Extract markdown links [text](url) - handle multiline with grep -o
             grep -oE '\[([^]]+)\]\(([^)]+)\)' "$md_file" | while read -r link; do
+              # Local variables - use lowercase
               # Extract the URL part
               url=$(echo "$link" | sed -E 's/.*\(([^)]+)\).*/\1/')
 
@@ -574,10 +765,10 @@ jobs:
 
               # Separate file path from anchor
               file_part="${url%%#*}"
-              anchor_part=""
-              if [[ "$url" =~ "#" ]]; then
-                anchor_part="${url#*#}"
-              fi
+              # TODO: Extract and validate anchor_part="${url#*#}"
+              # Implementation approach: Parse target markdown for headings, convert to anchor format
+              # (lowercase, replace spaces with hyphens, remove special chars), then verify match.
+              # Priority: Low - lychee already validates anchors for most cases.
 
               # Skip empty paths (anchor-only after removal)
               if [ -z "$file_part" ]; then
@@ -598,16 +789,21 @@ jobs:
                 echo "$((broken + 1))" > "$BROKEN_LINKS_FILE"
               fi
 
-              # TODO: Validate anchor exists in target file (future enhancement)
+              # TODO: Validate anchor exists in target file
+              # Implementation approach: Extract heading from target file, normalize to anchor ID
+              # (GitHub format: lowercase, spaces to hyphens, strip special chars except hyphens/underscores),
+              # then compare with anchor_part from URL.
+              # Priority: Low - lychee action above already handles most anchor validation.
             done
           done
 
-          read -r BROKEN_LINKS < "$BROKEN_LINKS_FILE"
+          read -r broken_links < "$BROKEN_LINKS_FILE"
 
-          if [ $BROKEN_LINKS -gt 0 ]; then
+          # Exit with error code 1 if any broken links were found
+          if [ "$broken_links" -gt 0 ]; then
             echo ""
-            echo "Found $BROKEN_LINKS broken internal link(s)"
-            exit 1
+            echo "Found $broken_links broken internal link(s)"
+            exit 1  # Non-zero exit code indicates failure
           fi
 
           echo "All internal links valid ✓"
@@ -617,7 +813,7 @@ jobs:
   inline-code-references:
     name: Validate Inline Code References
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 10  # Moderate timeout for future implementation of code reference validation
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 

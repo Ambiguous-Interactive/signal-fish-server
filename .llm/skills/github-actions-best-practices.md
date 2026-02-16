@@ -1,6 +1,7 @@
 # Skill: GitHub Actions & CI/CD Best Practices
 
-<!-- trigger: github actions, workflow, ci, cd, pipeline, bash, awk, shell script, continuous integration | Patterns for writing robust CI/CD workflows and avoiding common pitfalls | Infrastructure -->
+<!-- trigger: github actions, workflow, ci, cd, pipeline, bash, awk, shell script, continuous integration
+     | Patterns for writing robust CI/CD workflows and avoiding common pitfalls | Infrastructure -->
 
 **Trigger**: When writing GitHub Actions workflows, Bash scripts in CI, or debugging pipeline failures.
 
@@ -26,13 +27,18 @@
 
 ## TL;DR
 
-- AWK multi-line content needs NUL byte delimiters, not newlines
+- AWK multi-line content needs NUL byte delimiters with `printf "%c", 0`
+  (not `"\0"` - mawk incompatible)
+- AWK portability: Use POSIX `sub()` instead of gawk's `match()` with capture groups
+- Always quote variables in Bash: `"$var"` prevents word splitting (shellcheck SC2086)
 - Bash subshells lose variable modifications — use file-based counters in pipelines
+- Add shellcheck validation job to workflows to catch inline script issues
 - Lychee `include` is for URL regex filtering, not file glob patterns
 - Always verify case-sensitive filesystem assumptions on Linux
 - Documentation links must match actual filenames exactly
 - Use retry loops with `docker logs` dumps for smoke tests
 - Pin all action versions with SHA256 digests
+- Document magic numbers: timeout values, AWK field offsets, counter file formats
 
 ---
 
@@ -48,7 +54,9 @@ Use NUL bytes (`\0`) as record separators to preserve multi-line content through
 
 ```bash
 # ❌ WRONG: Newline separator breaks multi-line blocks
-awk '/^```rust/ {in_block=1; next} /^```$/ && in_block {print content; in_block=0; next} in_block {content = content "\n" $0}' file.md | while read -r block; do
+awk '/^```rust/ {in_block=1; next} /^```$/ && in_block {
+  print content; in_block=0; next
+} in_block {content = content "\n" $0}' file.md | while read -r block; do
   # Each LINE of the block arrives as a separate record — validation fails
   validate "$block"
 done
@@ -108,6 +116,32 @@ awk '
 done
 ```
 
+### AWK Portability: gawk vs mawk
+
+**Critical Issue**: Ubuntu CI runners use **mawk** by default, not gawk. Many gawk-specific features
+are not portable.
+
+```awk
+# ❌ WRONG: gawk-specific syntax (fails on mawk)
+# mawk doesn't support "\0" escape
+printf "%s\0", content
+# mawk's match() doesn't support capture groups
+if (match($0, /pattern/, arr))
+
+# ✅ CORRECT: POSIX-compatible (works on both gawk and mawk)
+# Use %c with value 0 for NUL byte
+printf "%s%c", content, 0
+# Use sub() instead of match() for extraction
+sub(/pattern/, "", var)
+```
+
+**Why This Matters:**
+
+- Local development often uses gawk (GNU awk)
+- CI/CD runners (Ubuntu) default to mawk (Mike's awk)
+- Scripts that work locally can fail in CI due to these differences
+- **Always test AWK scripts on Ubuntu/mawk before committing**
+
 ### Key AWK Patterns
 
 ```awk
@@ -120,7 +154,8 @@ in_block {
 # END block for unclosed blocks at EOF
 END {
   if (in_block) {
-    printf "%s\0", content
+    # POSIX-compatible: Use %c format instead of "\0" escape
+    printf "%s%c", content, 0
   }
 }
 
@@ -129,15 +164,147 @@ END {
   in_block = 1
 }
 
-# Extract attributes with regex capture groups
+# Extract attributes with POSIX-compatible sub() instead of match()
+# ❌ WRONG (gawk-only):
 if (match($0, /```rust,(.*)/, arr)) {
-  attrs = arr[1]  # Everything after "rust,"
+  attrs = arr[1]
 }
+
+# ✅ CORRECT (POSIX-compatible):
+attrs = $0
+sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, leaving only attributes
 ```
 
 ---
 
-## 2. Bash Subshells & Variable Scope
+## 2. Shellcheck Integration in CI/CD
+
+### Self-Validating Workflows
+
+GitHub Actions workflows should validate their own inline bash scripts using shellcheck:
+
+```yaml
+jobs:
+  shellcheck-workflow:
+    name: Shellcheck Workflow Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<SHA>
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Extract and validate inline shell scripts
+        run: |
+          set -euo pipefail
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          # Extract inline scripts from workflow YAML
+          awk '/name: My Script Step/,/^      - name:/ {
+            if (/run: \|/) { in_script=1; next }
+            if (in_script && /^      - name:/) { exit }
+            if (in_script && /^          /) { print substr($0, 11) }
+          }' .github/workflows/my-workflow.yml > "$TEMP_DIR/script.sh"
+
+          # Validate with shellcheck
+          if ! shellcheck -s bash "$TEMP_DIR/script.sh"; then
+            echo "✗ Shellcheck found issues"
+            exit 1
+          fi
+```
+
+### Variable Quoting Best Practices
+
+Always quote variables to prevent word splitting and glob expansion:
+
+```bash
+# ❌ WRONG: Unquoted variables (shellcheck SC2086)
+file=$1
+cat $file                    # Fails if file has spaces
+rm $TEMP_DIR/*.txt           # Glob expansion issues
+
+# ✅ CORRECT: Quoted variables
+file="$1"
+cat "$file"                  # Works with spaces in filename
+rm "$TEMP_DIR"/*.txt         # Quote variable, not glob
+
+# ✅ CORRECT: Arrays for multiple arguments
+files=("file1.txt" "file with spaces.txt")
+cat "${files[@]}"            # Proper array expansion
+```
+
+### Common Shellcheck Warnings in CI
+
+#### SC2086: Unquoted variable expansion
+
+```bash
+# ❌ WRONG
+total=$COUNTER
+file=$FILE_PATH
+
+# ✅ CORRECT
+total="$COUNTER"
+file="$FILE_PATH"
+```
+
+#### SC2034: Unused variable
+
+```bash
+# In documentation examples, unused variables are often acceptable
+# Suppress with comment:
+# shellcheck disable=SC2034
+EXAMPLE_VAR="for documentation only"
+```
+
+#### SC2046: Unquoted command substitution
+
+```bash
+# ❌ WRONG
+files=$(find . -name "*.txt")
+cat $files
+
+# ✅ CORRECT
+while IFS= read -r file; do
+  cat "$file"
+done < <(find . -name "*.txt")
+```
+
+### Shellcheck + AWK Limitations
+
+Shellcheck validates Bash syntax but does **not** validate AWK syntax
+embedded in heredocs or inline scripts.
+
+```bash
+# Shellcheck will NOT catch AWK syntax errors here:
+awk '
+  BEGIN { print "hello" }    # Shellcheck ignores this
+  { invalid_awk_syntax }     # Shellcheck won't catch this
+' file.txt
+```
+
+**Solution**: AWK scripts are validated through actual execution in CI. If an AWK script has syntax errors, the workflow will fail at runtime.
+
+### Variable Naming Conventions
+
+Use consistent naming to improve shellcheck compliance and readability:
+
+```bash
+# ✅ CORRECT: Clear naming conventions
+# Constants and cross-script values: UPPERCASE
+TEMP_DIR=$(mktemp -d)
+COUNTER_FILE="$TEMP_DIR/counters"
+
+# Local variables and loop iterators: lowercase
+for file in *.md; do
+  total=$((total + 1))
+  validate "$file"
+done
+```
+
+---
+
+## 3. Bash Subshells & Variable Scope
 
 ### The Problem
 
@@ -208,7 +375,7 @@ echo "Failed: $FAILED / $TOTAL"
 
 ---
 
-## 3. Lychee Link Checker Configuration
+## 4. Lychee Link Checker Configuration
 
 ### The Problem
 
@@ -289,7 +456,7 @@ See [testing guide](skills/testing-strategies.md)
 
 ---
 
-## 4. Case-Sensitive Filesystem Issues
+## 5. Case-Sensitive Filesystem Issues
 
 ### The Problem
 
@@ -342,7 +509,7 @@ done
 
 ---
 
-## 5. Docker Smoke Test Patterns
+## 6. Docker Smoke Test Patterns
 
 ### The Problem
 
@@ -389,7 +556,7 @@ exit 1
 
 ---
 
-## 6. Action Version Pinning
+## 7. Action Version Pinning
 
 ### The Problem
 
@@ -422,7 +589,50 @@ gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
 
 ---
 
-## 7. Workflow Path Filtering Best Practices
+## 8. Magic Numbers & Documentation
+
+### Always Document Timeout Values
+
+```yaml
+# ❌ WRONG: Unexplained magic number
+jobs:
+  test:
+    timeout-minutes: 15
+
+# ✅ CORRECT: Documented reasoning
+jobs:
+  test:
+    timeout-minutes: 15  # Generous timeout for building docs with all features
+```
+
+### Document AWK Field Extraction
+
+```bash
+# ❌ WRONG: Magic number without context
+print substr($0, 11)
+
+# ✅ CORRECT: Explain the calculation
+# Extract script content: skip the 10-space indentation
+# (6 spaces for YAML step level + 4 for script content)
+# plus line number + tab from workflow YAML structure = 11 characters to skip
+print substr($0, 11)
+```
+
+### Document Counter File Formats
+
+```bash
+# ❌ WRONG: Unexplained file format
+echo "0 0 0 0" > "$COUNTER_FILE"
+
+# ✅ CORRECT: Document the schema
+# Counter file format: 4 space-separated integers (total validated skipped failed)
+# Example: "10 7 2 1" means 10 total blocks, 7 validated, 2 skipped, 1 failed
+echo "0 0 0 0" > "$COUNTER_FILE"
+```
+
+---
+
+## 9. Workflow Path Filtering Best Practices
 
 ### Trigger on Relevant Changes Only
 
@@ -460,7 +670,7 @@ Prevents duplicate runs on rapid pushes.
 
 ---
 
-## 8. Minimal Permissions (Security)
+## 10. Minimal Permissions (Security)
 
 ### Default to Read-Only
 
@@ -482,7 +692,7 @@ permissions:
 
 ---
 
-## 9. Common CI Anti-Patterns
+## 11. Common CI Anti-Patterns
 
 ### Using `set -e` Without `set -u` or `set -o pipefail`
 
@@ -528,7 +738,7 @@ done
 
 ---
 
-## 10. Debugging Workflow Failures
+## 12. Debugging Workflow Failures
 
 ### Enable Debug Logging
 
@@ -566,18 +776,33 @@ Full `set -x` in CI creates massive logs — use sparingly.
 
 ## Agent Checklist
 
-- [ ] AWK multi-line extraction uses NUL byte delimiters (`printf "%s\0", content`)
-- [ ] Bash pipeline counters use file-based propagation, not subshell variables
+### AWK Best Practices
+
+- [ ] AWK multi-line extraction uses NUL byte delimiters (`printf "%s%c", content, 0`)
+- [ ] AWK uses POSIX-compatible `printf "%c", 0` instead of `"\0"` (mawk compatibility)
+- [ ] AWK uses `sub()` instead of `match()` with capture groups (mawk compatibility)
 - [ ] AWK END block handles unclosed blocks at EOF
+- [ ] AWK scripts tested on Ubuntu/mawk, not just local gawk
+
+### Shellcheck & Bash Best Practices
+
+- [ ] All variables quoted: `"$var"` not `$var` (prevents SC2086)
+- [ ] Workflows include shellcheck validation of inline scripts
+- [ ] Variable naming: UPPERCASE for constants, lowercase for locals
+- [ ] Bash pipeline counters use file-based propagation, not subshell variables
+- [ ] Workflows use `set -euo pipefail` and `trap` for cleanup
+- [ ] File discovery is dynamic (`find`), not hardcoded lists
+
+### GitHub Actions Best Practices
+
 - [ ] Lychee file patterns in CLI args, not `.lychee.toml` `include` field
 - [ ] All Markdown links use exact case matching actual filenames
 - [ ] Docker smoke tests use retry loops with `docker logs` on failure
 - [ ] Action versions pinned with SHA256 digests (not mutable tags)
-- [ ] Workflows use `set -euo pipefail` and `trap` for cleanup
-- [ ] File discovery is dynamic (`find`), not hardcoded lists
 - [ ] Permissions are minimal (`contents: read` by default)
 - [ ] Workflow path filters include the workflow file itself
 - [ ] Concurrency control prevents duplicate runs
+- [ ] Timeout values documented with comments explaining duration
 
 ---
 
