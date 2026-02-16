@@ -17,6 +17,21 @@
 
 ---
 
+## ⛔ CRITICAL: Git Safety Protocol
+
+**NEVER create git commits or modify git configuration under ANY circumstances.**
+
+- ❌ FORBIDDEN: `git commit`, `git add`, `git config user.*`, `git push`
+- ✅ ALLOWED: `git status`, `git diff`, `git log`, `git show` (read-only operations)
+- 🎯 PRINCIPLE: **You prepare the work. The user commits it.**
+
+> **See [skills/git-safety-protocol.md](skills/git-safety-protocol.md) for complete details.**
+>
+> When changes are ready, provide clear commit instructions for the user to execute.
+> The user controls their git identity, commit history, and repository state.
+
+---
+
 ## Quick Decision Trees
 
 ### What Am I Changing?
@@ -31,6 +46,8 @@ Start here:
     |                                  skills/web-service-security.md
     |                                  skills/websocket-session-security.md
     +-- Deployment/Containers? ------> skills/container-and-deployment.md
+    +-- CI/CD/GitHub Actions? -------> skills/github-actions-best-practices.md
+    |                                  skills/ci-cd-troubleshooting.md
     +-- Dependencies/Supply Chain? --> skills/supply-chain-security.md
     |                                  skills/dependency-management.md
     |                                  skills/msrv-and-toolchain-management.md
@@ -280,6 +297,7 @@ cargo bench                                    # Benchmarks
 
 | Skill                                                                | When to Use                                                              |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| [git-safety-protocol](skills/git-safety-protocol.md)                 | **CRITICAL** - Git operations safety rules (NEVER commit or configure)   |
 | [agentic-workflow-patterns](skills/agentic-workflow-patterns.md)     | Patterns for effective AI agent workflows and subagent dispatch          |
 | [agent-self-review-checklist](skills/agent-self-review-checklist.md) | Structured self-verification before marking any task complete            |
 | [clippy-and-linting](skills/clippy-and-linting.md)                   | Configuring lints; resolving clippy warnings; CI setup                   |

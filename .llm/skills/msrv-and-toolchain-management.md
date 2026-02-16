@@ -63,7 +63,7 @@
 [package]
 name = "signal-fish-server"
 rust-version = "1.88.0"  # ← Single source of truth
-```
+```rust
 
 **All other configuration files derive their Rust version from this field.**
 
@@ -71,16 +71,73 @@ rust-version = "1.88.0"  # ← Single source of truth
 
 ## Configuration Files That Must Match MSRV
 
-| File                        | Purpose                          | How to Update                            | CI Validated? |
-| --------------------------- | -------------------------------- | ---------------------------------------- | ------------- |
-| `Cargo.toml`                | MSRV source of truth             | `rust-version = "1.88.0"`                | ✓             |
-| `rust-toolchain.toml`       | Developer toolchain pinning      | `channel = "1.88.0"`                     | ✓             |
-| `clippy.toml`               | Clippy MSRV-aware lints          | `msrv = "1.88.0"`                        | ✓             |
-| `Dockerfile`                | Production build environment     | `FROM rust:1.88-bookworm`                | ✓             |
-| `.devcontainer/Dockerfile`  | Development container (optional) | Comment or use `mcr.microsoft.com/...`   | ⚠ (optional)  |
-| `.github/dependabot.yml`    | Dependency update policy         | Document MSRV in ignore rules comments   | ✗             |
-| `README.md`                 | User-facing documentation        | Update installation requirements section | ✗             |
-| `docs/development.md`       | Developer setup guide            | Update toolchain installation steps      | ✗             |
+| File                        | Purpose                          | How to Update                            | Format Notes                | CI Validated? |
+| --------------------------- | -------------------------------- | ---------------------------------------- | --------------------------- | ------------- |
+| `Cargo.toml`                | MSRV source of truth             | `rust-version = "1.88.0"`                | Full semver (1.88.0)        | ✓             |
+| `rust-toolchain.toml`       | Developer toolchain pinning      | `channel = "1.88.0"`                     | Full semver (1.88.0)        | ✓             |
+| `clippy.toml`               | Clippy MSRV-aware lints          | `msrv = "1.88.0"`                        | Full semver (1.88.0)        | ✓             |
+| `Dockerfile`                | Production build environment     | `FROM rust:1.88-bookworm`                | Docker format (1.88)        | ✓ (normalized)|
+| `.devcontainer/Dockerfile`  | Development container (optional) | Comment or use `mcr.microsoft.com/...`   | Full semver in comment      | ⚠ (optional)  |
+| `.github/dependabot.yml`    | Dependency update policy         | Document MSRV in ignore rules comments   | Full semver in comment      | ✗             |
+| `README.md`                 | User-facing documentation        | Update installation requirements section | Full semver                 | ✗             |
+| `docs/development.md`       | Developer setup guide            | Update toolchain installation steps      | Full semver                 | ✗             |
+
+---
+
+## Docker Version Format: Why 1.88 Instead of 1.88.0
+
+**Important:** The Dockerfile uses `rust:1.88` (major.minor) instead of `rust:1.88.0` (full semver).
+This is **intentional** and follows Docker Hub conventions.
+
+### Why Docker Uses Shortened Versions
+
+1. **Docker Hub convention**: Official Rust images use `rust:1.88` not `rust:1.88.0`
+2. **Automatic patch updates**: `rust:1.88` automatically pulls the latest patch (1.88.x)
+3. **Semantic equivalence**: `1.88` and `1.88.0` refer to the same Rust minor version
+4. **Maintenance benefit**: Dockerfile gets security patches without manual updates
+
+### CI Normalization Logic
+
+The CI MSRV verification **normalizes both formats** before comparison to avoid false failures:
+
+```bash
+# Cargo.toml has: rust-version = "1.88.0"
+MSRV="1.88.0"
+
+# Dockerfile has: FROM rust:1.88-bookworm
+DOCKERFILE_RUST="1.88"
+
+# Normalize MSRV to major.minor (1.88.0 → 1.88)
+MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
+
+# Compare: "1.88" == "1.88" ✓
+if [ "$DOCKERFILE_RUST" != "$MSRV_SHORT" ]; then
+  echo "FAIL"
+fi
+```
+
+### What This Means for You
+
+- **Cargo.toml**: Always use full semver (`1.88.0`)
+- **Dockerfile**: Use Docker format (`1.88-bookworm`)
+- **CI will normalize**: Both formats are considered equivalent
+- **Don't use 1.88.0 in Dockerfile**: It's not a valid Docker tag
+
+### Common Mistake: Using Full Semver in Dockerfile
+
+**Wrong:**
+
+```dockerfile
+FROM rust:1.88.0-bookworm  # ❌ Not a valid Docker tag
+```bash
+
+**Correct:**
+
+```dockerfile
+FROM rust:1.88-bookworm    # ✓ Valid Docker tag
+```
+
+The CI script normalizes both to `1.88` for comparison, so this mismatch is **expected and correct**.
 
 ---
 
@@ -122,7 +179,7 @@ jobs:
         run: |
           cargo check --locked --all-targets
           cargo test --locked --all-features
-```
+```bash
 
 **This job catches:**
 - Configuration drift (files with mismatched versions)
@@ -174,7 +231,7 @@ The project includes a dedicated script for MSRV consistency validation:
 
 ```bash
 ./scripts/check-msrv-consistency.sh
-```
+```bash
 
 This script validates all configuration files and provides clear, color-coded output.
 
@@ -235,7 +292,7 @@ Testing:
 - Zero clippy warnings (cargo clippy --all-targets --all-features)
 - Docker build successful
 - CI MSRV verification job passes
-```
+```rust
 
 ---
 
@@ -257,7 +314,7 @@ while the currently active rustc version is 1.87.0
    ```toml
    [dependencies]
    rand = "=0.9.0"  # Pin to older version compatible with current MSRV
-   ```
+   ```text
 
 ### Issue 2: CI Passes Locally But Fails in CI
 
@@ -282,7 +339,7 @@ CI:    cargo test → ✗ Fails with "requires rustc X.Y.Z or newer"
 ```text
 ✗ FAIL: clippy.toml msrv=1.87.0 (expected 1.88.0)
 ✗ FAIL: Dockerfile rust:1.87 (expected rust:1.88)
-```
+```rust
 
 **Solution:** Update the mismatched files to match `Cargo.toml`:
 ```bash
@@ -299,7 +356,7 @@ sed -i 's/FROM rust:1.87/FROM rust:1.88/' Dockerfile
 
 ```text
 error[E0658]: use of unstable library feature 'foo'
-```
+```bash
 
 **Root Cause:** Code uses a feature stabilized after MSRV.
 
@@ -345,7 +402,7 @@ The `rust-toolchain.toml` file pins the exact Rust version for developers and CI
 channel = "1.88.0"
 components = ["rustfmt", "clippy"]
 targets = []
-```
+```rust
 
 **Effect:**
 - `cargo` commands automatically use this version
@@ -406,7 +463,7 @@ cargo msrv --min 1.80.0
 
 # List incompatible dependencies
 cargo msrv --output-format json | jq '.dependencies'
-```
+```rust
 
 **Use cases:**
 - Determining minimum version after adding dependencies
@@ -466,7 +523,7 @@ cargo clippy --all-targets --all-features
 cargo test --all-features
 
 # No need to specify +1.88.0 — rust-toolchain.toml handles it
-```
+```bash
 
 ### Testing with Newer Rust
 
@@ -509,7 +566,7 @@ cargo +stable check --all-targets
 # Only update Cargo.toml
 sed -i 's/1.87.0/1.88.0/' Cargo.toml
 git commit -m "Update MSRV"
-```
+```bash
 
 **Why it fails:** CI MSRV verification job will fail due to inconsistency.
 
@@ -556,7 +613,7 @@ channel = "1.87.0"  # ← Inconsistent!
 git add Cargo.toml rust-toolchain.toml
 git commit -m "Update MSRV"
 git push  # ← CI will fail!
-```
+```rust
 
 **Why it fails:** Forgot to update clippy.toml, Dockerfile, etc.
 
@@ -697,7 +754,7 @@ Every nightly usage **must** be documented in the workflow file:
 #   - Production code MUST use stable MSRV (see Cargo.toml rust-version)
 #   - CI-only analysis tools MAY use nightly if required by the tool
 #   - Nightly is NEVER used for building production artifacts
-```
+```bash
 
 ### Nightly vs MSRV Relationship
 

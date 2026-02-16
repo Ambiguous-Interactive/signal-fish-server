@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     run_server(config).await
         .context("Server exited with error")
 }
-```
+```rust
 
 ---
 
@@ -122,7 +122,7 @@ pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinErro
     room.add_player(player)?;                                   // RoomError → JoinError
     Ok(JoinResponse { room_id: room.id() })
 }
-```
+```rust
 
 ---
 
@@ -168,7 +168,7 @@ let value = maybe_value.unwrap_or_default();
 // ✅ Transform without unwrapping
 let result = maybe_value.map(|v| v.to_string());
 let result = maybe_value.and_then(|v| v.parse().ok());
-```
+```rust
 
 **`expect()` only for compile-time-provable cases** with a `// SAFETY:` comment — it still panics:
 
@@ -204,7 +204,7 @@ pub enum WebSocketError {
         limit: u32,
     },
 }
-```
+```rust
 
 ---
 
@@ -250,7 +250,7 @@ match tokio::spawn(async move { process(msg).await }).await {
     Ok(Err(process_err)) => log_error(process_err),  // Task returned error
     Err(join_err) => tracing::error!("Task failed: {join_err}"), // Panicked/cancelled
 }
-```
+```rust
 
 See [async-rust-best-practices](./async-rust-best-practices.md) for structured concurrency with `JoinSet`.
 
@@ -287,7 +287,7 @@ See [observability-and-logging](./observability-and-logging.md) for full structu
 // ✅ Structured fields, not string interpolation
 tracing::error!(error = %err, room_id = %room_id, "Failed to join room");
 tracing::warn!(error = ?err, "Operation failed, retrying");  // Debug (?) for full chain
-```
+```rust
 
 ---
 

@@ -63,7 +63,7 @@ async fn handle_connection(
     let (mut sender, mut receiver) = socket.split();
     // Connection is now established — proceed with auth handshake
 }
-```
+```rust
 
 ### Authentication During Connection
 
@@ -111,7 +111,7 @@ async fn connection_loop(mut sender: SplitSink<WebSocket, Message>, mut receiver
         }
     }
 }
-```
+```rust
 
 ### Graceful Disconnection
 
@@ -167,7 +167,7 @@ pub enum ServerMessage {
     IceCandidate { candidate: String, from: PlayerId },
     Error { code: String, message: String },
 }
-```
+```rust
 
 ### Message Framing and Versioning
 
@@ -205,7 +205,7 @@ impl RoomHandle {
         }
     }
 }
-```
+```rust
 
 `Bytes::clone()` is O(1) (reference-counted). Always use bounded `mpsc` channels per client — drop or disconnect slow receivers rather than buffering unboundedly.
 
@@ -277,7 +277,7 @@ async fn test_join_and_peer_signaling() {
     ).expect("invalid JSON");
     assert_eq!(parsed["type"], "peer_joined");
 }
-```
+```rust
 
 For load tests, measure: connections/sec, message throughput, P50/P95/P99 latency, memory per connection.
 

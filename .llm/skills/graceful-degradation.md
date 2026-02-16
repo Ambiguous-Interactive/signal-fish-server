@@ -67,7 +67,7 @@ impl ServerHealth {
         self.level.store(level as u8, Ordering::Relaxed);
     }
 }
-```
+```rust
 
 ### Progressive Feature Shedding
 
@@ -133,7 +133,7 @@ impl CircuitBreaker {
         }
     }
 }
-```
+```rust
 
 ### Usage for Dependent Services (DB, Redis, Auth)
 
@@ -180,7 +180,7 @@ fn health_routes() -> Router<Arc<AppState>> {
         .route("/readyz", get(readiness))
         .route("/startupz", get(startup))
 }
-```
+```text
 
 ### Kubernetes Probes
 
@@ -220,7 +220,7 @@ async fn serve_with_graceful_shutdown(app: Router, shutdown_tx: watch::Sender<bo
             tokio::time::sleep(DRAIN_PERIOD).await;
         }).await.unwrap();
 }
-```
+```rust
 
 ### Connection Handler with Shutdown Awareness
 
@@ -267,7 +267,7 @@ spec:
       containers:
         - lifecycle:
             preStop: { exec: { command: ["sh", "-c", "sleep 5"] } }
-```
+```rust
 
 | Setting | Value | Reason |
 |---------|-------|--------|
@@ -346,7 +346,7 @@ async fn handle_bounded_connection(
         }
     } // _permit dropped → semaphore slot released
 }
-```
+```rust
 
 ### Per-Room Tracking with JoinSet
 
@@ -391,7 +391,7 @@ async fn update_room_state(
         .query_async(&mut redis.get_async_connection().await?).await?;
     Ok(())
 }
-```
+```rust
 
 ### Read Replica Failover
 
@@ -424,7 +424,7 @@ async fn restore_room(redis: &redis::Client, room_id: &str) -> Result<Option<Roo
         .query_async(&mut redis.get_async_connection().await?).await?;
     Ok(data.and_then(|d| serde_json::from_slice(&d).ok()))
 }
-```
+```bash
 
 ---
 

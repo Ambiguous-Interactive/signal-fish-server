@@ -2,16 +2,18 @@
 
 <!-- trigger: review, self-review, verify, checklist, done, quality-check, pre-commit | Structured self-verification before marking any task complete | Core -->
 
-**Trigger**: Before marking any task as complete, before committing changes, or when reviewing own work for correctness.
+**Trigger**: Before marking any task as complete, before presenting changes to user, or when reviewing own work for correctness.
 
 ---
 
 ## When to Use
 - Before marking any task as complete
-- Before committing changes
+- Before presenting changes to user (user commits, not you)
 - When reviewing your own work for quality and correctness
 - After implementing a fix to verify it actually resolves the issue
 - Before responding "done" to the user
+
+⛔ **CRITICAL**: You NEVER commit changes - see [git-safety-protocol](./git-safety-protocol.md)
 
 ---
 
@@ -48,7 +50,7 @@ cargo check --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo fmt --check
-```
+```bash
 
 If any command fails, fix the issue and re-run the full set.
 
@@ -135,6 +137,22 @@ For any change touching authentication, user input, or network configuration:
 
 ---
 
+## Git Safety Check (BEFORE Presenting Changes)
+
+⛔ **MANDATORY**: Before presenting changes to user, verify you have NOT:
+
+- [ ] Created any git commits (`git commit`)
+- [ ] Modified git configuration (`git config user.*`)
+- [ ] Staged files without explicit user request (`git add`)
+- [ ] Pushed to remote (`git push`)
+- [ ] Modified git history (`git rebase`, `git reset --hard`, `git commit --amend`)
+
+✅ **REQUIRED**: Instead, provide clear commit instructions for user to execute.
+
+See [git-safety-protocol](./git-safety-protocol.md) for complete details.
+
+---
+
 ## "Am I Done?" Decision Tree
 
 Work through this tree top-to-bottom. Stop at the first NO and fix it.
@@ -158,8 +176,11 @@ New tests for new behavior? ─── NO ──► Add tests
 Deep review passed? ─── NO ──► Fix findings
     │ YES
     ▼
-✅ DONE — commit
-```
+Git safety verified? ─── NO ──► Remove git commits/config; provide instructions instead
+    │ YES
+    ▼
+✅ DONE — present to user with commit instructions
+```rust
 
 **Key rule**: Never modify test expectations to make tests pass. If a test fails, understand *why* the existing expectation exists before changing anything.
 
@@ -173,7 +194,8 @@ Deep review passed? ─── NO ──► Fix findings
 | Not running tests after "small" change | Regressions in unrelated modules | Run full test suite every time |
 | Reviewing only changed files | Missing broken imports, type mismatches in dependents | `cargo check --all-targets` catches cross-file issues |
 | Forgetting TypeScript checks | Lint errors in dashboard/frontend discovered later | Run format + lint + build for any TS change |
-| Committing without `cargo fmt` | Formatting noise in next commit | Always `cargo fmt --check` before commit |
+| Committing without `cargo fmt` | Formatting noise in next commit | Always `cargo fmt --check` before presenting to user |
+| Creating git commits | Wrong author attribution, user loses control | NEVER commit - provide instructions to user instead |
 
 ---
 
@@ -195,17 +217,43 @@ Review the following changes against the self-review checklist:
 
 ## Post-Review Actions
 
-After the checklist passes:
+After the checklist passes, provide these instructions to the user:
 
-1. **Stage changes**: `git add -p` (review each hunk)
-2. **Commit message**: Follow conventional commits (`feat:`, `fix:`, `refactor:`)
-3. **Verify commit**: Run `cargo check` one final time after staging
-4. **Update docs**: If public API changed, update relevant documentation
+### What YOU Do (Agent)
+
+1. **Verify changes**: All checks pass
+2. **Summarize changes**: Clear description of what was modified
+3. **Provide commit instructions**: Exact commands for user to run
+
+### What USER Does (Not You)
+
+1. **Review changes**: `git status` and `git diff` to inspect
+2. **Stage changes**: `git add <files>` or `git add -p` (review each hunk)
+3. **Commit**: Follow conventional commits (`feat:`, `fix:`, `refactor:`)
+4. **Push**: `git push origin branch-name` when ready
+
+⛔ **YOU NEVER**: Stage, commit, configure git, or push. See [git-safety-protocol](./git-safety-protocol.md).
+
+### Example Instructions to Provide User
+
+```text
+Changes are ready. To commit:
+
+```bash
+git add src/file.rs tests/test_file.rs
+git commit -m "feat: add new validation
+
+- Add input validation for room codes
+- Add comprehensive tests
+"
+```text
+```
 
 ---
 
 ## Related Skills
 
+- [git-safety-protocol](./git-safety-protocol.md) — **CRITICAL** - Never commit or configure git
 - [code-review-checklist](./code-review-checklist.md) — For reviewing others' code
-- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Implement → Verify → Review cycle
+- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Implement → Verify → Review → Present cycle
 - [testing-strategies](./testing-strategies.md) — How to write effective tests

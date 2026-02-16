@@ -47,7 +47,7 @@
 ```bash
 cargo audit              # Check against RustSec Advisory Database
 cargo audit --json       # JSON output for CI parsing
-```
+```bash
 
 Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`), or **Deny** (replace the crate).
 
@@ -66,7 +66,7 @@ ignore = [
     # RUSTSEC-2024-0001: Utc-only, not exploitable. Revisit by 2026-06-01.
     "RUSTSEC-2024-0001",
 ]
-```
+```bash
 
 ---
 
@@ -90,7 +90,7 @@ unmaintained = "workspace"
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
          "BSD-2-Clause", "BSD-3-Clause", "ISC", "OpenSSL",
          "Unicode-DFS-2016", "Unicode-3.0", "Zlib", "0BSD", "CC0-1.0"]
-```
+```text
 
 ```rust
 // ❌ Bad — adding a GPL-licensed crate to a permissive project
@@ -109,7 +109,7 @@ wildcards = "deny"
 name = "openssl"
 wrappers = ["native-tls"]
 reason = "Prefer rustls for TLS - openssl has had numerous CVEs"
-```
+```text
 
 ```rust
 // ❌ Bad — pulling in openssl via native-tls feature
@@ -126,7 +126,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
-```
+```rust
 
 ```rust
 // ❌ Bad — git dep bypasses crates.io auditing
@@ -148,7 +148,7 @@ rustls = "=0.23.20"        # TLS — pin exactly
 ring = "=0.17.8"           # Crypto — pin exactly
 jsonwebtoken = "=9.3.0"    # Auth tokens — pin exactly
 serde = "1.0"              # Non-security — semver range OK
-```
+```bash
 
 ### Always Commit `Cargo.lock`
 
@@ -175,7 +175,7 @@ steps:
   - run: cargo build --release --locked
   - run: cargo test --locked
   - run: cargo clippy --locked -- -D warnings
-```
+```bash
 
 ### Deterministic Compilation
 
@@ -202,7 +202,7 @@ RUN cargo build --release --locked
 FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /app/target/release/matchbox-server /
 ENTRYPOINT ["/matchbox-server"]
-```
+```text
 
 ---
 
@@ -219,7 +219,7 @@ cargo sbom --output-format spdx-json > sbom.spdx.json       # SPDX
 ```bash
 grype sbom:sbom.cdx.json --output table              # Grype
 trivy sbom sbom.cdx.json --severity HIGH,CRITICAL     # Trivy
-```
+```text
 
 ### CI Artifact Upload
 
@@ -250,7 +250,7 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
-```
+```bash
 
 ### Update Urgency Guide
 
@@ -309,7 +309,7 @@ jobs:
 set -e
 cargo deny check && cargo audit
 echo "Supply chain checks passed."
-```
+```text
 
 ### Alerting on New Advisories
 
@@ -350,7 +350,7 @@ GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when
 
 # ✅ Good — v2 supports Cargo.lock v4
 - uses: EmbarkStudios/cargo-deny-action@v2
-```
+```bash
 
 ### Pre-Push Validation
 

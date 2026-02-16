@@ -44,7 +44,7 @@
 
 ---
 
-## Core Workflow: Implement → Verify → Review → Fix → Commit
+## Core Workflow: Implement → Verify → Review → Fix → Present
 
 Every significant code change follows this cycle:
 
@@ -54,10 +54,12 @@ Every significant code change follows this cycle:
 3. REVIEW   — Check against code-review-checklist
 4. FIX      — Address any issues found
 5. VERIFY   — Run cargo check, clippy, test again
-6. COMMIT   — Only when all checks pass
-```
+6. PRESENT  — Provide commit instructions to user (NEVER commit yourself)
+```rust
 
 **Never skip verification.** Running `cargo clippy` and `cargo test` catches more issues than visual inspection.
+
+**⛔ CRITICAL:** Step 6 is "PRESENT" not "COMMIT" — you provide instructions, user commits. See [git-safety-protocol](./git-safety-protocol.md).
 
 ---
 
@@ -97,7 +99,7 @@ Return: List of changes made with before/after snippets.
 ## Bad Subagent Prompt (too vague)
 Fix the error handling in the server code.
 Make it better and more robust.
-```
+```rust
 
 ### Sequential vs Parallel Dispatch
 
@@ -205,6 +207,7 @@ If you've attempted to fix an issue twice and it's still broken:
 
 | Mistake | Fix |
 |---------|-----|
+| **Creating git commits or modifying git config** | **NEVER commit or configure git - provide instructions to user instead** |
 | Fixing symptoms, not root cause | Read the full error trace, find the origin |
 | Over-reading files (context overflow) | Use targeted grep, read specific line ranges |
 | Making multiple changes without verifying | One change → verify → next change |
@@ -270,6 +273,7 @@ Confidence: medium
 
 ## Related Skills
 
+- [git-safety-protocol](./git-safety-protocol.md) — **CRITICAL** - Never commit or configure git
 - [code-review-checklist](./code-review-checklist.md) — Detailed review criteria
 - [solid-principles-enforcement](./solid-principles-enforcement.md) — SOLID checks during review
 - [rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow

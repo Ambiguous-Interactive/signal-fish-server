@@ -40,7 +40,7 @@ For each issue found, use this structured format:
 Issue: One-line description of the problem
 Fix: Concrete suggested resolution
 Confidence: high | medium | low
-```
+```rust
 
 Severity levels:
 - **CRITICAL** — Bugs, security vulnerabilities, data loss, crashes
@@ -123,7 +123,7 @@ async fn load_config() -> Result<Config, ConfigError> {
     let data = tokio::fs::read_to_string("config.json").await?;
     Ok(serde_json::from_str(&data)?)
 }
-```
+```rust
 
 ---
 

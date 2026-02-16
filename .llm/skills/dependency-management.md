@@ -43,7 +43,7 @@ cargo deny check advisories   # Known vulnerabilities
 cargo deny check licenses     # License compliance
 cargo deny check bans         # Banned crates
 cargo deny check sources      # Crate source restrictions
-```
+```bash
 
 The deny.toml configures: `vulnerability = "deny"`, `yanked = "deny"`, allowed licenses (MIT, Apache-2.0, BSD, ISC, etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
 
@@ -96,7 +96,7 @@ Put heavy/optional dependencies behind feature flags. Use `#[cfg(feature = "..."
 cargo test                          # No features
 cargo test --all-features           # All features
 cargo test --features "postgres,kafka"  # Specific combinations
-```
+```rust
 
 ---
 
@@ -129,7 +129,7 @@ tracing = "0.1"
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-```
+```text
 
 ---
 
@@ -187,7 +187,7 @@ winapi = { version = "0.3", features = ["winuser"], optional = true }
 
 # keep: Build dependency for code generation
 quote = "1.0"
-```
+```text
 
 ### Regular Audit Schedule
 
@@ -242,7 +242,7 @@ cargo tree --features                 # Feature usage
 
 # 5. Document findings in issue tracker
 # Create tasks to remove unused deps, upgrade outdated deps
-```
+```rust
 
 ### Handling False Positives
 
@@ -267,7 +267,7 @@ cargo metadata --format-version=1 | jq '.packages[] | select(.name == "dependenc
 # keep: Used by serde_derive proc macro for deserialization
 # cargo-udeps reports false positive because proc macros are analyzed differently
 serde = { version = "1.0", features = ["derive"] }
-```
+```bash
 
 **Step 3: Consider CI configuration**
 
@@ -317,7 +317,7 @@ After running audit tools, document findings:
 - [x] Created PR #123 to remove unused dependencies
 - [x] Created PR #124 to document false positive
 - [ ] Schedule next audit: 2026-05-16 (3 months)
-```
+```bash
 
 ---
 
@@ -348,7 +348,7 @@ rustls = "=0.23.36"    # Exact version — no automatic updates
 
 # ❌ Don't use "*" wildcard
 serde = "*"             # Any version — breaks reproducibility
-```
+```bash
 
 ---
 
@@ -390,7 +390,7 @@ If a dependency update requires a Rust version newer than the project MSRV:
 ```toml
 [dependencies]
 rand = "=0.9.0"  # Pin to version compatible with current MSRV
-```
+```bash
 
 **Option 2: Evaluate alternatives**
 

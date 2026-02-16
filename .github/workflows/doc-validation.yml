@@ -214,6 +214,11 @@ jobs:
                 attributes = $0       # Save full fence line for reference
                 # POSIX-compatible: use sub() instead of match() for mawk compatibility
                 # Extract attributes after rust (case-insensitive)
+                # Uses prefix match pattern instead of exact match to handle multiple fence formats:
+                # - ```rust           (plain)
+                # - ```rust,ignore    (with attribute)
+                # - ```Rust           (capitalized)
+                # Prefix match /^```[Rr]ust/ catches all these variants, then sub() strips the prefix
                 attrs = $0
                 sub(/^```[Rr]ust,?/, "", attrs)  # Remove "```rust" or "```Rust" and optional comma
                 next                  # Skip to next line (don't include fence in content)
@@ -397,12 +402,16 @@ jobs:
               # Match opening fence for JSON code blocks
               /^```json$/ {
                 in_block = 1
+                block_start = NR
                 content = ""
                 next
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
-                print content
+                # Output format: line_number<TAB>content<NUL>
+                # Tab is used as field separator, NUL as record separator
+                # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                printf "%s\t%s%c", block_start, content, 0
                 in_block = 0
                 next
               }
@@ -413,10 +422,11 @@ jobs:
               # Handle unclosed blocks at end of file
               END {
                 if (in_block) {
-                  print content
+                  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                  printf "%s\t%s%c", block_start, content, 0
                 }
               }
-            ' "$md_file" | while read -r content; do
+            ' "$md_file" | while IFS=$'\t' read -r -d '' line_num content; do
               [ -z "$content" ] && continue
 
               # Read current counters from file (local variables - lowercase)
@@ -427,7 +437,7 @@ jobs:
               echo "$content" > "$test_file"
 
               if ! jq empty "$test_file" 2>/dev/null; then
-                echo "✗ Invalid JSON in $md_file"
+                echo "✗ Invalid JSON in $md_file at line $line_num"
                 cat "$test_file"
                 failed=$((failed + 1))
               fi
@@ -472,14 +482,18 @@ jobs:
 
             awk '
               # Match opening fence for YAML code blocks
-              /^```(yaml|yml)$/ {
+              /^```yaml$/ || /^```yml$/ {
                 in_block = 1
+                block_start = NR
                 content = ""
                 next
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
-                print content
+                # Output format: line_number<TAB>content<NUL>
+                # Tab is used as field separator, NUL as record separator
+                # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                printf "%s\t%s%c", block_start, content, 0
                 in_block = 0
                 next
               }
@@ -490,10 +504,11 @@ jobs:
               # Handle unclosed blocks at end of file
               END {
                 if (in_block) {
-                  print content
+                  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                  printf "%s\t%s%c", block_start, content, 0
                 }
               }
-            ' "$md_file" | while read -r content; do
+            ' "$md_file" | while IFS=$'\t' read -r -d '' line_num content; do
               [ -z "$content" ] && continue
 
               # Read current counters from file (local variables - lowercase)
@@ -504,7 +519,7 @@ jobs:
               echo "$content" > "$test_file"
 
               if ! yq eval . "$test_file" >/dev/null 2>&1; then
-                echo "✗ Invalid YAML in $md_file"
+                echo "✗ Invalid YAML in $md_file at line $line_num"
                 cat "$test_file"
                 failed=$((failed + 1))
               fi
@@ -551,12 +566,16 @@ jobs:
               # Match opening fence for TOML code blocks
               /^```toml$/ {
                 in_block = 1
+                block_start = NR
                 content = ""
                 next
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
-                print content
+                # Output format: line_number<TAB>content<NUL>
+                # Tab is used as field separator, NUL as record separator
+                # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                printf "%s\t%s%c", block_start, content, 0
                 in_block = 0
                 next
               }
@@ -567,10 +586,11 @@ jobs:
               # Handle unclosed blocks at end of file
               END {
                 if (in_block) {
-                  print content
+                  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                  printf "%s\t%s%c", block_start, content, 0
                 }
               }
-            ' "$md_file" | while read -r content; do
+            ' "$md_file" | while IFS=$'\t' read -r -d '' line_num content; do
               [ -z "$content" ] && continue
 
               # Read current counters from file (local variables - lowercase)
@@ -581,7 +601,7 @@ jobs:
               echo "$content" > "$test_file"
 
               if ! taplo check "$test_file" 2>/dev/null; then
-                echo "✗ Invalid TOML in $md_file"
+                echo "✗ Invalid TOML in $md_file at line $line_num"
                 cat "$test_file"
                 failed=$((failed + 1))
               fi
@@ -625,14 +645,18 @@ jobs:
 
             awk '
               # Match opening fence for Bash/shell code blocks
-              /^```(bash|sh|shell)$/ {
+              /^```bash$/ || /^```sh$/ || /^```shell$/ {
                 in_block = 1
+                block_start = NR
                 content = ""
                 next
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
-                print content
+                # Output format: line_number<TAB>content<NUL>
+                # Tab is used as field separator, NUL as record separator
+                # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                printf "%s\t%s%c", block_start, content, 0
                 in_block = 0
                 next
               }
@@ -643,10 +667,11 @@ jobs:
               # Handle unclosed blocks at end of file
               END {
                 if (in_block) {
-                  print content
+                  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
+                  printf "%s\t%s%c", block_start, content, 0
                 }
               }
-            ' "$md_file" | while read -r content; do
+            ' "$md_file" | while IFS=$'\t' read -r -d '' line_num content; do
               [ -z "$content" ] && continue
               # Skip placeholder/example-only blocks
               if echo "$content" | grep -qE '^#.*example|^# Note:|^\.\.\.$'; then
@@ -662,7 +687,7 @@ jobs:
 
               # First check syntax with bash -n
               if ! bash -n "$test_file" 2>/dev/null; then
-                echo "✗ Invalid Bash syntax in $md_file"
+                echo "✗ Invalid Bash syntax in $md_file at line $line_num"
                 cat "$test_file"
                 failed=$((failed + 1))
               # Then validate with shellcheck for comprehensive checking
@@ -670,7 +695,7 @@ jobs:
               # for illustration purposes (e.g., missing quotes, unused variables for clarity).
               # Only syntax errors (caught by bash -n above) are considered fatal.
               elif ! shellcheck -s bash "$test_file" 2>"$TEMP_DIR/shellcheck_$total.txt"; then
-                echo "⚠ Shellcheck warnings in $md_file (non-fatal):"
+                echo "⚠ Shellcheck warnings in $md_file at line $line_num (non-fatal):"
                 cat "$TEMP_DIR/shellcheck_$total.txt"
                 # Common acceptable warnings in documentation:
                 # SC2034: unused variables (kept for documentation clarity)

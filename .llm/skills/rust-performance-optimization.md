@@ -48,7 +48,7 @@ Consider `tikv-jemallocator` (multi-threaded server workloads) or `mimalloc` (go
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-```
+```rust
 
 ---
 
@@ -67,7 +67,7 @@ let mut s = String::with_capacity(estimated_len);
 ```rust
 use smallvec::SmallVec;
 let players: SmallVec<[PlayerId; 8]> = SmallVec::new();  // Stack for ≤8, heap otherwise
-```
+```rust
 
 **Note:** This project uses `SmallVec` for stack-first collections. `ArrayVec` (fixed-capacity, never heap) is a
 valid alternative pattern for external projects with hard capacity limits, but is not a dependency of this codebase.
@@ -125,7 +125,7 @@ struct RoomConfig {
 
 // ✅ Assert sizes at compile time
 const _: () = assert!(std::mem::size_of::<Message>() <= 64);
-```
+```rust
 
 ---
 
@@ -172,7 +172,7 @@ fn process(input: &[u8]) -> Cow<'_, [u8]> {
         Cow::Borrowed(input)         // Zero-copy for the common case
     }
 }
-```
+```rust
 
 ### rkyv for Zero-Copy Deserialization
 
@@ -205,7 +205,7 @@ struct Players {
     positions: Vec<Position>,
     health: Vec<u16>,
 }
-```
+```rust
 
 ---
 
@@ -249,7 +249,7 @@ let mut out = String::with_capacity(256);
 write!(out, "Player {} in room {}", player_id, room_code)?; // Pre-allocated
 
 const GREETING: &str = concat!("matchbox-signaling-server/", env!("CARGO_PKG_VERSION"));  // Compile-time
-```
+```rust
 
 ---
 

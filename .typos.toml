@@ -94,13 +94,15 @@ clang = "clang"          # C/C++ compiler
 distroless = "distroless" # Google's minimal container images
 dockerfile = "dockerfile"
 ghcr = "ghcr"            # GitHub Container Registry
-hashicorp = "hashicorp"  # HashiCorp (company name, case-insensitive match)
+HashiCorp = "HashiCorp"  # HashiCorp (company name, proper capitalization)
+hashicorp = "hashicorp"  # hashicorp (lowercase variant)
 mold = "mold"            # Fast linker
 nightly = "nightly"      # Rust nightly toolchain
 
 # === GitHub Actions ===
 dtolnay = "dtolnay"           # rust-toolchain action author
 embarkstudios = "embarkstudios" # cargo-deny action author
+github = "github"             # GitHub platform
 swatinem = "swatinem"         # rust-cache action author
 
 # === Game Engines ===
@@ -169,3 +171,6 @@ params = "params"
 stderr = "stderr"
 stdin = "stdin"
 stdout = "stdout"
+
+# Proper nouns and company names with mixed case
+HashiCorp = "HashiCorp"

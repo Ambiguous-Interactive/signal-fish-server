@@ -28,11 +28,23 @@
 
 ## TL;DR
 
+**Configuration & Consistency:**
+
 - **Configuration mismatch** is the most common root cause of "works locally, fails in CI"
 - **Check language-project alignment**: Python caching on Rust project = instant failure
+- **Typos configuration**: Mixed-case names (HashiCorp) need `extend-identifiers`, not `extend-words`
+- **Docker versions**: Use X.Y format (1.88) for Docker Hub, not X.Y.Z (1.88.0)
+
+**Staleness & Maintenance:**
+
 - **Staleness kills**: Old toolchains (>6 months) cause subtle breakage
-- **Cache invalidation** is hard — when in doubt, clear the cache
+- **Cache invalidation** is hard - when in doubt, clear the cache
 - **Always check dates**: Pinned versions/toolchains from >6 months ago need review
+
+**Testing & Validation:**
+
+- **Test configuration files**: Add CI tests to validate consistency (MSRV, typos.toml, etc.)
+- **AWK patterns**: Use prefix matching (`/^```rust/`) for flexibility, not exact patterns
 
 ---
 
@@ -46,7 +58,7 @@
 # CI fails with:
 ERROR: Cache entry deserialization failed, entry ignored
 ERROR: Unable to locate executable file: pip
-```
+```bash
 
 #### Root Cause
 
@@ -73,7 +85,7 @@ Workflow uses caching/tooling for wrong language ecosystem:
     prefix-key: "rust"
 
 - run: cargo build
-```
+```rust
 
 #### Prevention Checklist
 
@@ -113,7 +125,7 @@ grep -r "cargo\|Cargo\.toml\|rust" .          # Rust patterns (should be present
 ```text
 ERROR: Cache entry deserialization failed, entry ignored
 WARNING: Failed to restore cache, continuing without cache
-```
+```bash
 
 #### Root Causes
 
@@ -149,7 +161,7 @@ WARNING: Failed to restore cache, continuing without cache
 # ✅ GOOD: Versioned cache key
 key: ${{ runner.os }}-rust-v1-${{ hashFiles('**/Cargo.lock') }}
 #                          ^^^ version allows cache invalidation
-```
+```text
 
 **Use action-managed caching when available:**
 
@@ -172,7 +184,7 @@ while the currently active rustc version is 1.87.0
 # OR
 
 error[E0658]: use of unstable library feature 'foo'
-```
+```text
 
 #### Root Cause
 
@@ -201,7 +213,7 @@ error[E0658]: use of unstable library feature 'foo'
 - uses: dtolnay/rust-toolchain@stable
   with:
     toolchain: nightly-2026-01-15  # ← 32 days old, acceptable
-```
+```bash
 
 **For stable MSRV issues, update MSRV across all files:**
 
@@ -244,7 +256,7 @@ done
 # Check age of Rust stable version
 MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
 rustc --version  # Compare with latest stable
-```
+```text
 
 ---
 
@@ -280,7 +292,7 @@ cargo machete
 
 # Find unused dependencies and features (slow, nightly, more thorough)
 cargo +nightly udeps --all-targets
-```
+```rust
 
 **Remove confirmed unused dependencies:**
 
@@ -309,7 +321,7 @@ rand = "0.10"
 on:
   schedule:
     - cron: '0 0 * * 1'  # Weekly on Monday
-```
+```bash
 
 **CI enforcement:**
 
@@ -338,7 +350,7 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "macros"] }
 
 # keep: Used by serde derive macros (false positive from cargo-udeps)
 serde_derive = "1.0"
-```
+```text
 
 ---
 
@@ -367,7 +379,7 @@ rustc 1.89.0
 
 # CI (using MSRV from rust-toolchain.toml)
 rustc 1.88.0
-```
+```text
 
 **B. Different feature flags:**
 
@@ -387,7 +399,7 @@ use crate::Config;  // finds config.rs, Config.rs, or CONFIG.rs
 
 # CI: Linux (case-sensitive filesystem)
 use crate::Config;  // ONLY finds config.rs (exact match)
-```
+```bash
 
 **D. Different environment variables:**
 
@@ -418,7 +430,7 @@ docker run --rm -v $(pwd):/app -w /app rust:1.88-bookworm cargo test
 
 # 4. Clear env vars
 env -i PATH=$PATH HOME=$HOME cargo test
-```
+```text
 
 **Identify differences systematically:**
 
@@ -440,7 +452,7 @@ env -i PATH=$PATH HOME=$HOME cargo test
 [toolchain]
 channel = "1.88.0"
 components = ["rustfmt", "clippy"]
-```
+```bash
 
 **Test both feature configurations locally:**
 
@@ -464,7 +476,7 @@ Required:
 
 Optional (for integration tests):
 - DATABASE_URL for postgres feature tests
-```
+```text
 
 ---
 
@@ -484,7 +496,7 @@ CI:    docker build -t myapp .  → ✗ Fails with package not found
 ```dockerfile
 # Local: Has cached layers from previous builds
 # CI: Starts fresh every time
-```
+```bash
 
 **B. Platform differences:**
 
@@ -500,7 +512,7 @@ CI:    docker build -t myapp .  → ✗ Fails with package not found
 COPY . /app  # Includes target/, .git/, etc. (breaks build)
 
 # CI: Fails because copied files interfere
-```
+```text
 
 #### Solution
 
@@ -516,7 +528,7 @@ COPY . /app  # Includes target/, .git/, etc. (breaks build)
 ```dockerfile
 # Multi-platform support
 FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS builder
-```
+```text
 
 **Improve .dockerignore:**
 
@@ -540,7 +552,7 @@ docker build --no-cache --progress=plain -t test .
 
 # Or use BuildKit (shows more details)
 DOCKER_BUILDKIT=1 docker build --no-cache -t test .
-```
+```bash
 
 ---
 
@@ -572,7 +584,7 @@ git diff HEAD~1 HEAD -- Cargo.toml Cargo.lock
 
 # Did we change Rust version?
 git diff HEAD~1 HEAD -- rust-toolchain.toml clippy.toml Dockerfile
-```
+```text
 
 ### Step 3: Reproduce Locally
 
@@ -596,7 +608,7 @@ cargo test --locked --all-features
 # Check for ecosystem mismatches
 grep -r "pip\|npm\|bundle" .github/workflows/  # Should be empty for Rust-only project
 grep -r "cargo\|rust" .github/workflows/       # Should be present
-```
+```bash
 
 ### Step 5: Check Staleness
 
@@ -672,7 +684,242 @@ Before committing workflow changes, verify:
 
 ---
 
-## Pattern 7: Documentation Quality Issues (Markdown Linting, Spell Checking)
+## Pattern 7: Typos Configuration Issues (extend-words vs extend-identifiers)
+
+### Symptom
+
+```text
+CI fails with:
+ERROR: Typo found: HashiCorp (did you mean: Hashicorp?)
+ERROR: Typo found in file.md:42: HashiCorp
+```
+
+Even though you've added `hashicorp = "hashicorp"` to `.typos.toml`.
+
+### Root Cause
+
+**Mixed-case company names and proper nouns MUST use `[default.extend-identifiers]`, not `[default.extend-words]`.**
+
+The `typos` spell checker has two distinct configuration sections:
+
+1. **`[default.extend-words]`** - For lowercase technical terms (e.g., `tokio`, `axum`, `websocket`)
+2. **`[default.extend-identifiers]`** - For mixed-case identifiers (e.g., `HashiCorp`, `WebSocket`, `CamelCase`)
+
+**Why this matters:**
+
+- `extend-words` uses case-insensitive matching for lowercase terms
+- `extend-identifiers` preserves exact case for mixed-case terms
+- CamelCase and PascalCase names are treated as identifiers by typos
+- Company names with specific capitalization (HashiCorp, GitHub) require exact case matching
+
+### Solution
+
+**A. Use `[default.extend-identifiers]` for mixed-case terms:**
+
+```toml
+# .typos.toml
+
+[default.extend-words]
+# Lowercase technical terms
+axum = "axum"
+tokio = "tokio"
+websocket = "websocket"
+rustc = "rustc"
+
+[default.extend-identifiers]
+# Mixed-case company names and proper nouns
+HashiCorp = "HashiCorp"  # Company name (capital H, capital C)
+GitHub = "GitHub"        # Company name (capital H)
+WebSocket = "WebSocket"  # Protocol name (capital W, capital S)
+```
+
+**B. Add both lowercase and mixed-case variants if needed:**
+
+```toml
+[default.extend-words]
+# Lowercase variant (for general use)
+hashicorp = "hashicorp"
+github = "github"
+websocket = "websocket"
+
+[default.extend-identifiers]
+# Mixed-case variant (for proper nouns)
+HashiCorp = "HashiCorp"
+GitHub = "GitHub"
+WebSocket = "WebSocket"
+```
+
+### Common Mixed-Case Terms That Need extend-identifiers
+
+**Company names:**
+
+- `HashiCorp` (Terraform, Vault)
+- `GitHub` (platform name)
+- `GitLab`
+- `MongoDB`
+- `PostgreSQL`
+
+**Protocol/Technology names:**
+
+- `WebSocket` (networking protocol)
+- `WebRTC` (real-time communication)
+- `JavaScript`
+- `TypeScript`
+
+**Project/Product names:**
+
+- `CamelCase` identifiers in code
+- `PascalCase` type names
+- Mixed-case project names
+
+### Prevention
+
+**Pattern A: Always add mixed-case terms to extend-identifiers:**
+
+```toml
+# ❌ WRONG: Mixed-case in extend-words
+[default.extend-words]
+HashiCorp = "HashiCorp"  # Won't work - needs exact case matching
+
+# ✅ CORRECT: Mixed-case in extend-identifiers
+[default.extend-identifiers]
+HashiCorp = "HashiCorp"  # Works - preserves exact case
+```
+
+**Pattern B: Organize .typos.toml by category:**
+
+```toml
+[default.extend-words]
+# === Rust Crates ===
+tokio = "tokio"
+axum = "axum"
+
+# === Build Tools ===
+dockerfile = "dockerfile"
+nightly = "nightly"
+
+# === Technical Terms ===
+websocket = "websocket"
+async = "async"
+
+[default.extend-identifiers]
+# === Code Identifiers ===
+params = "params"
+consts = "consts"
+
+# === Proper Nouns (Company Names) ===
+HashiCorp = "HashiCorp"
+GitHub = "GitHub"
+
+# === Protocol Names ===
+WebSocket = "WebSocket"
+WebRTC = "WebRTC"
+```
+
+### Testing .typos.toml Configuration
+
+**Run typos locally to verify configuration:**
+
+```bash
+# Check all files
+typos
+
+# Check specific file
+typos path/to/file.md
+
+# Show what would be fixed
+typos --write-changes
+
+# Verify configuration is valid
+typos --dump-config
+```
+
+**Add CI test to validate .typos.toml exists:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_typos_config_exists_and_is_valid() {
+    let typos_config = repo_root().join(".typos.toml");
+
+    assert!(
+        typos_config.exists(),
+        ".typos.toml is required for spell checking in CI"
+    );
+
+    let content = read_file(&typos_config);
+
+    // Verify both required sections exist
+    assert!(
+        content.contains("[default.extend-words]"),
+        ".typos.toml must have [default.extend-words] section"
+    );
+
+    assert!(
+        content.contains("[default.extend-identifiers]"),
+        ".typos.toml must have [default.extend-identifiers] section"
+    );
+}
+
+#[test]
+fn test_typos_config_has_common_rust_terms() {
+    let content = read_file(".typos.toml");
+
+    // Verify common Rust terms are whitelisted
+    let required_terms = vec![
+        "tokio", "axum", "serde", "async",
+        "rustc", "clippy", "rustfmt"
+    ];
+
+    for term in required_terms {
+        assert!(
+            content.contains(&format!("{} = \"{}\"", term, term)),
+            ".typos.toml should include common Rust term: {}",
+            term
+        );
+    }
+}
+```
+
+### Key Insights
+
+**Why extend-identifiers is needed:**
+
+- Typos uses CamelCase splitting internally
+- `HashiCorp` is treated as `Hash` + `I` + `Corp` (identifier components)
+- `extend-words` only handles lowercase, unsplit words
+- `extend-identifiers` handles case-sensitive, potentially-split identifiers
+
+**When to use each section:**
+
+| Term Type                  | Section               | Example                            |
+|----------------------------|---------------------- |------------------------------------|
+| Lowercase technical term   | `extend-words`        | `tokio`, `axum`, `rustc`           |
+| Lowercase abbreviation     | `extend-words`        | `async`, `impl`, `config`          |
+| Mixed-case company name    | `extend-identifiers`  | `HashiCorp`, `GitHub`              |
+| Mixed-case protocol        | `extend-identifiers`  | `WebSocket`, `WebRTC`              |
+| Code identifier            | `extend-identifiers`  | `params`, `consts`, `stdin`        |
+| CamelCase code             | `extend-identifiers`  | `CamelCase`, `PascalCase`          |
+
+**Documentation pattern:**
+
+```toml
+# Always comment why a term is whitelisted
+
+[default.extend-words]
+# Build tools and infrastructure
+hashicorp = "hashicorp"  # HashiCorp (lowercase variant)
+dockerfile = "dockerfile"
+
+[default.extend-identifiers]
+# Proper nouns and company names with mixed case
+HashiCorp = "HashiCorp"  # Company name, proper capitalization
+```
+
+---
+
+## Pattern 9: Documentation Quality Issues (Markdown Linting, Spell Checking)
 
 ### Symptom
 
@@ -681,7 +928,7 @@ CI fails with:
 ERROR: MD040/fenced-code-language: Fenced code blocks should have a language specified
 ERROR: MD060/table-alignment: Table column alignment is inconsistent
 ERROR: typos found: HashiCorp (did you mean: Hashicorp?)
-```
+```bash
 
 ### Root Causes
 
@@ -708,7 +955,7 @@ some code here
 Error: Unknown word: HashiCorp
 Error: Unknown word: WebSocket
 Error: Unknown word: rustc
-```
+```text
 
 **C. Table formatting inconsistencies:**
 
@@ -739,7 +986,7 @@ grep -r '^```$' --include="*.md" .
 
 # Automated fix with markdownlint-cli2:
 ./scripts/check-markdown.sh fix
-```
+```bash
 
 **B. Configure spell checker to whitelist technical terms:**
 
@@ -758,7 +1005,7 @@ tokio = "tokio"          # Tokio async runtime
 ```bash
 # Auto-fix table alignment and other issues
 markdownlint-cli2 --fix '**/*.md' '#target/**' '#third_party/**'
-```
+```bash
 
 **D. Set up local validation tools:**
 
@@ -792,7 +1039,7 @@ fi
 
 # Check markdown files (excluding build artifacts)
 markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'
-```
+```rust
 
 **Add CI config validation tests:**
 
@@ -878,7 +1125,7 @@ if command -v markdownlint-cli2 >/dev/null 2>&1; then
 else
     echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
 fi
-```
+```bash
 
 **Add VS Code integration:**
 
@@ -917,7 +1164,7 @@ markdownlint-cli2 'docs/**/*.md'
 
 # ✅ CORRECT: Checks all markdown files in repository
 markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'
-```
+```bash
 
 **Pattern B: Markdown linting should be part of the standard workflow:**
 
@@ -951,7 +1198,7 @@ fn test_required_config_files_exist() {
     assert!(Path::new(".markdownlint.json").exists());
     assert!(Path::new(".githooks/pre-commit").exists());
 }
-```
+```bash
 
 **Pattern D: Auto-fix capability is essential:**
 
@@ -1004,7 +1251,7 @@ api = "api"
 json = "json"
 yaml = "yaml"
 toml = "toml"
-```
+```bash
 
 **Organization-specific terms:**
 
@@ -1020,7 +1267,7 @@ ambiguous = "ambiguous"
 
 ---
 
-## Pattern 8: Git Hook Permission Issues
+## Pattern 10: Git Hook Permission Issues
 
 ### Symptom
 
@@ -1031,7 +1278,7 @@ error: cannot run .git/hooks/pre-commit: Permission denied
 # OR in CI
 ERROR: Script ./scripts/check-markdown.sh is not executable
 Fix: chmod +x ./scripts/check-markdown.sh
-```
+```bash
 
 ### Root Cause
 
@@ -1055,7 +1302,7 @@ ls -la .githooks/pre-commit
 chmod +x .githooks/pre-commit
 chmod +x scripts/check-markdown.sh
 chmod +x scripts/*.sh
-```
+```bash
 
 **B. Tell Git to track executable bit:**
 
@@ -1077,7 +1324,7 @@ chmod +x .githooks/pre-commit
 git update-index --chmod=+x .githooks/pre-commit
 git add .githooks/pre-commit
 git commit -m "fix: ensure pre-commit hook is executable"
-```
+```rust
 
 ### Prevention
 
@@ -1146,7 +1393,7 @@ git update-index --chmod=+x .githooks/pre-commit
 git config core.hooksPath .githooks
 
 echo "Git hooks enabled successfully"
-```
+```bash
 
 ### Key Insights
 
@@ -1189,7 +1436,7 @@ git commit -m "Add pre-commit hook"
 # CI clones on Linux
 git clone repo
 .githooks/pre-commit           # ← Works! Git restored executable bit
-```
+```bash
 
 ---
 
@@ -1226,7 +1473,7 @@ git clone repo
 ```yaml
 # Replaced with Rust-specific caching
 - uses: Swatinem/rust-cache@v2.7.5
-```
+```text
 
 **Prevention:** Before adding caching, verify language ecosystem matches project.
 
@@ -1247,7 +1494,7 @@ toolchain: nightly-2025-02-21  # 360 days old
 ```yaml
 # Updated to recent nightly
 toolchain: nightly-2026-01-15  # 32 days old
-```
+```bash
 
 **Prevention:** Document update criteria and review quarterly.
 

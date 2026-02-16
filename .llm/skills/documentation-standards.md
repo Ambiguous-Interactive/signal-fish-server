@@ -112,7 +112,7 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 ### Security
 
 - Fix authentication bypass in admin API (#250)
-```
+```rust
 
 **Rules:**
 
@@ -179,7 +179,7 @@ Tables must have consistent column alignment:
 
 # Auto-fix issues where possible
 ./scripts/check-markdown.sh fix
-```
+```text
 
 **Install local tools:**
 
@@ -210,7 +210,7 @@ The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is
 # 1. Code formatting (cargo fmt)
 # 2. Panic-prone patterns
 # 3. Markdown linting (if markdownlint-cli2 installed)
-```
+```bash
 
 ### Common Markdown Linting Issues
 

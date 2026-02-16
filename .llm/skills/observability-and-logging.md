@@ -50,7 +50,7 @@ tracing::info!(
     room_code = %room_code,
     "Player joined room"
 );
-```
+```rust
 
 ### Structured Fields vs String Interpolation
 
@@ -111,7 +111,7 @@ tokio::spawn(
     async move { process(msg).await }
         .instrument(tracing::info_span!("process_task", msg_id = %id))
 );
-```
+```rust
 
 ---
 
@@ -162,7 +162,7 @@ impl ServerMetrics {
         }
     }
 }
-```
+```bash
 
 ### OTLP Export Configuration
 
@@ -192,7 +192,7 @@ tracing::info!(player_id = %player_id, "authenticating");
 
 // ✅ If IP is needed for security, hash or truncate it
 tracing::info!(ip_hash = %hash_ip(&addr), "connection from");
-```
+```rust
 
 ### Consistent Field Names Across Spans
 
@@ -230,7 +230,7 @@ async fn handle_join(&self, req: JoinRequest) -> Result<Json<Response>, AppError
     }
     result.map(Json)
 }
-```
+```rust
 
 ### Performance: Avoid Expensive Log Computations
 

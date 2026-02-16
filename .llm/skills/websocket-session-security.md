@@ -59,7 +59,7 @@ pub struct SessionId(Uuid);
 impl SessionId {
     pub fn generate() -> Self { Self(Uuid::new_v4()) }
 }
-```
+```rust
 
 ### Idle + Absolute Timeouts
 
@@ -100,7 +100,7 @@ impl SessionRegistry {
         }
     }
 }
-```
+```rust
 
 ## 2. Token Security for WebSocket Connections
 
@@ -136,7 +136,7 @@ pub struct GameClaims {
     pub exp: usize, pub nbf: usize, pub iat: usize,
     pub jti: String,           // unique token ID for revocation
 }
-```
+```rust
 
 ### JWT Validation — Explicit Everything
 
@@ -164,7 +164,7 @@ impl TokenDenylist {
     fn revoke(&self, jti: &str) { self.denied.insert(Sha256::digest(jti.as_bytes()).into()); }
     fn contains(&self, jti: &str) -> bool { self.denied.contains(&Sha256::digest(jti.as_bytes()).into()) }
 }
-```
+```rust
 
 ```rust
 // ❌ Bad — HMAC: shared secret; if it leaks, attacker forges tokens for ALL services
@@ -193,7 +193,7 @@ impl PlayerSession {
         Ok(())
     }
 }
-```
+```rust
 
 ### Session Fixation Protection
 
@@ -223,7 +223,7 @@ fn verify(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.ct_eq(b).into() 
 // Zeroize secrets on drop
 struct TokenSecret { key: Vec<u8> }
 impl Drop for TokenSecret { fn drop(&mut self) { self.key.zeroize(); } }
-```
+```rust
 
 ## 4. Cross-Site WebSocket Hijacking (CSWSH)
 
@@ -270,7 +270,7 @@ impl PeerState {
         Ok(())
     }
 }
-```
+```rust
 
 ### Nonce-Based Prevention for Critical Operations
 
@@ -307,7 +307,7 @@ fn generate_reconnect_token(session: &PlayerSession, secret: &[u8]) -> String {
     mac.update(payload.as_bytes());
     format!("{}.{}", base64_url::encode(payload.as_bytes()), base64_url::encode(&mac.finalize().into_bytes()))
 }
-```
+```rust
 
 ### One-Time Use (Atomic CAS) + Short TTL + IP Binding
 
@@ -359,7 +359,7 @@ async fn revalidation_loop(
         }
     }
 }
-```
+```rust
 
 Graceful disconnect: send close reason then close frame (code 4001):
 
@@ -399,7 +399,7 @@ async fn handle_signal(
         _ => Ok(()),
     }
 }
-```
+```rust
 
 ## Agent Checklist
 

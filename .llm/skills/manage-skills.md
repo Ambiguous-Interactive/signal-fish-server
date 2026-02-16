@@ -52,7 +52,7 @@ Every skill file MUST follow this structure:
 
 ## Related Skills
 - [related-skill](./related-skill.md) — Brief description
-```
+```text
 
 ---
 

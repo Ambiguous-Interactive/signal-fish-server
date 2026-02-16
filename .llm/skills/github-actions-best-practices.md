@@ -46,12 +46,27 @@
 
 ## TL;DR
 
-- AWK multi-line content needs NUL byte delimiters with `printf "%c", 0`
-  (not `"\0"` - mawk incompatible)
-- AWK portability: Use POSIX `sub()` instead of gawk's `match()` with capture groups
-- Always quote variables in Bash: `"$var"` prevents word splitting (shellcheck SC2086)
-- Bash subshells lose variable modifications — use file-based counters in pipelines
+**Docker & Version Formats:**
+
+- Docker Hub official images use X.Y tags (e.g., `rust:1.88`), not X.Y.Z
+- Normalize versions (1.88.0 → 1.88) when comparing Dockerfile vs Cargo.toml
+- X.Y format provides automatic security patches; X.Y.Z requires manual updates
+
+**AWK Portability:**
+
+- AWK multi-line content needs NUL byte delimiters with `printf "%c", 0` (not `"\0"` - mawk incompatible)
+- Use POSIX `sub()` instead of gawk's `match()` with capture groups (mawk compatibility)
+- Use prefix patterns (`/^```rust/`) instead of exact matches (`/^```rust(,.*)?$/`) for flexibility
+- Test AWK scripts on Ubuntu/mawk, not just local gawk
+
+**Bash Best Practices:**
+
+- Always quote variables: `"$var"` prevents word splitting (shellcheck SC2086)
+- Bash subshells lose variable modifications - use file-based counters in pipelines
 - Add shellcheck validation job to workflows to catch inline script issues
+
+**CI/CD Configuration:**
+
 - Lychee `include` is for URL regex filtering, not file glob patterns
 - Always verify case-sensitive filesystem assumptions on Linux
 - Documentation links must match actual filenames exactly
@@ -82,7 +97,7 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 
 - name: Build Rust project
   run: cargo build               # ← Rust, not Python!
-```
+```bash
 
 **Symptoms:**
 - `ERROR: Cache entry deserialization failed, entry ignored`
@@ -114,7 +129,7 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 
 - name: Build Rust project
   run: cargo build --locked
-```
+```bash
 
 **Rust indicators:**
 - Has `Cargo.toml` and `Cargo.lock`
@@ -152,7 +167,7 @@ Using caching or tooling from the wrong language ecosystem causes silent failure
 
 - name: Build Node project
   run: npm run build
-```
+```bash
 
 ### Detection: Identifying Ecosystem Mismatches
 
@@ -174,12 +189,12 @@ grep -r "cargo\|Cargo\.toml\|rust-cache" .          # Rust
 
 **Red flags:**
 
-| Indicator | Rust | Python | Node | Java |
-|-----------|------|--------|------|------|
-| Cache paths | `~/.cargo/`, `target/` | `~/.cache/pip` | `node_modules/`, `.npm/` | `.m2/`, `.gradle/` |
-| Dependency files | `Cargo.toml`, `Cargo.lock` | `requirements.txt`, `Pipfile.lock` | `package.json`, `package-lock.json` | `pom.xml`, `build.gradle` |
-| Build commands | `cargo build` | `pip install`, `python setup.py` | `npm install`, `npm run build` | `mvn package`, `gradle build` |
-| Test commands | `cargo test` | `pytest`, `python -m unittest` | `npm test`, `jest` | `mvn test`, `gradle test` |
+| Indicator        | Rust                        | Python                              | Node                                  | Java                          |
+|------------------|-----------------------------|-------------------------------------|---------------------------------------|-------------------------------|
+| Cache paths      | `~/.cargo/`, `target/`      | `~/.cache/pip`                      | `node_modules/`, `.npm/`              | `.m2/`, `.gradle/`            |
+| Dependency files | `Cargo.toml`, `Cargo.lock`  | `requirements.txt`, `Pipfile.lock`  | `package.json`, `package-lock.json`   | `pom.xml`, `build.gradle`     |
+| Build commands   | `cargo build`               | `pip install`, `python setup.py`    | `npm install`, `npm run build`        | `mvn package`, `gradle build` |
+| Test commands    | `cargo test`                | `pytest`, `python -m unittest`      | `npm test`, `jest`                    | `mvn test`, `gradle test`     |
 
 ### Avoiding Configuration Drift
 
@@ -189,11 +204,14 @@ grep -r "cargo\|Cargo\.toml\|rust-cache" .          # Rust
 
 Before committing a new or modified workflow:
 
-- [ ] **Identify project language**: Check repository for `Cargo.toml` (Rust), `package.json` (Node), `requirements.txt` (Python), etc.
+- [ ] **Identify project language**: Check repository for `Cargo.toml` (Rust), `package.json` (Node),
+      `requirements.txt` (Python), etc.
 - [ ] **Verify cache configuration**: Cache paths must match project language (see table above)
 - [ ] **Check hash files in cache keys**: Files referenced in `hashFiles()` must exist
-- [ ] **Validate tool/action selection**: Use language-appropriate actions (rust-cache for Rust, setup-python for Python, etc.)
-- [ ] **Review dependency install commands**: Must match project language (`cargo build`, not `pip install`)
+- [ ] **Validate tool/action selection**: Use language-appropriate actions
+      (rust-cache for Rust, setup-python for Python, etc.)
+- [ ] **Review dependency install commands**: Must match project language
+      (`cargo build`, not `pip install`)
 - [ ] **Test workflow with cold cache**: Ensure workflow works even when cache misses
 
 **Workflow template validation:**
@@ -222,7 +240,7 @@ for pattern in "${WRONG_PATTERNS[@]}"; do
 done
 
 echo "✓ Workflow ecosystem configuration validated"
-```
+```bash
 
 ### SHA Pinning for Actions
 
@@ -249,11 +267,232 @@ echo "✓ Workflow ecosystem configuration validated"
 # GitHub Actions: Go to releases, find commit SHA
 # Or use gh CLI:
 gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
-```
+```bash
 
 ---
 
-## 2. AWK Multi-Line Content Processing
+## 2. Docker Version Format Conventions
+
+### The Problem: Docker Hub Tag Format vs Semantic Versioning
+
+Docker Hub uses a shortened version format for official images (e.g., `rust:1.88` instead of `rust:1.88.0`), which can cause MSRV consistency validation to fail when comparing against `Cargo.toml` versions.
+
+**Critical Rule:** When using Docker Hub official images, use the X.Y format (not X.Y.Z) to match Docker Hub conventions.
+
+### Docker Hub Versioning Patterns
+
+**Official Rust images on Docker Hub:**
+
+```dockerfile
+# ✅ CORRECT: Docker Hub format (X.Y)
+FROM rust:1.88-bookworm      # Works - official Docker Hub tag
+FROM rust:1.87-alpine        # Works - official Docker Hub tag
+
+# ❌ WRONG: Full semantic version (X.Y.Z)
+FROM rust:1.88.0-bookworm    # Tag doesn't exist on Docker Hub
+FROM rust:1.87.0-alpine      # Tag doesn't exist on Docker Hub
+```
+
+**Why Docker Hub uses X.Y tags:**
+
+1. **Automatic security patches**: `rust:1.88` automatically includes `1.88.1`, `1.88.2`, etc.
+2. **Simplified maintenance**: No need to update Dockerfiles for patch releases
+3. **Convention consistency**: Most official images follow this pattern
+4. **Reduced tag proliferation**: Fewer tags to maintain
+
+### Solution: Version Format Normalization
+
+**A. Use shortened format in Dockerfile:**
+
+```dockerfile
+# Dockerfile (line 7)
+FROM rust:1.88-bookworm AS chef
+#          ^^^^
+#          X.Y format (not 1.88.0)
+```
+
+**B. Normalize versions in validation scripts:**
+
+```bash
+# Extract and normalize versions for comparison
+DOCKERFILE_VERSION=$(grep '^FROM rust:' Dockerfile | head -1 | sed -E 's/FROM rust:([0-9]+\.[0-9]+).*/\1/')
+CARGO_VERSION=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "([0-9]+\.[0-9]+).*/\1/')
+
+# Compare normalized versions (X.Y format)
+if [ "$DOCKERFILE_VERSION" != "$CARGO_VERSION" ]; then
+  echo "ERROR: Dockerfile Rust version ($DOCKERFILE_VERSION) doesn't match Cargo.toml ($CARGO_VERSION)"
+  exit 1
+fi
+```
+
+**C. CI validation that handles both formats:**
+
+```rust
+// tests/ci_config_tests.rs
+
+fn normalize_version(version: &str) -> String {
+    // Normalize "1.88.0" -> "1.88" or "1.88" -> "1.88"
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() >= 2 {
+        format!("{}.{}", parts[0], parts[1])
+    } else {
+        version.to_string()
+    }
+}
+
+#[test]
+fn test_dockerfile_rust_version_matches_msrv() {
+    let dockerfile = read_file("Dockerfile");
+    let cargo_toml = read_file("Cargo.toml");
+
+    // Extract versions
+    let dockerfile_version = extract_dockerfile_rust_version(&dockerfile);
+    let cargo_version = extract_cargo_rust_version(&cargo_toml);
+
+    // Normalize to X.Y format for comparison
+    let normalized_dockerfile = normalize_version(&dockerfile_version);
+    let normalized_cargo = normalize_version(&cargo_version);
+
+    assert_eq!(
+        normalized_dockerfile, normalized_cargo,
+        "Dockerfile Rust version must match Cargo.toml rust-version.\n\
+         Expected: {} (from Cargo.toml)\n\
+         Found: {} (from Dockerfile)\n\
+         Note: Docker Hub uses X.Y format (e.g., 1.88, not 1.88.0)\n\
+         Fix: Update Dockerfile to use rust:{normalized_cargo}-bookworm",
+        normalized_cargo, normalized_dockerfile
+    );
+}
+```
+
+### When to Use Full Versions vs Shortened Versions
+
+| Context                       | Version Format | Example  | Rationale                            |
+|-------------------------------|----------------|----------|--------------------------------------|
+| `Cargo.toml`                  | Full (X.Y.Z)   | `1.88.0` | Semantic versioning, MSRV spec       |
+| `rust-toolchain.toml`         | Full (X.Y.Z)   | `1.88.0` | Exact toolchain pinning              |
+| `clippy.toml`                 | Full (X.Y.Z)   | `1.88.0` | MSRV consistency                     |
+| Dockerfile (official images)  | Short (X.Y)    | `1.88`   | Docker Hub convention                |
+| Custom Docker images          | Full (X.Y.Z)   | `1.88.0` | Explicit version control             |
+| GitHub Actions                | Full (X.Y.Z)   | `1.88.0` | Explicit version control             |
+
+### Docker Hub Official Image Patterns
+
+**Rust official image tags:**
+
+```dockerfile
+# Primary patterns (CORRECT for Docker Hub)
+FROM rust:1.88-bookworm        # Debian 12 base
+FROM rust:1.88-alpine          # Alpine base
+FROM rust:1.88-slim            # Slim Debian
+FROM rust:1.88                 # Default (Debian bookworm)
+
+# NOT available on Docker Hub
+FROM rust:1.88.0-bookworm      # ❌ Won't work
+FROM rust:1.88.0               # ❌ Won't work
+```
+
+**Check available tags:**
+
+```bash
+# List available tags for rust image
+docker search rust --limit 5
+docker pull rust:1.88-bookworm  # Works
+docker pull rust:1.88.0-bookworm  # Error: manifest unknown
+```
+
+### Benefits of Docker Hub Shortened Format
+
+**Automatic security updates:**
+
+```dockerfile
+# Using rust:1.88 automatically pulls latest patch
+FROM rust:1.88-bookworm
+# Today: Gets 1.88.0
+# Tomorrow: Automatically gets 1.88.1 (with security fixes)
+# Next week: Automatically gets 1.88.2 (with bug fixes)
+```
+
+**vs explicit pinning:**
+
+```dockerfile
+# Using full version requires manual updates
+FROM rust:1.88.0-bookworm
+# Stuck on 1.88.0 forever
+# Must manually update Dockerfile to get 1.88.1
+```
+
+### When to Pin Exact Versions
+
+**Use exact versions (X.Y.Z) when:**
+
+1. **Reproducible builds are critical** (e.g., audited environments)
+2. **Using custom/private registries** (not Docker Hub)
+3. **Regulatory compliance requires it** (e.g., FDA, finance)
+4. **Building security-sensitive applications** (control every dependency)
+
+**Example: Custom registry with full versions:**
+
+```dockerfile
+# Custom registry: Use full versions for reproducibility
+FROM my-registry.example.com/rust:1.88.0-bookworm
+# Not Docker Hub, so full version is appropriate
+```
+
+### Prevention Checklist
+
+Before committing Dockerfile changes:
+
+- [ ] Using official Docker Hub images? Use X.Y format (not X.Y.Z)
+- [ ] Using custom registry? Consider full X.Y.Z for reproducibility
+- [ ] Version matches MSRV in Cargo.toml (after normalization)?
+- [ ] CI validation tests normalize versions before comparison?
+- [ ] Comments explain why shortened format is used?
+
+### Documentation Pattern
+
+```dockerfile
+# Multi-stage Dockerfile for Signal Fish Server
+
+# Stage 1: Chef - Install cargo-chef for dependency management
+# Using bookworm (Debian 12) which has mold in its repositories
+# Version 1.88 matches MSRV in Cargo.toml
+# Docker Hub uses X.Y format, not X.Y.Z
+FROM rust:1.88-bookworm AS chef
+#          ^^^^ Shortened format for Docker Hub (automatically includes patches)
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+```
+
+### Real-World Example: The Fix
+
+**Before (WRONG - caused CI failure):**
+
+```dockerfile
+# Dockerfile:7
+FROM rust:1.88.0-bookworm AS chef
+#          ^^^^^^ Full version - tag doesn't exist on Docker Hub
+```
+
+**Error:**
+
+```text
+ERROR: manifest for rust:1.88.0-bookworm not found
+```
+
+**After (CORRECT):**
+
+```dockerfile
+# Dockerfile:7
+FROM rust:1.88-bookworm AS chef
+#          ^^^^ Shortened format - matches Docker Hub convention
+```
+
+**Key Insight:** Docker Hub official images use X.Y tags to provide automatic patch updates. Full X.Y.Z versions are not published for official images.
+
+---
+
+## 3. AWK Multi-Line Content Processing
 
 ### The Problem
 
@@ -325,7 +564,7 @@ awk '
   echo "Processing block at line $line_num with attributes: $attributes"
   echo "$content" | validate_code
 done
-```
+```rust
 
 ### AWK Portability: gawk vs mawk
 
@@ -352,6 +591,182 @@ sub(/pattern/, "", var)
 - CI/CD runners (Ubuntu) default to mawk (Mike's awk)
 - Scripts that work locally can fail in CI due to these differences
 - **Always test AWK scripts on Ubuntu/mawk before committing**
+
+### AWK Pattern Portability: ERE vs Prefix Matching
+
+**Critical Issue**: Complex AWK patterns with alternation (e.g., `/^```(rust|Rust)(,.*)?$/`)
+can behave differently across AWK implementations. Prefix patterns are more portable.
+
+#### The Problem: Alternation and Optional Groups
+
+```awk
+# ❌ FRAGILE: Alternation with optional suffix (complex to maintain)
+/^```[Rr]ust(,.*)?$/ {
+  # Matches: ```rust, ```Rust, ```rust,ignore, ```Rust,ignore
+  # BUT: Doesn't match ```rust ignore (space instead of comma)
+  # AND: Fails on ```rust,no_run or other valid fence formats
+}
+```
+
+**Issues with exact pattern matching:**
+
+1. **Brittle fence format assumptions** - Assumes comma separator, fails on spaces
+2. **Maintenance burden** - Adding new fence formats requires pattern updates
+3. **Test coverage gaps** - Hard to test all possible fence format variations
+4. **Portability concerns** - Complex regex can behave differently across AWK versions
+
+#### The Solution: Prefix Patterns with Flexible Attribute Extraction
+
+```awk
+# ✅ ROBUST: Prefix pattern (matches any fence format)
+/^```[Rr]ust/ {
+  in_block = 1
+  block_start = NR
+  content = ""
+  attributes = $0
+
+  # Extract attributes using POSIX sub() (portable across mawk/gawk)
+  attrs = $0
+  sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, keep attributes
+  # Now attrs contains: "ignore", "no_run", "", "ignore no_run", etc.
+
+  next
+}
+```
+
+**Benefits of prefix matching:**
+
+1. **Flexible fence formats** - Works with: `rust,ignore`, `rust ignore`, `Rust,no_run`, etc.
+2. **Future-proof** - New attribute formats automatically supported
+3. **Portable** - Uses POSIX `sub()` instead of gawk-specific `match()`
+4. **Maintainable** - Single pattern handles all variations
+
+#### Real-World Example: The Fix
+
+**Before (FRAGILE):**
+
+```awk
+# doc-validation.yml:210 (BEFORE)
+/^```[Rr]ust(,.*)?$/ {
+  # Only matches: ```rust and ```rust,<attributes>
+  # Fails on: ```rust ignore (space separator)
+  # Fails on: ```rust,ignore no_run (multiple attributes)
+}
+```
+
+**Problems encountered:**
+
+- Fence format: ` ```rust ignore` (space, not comma) didn't match
+- Test suite had 119 code blocks with various fence formats
+- Pattern needed constant updates for new attribute styles
+
+**After (ROBUST):**
+
+```awk
+# doc-validation.yml:210 (AFTER)
+/^```[Rr]ust/ {
+  # Matches ANY fence starting with ```rust or ```Rust
+  # Handles all attribute formats automatically
+  in_block = 1
+  attrs = $0
+  sub(/^```[Rr]ust,?/, "", attrs)  # Flexible attribute extraction
+  next
+}
+```
+
+**Results:**
+
+- All 119 test code blocks now validate correctly
+- Works with: `rust,ignore`, `rust ignore`, `Rust,no_run`, `rust,edition2021`
+- Future fence formats automatically supported
+- No need to update pattern for new attribute styles
+
+#### When to Use Prefix Patterns vs Exact Matching
+
+| Scenario                       | Pattern Type | Example                | Rationale                      |
+|--------------------------------|--------------|------------------------|--------------------------------|
+| Code fence detection           | Prefix       | `/^```[Rr]ust/`        | Flexible attribute handling    |
+| Closing fence                  | Exact        | `/^```$/`              | Must match exactly (no prefix) |
+| Language detection (no attrs)  | Exact        | `/^```rust$/`          | Only plain code blocks         |
+| Strict validation              | Exact        | `/^```rust,ignore$/`   | Enforce specific format        |
+| General extraction             | Prefix       | `/^```python/`         | Handle any Python fence        |
+
+#### Testing AWK Patterns
+
+**Validate pattern portability:**
+
+```bash
+# Test with both gawk and mawk
+echo '```rust ignore' | gawk '/^```[Rr]ust/ {print "match"}'
+echo '```rust ignore' | mawk '/^```[Rr]ust/ {print "match"}'
+
+# Test attribute extraction
+echo '```rust,ignore' | awk '
+  /^```[Rr]ust/ {
+    attrs = $0
+    sub(/^```[Rr]ust,?/, "", attrs)
+    print "attrs: [" attrs "]"
+  }
+'
+# Output: attrs: [ignore]
+
+echo '```rust ignore no_run' | awk '
+  /^```[Rr]ust/ {
+    attrs = $0
+    sub(/^```[Rr]ust,?/, "", attrs)
+    print "attrs: [" attrs "]"
+  }
+'
+# Output: attrs: [ ignore no_run]
+```
+
+**Add comprehensive fence format tests:**
+
+```bash
+# Test all fence format variations
+test_fences=(
+  "```rust"
+  "```Rust"
+  "```rust,ignore"
+  "```Rust,ignore"
+  "```rust ignore"
+  "```rust,no_run"
+  "```rust ignore no_run"
+  "```rust,edition2021"
+)
+
+for fence in "${test_fences[@]}"; do
+  result=$(echo "$fence" | awk '/^```[Rr]ust/ {print "MATCH"}')
+  if [ "$result" = "MATCH" ]; then
+    echo "✓ $fence"
+  else
+    echo "✗ $fence"
+  fi
+done
+```
+
+#### Documentation Pattern
+
+```yaml
+# .github/workflows/doc-validation.yml
+
+# Extract Rust code blocks from markdown files
+# Uses prefix pattern /^```[Rr]ust/ instead of exact match for flexibility:
+# - Handles both ```rust and ```Rust (case-insensitive)
+# - Works with any attribute format: rust,ignore OR rust ignore
+# - Future-proof: new attribute styles automatically supported
+# - Portable: POSIX-compatible pattern works on gawk and mawk
+awk '
+  # Match opening fence with prefix pattern (flexible)
+  /^```[Rr]ust/ {
+    in_block = 1
+    attrs = $0
+    sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, keep attributes
+    next
+  }
+  # ... rest of AWK script
+'
+```
 
 ### Key AWK Patterns
 
@@ -384,11 +799,11 @@ if (match($0, /```rust,(.*)/, arr)) {
 # ✅ CORRECT (POSIX-compatible):
 attrs = $0
 sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, leaving only attributes
-```
+```bash
 
 ---
 
-## 2. Shellcheck Integration in CI/CD
+## 4. Shellcheck Integration in CI/CD
 
 ### Self-Validating Workflows
 
@@ -443,7 +858,7 @@ rm "$TEMP_DIR"/*.txt         # Quote variable, not glob
 # ✅ CORRECT: Arrays for multiple arguments
 files=("file1.txt" "file with spaces.txt")
 cat "${files[@]}"            # Proper array expansion
-```
+```bash
 
 ### Common Shellcheck Warnings in CI
 
@@ -466,7 +881,7 @@ file="$FILE_PATH"
 # Suppress with comment:
 # shellcheck disable=SC2034
 EXAMPLE_VAR="for documentation only"
-```
+```bash
 
 #### SC2046: Unquoted command substitution
 
@@ -492,7 +907,7 @@ awk '
   BEGIN { print "hello" }    # Shellcheck ignores this
   { invalid_awk_syntax }     # Shellcheck won't catch this
 ' file.txt
-```
+```bash
 
 **Solution**: AWK scripts are validated through actual execution in CI. If an AWK script has syntax errors, the workflow will fail at runtime.
 
@@ -515,7 +930,7 @@ done
 
 ---
 
-## 3. Bash Subshells & Variable Scope
+## 5. Bash Subshells & Variable Scope
 
 ### The Problem
 
@@ -533,7 +948,7 @@ done
 
 # TOTAL and FAILED are still 0 here — changes were in subshell!
 echo "Failed: $FAILED / $TOTAL"
-```
+```bash
 
 ### The Solution: File-Based Counters
 
@@ -582,11 +997,11 @@ while read -r file; do
 done < <(find . -name "*.md")
 
 echo "Failed: $FAILED / $TOTAL"
-```
+```bash
 
 ---
 
-## 4. Lychee Link Checker Configuration
+## 6. Lychee Link Checker Configuration
 
 ### The Problem
 
@@ -611,7 +1026,7 @@ Specify file patterns as CLI arguments in the workflow, not in the config file:
   with:
     # File patterns are CLI args, NOT in .lychee.toml
     args: --verbose --no-progress --cache --max-cache-age 7d './**/*.md' './**/*.rs' './**/*.toml' --config .lychee.toml
-```
+```bash
 
 ### Lychee Config (.lychee.toml) Best Practices
 
@@ -658,7 +1073,7 @@ See [testing guide](Skills/testing-strategies.md)
 
 <!-- ✅ CORRECT: Exact case match -->
 See [testing guide](skills/testing-strategies.md)
-```
+```bash
 
 **Prevention:**
 - Verify link case matches actual filename case exactly
@@ -667,7 +1082,7 @@ See [testing guide](skills/testing-strategies.md)
 
 ---
 
-## 5. Case-Sensitive Filesystem Issues
+## 7. Case-Sensitive Filesystem Issues
 
 ### The Problem
 
@@ -716,11 +1131,11 @@ find . -name "*.md" -not -path "./target/*" | while read -r md_file; do
     fi
   done
 done
-```
+```text
 
 ---
 
-## 6. Docker Smoke Test Patterns
+## 8. Docker Smoke Test Patterns
 
 ### The Problem
 
@@ -755,7 +1170,7 @@ echo "ERROR: Server failed to become healthy after 30s"
 echo "=== Docker logs ==="
 docker logs test-server
 exit 1
-```
+```text
 
 ### Always Include Cleanup
 
@@ -767,7 +1182,7 @@ exit 1
 
 ---
 
-## 7. Action Version Pinning
+## 9. Action Version Pinning
 
 ### The Problem
 
@@ -783,7 +1198,7 @@ Using mutable tags (`@v2`, `@main`) allows actions to change behavior between ru
 # ✅ CORRECT: SHA256 digest is cryptographically immutable
 - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 - uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
-```
+```rust
 
 **How to get SHA256 digests:**
 
@@ -800,7 +1215,7 @@ gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
 
 ---
 
-## 8. Magic Numbers & Documentation
+## 10. Magic Numbers & Documentation
 
 ### Always Document Timeout Values
 
@@ -814,7 +1229,7 @@ jobs:
 jobs:
   test:
     timeout-minutes: 15  # Generous timeout for building docs with all features
-```
+```bash
 
 ### Document AWK Field Extraction
 
@@ -839,11 +1254,11 @@ echo "0 0 0 0" > "$COUNTER_FILE"
 # Counter file format: 4 space-separated integers (total validated skipped failed)
 # Example: "10 7 2 1" means 10 total blocks, 7 validated, 2 skipped, 1 failed
 echo "0 0 0 0" > "$COUNTER_FILE"
-```
+```text
 
 ---
 
-## 9. Workflow Path Filtering Best Practices
+## 11. Workflow Path Filtering Best Practices
 
 ### Trigger on Relevant Changes Only
 
@@ -875,13 +1290,13 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
-```
+```text
 
 Prevents duplicate runs on rapid pushes.
 
 ---
 
-## 10. Minimal Permissions (Security)
+## 12. Minimal Permissions (Security)
 
 ### Default to Read-Only
 
@@ -899,11 +1314,11 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-```
+```bash
 
 ---
 
-## 11. Common CI Anti-Patterns
+## 13. Common CI Anti-Patterns
 
 ### Using `set -e` Without `set -u` or `set -o pipefail`
 
@@ -929,7 +1344,7 @@ rm -rf "$TEMP_DIR"  # Never runs if process_files fails
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 process_files "$TEMP_DIR"
-```
+```bash
 
 ### Hardcoded File Lists
 
@@ -949,7 +1364,7 @@ done
 
 ---
 
-## 12. Debugging Workflow Failures
+## 14. Debugging Workflow Failures
 
 ### Enable Debug Logging
 
@@ -957,7 +1372,7 @@ done
 env:
   ACTIONS_STEP_DEBUG: true
   RUNNER_DEBUG: 1
-```
+```bash
 
 Or set repository secret `ACTIONS_STEP_DEBUG=true`.
 
@@ -979,13 +1394,13 @@ complicated_pipeline | awk '...' | while read -r x; do
   process "$x"
 done
 set +x
-```
+```rust
 
 Full `set -x` in CI creates massive logs — use sparingly.
 
 ---
 
-## 13. Configuration File Validation Tests (Preventative Pattern)
+## 15. Configuration File Validation Tests (Preventative Pattern)
 
 ### The Pattern: Test Configuration Consistency
 
@@ -1113,7 +1528,7 @@ assert_eq!(
      Found: {toolchain_version}\n\
      Fix: Update rust-toolchain.toml to use channel = \"{msrv}\""
 );
-```
+```rust
 
 **Prevents Regression:**
 
@@ -1164,7 +1579,7 @@ cargo test --test ci_config_tests
 
 # CI workflow
 cargo test --all-features  # Includes ci_config_tests
-```
+```rust
 
 **Fast execution:**
 

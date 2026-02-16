@@ -73,7 +73,7 @@ COPY --from=builder /app/target/release/matchbox-signaling-server /usr/local/bin
 EXPOSE 3536
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/server"]
-```
+```bash
 
 ### Key Principles
 
@@ -121,7 +121,7 @@ docker run \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   -p 3536:3536 \
   matchbox-signaling-server:latest
-```
+```rust
 
 ### Compose Hardening
 
@@ -168,7 +168,7 @@ services:
     image: matchbox-signaling-server:${{ github.sha }}
     format: spdx-json
     output-file: sbom.spdx.json
-```
+```bash
 
 ---
 
@@ -266,7 +266,7 @@ spec:
   selector:
     matchLabels:
       app: signaling-server
-```
+```bash
 
 ### Service with Session Affinity
 
@@ -346,7 +346,7 @@ pub fn health_routes() -> Router<Arc<AppState>> {
         .route("/readyz", get(readyz))
         .route("/startupz", get(startupz))
 }
-```
+```rust
 
 ### Graceful Shutdown for Connection Draining
 
@@ -420,7 +420,7 @@ jobs:
           docker tag matchbox-signaling-server:${{ github.sha }} \
             ghcr.io/example/matchbox-signaling-server:${{ github.sha }}
           docker push ghcr.io/example/matchbox-signaling-server:${{ github.sha }}
-```
+```text
 
 ### Immutable Tags — Never `:latest`
 
@@ -443,7 +443,7 @@ image: ghcr.io/example/matchbox-signaling-server@sha256:abcdef1234567890
     kubectl rollout status deployment/signaling-server --timeout=120s
     kubectl exec deploy/signaling-server -- /bin/true || true
     curl -sf http://signaling-server.svc:3536/healthz | jq .status
-```
+```bash
 
 ---
 
@@ -475,7 +475,7 @@ spec:
       secret:
         secretName: signaling-secrets
         defaultMode: 0400 # Read-only by owner
-```
+```rust
 
 ```rust
 // Read secret from mounted file
@@ -505,7 +505,7 @@ spec:
     - secretKey: jwt-secret
       remoteRef:
         key: prod/signaling/jwt-secret
-```
+```rust
 
 ### Secret Rotation Without Restart
 
@@ -546,7 +546,7 @@ tracing_subscriber::fmt()
     .with_target(true)
     .with_env_filter(EnvFilter::from_default_env())
     .init();
-```
+```rust
 
 Never write to files inside the container — they are ephemeral and lost on restart.
 
@@ -595,7 +595,7 @@ spec:
     - port: http
       path: /metrics
       interval: 15s
-```
+```text
 
 ### Container Resource Monitoring
 
@@ -633,7 +633,7 @@ All native build dependencies are centralized in a reusable composite action:
 
 ```text
 .github/actions/install-build-deps/action.yml
-```
+```rust
 
 Every CI job that builds Rust code with `--all-features` **must** use this action:
 
@@ -661,7 +661,7 @@ A regression-prevention script checks that workflows using `--all-features` refe
 ```bash
 # Run before pushing CI workflow changes
 scripts/check-ci-config.sh
-```
+```bash
 
 ### When Adding a Cargo Feature with Native Dependencies
 
@@ -722,7 +722,7 @@ Use a retry loop instead of a bare `sleep`:
     echo "=== Docker logs ==="
     docker logs test-server
     exit 1
-```
+```rust
 
 ### Related Test Pattern
 

@@ -94,7 +94,7 @@ semicolon_outside_block = "warn"
 tests_outside_test_module = "warn"
 unnecessary_self_imports = "warn"
 wildcard_enum_match_arm = "warn"
-```
+```bash
 
 ---
 
@@ -131,7 +131,7 @@ disallowed-methods = [
 
 # Single-char variable names allowed
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
-```
+```rust
 
 ---
 
@@ -225,7 +225,7 @@ let re = Regex::new(r"^\d+$").unwrap();
 
 // ❌ NEVER suppress entire categories
 #[allow(clippy::pedantic)]  // Hides real issues
-```
+```bash
 
 ---
 
@@ -249,7 +249,7 @@ The project workflow runs:
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
-```
+```rust
 
 Use `-D warnings` in CI to fail on any lint warning.
 

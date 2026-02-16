@@ -66,7 +66,7 @@ let gov_conf = GovernorConfigBuilder::default()
 let app = Router::new()
     .route("/ws", get(ws_handler))
     .layer(GovernorLayer { config: Arc::new(gov_conf) });
-```
+```rust
 
 ### Tiered Rate Limits
 
@@ -102,7 +102,7 @@ let limiters: HashMap<IpAddr, RateLimiter> = HashMap::new();
 // ✅ Bounded with TTL eviction — governor handles this internally,
 // or use DashMap with periodic cleanup capped at MAX_TRACKED_IPS
 const MAX_TRACKED_IPS: usize = 100_000;
-```
+```rust
 
 ---
 
@@ -158,7 +158,7 @@ async fn ws_handler(
         drop(permit);
     }))
 }
-```
+```rust
 
 ### Idle Timeout
 
@@ -192,7 +192,7 @@ let builder = Builder::new(TokioExecutor::new());
 builder.http1()
     .header_read_timeout(Duration::from_secs(5))   // 5s to send headers
     .keep_alive(false);                              // no HTTP keep-alive
-```
+```rust
 
 ---
 
@@ -221,7 +221,7 @@ ws.max_frame_size(16_384)      // 16 KB per frame
   .max_message_size(65_536)    // 64 KB per message
   .on_upgrade(move |socket| handle_socket(socket, state))
 // Note: For outbound backpressure, use bounded mpsc channels (see §3 Backpressure)
-```
+```rust
 
 ### Ping/Pong with Strict Pong Timeout
 
@@ -251,7 +251,7 @@ async fn validate_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
     if !ALLOWED_ORIGINS.contains(&origin) { return Err(StatusCode::FORBIDDEN); }
     Ok(())
 }
-```
+```rust
 
 ### Backpressure with Bounded Channels
 
@@ -291,7 +291,7 @@ fn bounded_sdp<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Err
     if s.len() > 8_192 { return Err(serde::de::Error::custom("SDP too large")); }
     Ok(s)
 }
-```
+```rust
 
 ### Computational Complexity Caps
 
@@ -322,7 +322,7 @@ let items: Vec<Item> = Vec::with_capacity(user_request.count);
 // ✅ Clamp to a safe maximum before allocating
 let count = user_request.count.min(MAX_ITEMS);
 let items: Vec<Item> = Vec::with_capacity(count);
-```
+```bash
 
 ---
 
@@ -382,7 +382,7 @@ gauge!("connections.active").set(active_count as f64);
 counter!("messages.received", "type" => msg_type).increment(1);
 counter!("rate_limit.rejected", "tier" => "per_ip").increment(1);
 histogram!("message.processing_time_ms").record(elapsed.as_millis() as f64);
-```
+```rust
 
 ### Progressive Defense Escalation
 

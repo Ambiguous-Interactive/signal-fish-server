@@ -56,7 +56,7 @@ impl RoomCode {
     fn get_str(&self) -> &str { &self.0 }         // Don't use get_
     fn into_uppercase(&self) -> String { todo!() }      // into_ implies ownership
 }
-```
+```rust
 
 ### Getter Naming — No `get_` Prefix
 
@@ -114,7 +114,7 @@ impl TryFrom<&str> for RoomCode {
 impl AsRef<str> for RoomCode {
     fn as_ref(&self) -> &str { &self.0 }
 }
-```
+```rust
 
 **In function signatures:** Use `impl Into<T>` for owned+flexibility, `&str`/`AsRef<T>` for read-only, `impl AsRef<Path>` for file paths.
 
@@ -166,7 +166,7 @@ pub enum Visibility { Private, Public }
 
 // ✅ Self-documenting
 create_room("ABC123", Persistence::Persistent, Visibility::Private);
-```
+```rust
 
 ---
 
@@ -224,7 +224,7 @@ impl Connection<Authenticated> {
     pub fn send(&self, msg: &Message) -> Result<(), Error> { todo!() }
 }
 // conn.send(&msg) on Connected won't compile — must authenticate first.
-```
+```rust
 
 ---
 
@@ -277,7 +277,7 @@ fn format_error(code: u16, msg: Option<&str>) -> Cow<'_, str> {
         None => Cow::Owned(format!("Error {code}")),
     }
 }
-```
+```rust
 
 ---
 
@@ -304,7 +304,7 @@ buffer.clone_from(&new_data);  // Reuses buffer's allocation
 
 // ❌ Discards existing allocation
 buffer = new_data.clone();  // Allocates new, drops old
-```
+```rust
 
 ---
 

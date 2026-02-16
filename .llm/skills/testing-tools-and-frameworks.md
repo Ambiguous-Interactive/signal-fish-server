@@ -62,7 +62,7 @@ async fn test_room_persistence_in_postgres() {
 
     assert_eq!(found.unwrap().code, room.code);
 }
-```
+```rust
 
 ---
 
@@ -142,7 +142,7 @@ fn test_room_info_serialization() {
 }
 
 // Review changes: cargo insta review
-```
+```rust
 
 ---
 
@@ -205,7 +205,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 // Run: cargo +nightly fuzz run parse_message
-```
+```rust
 
 ---
 
@@ -247,7 +247,7 @@ cargo nextest run -E 'test(websocket)'
 
 # With output capture on failure only
 cargo nextest run --failure-output immediate
-```
+```bash
 
 ---
 

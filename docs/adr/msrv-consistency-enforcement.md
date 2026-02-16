@@ -167,12 +167,40 @@ The `msrv` CI job runs on every push and pull request:
 
 **Steps**:
 1. Extract MSRV from Cargo.toml using `grep` and `sed`
-2. Validate rust-toolchain.toml channel matches
-3. Validate clippy.toml msrv matches
-4. Validate Dockerfile rust version matches (major.minor comparison)
+2. Validate rust-toolchain.toml channel matches (exact match: `1.88.0`)
+3. Validate clippy.toml msrv matches (exact match: `1.88.0`)
+4. Validate Dockerfile rust version matches (normalized comparison: `1.88` ↔ `1.88.0`)
 5. Install exact MSRV toolchain via dtolnay/rust-toolchain
 6. Build with `cargo check --locked --all-targets`
 7. Test with `cargo test --locked --all-features`
+
+**Version Format Normalization**:
+
+Docker images use shortened version tags (`rust:1.88-bookworm`) while Cargo.toml uses
+full semantic versioning (`1.88.0`). The CI validation normalizes both formats to
+major.minor for comparison to avoid false failures.
+
+**Why normalize instead of requiring exact format?**
+
+1. **Docker Hub convention**: Official Rust images use `rust:1.88` not `rust:1.88.0`
+2. **Automatic updates**: Docker tags like `rust:1.88` automatically pull latest patch (1.88.x)
+3. **Semantic equivalence**: `1.88` and `1.88.0` refer to the same Rust version
+4. **Maintenance burden**: Requiring `rust:1.88.0` forces manual updates for patch releases
+
+The normalization logic:
+
+```bash
+# Extract major.minor from Dockerfile (already in 1.88 format)
+DOCKERFILE_RUST=$(grep '^FROM rust:' Dockerfile | sed -E 's/FROM rust:([0-9]+\.[0-9]+).*/\1/')
+
+# Normalize Cargo.toml MSRV from 1.88.0 to 1.88
+MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
+
+# Compare normalized versions
+if [ "$DOCKERFILE_RUST" != "$MSRV_SHORT" ]; then
+  echo "FAIL"
+fi
+```
 
 **Failure scenarios**:
 - Configuration drift: Files have different versions → Clear error with fix instructions

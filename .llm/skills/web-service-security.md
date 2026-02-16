@@ -51,7 +51,7 @@ impl TryFrom<String> for RoomCode {
         Ok(Self(value))
     }
 }
-```
+```rust
 
 ### Serde Validation at Deserialization
 
@@ -75,7 +75,7 @@ fn is_valid(input: &str) -> bool { !input.contains('<') && !input.contains('>') 
 fn is_valid(input: &str) -> bool {
     input.chars().all(|c| c.is_ascii_alphanumeric() || "-_. ".contains(c))
 }
-```
+```rust
 
 ### Message Size Limits
 
@@ -101,7 +101,7 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, claims, state))
 }
-```
+```rust
 
 ### Constant-Time Token Comparison
 
@@ -124,7 +124,7 @@ validation.set_required_spec_claims(&["exp", "iss", "sub"]);
 validation.set_issuer(&["matchbox-server"]);
 validation.set_audience(&["matchbox-client"]);
 let token_data = jsonwebtoken::decode::<Claims>(token, &key, &validation)?;
-```
+```rust
 
 ### Per-Message Authorization
 
@@ -149,7 +149,7 @@ async fn handle_message(msg: ClientMessage, claims: &AuthClaims, state: &AppStat
 "Invalid password for user admin@example.com"
 // ✅ Generic — no information leakage
 "Invalid credentials"
-```
+```rust
 
 ---
 
@@ -173,7 +173,7 @@ async fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), 
 ws.max_frame_size(16_384)      // 16 KB per frame
   .max_message_size(65_536)    // 64 KB per message
   .on_upgrade(move |socket| handle_socket(socket, claims, state))
-```
+```rust
 
 ### Connection Caps with Semaphore
 
@@ -200,7 +200,7 @@ tokio::select! {
         socket.send(Message::Ping(vec![])).await?;
     }
 }
-```
+```rust
 
 ### Disable `permessage-deflate`
 
@@ -234,7 +234,7 @@ let jwt_secret = Secret::new(
     std::env::var("JWT_SECRET").context("JWT_SECRET must be set")?
 );
 // ❌ NEVER: let jwt_secret = "super-secret-key";
-```
+```rust
 
 ### Redact from Logs
 
@@ -270,7 +270,7 @@ async fn security_headers(req: Request, next: middleware::Next) -> Response {
     h.insert("cache-control", "no-store".parse().unwrap());
     res
 }
-```
+```rust
 
 ### CORS Allowlist — Never Wildcard in Production
 
@@ -293,7 +293,7 @@ Run in CI on every PR:
 cargo audit              # known CVE database
 cargo deny check         # license + advisory + ban checks
 cargo vet                # require review of new third-party code
-```
+```text
 
 Pin security-critical dependencies with exact versions:
 
@@ -312,7 +312,7 @@ Always commit `Cargo.lock` to the repository for reproducible builds.
 
 ```rust
 #![forbid(unsafe_code)]
-```
+```bash
 
 ### Overflow Checks in Release
 
@@ -328,7 +328,7 @@ overflow-checks = true
 if user_token == stored_token { ... }
 // ✅ Constant-time — no timing side channel
 if user_token.as_bytes().ct_eq(stored_token.as_bytes()).into() { ... }
-```
+```rust
 
 ### Type-State Pattern for Auth Boundaries
 
@@ -356,7 +356,7 @@ let room: RoomCode = serde_json::from_str(&msg).unwrap();
 // ✅ Propagate the error
 let room: RoomCode = serde_json::from_str(&msg)
     .map_err(|e| ProtocolError::InvalidMessage(e.to_string()))?;
-```
+```rust
 
 ---
 
@@ -379,7 +379,7 @@ tracing::warn!(
     peer_addr = %addr, room_code = %room, reason = "unauthorized",
     "Authorization denied for room join"
 );
-```
+```rust
 
 ### Never Log Secrets
 

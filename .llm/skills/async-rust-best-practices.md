@@ -52,7 +52,7 @@ let hash = tokio::task::spawn_blocking(move || {
 
 // ❌ CPU-bound work blocking the async runtime
 let hash = compute_expensive_hash(&data);  // Blocks executor thread!
-```
+```rust
 
 ---
 
@@ -110,7 +110,7 @@ let result = database.query(&key).await;
 // ✅ Use DashMap for concurrent read/write access — no lock needed
 let rooms: DashMap<RoomId, Room> = DashMap::new();
 rooms.insert(room_id, room);
-```
+```rust
 
 **Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block. Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
 
@@ -175,7 +175,7 @@ while let Some(result) = set.join_next().await {
     }
 }
 // All tasks complete here — no leaked futures
-```
+```rust
 
 ---
 
@@ -216,7 +216,7 @@ async fn run_server(shutdown: CancellationToken) {
         }
     }
 }
-```
+```rust
 
 **Alternative pattern:** Use `tokio::sync::broadcast` channels for shutdown signals, or implement custom cancellation
 using atomic flags and condition variables. The key principle is coordinated shutdown across all active connections.
@@ -260,7 +260,7 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
     .map_err(|_| Error::WebSocketTimeout)?
     .ok_or(Error::ConnectionClosed)?
     .map_err(Error::WebSocket)?;
-```
+```rust
 
 ---
 

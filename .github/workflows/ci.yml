@@ -161,10 +161,13 @@ jobs:
 
           # Check Dockerfile
           if [ -f Dockerfile ]; then
-            # Extract Rust version from FROM rust:X.Y line
+            # Extract Rust version from FROM rust:X.Y line (handles both 1.88 and 1.88.0 formats)
             DOCKERFILE_RUST=$(grep '^FROM rust:' Dockerfile | head -1 | sed -E 's/FROM rust:([0-9]+\.[0-9]+).*/\1/')
-            if [ "$DOCKERFILE_RUST" != "$MSRV" ]; then
-              echo "✗ FAIL: Dockerfile rust:$DOCKERFILE_RUST (expected rust:$MSRV)"
+            # Normalize MSRV to major.minor for comparison (1.88.0 -> 1.88)
+            # Docker images use shortened versions (rust:1.88) while MSRV uses full semver (1.88.0)
+            MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
+            if [ "$DOCKERFILE_RUST" != "$MSRV_SHORT" ]; then
+              echo "✗ FAIL: Dockerfile rust:$DOCKERFILE_RUST (expected rust:$MSRV_SHORT from MSRV $MSRV)"
               FAILED=1
             else
               echo "✓ PASS: Dockerfile"

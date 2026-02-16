@@ -58,7 +58,7 @@ struct GameServer {
     auth: Authenticator,
     metrics: MetricsCollector,
 }
-```
+```rust
 
 **File-level SRP**: One concern per file. `src/server.rs` with 2000 lines → split into `src/server/room_manager.rs`, `src/server/player_handler.rs`, `src/server/message_router.rs`.
 
@@ -97,7 +97,7 @@ interface DashboardWidget {
     render(data: MetricsData): HTMLElement;
     update(data: MetricsData): void;
 }
-```
+```rust
 
 ---
 
@@ -157,7 +157,7 @@ trait Messaging {
 trait Authentication {
     fn authenticate(&self) -> Result<Token>;
 }
-```
+```rust
 
 **Guideline**: 2-5 methods per trait. If a trait has 8+ methods, it probably needs splitting.
 
@@ -229,7 +229,7 @@ mod player_authentication;
 mod protocol_serialization;
 mod connection_health;
 mod relay_transport;
-```
+```rust
 
 ---
 

@@ -72,7 +72,7 @@ impl Room {
     fn has_authority(&self) -> bool { self.authority.is_some() }
     fn can_join(&self, player: &Player) -> bool { !self.is_full() && !self.has_player(player) }
 }
-```
+```rust
 
 ### Iterator Methods
 
@@ -120,7 +120,7 @@ bitflags::bitflags! {
 
 fn configure_client(caps: Capabilities) { todo!() }
 configure_client(Capabilities::RELAY | Capabilities::OBSERVE);
-```
+```rust
 
 > **Note:** Add `bitflags` to `Cargo.toml` to use; not currently in project dependencies.
 
@@ -148,7 +148,7 @@ pub fn find_rooms(&self, filter: &Filter) -> impl Iterator<Item = RoomInfo> + '_
         .map(|r| r.info())
 }
 // Caller: let first_5: Vec<_> = server.find_rooms(&f).take(5).collect();
-```
+```rust
 
 ---
 
@@ -191,7 +191,7 @@ pub trait Transport: private::Sealed {
 // Only your types can implement Transport
 impl private::Sealed for WebSocketTransport {}
 impl Transport for WebSocketTransport { ... }
-```
+```rust
 
 ### Private Fields with Constructors
 
@@ -235,7 +235,7 @@ Every public item needs:
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub async fn create_room(&self, config: RoomConfig) -> Result<Room, CreateError> { todo!() }
-```
+```rust
 
 ---
 
@@ -301,7 +301,7 @@ pub struct ApiError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
-```
+```bash
 
 ### Connection State
 

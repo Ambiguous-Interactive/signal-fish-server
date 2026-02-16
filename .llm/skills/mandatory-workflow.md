@@ -43,7 +43,7 @@ cargo test --all-features
 
 # 3. Supply chain checks (run before pushing)
 cargo deny --all-features check            # Advisories, licenses, bans, sources
-```
+```bash
 
 ### Pre-Push Validation
 
@@ -74,7 +74,7 @@ scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related 
 # Rust toolchain
 rustup component add rustfmt
 rustup component add clippy
-```
+```bash
 
 ---
 

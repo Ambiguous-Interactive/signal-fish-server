@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(code.as_str(), "ABC123");
     }
 }
-```
+```text
 
 ### Test Naming Convention
 
@@ -76,7 +76,7 @@ test_<unit>_<condition>_<expected_behavior>
 #[test] fn room_code_empty_input_returns_invalid_length() { ... }
 #[test] fn player_join_room_full_returns_room_full_error() { ... }
 #[test] fn broadcast_no_recipients_succeeds_silently() { ... }
-```
+```rust
 
 ---
 
@@ -137,7 +137,7 @@ async fn test_concurrent_joins() {
         .into_iter().map(|r| r.unwrap()).collect();
     assert!(results.iter().all(|r| r.is_ok()));
 }
-```
+```rust
 
 ---
 
@@ -190,7 +190,7 @@ async fn test_double_join_same_player() {
     server.join_room_as(&room.code, &player).await.unwrap();
     assert!(matches!(server.join_room_as(&room.code, &player).await, Err(JoinError::AlreadyJoined)));
 }
-```
+```rust
 
 Always test: empty collections, Unicode input, zero-value parameters, concurrent access.
 
@@ -230,7 +230,7 @@ async fn test_no_data_race_on_room_state() {
 1. Bug reported → write a failing test FIRST
 2. Fix the bug → test passes
 3. Test stays forever → prevents regression
-```
+```rust
 
 ```rust
 // Regression test: Issue #142 — player count not updated on disconnect
@@ -262,7 +262,7 @@ async fn test_database_migration() {
     // This test modifies shared database state
     // #[serial] ensures no parallel execution
 }
-```
+```rust
 
 ---
 
@@ -325,7 +325,7 @@ CI smoke tests must verify the complete deployment artifact:
     echo "=== Docker logs ==="
     docker logs test-server
     exit 1
-```
+```rust
 
 **Key smoke test requirements:**
 
@@ -374,7 +374,7 @@ mod ci_integration_tests {
         }
     }
 }
-```
+```text
 
 ---
 

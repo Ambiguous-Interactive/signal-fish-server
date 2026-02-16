@@ -380,3 +380,4 @@ ls -la scripts/*.sh
 **Changelog:**
 - 2026-02-16: Initial ADR created with comprehensive preventative measures
 - 2026-02-16: Updated with markdown linting and spell checking preventative measures (layers 4-5)
+- 2026-02-16: Fixed HashiCorp typo false positive by adding to [default.extend-identifiers] section

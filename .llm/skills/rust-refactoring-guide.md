@@ -62,7 +62,7 @@
 6. Run tests:                  cargo test --all-features
 7. Commit
 8. Repeat from step 2
-```
+```rust
 
 **Never skip step 1.** If tests don't pass before you start, you can't verify your refactoring is correct.
 
@@ -105,7 +105,7 @@ src/server/
 ├── room_manager.rs   (300 lines)
 ├── player_manager.rs (250 lines)
 └── message_handler.rs(400 lines)
-```
+```rust
 
 Move `src/server.rs` to `src/server/mod.rs`, then extract one section at a time, compiling after each.
 
@@ -194,7 +194,7 @@ struct GameServer<D: Database> { db: D }
 struct InMemoryDatabase { rooms: DashMap<String, Room> }
 #[async_trait]
 impl Database for InMemoryDatabase { ... }
-```
+```rust
 
 ---
 

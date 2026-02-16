@@ -56,7 +56,7 @@ let third = items.get(2).ok_or(Error::InsufficientItems)?;
 
 // ✅ Iterator methods for safe element access
 let second = items.iter().nth(1).ok_or(Error::TooFew)?;
-```
+```rust
 
 ---
 
@@ -98,7 +98,7 @@ match transport {
     Transport::Tcp => handle_tcp(),
 }
 // Adding Transport::WebTransport forces handling everywhere
-```
+```rust
 
 ---
 
@@ -144,7 +144,7 @@ impl RateLimitConfig {
         Ok(Self { requests_per_second: rps, burst_size: burst })
     }
 }
-```
+```rust
 
 ---
 
@@ -178,7 +178,7 @@ let port: u16 = u16::try_from(large_number)
 
 // ✅ Saturating conversion when clamping is acceptable
 let players: u16 = u16::try_from(count).unwrap_or(u16::MAX);
-```
+```rust
 
 ---
 
@@ -233,7 +233,7 @@ let truncated = &s[..s.floor_char_boundary(max_len)];
 
 // ✅ Character-based operations for Unicode safety
 let first_char = s.chars().next().ok_or(Error::Empty)?;
-```
+```rust
 
 ---
 
@@ -281,7 +281,7 @@ match user_input.parse::<u8>() {
     Ok(v) if v < 10 => process(v),
     _ => unreachable!(),  // WRONG: user input CAN be anything
 }
-```
+```rust
 
 ---
 
