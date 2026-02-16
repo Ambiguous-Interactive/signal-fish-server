@@ -53,7 +53,7 @@
 
 ## Safe Refactoring Workflow
 
-```
+```text
 1. Ensure all tests pass:     cargo test --all-features
 2. Make ONE change
 3. Compile:                    cargo check
@@ -97,7 +97,7 @@ impl GameServer {
 
 ## Breaking Up Large Files
 
-```
+```text
 # Before: src/server.rs (2000 lines)
 # After:
 src/server/
@@ -227,7 +227,7 @@ See [rust-performance-optimization](./rust-performance-optimization.md) for deta
 
 **Structured output for agent refactoring steps:**
 
-```
+```text
 REFACTOR: [description]
   Files: [list of files changed]
   Risk: low/medium/high

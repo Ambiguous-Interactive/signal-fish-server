@@ -68,6 +68,7 @@ Standalone script that:
 - Can be integrated into git hooks
 
 **Usage**:
+
 ```bash
 ./scripts/check-msrv-consistency.sh
 ```
@@ -138,7 +139,8 @@ When a dependency requires a newer Rust version:
 5. **Document**: Update CHANGELOG.md and commit message
 
 **Commit message format**:
-```
+
+```text
 chore: update MSRV from 1.87.0 to 1.88.0
 
 Update minimum supported Rust version to 1.88.0 to support the rand 0.10

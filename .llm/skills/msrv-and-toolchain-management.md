@@ -215,7 +215,7 @@ grep "FROM rust:$MSRV" Dockerfile || echo "FAIL: Dockerfile"
 
 ### Commit Message Format
 
-```
+```text
 chore: update MSRV from 1.87.0 to 1.88.0
 
 Update minimum supported Rust version to 1.88.0 to support the rand 0.10
@@ -244,7 +244,8 @@ Testing:
 ### Issue 1: Dependency Requires Newer Rust
 
 **Symptom:**
-```
+
+```text
 error: package `rand v0.10.0` cannot be built because it requires rustc 1.88.0 or newer,
 while the currently active rustc version is 1.87.0
 ```
@@ -261,7 +262,8 @@ while the currently active rustc version is 1.87.0
 ### Issue 2: CI Passes Locally But Fails in CI
 
 **Symptom:**
-```
+
+```text
 Local: cargo test → ✓ Passes
 CI:    cargo test → ✗ Fails with "requires rustc X.Y.Z or newer"
 ```
@@ -276,7 +278,8 @@ CI:    cargo test → ✗ Fails with "requires rustc X.Y.Z or newer"
 ### Issue 3: MSRV Consistency Check Fails in CI
 
 **Symptom:**
-```
+
+```text
 ✗ FAIL: clippy.toml msrv=1.87.0 (expected 1.88.0)
 ✗ FAIL: Dockerfile rust:1.87 (expected rust:1.88)
 ```
@@ -293,7 +296,8 @@ sed -i 's/FROM rust:1.87/FROM rust:1.88/' Dockerfile
 ### Issue 4: Using Features From Newer Rust
 
 **Symptom:**
-```
+
+```text
 error[E0658]: use of unstable library feature 'foo'
 ```
 
@@ -655,7 +659,8 @@ git diff .github/workflows/unused-deps.yml
 
 # 5. Commit with explanation
 git add .github/workflows/unused-deps.yml
-git commit -m "chore: update cargo-udeps nightly from 2025-02-21 to 2026-01-15
+git commit -m "$(cat <<'EOF'
+chore: update cargo-udeps nightly from 2025-02-21 to 2026-01-15
 
 Update nightly toolchain for cargo-udeps to nightly-2026-01-15 (from
 nightly-2025-02-21, which was 360 days old). The new nightly is 32 days
@@ -667,7 +672,8 @@ to use stable MSRV (1.88.0) as defined in Cargo.toml.
 
 See .github/workflows/unused-deps.yml for nightly version policy and update
 criteria.
-"
+EOF
+)"
 ```
 
 ### Documentation Requirements

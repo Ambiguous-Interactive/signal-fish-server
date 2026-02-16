@@ -68,7 +68,7 @@ mod tests {
 
 ### Test Naming Convention
 
-```
+```text
 test_<unit>_<condition>_<expected_behavior>
 ```
 
@@ -226,7 +226,7 @@ async fn test_no_data_race_on_room_state() {
 
 ## Regression Testing Discipline
 
-```
+```text
 1. Bug reported → write a failing test FIRST
 2. Fix the bug → test passes
 3. Test stays forever → prevents regression

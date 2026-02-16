@@ -47,6 +47,8 @@ if git config --local core.hooksPath "$DESIRED" 2>/dev/null; then
     log "Git hooks are now enabled. The following checks will run on commit:"
     log "  - Code formatting (cargo fmt)"
     log "  - Panic-prone pattern detection (no .unwrap(), panic!, etc.)"
+    log "  - Markdown linting (if markdownlint-cli2 is installed)"
     log ""
+    log "To install markdownlint-cli2: npm install -g markdownlint-cli2"
     log "To skip hooks (not recommended): git commit --no-verify"
 fi

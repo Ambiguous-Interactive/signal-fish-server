@@ -21,7 +21,7 @@
 
 ### What Am I Changing?
 
-```
+```text
 Start here:
     |
     +-- Protocol/Messages? ----------> /add-protocol-message (or see Common Scenarios)
@@ -41,7 +41,7 @@ Start here:
 
 ### Should I Add a Test?
 
-```
+```text
 YES - ALWAYS. Every change requires comprehensive tests.
   +-- Happy path + positive variations
   +-- Negative cases + error conditions
@@ -56,7 +56,7 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 
 ## Architecture At-a-Glance
 
-```
+```text
 +-----------------------------------------------------+
 |  CLIENTS: Game Engines | Browser WebRTC | Custom     |
 +------------------------+----------------------------+

@@ -139,7 +139,7 @@ For any change touching authentication, user input, or network configuration:
 
 Work through this tree top-to-bottom. Stop at the first NO and fix it.
 
-```
+```text
 Compiled? ─── NO ──► Fix compilation errors first
     │ YES
     ▼
@@ -181,7 +181,7 @@ Deep review passed? ─── NO ──► Fix findings
 
 When dispatching a review subagent, use this prompt structure:
 
-```
+```text
 Review the following changes against the self-review checklist:
 1. Run Quick Review commands
 2. Apply Deep Review checklist items relevant to the change type

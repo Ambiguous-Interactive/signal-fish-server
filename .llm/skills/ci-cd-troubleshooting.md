@@ -97,7 +97,7 @@ Workflow uses caching/tooling for wrong language ecosystem:
 
 ```bash
 # Search for language-specific patterns in workflow files
-cd .github/workflows
+cd .github/workflows || exit
 grep -r "pip\|requirements\.txt\|python" .    # Python patterns
 grep -r "npm\|package\.json\|node" .          # Node patterns
 grep -r "bundle\|Gemfile\|ruby" .             # Ruby patterns
@@ -110,7 +110,7 @@ grep -r "cargo\|Cargo\.toml\|rust" .          # Rust patterns (should be present
 
 #### Symptom
 
-```
+```text
 ERROR: Cache entry deserialization failed, entry ignored
 WARNING: Failed to restore cache, continuing without cache
 ```
@@ -165,7 +165,7 @@ key: ${{ runner.os }}-rust-v1-${{ hashFiles('**/Cargo.lock') }}
 
 #### Symptom
 
-```
+```text
 error: package `rand v0.10.0` cannot be built because it requires rustc 1.88.0 or newer,
 while the currently active rustc version is 1.87.0
 
@@ -252,7 +252,7 @@ rustc --version  # Compare with latest stable
 
 #### Symptom
 
-```
+```text
 warning: unused dependency: `futures`
 warning: unused dependency: `async-trait`
 # ... 15+ unused dependencies
@@ -346,7 +346,7 @@ serde_derive = "1.0"
 
 #### Symptom
 
-```
+```text
 Local: cargo test  → ✓ Passes
 CI:    cargo test  → ✗ Fails with compilation errors
 
@@ -472,7 +472,7 @@ Optional (for integration tests):
 
 #### Symptom
 
-```
+```text
 Local: docker build -t myapp .  → ✓ Success
 CI:    docker build -t myapp .  → ✗ Fails with package not found
 ```
@@ -520,7 +520,7 @@ FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS builder
 
 **Improve .dockerignore:**
 
-```
+```text
 # .dockerignore
 target/
 .git/
@@ -550,7 +550,7 @@ When CI fails, work through this systematic diagnostic process:
 
 ### Step 1: Identify Failure Type
 
-```
+```text
 CI Failure
     |
     ├─ Compilation error ──► Check Rust version, dependencies, features
@@ -669,6 +669,527 @@ Before committing workflow changes, verify:
 | `unused dependency` | Dependency in Cargo.toml but not used | Remove from Cargo.toml or document reason to keep |
 | `Permission denied` | Workflow needs additional permissions | Add `permissions:` section to workflow |
 | `Resource not accessible by integration` | GitHub token lacks permission | Grant required permission in `permissions:` |
+
+---
+
+## Pattern 7: Documentation Quality Issues (Markdown Linting, Spell Checking)
+
+### Symptom
+
+```text
+CI fails with:
+ERROR: MD040/fenced-code-language: Fenced code blocks should have a language specified
+ERROR: MD060/table-alignment: Table column alignment is inconsistent
+ERROR: typos found: HashiCorp (did you mean: Hashicorp?)
+```
+
+### Root Causes
+
+**A. Code blocks without language identifiers:**
+
+```markdown
+❌ WRONG: Missing language identifier
+
+(triple backticks with no language)
+some code here
+(triple backticks)
+
+✅ CORRECT: Language identifier specified
+
+(triple backticks)bash
+some code here
+(triple backticks)
+```
+
+**B. Spell checker flagging technical terms:**
+
+```text
+# CI fails because .typos.toml doesn't whitelist technical terms
+Error: Unknown word: HashiCorp
+Error: Unknown word: WebSocket
+Error: Unknown word: rustc
+```
+
+**C. Table formatting inconsistencies:**
+
+```markdown
+❌ WRONG: Inconsistent table column alignment
+| Column | Value |
+|--------|-------|
+|  foo   | bar  |
+```
+
+**D. Markdown linting not run locally:**
+
+- Developers push without validating markdown
+- CI catches issues that could have been fixed locally
+- No pre-commit hook to catch markdown issues
+- No VS Code extension for real-time feedback
+
+### Solution
+
+**A. Add language identifiers to all code blocks:**
+
+```bash
+# Find code blocks without language identifiers
+grep -r '^```$' --include="*.md" .
+
+# Manual fix: Add language after opening backticks
+# Examples: ```bash, ```rust, ```json, ```text
+
+# Automated fix with markdownlint-cli2:
+./scripts/check-markdown.sh fix
+```
+
+**B. Configure spell checker to whitelist technical terms:**
+
+```toml
+# .typos.toml - Add technical terms
+[default.extend-words]
+hashicorp = "hashicorp"  # HashiCorp company name
+websocket = "websocket"  # WebSocket protocol
+rustc = "rustc"          # Rust compiler
+axum = "axum"            # Axum web framework
+tokio = "tokio"          # Tokio async runtime
+```
+
+**C. Use automated markdown formatter:**
+
+```bash
+# Auto-fix table alignment and other issues
+markdownlint-cli2 --fix '**/*.md' '#target/**' '#third_party/**'
+```
+
+**D. Set up local validation tools:**
+
+```bash
+# Install markdown linter
+npm install -g markdownlint-cli2
+
+# Add to pre-commit hook
+echo "scripts/check-markdown.sh" >> .githooks/pre-commit
+
+# Install VS Code extensions
+# - davidanson.vscode-markdownlint
+# - streetsidesoftware.code-spell-checker
+```
+
+### Prevention
+
+**Create validation script:**
+
+```bash
+#!/usr/bin/env bash
+# scripts/check-markdown.sh
+
+set -euo pipefail
+
+if ! command -v markdownlint-cli2 &> /dev/null; then
+    echo "ERROR: markdownlint-cli2 not installed"
+    echo "Install: npm install -g markdownlint-cli2"
+    exit 2
+fi
+
+# Check markdown files (excluding build artifacts)
+markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'
+```
+
+**Add CI config validation tests:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_markdown_files_have_language_identifiers() {
+    // Find all markdown files
+    let markdown_files = find_markdown_files(&repo_root());
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        for (line_num, line) in content.lines().enumerate() {
+            // Check for opening code fence without language
+            let fence_marker = "```";  // Three backticks
+            if line.trim_start().starts_with(fence_marker) {
+                let fence_content = line.trim_start()
+                    .trim_start_matches('`')
+                    .trim();
+
+                assert!(
+                    !fence_content.is_empty(),
+                    "{}:{}: Code block missing language identifier (MD040)",
+                    file.display(),
+                    line_num + 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_typos_config_exists() {
+    let typos_config = repo_root().join(".typos.toml");
+
+    assert!(
+        typos_config.exists(),
+        ".typos.toml is required for spell checking in CI"
+    );
+
+    let content = read_file(&typos_config);
+
+    assert!(
+        content.contains("[default.extend-words]"),
+        ".typos.toml must have [default.extend-words] section"
+    );
+}
+
+#[test]
+fn test_markdownlint_config_exists() {
+    let config = repo_root().join(".markdownlint.json");
+
+    assert!(
+        config.exists(),
+        ".markdownlint.json is required for markdown linting"
+    );
+
+    let content = read_file(&config);
+
+    // Verify MD040 rule is configured
+    assert!(
+        content.contains("MD040"),
+        ".markdownlint.json must include MD040 rule"
+    );
+}
+```
+
+**Document in pre-commit hook:**
+
+```bash
+# .githooks/pre-commit
+
+# Check markdown files (if markdownlint-cli2 is installed)
+if command -v markdownlint-cli2 >/dev/null 2>&1; then
+    echo "[pre-commit] Checking markdown files..."
+    if ! scripts/check-markdown.sh; then
+        echo "[pre-commit] ERROR: Markdown linting failed"
+        echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
+        exit 1
+    fi
+else
+    echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
+fi
+```
+
+**Add VS Code integration:**
+
+```json
+// .vscode/extensions.json
+{
+  "recommendations": [
+    "davidanson.vscode-markdownlint",
+    "streetsidesoftware.code-spell-checker"
+  ]
+}
+
+// .vscode/settings.json
+{
+  "markdownlint.config": {
+    "MD040": true,  // Require language identifiers on code blocks
+    "MD013": false  // Disable line length (too strict for technical docs)
+  },
+  "cSpell.words": [
+    "rustc",
+    "tokio",
+    "axum",
+    "HashiCorp",
+    "WebSocket"
+  ]
+}
+```
+
+### Key Patterns
+
+**Pattern A: Check ALL markdown files, not just docs/:**
+
+```bash
+# ❌ WRONG: Only checks docs/ directory
+markdownlint-cli2 'docs/**/*.md'
+
+# ✅ CORRECT: Checks all markdown files in repository
+markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'
+```
+
+**Pattern B: Markdown linting should be part of the standard workflow:**
+
+```yaml
+# .github/workflows/doc-validation.yml
+jobs:
+  markdownlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<SHA>
+
+      - name: Setup Node.js
+        uses: actions/setup-node@<SHA>
+        with:
+          node-version: '20'
+
+      - name: Install markdownlint-cli2
+        run: npm install -g markdownlint-cli2
+
+      - name: Check markdown files
+        run: markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'
+```
+
+**Pattern C: Configuration files need validation tests:**
+
+```rust
+// Always test that required config files exist and are valid
+#[test]
+fn test_required_config_files_exist() {
+    assert!(Path::new(".typos.toml").exists());
+    assert!(Path::new(".markdownlint.json").exists());
+    assert!(Path::new(".githooks/pre-commit").exists());
+}
+```
+
+**Pattern D: Auto-fix capability is essential:**
+
+```bash
+# Always provide an auto-fix option for markdown issues
+./scripts/check-markdown.sh       # Check only
+./scripts/check-markdown.sh fix   # Auto-fix where possible
+```
+
+### Common Markdown Linting Rules
+
+| Rule | Description | Fix |
+|------|-------------|-----|
+| **MD040** | Code blocks must have language identifiers | Add language after \`\`\` (bash, Rust, json, text) |
+| **MD060** | Table column alignment inconsistent | Use consistent spacing in table columns |
+| **MD013** | Line length limit (often disabled for technical docs) | Break long lines or disable rule |
+| **MD041** | First line must be top-level heading | Add `# Title` as first line |
+| **MD046** | Code block style (fenced vs indented) | Use fenced code blocks (\`\`\`) consistently |
+
+### Spell Checking Best Practices
+
+**Technical terms that commonly need whitelisting:**
+
+```toml
+# .typos.toml
+[default.extend-words]
+# Rust ecosystem
+rustc = "rustc"
+tokio = "tokio"
+axum = "axum"
+serde = "serde"
+clippy = "clippy"
+
+# Build tools and infrastructure
+hashicorp = "hashicorp"
+github = "github"
+gitlab = "gitlab"
+dockerfile = "dockerfile"
+
+# Game engines and networking
+godot = "godot"
+websocket = "websocket"
+webrtc = "webrtc"
+signaling = "signaling"
+
+# Common technical abbreviations
+msrv = "msrv"  # Minimum Supported Rust Version
+cicd = "cicd"  # CI/CD
+api = "api"
+json = "json"
+yaml = "yaml"
+toml = "toml"
+```
+
+**Organization-specific terms:**
+
+```toml
+[default.extend-words]
+# Project-specific terms
+matchbox = "matchbox"
+signalfish = "signalfish"
+
+# Company names
+ambiguous = "ambiguous"
+```
+
+---
+
+## Pattern 8: Git Hook Permission Issues
+
+### Symptom
+
+```text
+# Git hooks fail to execute
+error: cannot run .git/hooks/pre-commit: Permission denied
+
+# OR in CI
+ERROR: Script ./scripts/check-markdown.sh is not executable
+Fix: chmod +x ./scripts/check-markdown.sh
+```
+
+### Root Cause
+
+**Git hooks and scripts must be executable:**
+
+```bash
+# File exists but is not executable
+ls -la .githooks/pre-commit
+-rw-r--r--  1 user  staff  1401 Feb 16 18:56 pre-commit  # ← Missing +x
+
+# Git doesn't track executable bit correctly on some systems
+# Especially when copying files or cloning on Windows
+```
+
+### Solution
+
+**A. Set file system permissions:**
+
+```bash
+# Make script executable
+chmod +x .githooks/pre-commit
+chmod +x scripts/check-markdown.sh
+chmod +x scripts/*.sh
+```
+
+**B. Tell Git to track executable bit:**
+
+```bash
+# CRITICAL: Git needs to track the executable bit explicitly
+git update-index --chmod=+x .githooks/pre-commit
+git update-index --chmod=+x scripts/check-markdown.sh
+
+# Verify it's set in Git
+git ls-files -s .githooks/pre-commit
+# Should show: 100755 (executable) not 100644 (regular file)
+```
+
+**C. Commit both changes:**
+
+```bash
+# Both steps are required!
+chmod +x .githooks/pre-commit
+git update-index --chmod=+x .githooks/pre-commit
+git add .githooks/pre-commit
+git commit -m "fix: ensure pre-commit hook is executable"
+```
+
+### Prevention
+
+**Add CI test to validate script permissions:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_scripts_are_executable() {
+    let directories = vec!["scripts", ".githooks"];
+
+    for dir in directories {
+        let dir_path = repo_root().join(dir);
+        if !dir_path.exists() {
+            continue;
+        }
+
+        for entry in std::fs::read_dir(&dir_path).unwrap() {
+            let path = entry.unwrap().path();
+
+            // Check .sh files and git hooks
+            if path.extension().map(|ext| ext == "sh").unwrap_or(false)
+                || (path.is_file() && path.extension().is_none())
+            {
+                let metadata = std::fs::metadata(&path).unwrap();
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = metadata.permissions().mode();
+                    let is_executable = mode & 0o111 != 0;
+
+                    assert!(
+                        is_executable,
+                        "{} is not executable.\n\
+                         Fix: chmod +x {} && git update-index --chmod=+x {}",
+                        path.display(),
+                        path.display(),
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+```
+
+**Document the two-step process:**
+
+```bash
+# scripts/enable-hooks.sh
+
+#!/bin/bash
+set -euo pipefail
+
+echo "Enabling git hooks..."
+
+# Step 1: Set filesystem permissions
+chmod +x .githooks/pre-commit
+
+# Step 2: Tell Git to track executable bit
+git update-index --chmod=+x .githooks/pre-commit
+
+# Step 3: Configure Git to use .githooks directory
+git config core.hooksPath .githooks
+
+echo "Git hooks enabled successfully"
+```
+
+### Key Insights
+
+**Two permissions are required:**
+
+1. **Filesystem permission** (`chmod +x`) - Allows the file to be executed locally
+2. **Git index permission** (`git update-index --chmod=+x`) - Tracks executable bit in Git
+
+**Why both are needed:**
+
+- `chmod +x` is not always tracked by Git (especially on Windows)
+- `git update-index --chmod=+x` ensures executable bit is committed
+- When others clone the repo, Git restores the executable bit
+- Without both, hooks work locally but fail for others (or in CI)
+
+**Common failure pattern:**
+
+```bash
+# Developer creates hook on macOS
+touch .githooks/pre-commit
+chmod +x .githooks/pre-commit  # ← Only sets filesystem permission
+git add .githooks/pre-commit
+git commit -m "Add pre-commit hook"
+
+# CI clones on Linux
+git clone repo
+.githooks/pre-commit           # ← Permission denied!
+```
+
+**Correct pattern:**
+
+```bash
+# Developer creates hook
+touch .githooks/pre-commit
+chmod +x .githooks/pre-commit           # Filesystem permission
+git update-index --chmod=+x .githooks/pre-commit  # Git permission
+git add .githooks/pre-commit
+git commit -m "Add pre-commit hook"
+
+# CI clones on Linux
+git clone repo
+.githooks/pre-commit           # ← Works! Git restored executable bit
+```
 
 ---
 

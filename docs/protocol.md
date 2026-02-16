@@ -1,6 +1,7 @@
 # Protocol Reference
 
-Signal Fish Server uses a JSON-based WebSocket protocol. All messages are JSON objects with a `type` field and optional `data` field.
+Signal Fish Server uses a JSON-based WebSocket protocol. All messages are JSON objects with a `type` field and
+optional `data` field.
 
 MessagePack encoding is also supported for game data when `enable_message_pack_game_data` is enabled.
 
@@ -8,7 +9,8 @@ MessagePack encoding is also supported for game data when `enable_message_pack_g
 
 ### Authenticate
 
-Authenticate with app credentials (required when auth is enabled). App ID is a public identifier that identifies the game application.
+Authenticate with app credentials (required when auth is enabled). App ID is a public identifier that identifies
+the game application.
 
 ```json
 {
@@ -20,6 +22,7 @@ Authenticate with app credentials (required when auth is enabled). App ID is a p
 ```
 
 Optional fields:
+
 - `sdk_version` - SDK version for debugging and analytics
 - `platform` - Platform information (e.g., "unity", "godot", "unreal")
 - `game_data_format` - Preferred game data encoding (defaults to JSON text frames)
@@ -39,10 +42,12 @@ Join or create a room for a specific game. If no `room_code` is provided, a new 
 ```
 
 Required fields:
+
 - `game_name` - Name of the game
 - `player_name` - Name for the player
 
 Optional fields:
+
 - `room_code` - Code of existing room to join (if not provided, creates new room)
 - `max_players` - Maximum players for the room (only used when creating new room)
 - `supports_authority` - Whether the room supports authority system (only used when creating new room)
@@ -159,6 +164,7 @@ Join a room as a spectator (read-only observer).
 ```
 
 Required fields:
+
 - `game_name` - Name of the game
 - `room_code` - Code of the room to spectate
 - `spectator_name` - Name for the spectator
@@ -230,7 +236,8 @@ Authentication failed.
 
 ### RoomJoined
 
-Successfully joined or created a room. This message is sent both when creating a new room and when joining an existing room.
+Successfully joined or created a room. This message is sent both when creating a new room and when joining an
+existing room.
 
 ```json
 {
@@ -648,7 +655,7 @@ Note: The `reason` field is optional.
 
 ## Session Flow
 
-```
+```text
 Client                              Server
   |                                    |
   |--- Authenticate ------------------>|
@@ -672,7 +679,8 @@ Client                              Server
 
 ## Reconnection Flow
 
-When a client initially joins a room, the server provides an `auth_token` in the `RoomJoined` response. This token should be stored by the client for reconnection purposes.
+When a client initially joins a room, the server provides an `auth_token` in the `RoomJoined` response. This token
+should be stored by the client for reconnection purposes.
 
 If the connection is lost, the client can reconnect using the stored information:
 
@@ -687,7 +695,8 @@ If the connection is lost, the client can reconnect using the stored information
 }
 ```
 
-On successful reconnection, the server sends a `Reconnected` message with the current room state and any missed events that occurred during the disconnection.
+On successful reconnection, the server sends a `Reconnected` message with the current room state and any
+missed events that occurred during the disconnection.
 
 ## Next Steps
 

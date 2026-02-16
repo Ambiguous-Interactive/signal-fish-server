@@ -58,7 +58,7 @@ Every skill file MUST follow this structure:
 
 ## Trigger Comment Format
 
-```
+```text
 <!-- trigger: keywords | description | category -->
 ```
 

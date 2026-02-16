@@ -631,7 +631,7 @@ When a Cargo feature requires native C libraries (e.g., `kafka` â†’ `rdkafka` â†
 
 All native build dependencies are centralized in a reusable composite action:
 
-```
+```text
 .github/actions/install-build-deps/action.yml
 ```
 

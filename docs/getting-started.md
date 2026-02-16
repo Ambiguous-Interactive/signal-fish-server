@@ -28,7 +28,7 @@ docker compose up
 
 Connect your WebSocket client to:
 
-```
+```text
 ws://localhost:3536/v2/ws
 ```
 

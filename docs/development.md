@@ -130,6 +130,40 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+### Markdown Linting
+
+Check markdown files for formatting issues, missing language identifiers, and inconsistencies:
+
+```bash
+./scripts/check-markdown.sh
+```
+
+Auto-fix markdown issues where possible:
+
+```bash
+./scripts/check-markdown.sh fix
+```
+
+Common markdown linting rules enforced by CI:
+
+- **MD040**: All code blocks must have language identifiers (e.g., ` ```bash ` not just ` ``` `)
+- **MD060**: Tables must have consistent alignment
+- **MD013**: Lines should not exceed 120 characters (except tables)
+- **MD044**: Proper capitalization of technical terms (JavaScript, GitHub, WebSocket, etc.)
+
+See `.markdownlint.json` for the complete rule configuration.
+
+### Spell Checking
+
+Check for typos in code and documentation:
+
+```bash
+typos
+```
+
+Technical terms that are commonly flagged as typos are configured in `.typos.toml`. If a legitimate
+technical term is flagged, add it to the `[default.extend-words]` section.
+
 ## Benchmarks
 
 ```bash
@@ -175,7 +209,7 @@ docker run -p 3536:3536 -v ./config.json:/app/config.json:ro signal-fish-server
 
 ## Project Structure
 
-```
+```text
 signal-fish-server/
 ├── src/
 │   ├── main.rs                  # Binary entry point
@@ -394,11 +428,45 @@ for comprehensive MSRV management guidance.
 
 The project uses GitHub Actions for CI. All PRs must pass:
 
-- `cargo fmt --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-features`
-- `cargo build --release`
-- **MSRV verification** (dedicated CI job validates MSRV consistency and builds with exact MSRV)
+- `cargo fmt --check` - Code formatting
+- `cargo clippy --all-targets --all-features -- -D warnings` - Rust linting
+- `cargo test --all-features` - All tests
+- `cargo build --release` - Release build
+- **MSRV verification** - Validates MSRV consistency and builds with exact MSRV
+- **Markdown linting** - Validates markdown files for formatting and best practices
+- **Spell checking** - Checks for typos in code and documentation
+- **YAML validation** - Validates workflow files and configuration
+- **Actionlint** - Validates GitHub Actions workflow syntax
+
+### Running All CI Checks Locally
+
+Before pushing, run all CI checks locally:
+
+```bash
+# Format check
+cargo fmt --check
+
+# Clippy
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Tests
+cargo test --all-features
+
+# Markdown linting
+./scripts/check-markdown.sh
+
+# Spell checking (install with: cargo install typos-cli)
+typos
+
+# MSRV consistency
+./scripts/check-msrv-consistency.sh
+```
+
+Or use the pre-commit hook to run checks automatically:
+
+```bash
+./scripts/enable-hooks.sh
+```
 
 ## Release Process
 

@@ -48,7 +48,7 @@
 
 Every significant code change follows this cycle:
 
-```
+```text
 1. IMPLEMENT — Make the change (one logical change at a time)
 2. VERIFY   — Run cargo check, clippy, test
 3. REVIEW   — Check against code-review-checklist

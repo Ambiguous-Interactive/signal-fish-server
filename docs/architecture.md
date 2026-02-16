@@ -4,7 +4,7 @@ System design and project structure overview.
 
 ## System Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │              Game Clients (WebSocket)                │
 │  Browser | Unity | Godot | Custom                    │
@@ -136,7 +136,7 @@ Metrics collection and export.
 
 ### Room Creation
 
-```
+```text
 Client                    WebSocket Handler         EnhancedGameServer        Database
   |                              |                         |                      |
   |-- CreateRoom -------------->|                         |                      |
@@ -149,7 +149,7 @@ Client                    WebSocket Handler         EnhancedGameServer        Da
 
 ### Player Join
 
-```
+```text
 Client                    WebSocket Handler         EnhancedGameServer        Database
   |                              |                         |                      |
   |-- JoinRoom ---------------->|                         |                      |
@@ -166,7 +166,7 @@ Client                    WebSocket Handler         EnhancedGameServer        Da
 
 ### Game Data Relay
 
-```
+```text
 Client A                 EnhancedGameServer                    Client B
   |                              |                                  |
   |-- GameData ----------------->|                                  |
@@ -237,7 +237,7 @@ For horizontal scaling:
 
 ## Module Dependencies
 
-```
+```text
 main.rs
   └── lib.rs
        ├── server.rs (EnhancedGameServer)

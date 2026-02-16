@@ -102,7 +102,7 @@ Game in progress.
 
 ### State Transitions
 
-```
+```text
 Waiting --> Countdown (all players ready)
 Countdown --> Waiting (player unready)
 Countdown --> Playing (countdown complete)

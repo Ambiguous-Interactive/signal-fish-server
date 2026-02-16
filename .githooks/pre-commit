@@ -25,4 +25,16 @@ if [ -x scripts/check-no-panics.sh ]; then
     fi
 fi
 
+# Check markdown files (if markdownlint-cli2 is installed)
+if command -v markdownlint-cli2 >/dev/null 2>&1; then
+    echo "[pre-commit] Checking markdown files..."
+    if ! scripts/check-markdown.sh 2>&1 | grep -q "All markdown files are valid"; then
+        echo "[pre-commit] ERROR: Markdown linting failed. Run './scripts/check-markdown.sh' for details."
+        echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
+        exit 1
+    fi
+else
+    echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
+fi
+
 echo "[pre-commit] All checks passed."

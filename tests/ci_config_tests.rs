@@ -305,20 +305,22 @@ fn test_no_language_specific_cache_mismatch() {
             let filename = path.file_name().unwrap().to_string_lossy();
 
             // Check for Python caching on non-Python projects
-            if !is_python_project && is_rust_project
-                && (content.contains("cache: 'pip'") || content.contains("cache: pip")) {
-                    // Allow if there's an explicit comment explaining why
-                    let has_explanation = content.contains("Pip caching disabled")
-                        || content.contains("no requirements.txt")
-                        || content.contains("yamllint install is fast");
+            if !is_python_project
+                && is_rust_project
+                && (content.contains("cache: 'pip'") || content.contains("cache: pip"))
+            {
+                // Allow if there's an explicit comment explaining why
+                let has_explanation = content.contains("Pip caching disabled")
+                    || content.contains("no requirements.txt")
+                    || content.contains("yamllint install is fast");
 
-                    assert!(
-                        has_explanation,
-                        "{filename}: Uses Python pip cache but no Python project files found.\n\
+                assert!(
+                    has_explanation,
+                    "{filename}: Uses Python pip cache but no Python project files found.\n\
                          This is a Rust project (Cargo.toml exists).\n\
                          Either remove 'cache: pip' or add a comment explaining why it's needed."
-                    );
-                }
+                );
+            }
 
             // Check for Node caching on non-Node projects
             if !is_node_project && is_rust_project {
@@ -341,41 +343,230 @@ fn test_scripts_are_executable() {
     // Prevents "permission denied" errors in CI
 
     let root = repo_root();
-    let scripts_dir = root.join("scripts");
+    let directories_to_check = vec![root.join("scripts"), root.join(".githooks")];
 
-    if !scripts_dir.exists() {
-        return;
-    }
+    for dir in directories_to_check {
+        if !dir.exists() {
+            continue;
+        }
 
-    for entry in std::fs::read_dir(&scripts_dir)
-        .unwrap()
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        if path.extension().map(|ext| ext == "sh").unwrap_or(false) {
-            let metadata = std::fs::metadata(&path)
-                .unwrap_or_else(|e| panic!("Failed to get metadata for {}: {}", path.display(), e));
+        for entry in std::fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
+            let path = entry.path();
+            // Check .sh files and files without extension (common for git hooks)
+            let should_check = path.extension().map(|ext| ext == "sh").unwrap_or(false)
+                || (path.is_file()
+                    && path.extension().is_none()
+                    && !path.file_name().unwrap().to_string_lossy().starts_with('.'));
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = metadata.permissions().mode();
-                let is_executable = mode & 0o111 != 0;
+            if should_check {
+                let metadata = std::fs::metadata(&path).unwrap_or_else(|e| {
+                    panic!("Failed to get metadata for {}: {}", path.display(), e)
+                });
 
-                assert!(
-                    is_executable,
-                    "{} is not executable.\n\
-                     Fix: chmod +x {}",
-                    path.display(),
-                    path.display()
-                );
-            }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = metadata.permissions().mode();
+                    let is_executable = mode & 0o111 != 0;
 
-            // On non-Unix platforms, just check the file exists
-            #[cfg(not(unix))]
-            {
-                let _ = metadata; // Suppress unused variable warning
+                    assert!(
+                        is_executable,
+                        "{} is not executable.\n\
+                         Fix: chmod +x {} && git update-index --chmod=+x {}",
+                        path.display(),
+                        path.display(),
+                        path.display()
+                    );
+                }
+
+                // On non-Unix platforms, just check the file exists
+                #[cfg(not(unix))]
+                {
+                    let _ = metadata; // Suppress unused variable warning
+                }
             }
         }
     }
+}
+
+#[test]
+fn test_markdown_files_have_language_identifiers() {
+    // This test prevents the MD040 markdown linting issue that caused CI failures
+    // All code blocks in markdown files must have language identifiers
+    // Example: ```bash instead of just ```
+
+    let root = repo_root();
+
+    // Find all markdown files in the repository (excluding dependencies and test fixtures)
+    let markdown_files = find_files_with_extension(
+        &root,
+        "md",
+        &["target", "third_party", "node_modules", "test-fixtures"],
+    );
+
+    if markdown_files.is_empty() {
+        // No markdown files found, test passes trivially
+        return;
+    }
+
+    let mut violations = Vec::new();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+        let mut in_code_block = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed for human readability
+
+            // Check for opening code fence
+            if line.trim_start().starts_with("```") {
+                if !in_code_block {
+                    // Opening fence
+                    in_code_block = true;
+
+                    // Check if language identifier is present
+                    let fence_content = line.trim_start().trim_start_matches('`').trim();
+                    if fence_content.is_empty() {
+                        violations.push(format!(
+                            "{}:{}: Code block missing language identifier (MD040)",
+                            file.display(),
+                            line_num
+                        ));
+                    }
+                } else {
+                    // Closing fence
+                    in_code_block = false;
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Markdown files have code blocks without language identifiers (MD040):\n\n{}\n\n\
+             All code blocks must specify a language identifier after the opening ```.\n\
+             Examples:\n\
+             - ```bash\n\
+             - ```rust\n\
+             - ```json\n\
+             - ```text\n\n\
+             To check markdown files locally:\n\
+             ./scripts/check-markdown.sh\n\n\
+             To auto-fix markdown issues:\n\
+             ./scripts/check-markdown.sh fix",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_typos_config_exists_and_is_valid() {
+    // This test ensures the .typos.toml configuration file exists
+    // and contains required technical terms to prevent false positives
+    // Prevents the HashiCorp typo false positive issue
+
+    let root = repo_root();
+    let typos_config = root.join(".typos.toml");
+
+    assert!(
+        typos_config.exists(),
+        ".typos.toml configuration file is missing.\n\
+         This file is required for the typos spell checker in CI.\n\
+         Create it with at least the [default.extend-words] section."
+    );
+
+    let content = read_file(&typos_config);
+
+    // Basic validation: check for required sections
+    assert!(
+        content.contains("[default.extend-words]") || content.contains("[default]"),
+        ".typos.toml must contain [default.extend-words] or [default] section"
+    );
+
+    // Check for common technical terms that are often flagged as typos
+    // These should be explicitly allowed in .typos.toml
+    let recommended_terms = vec![
+        ("hashicorp", "HashiCorp (company name)"),
+        ("github", "GitHub (platform name)"),
+        ("websocket", "WebSocket protocol"),
+    ];
+
+    let mut missing_terms = Vec::new();
+    for (term, description) in recommended_terms {
+        // Case-insensitive search since typos.toml entries are lowercase
+        if !content.to_lowercase().contains(&format!("{term} =")) {
+            missing_terms.push(format!("  - {} ({})", term, description));
+        }
+    }
+
+    if !missing_terms.is_empty() {
+        eprintln!(
+            "WARNING: .typos.toml is missing some recommended technical terms:\n{}",
+            missing_terms.join("\n")
+        );
+        // This is a warning, not a failure, since these are recommendations
+        // Uncomment to make it a hard requirement:
+        // panic!("Add recommended terms to .typos.toml");
+    }
+}
+
+#[test]
+fn test_markdown_config_exists() {
+    // This test ensures the .markdownlint.json configuration exists
+    // Prevents missing markdownlint configuration
+
+    let root = repo_root();
+    let markdownlint_config = root.join(".markdownlint.json");
+
+    assert!(
+        markdownlint_config.exists(),
+        ".markdownlint.json configuration file is missing.\n\
+         This file is required for markdown linting in CI.\n\
+         See .github/workflows/markdownlint.yml"
+    );
+
+    let content = read_file(&markdownlint_config);
+
+    // Verify it's valid JSON
+    assert!(
+        content.trim().starts_with('{') && content.trim().ends_with('}'),
+        ".markdownlint.json does not appear to be valid JSON"
+    );
+
+    // Check for MD040 rule (code block language identifiers)
+    assert!(
+        content.contains("MD040"),
+        ".markdownlint.json must include MD040 rule (code block language identifiers)"
+    );
+}
+
+/// Helper function to find all files with a given extension, excluding specified directories
+fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    fn visit_dirs(dir: &Path, extension: &str, exclude_dirs: &[&str], files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip excluded directories
+                if path.is_dir() {
+                    let dir_name = path.file_name().unwrap().to_string_lossy();
+                    if exclude_dirs.iter().any(|&excl| dir_name == excl) {
+                        continue;
+                    }
+                    visit_dirs(&path, extension, exclude_dirs, files);
+                } else if path
+                    .extension()
+                    .map(|ext| ext == extension)
+                    .unwrap_or(false)
+                {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    visit_dirs(root, extension, exclude_dirs, &mut files);
+    files
 }

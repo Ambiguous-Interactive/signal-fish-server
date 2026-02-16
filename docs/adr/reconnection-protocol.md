@@ -41,7 +41,7 @@ The server maintains per-room event buffers using a ring buffer (VecDeque) that:
 
 ### 3. Reconnection Flow
 
-```
+```text
 Player Disconnects → Server registers disconnection
                   → Generates reconnection token
                   → Buffers room events

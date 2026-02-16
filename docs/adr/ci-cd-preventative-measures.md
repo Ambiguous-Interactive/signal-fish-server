@@ -7,7 +7,7 @@
 
 ## Context
 
-After fixing three specific CI/CD issues in the Signal Fish Server repository, we identified the need for systematic preventative measures to catch similar problems early:
+After fixing multiple CI/CD issues in the Signal Fish Server repository, we identified the need for systematic preventative measures to catch similar problems early:
 
 ### Issues Fixed
 
@@ -26,6 +26,16 @@ After fixing three specific CI/CD issues in the Signal Fish Server repository, w
    - **Impact:** Larger binary size, increased attack surface, maintenance burden
    - **Root Cause:** No automated validation that dependencies are actually used
 
+4. **Markdown Linting Issues** (MD040, MD060 rules)
+   - **Problem:** Missing language identifiers on code blocks, table alignment issues
+   - **Impact:** CI failures, inconsistent documentation formatting
+   - **Root Cause:** No local validation of markdown files before commit
+
+5. **Typos Configuration Missing** (.typos.toml)
+   - **Problem:** Technical terms like "HashiCorp" flagged as typos
+   - **Impact:** CI failures, false positive spell check errors
+   - **Root Cause:** No configuration for technical terminology
+
 ### Risk Assessment
 
 Without systematic preventative measures, these types of issues will recur as the project evolves:
@@ -36,7 +46,7 @@ Without systematic preventative measures, these types of issues will recur as th
 
 ## Decision
 
-Implement comprehensive CI/CD preventative measures across four layers:
+Implement comprehensive CI/CD preventative measures across six layers:
 
 ### 1. Workflow Hygiene Validation
 
@@ -67,6 +77,9 @@ Implement comprehensive CI/CD preventative measures across four layers:
 - **YAML validity**: Basic YAML syntax validation (balanced quotes, required fields)
 - **Cache configuration**: Prevents language-specific cache mismatches
 - **Script permissions**: Ensures shell scripts have executable permissions
+- **Markdown validation**: Checks for code blocks without language identifiers (MD040)
+- **Typos configuration**: Validates .typos.toml exists and has required structure
+- **Markdownlint configuration**: Validates .markdownlint.json exists and is properly configured
 
 **Integration:**
 - Runs as part of `cargo test` (included in standard test suite)
@@ -86,17 +99,58 @@ Implement comprehensive CI/CD preventative measures across four layers:
 - Build and test with exact MSRV in CI
 - Clear error messages with remediation steps
 
-### 4. Documentation and Guidance
+### 4. Markdown Linting and Validation
+
+**New Files:**
+- `/scripts/check-markdown.sh` - Local markdown validation script
+- Tests added to `/tests/ci_config_tests.rs` - Markdown validation tests
+
+**Checks Implemented:**
+- **MD040 validation**: Ensures all code blocks have language identifiers
+- **Configuration validation**: Validates .markdownlint.json exists and is properly configured
+- **Auto-fix capability**: Script can automatically fix common markdown issues
+- **Test coverage**: Validates markdown files during `cargo test`
+
+**Integration:**
+- Pre-commit hook runs markdown linting (if markdownlint-cli2 is installed)
+- CI validates markdown files on every PR
+- VS Code extension recommendations for real-time linting
+
+### 5. Spell Checking Configuration
+
+**Enhanced Files:**
+- `.typos.toml` - Comprehensive technical term configuration
+- Tests added to `/tests/ci_config_tests.rs` - Typos config validation
+
+**Configuration Coverage:**
+- Rust crate names and tooling terms
+- Build tools and infrastructure (HashiCorp, GitHub, Docker, etc.)
+- Game engines and networking protocols
+- WebSocket and API terminology
+- Project-specific terms
+
+**Validation:**
+- Test ensures .typos.toml exists and has required sections
+- Warns if common technical terms are missing
+- CI runs typos check on every commit
+
+### 6. Documentation and Guidance
 
 **New Documentation:**
 - `/docs/adr/ci-cd-preventative-measures.md` (this document)
 - Enhanced workflow comments explaining cache decisions
 - Nightly toolchain documentation in unused-deps.yml
+- Markdown linting section in `/docs/development.md`
+
+**New VS Code Configuration:**
+- `/.vscode/extensions.json` - Recommended extensions for markdown linting and spell checking
+- `/.vscode/settings.json` - Enhanced with markdown formatting and spell check configuration
 
 **Existing Documentation Enhanced:**
 - `.llm/skills/msrv-and-toolchain-management.md` - Toolchain management
 - `.llm/skills/github-actions-best-practices.md` - Workflow best practices
 - `.llm/skills/dependency-management.md` - Dependency hygiene
+- `/docs/development.md` - Added markdown linting, spell checking, and CI sections
 
 ## Consequences
 
@@ -162,7 +216,7 @@ Implement comprehensive CI/CD preventative measures across four layers:
 - Shellcheck validated (no warnings)
 
 **Example Output:**
-```
+```text
 [OK] No language-specific caching mismatches found
 [OK] unused-deps.yml: Nightly toolchain is recent (< 6 months old)
 [WARN] ci.yml: No timeout-minutes found (consider adding)
@@ -226,19 +280,27 @@ fn test_msrv_consistency_across_config_files() {
    - Identifies cache mismatches
 
 2. ✅ **CI config tests pass**
-   - All 6 tests pass in clean repository
+   - All 9 tests pass in clean repository (MSRV, workflows, YAML, cache, scripts, markdown, typos)
    - Tests detect MSRV inconsistency (tested by temporarily breaking config)
    - Tests detect missing workflows (tested by moving file)
+   - Tests detect markdown issues (MD040 violations caught)
 
 3. ✅ **Integration works end-to-end**
    - New workflow-hygiene.yml workflow syntax is valid
-   - Script is executable and shellcheck clean
+   - Scripts are executable and shellcheck clean
    - Tests run as part of `cargo test`
+   - Pre-commit hook includes markdown linting
 
 4. ✅ **Documentation is clear**
    - ADR explains rationale and implementation
    - Scripts have usage documentation
    - Error messages include remediation steps
+   - Development.md updated with markdown linting and spell checking sections
+
+5. ✅ **Developer tooling configured**
+   - VS Code extensions recommended (markdownlint, spell checker)
+   - VS Code settings configured for markdown formatting
+   - Pre-commit hook updated with markdown linting
 
 ### Testing Performed
 
@@ -247,12 +309,16 @@ fn test_msrv_consistency_across_config_files() {
 ./scripts/check-workflow-hygiene.sh
 # Result: PASS (4 warnings, 0 errors)
 
-# Validate CI config tests
+# Validate CI config tests (including new markdown and typos tests)
 cargo test --test ci_config_tests
-# Result: 6 passed; 0 failed
+# Result: 9 passed; 0 failed
+
+# Validate markdown linting script
+./scripts/check-markdown.sh
+# Result: All markdown files are valid
 
 # Validate shellcheck
-shellcheck -s bash scripts/check-workflow-hygiene.sh
+shellcheck -s bash scripts/check-workflow-hygiene.sh scripts/check-markdown.sh
 # Result: No warnings
 
 # Validate workflow syntax
@@ -313,3 +379,4 @@ ls -la scripts/*.sh
 
 **Changelog:**
 - 2026-02-16: Initial ADR created with comprehensive preventative measures
+- 2026-02-16: Updated with markdown linting and spell checking preventative measures (layers 4-5)

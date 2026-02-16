@@ -26,15 +26,21 @@
 ## Quick Reference: Preventative Measures
 
 **Before pushing workflow changes:**
+
 1. Run `./scripts/check-workflow-hygiene.sh` to validate workflow configuration
 2. Run `cargo test --test ci_config_tests` to validate CI consistency
-3. Review `/docs/adr/ci-cd-preventative-measures.md` for systematic issue prevention
+3. Run `./scripts/check-markdown.sh` to validate markdown documentation
+4. Review `/docs/adr/ci-cd-preventative-measures.md` for systematic issue prevention
 
 **Common issues automatically detected:**
+
 - Language-specific caching on wrong project type (Python cache on Rust project)
 - Stale nightly toolchains (>180 days old)
 - Missing required CI validation workflows
 - MSRV inconsistency across configuration files
+- Markdown linting issues (MD040, MD060, MD013)
+- Spell checking issues (technical terms not whitelisted)
+- Git hook permission issues (missing executable bit)
 
 ---
 
@@ -976,6 +982,196 @@ set +x
 ```
 
 Full `set -x` in CI creates massive logs — use sparingly.
+
+---
+
+## 13. Configuration File Validation Tests (Preventative Pattern)
+
+### The Pattern: Test Configuration Consistency
+
+Instead of waiting for CI to fail, use data-driven tests to validate configuration consistency:
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_msrv_consistency_across_config_files() {
+    // Single source of truth: Cargo.toml rust-version
+    let msrv = extract_toml_version(&cargo_content, "rust-version");
+
+    // Validate rust-toolchain.toml
+    let toolchain_version = extract_yaml_version(&toolchain_content, "channel");
+    assert_eq!(
+        toolchain_version, msrv,
+        "rust-toolchain.toml channel must match Cargo.toml rust-version"
+    );
+
+    // Validate clippy.toml
+    let clippy_msrv = extract_toml_version(&clippy_content, "msrv");
+    assert_eq!(clippy_msrv, msrv, "clippy.toml msrv must match");
+
+    // Validate Dockerfile
+    assert!(dockerfile_version == msrv, "Dockerfile Rust version must match");
+}
+
+#[test]
+fn test_required_ci_workflows_exist() {
+    let required_workflows = vec![
+        "ci.yml",
+        "yaml-lint.yml",
+        "actionlint.yml",
+        "unused-deps.yml",
+        "workflow-hygiene.yml",
+    ];
+
+    for workflow in required_workflows {
+        assert!(
+            workflows_dir.join(workflow).exists(),
+            "Required workflow missing: {}", workflow
+        );
+    }
+}
+
+#[test]
+fn test_no_language_specific_cache_mismatch() {
+    let is_rust_project = Path::new("Cargo.toml").exists();
+
+    for workflow_file in workflow_files {
+        let content = read_file(&workflow_file);
+
+        // Check for Python caching on Rust projects
+        if is_rust_project && content.contains("cache: 'pip'") {
+            panic!("Python pip cache found in Rust project workflow");
+        }
+    }
+}
+
+#[test]
+fn test_markdown_files_have_language_identifiers() {
+    for file in find_markdown_files() {
+        for (line_num, line) in content.lines().enumerate() {
+            if line.trim_start().starts_with("```") {
+                let fence = line.trim_start().trim_start_matches('`').trim();
+                assert!(
+                    !fence.is_empty(),
+                    "{}:{}: Missing language identifier (MD040)",
+                    file.display(), line_num + 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_scripts_are_executable() {
+    for script in find_scripts(&["scripts", ".githooks"]) {
+        #[cfg(unix)]
+        {
+            let mode = metadata.permissions().mode();
+            let is_executable = mode & 0o111 != 0;
+
+            assert!(
+                is_executable,
+                "{} is not executable.\nFix: chmod +x {} && git update-index --chmod=+x {}",
+                script.display(), script.display(), script.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_typos_config_exists_and_is_valid() {
+    assert!(
+        Path::new(".typos.toml").exists(),
+        ".typos.toml is required for spell checking"
+    );
+
+    let content = read_file(".typos.toml");
+    assert!(
+        content.contains("[default.extend-words]"),
+        ".typos.toml must have [default.extend-words] section"
+    );
+}
+```
+
+### Benefits of Configuration Tests
+
+**Early Detection:**
+
+- Catch issues during `cargo test` (before pushing)
+- Fast feedback loop (< 1 second for all tests)
+- No waiting for CI to fail
+
+**Actionable Errors:**
+
+```rust
+// Error messages include fix instructions
+assert_eq!(
+    toolchain_version, msrv,
+    "rust-toolchain.toml channel must match Cargo.toml rust-version.\n\
+     Expected: {msrv}\n\
+     Found: {toolchain_version}\n\
+     Fix: Update rust-toolchain.toml to use channel = \"{msrv}\""
+);
+```
+
+**Prevents Regression:**
+
+- Once a configuration issue is fixed, add a test
+- Test prevents the same issue from recurring
+- Documents configuration requirements
+
+**Self-Documenting:**
+
+- Test names describe what's validated
+- Tests serve as executable documentation
+- Easy to add new validation rules
+
+### When to Add Configuration Tests
+
+Add a test whenever you:
+
+1. **Fix a CI configuration issue** - Prevent recurrence
+2. **Add a new configuration file** - Validate it exists and is correct
+3. **Establish a consistency requirement** - MSRV across files, naming conventions
+4. **Add a new required workflow** - Test that it exists
+5. **Add a coding standard** - Markdown linting, spell checking
+
+### Pattern: Test Configuration Files, Not Content
+
+```rust
+// ✅ GOOD: Test configuration requirements
+#[test]
+fn test_markdownlint_config_exists() {
+    assert!(Path::new(".markdownlint.json").exists());
+}
+
+// ❌ BAD: Test implementation details
+#[test]
+fn test_markdownlint_config_exact_content() {
+    let content = read_file(".markdownlint.json");
+    assert_eq!(content, r#"{"MD040": true, ...}"#); // Too brittle
+}
+```
+
+### Integration with CI
+
+Configuration tests run as part of standard test suite:
+
+```bash
+# Local development
+cargo test --test ci_config_tests
+
+# CI workflow
+cargo test --all-features  # Includes ci_config_tests
+```
+
+**Fast execution:**
+
+- No external dependencies (pure Rust file reading)
+- No network calls
+- Parallel test execution
+- Total time: < 1 second for all tests
 
 ---
 

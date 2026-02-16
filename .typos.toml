@@ -94,6 +94,7 @@ clang = "clang"          # C/C++ compiler
 distroless = "distroless" # Google's minimal container images
 dockerfile = "dockerfile"
 ghcr = "ghcr"            # GitHub Container Registry
+hashicorp = "hashicorp"  # HashiCorp (company name, case-insensitive match)
 mold = "mold"            # Fast linker
 nightly = "nightly"      # Rust nightly toolchain
 

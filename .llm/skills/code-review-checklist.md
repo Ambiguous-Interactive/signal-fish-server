@@ -35,7 +35,7 @@
 
 For each issue found, use this structured format:
 
-```
+```text
 **[SEVERITY]** File: path/to/file | Line: ~N
 Issue: One-line description of the problem
 Fix: Concrete suggested resolution
