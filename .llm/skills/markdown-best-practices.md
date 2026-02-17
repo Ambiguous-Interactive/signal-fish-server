@@ -84,6 +84,7 @@ fn main() {
 | Rust code | `rust` | ` ```Rust` |
 | Shell commands | `bash` or `sh` | ` ```bash` |
 | JSON | `json` | ` ```json` |
+| JSON with Comments | `jsonc` | ` ```jsonc` |
 | TOML | `toml` | ` ```toml` |
 | YAML | `yaml` or `yml` | ` ```yaml` |
 | Plain text/output | `text` | ` ```text` |
@@ -768,6 +769,94 @@ Test fixture markdown files often contain intentional lint violations. Exclude t
 from linting by adding paths to `.markdownlintignore` rather than weakening rules
 project-wide.
 
+### Pitfall 10: `json` vs `jsonc` Code Fence Tags
+
+JSON with Comments (JSONC) uses `//` or `/* */` style comments. Standard JSON does
+**not** allow comments. If a code block contains comments, use `` ```jsonc `` instead
+of `` ```json ``. Using the wrong tag causes JSON validators to report syntax errors
+on comment lines.
+
+````markdown
+❌ WRONG: Comments inside a json block
+```json
+{
+  // This comment makes the JSON invalid
+  "key": "value"
+}
+```
+
+✅ CORRECT: Use jsonc for JSON with comments
+```jsonc
+{
+  // Comments are valid in JSONC
+  "key": "value"
+}
+```
+
+✅ ALSO CORRECT: Remove comments for pure json
+```json
+{
+  "key": "value"
+}
+```
+````
+
+**When to use each tag:**
+
+| Content | Tag | Example |
+|---------|-----|---------|
+| Pure JSON (no comments) | `json` | API responses, `Cargo.lock` |
+| JSON with `//` comments | `jsonc` | VS Code `settings.json`, `tsconfig.json` |
+| JSON with `/* */` comments | `jsonc` | Configuration with inline docs |
+| JSON with placeholder values like `[...]` | `jsonc` | Abbreviated examples |
+
+**Why this matters:**
+
+- CI validators may parse `` ```json `` blocks with a strict JSON parser
+- `//` is not valid JSON syntax and causes parse errors
+- `[...]` as a placeholder (meaning "more items here") is not valid JSON
+- Using `jsonc` signals to validators and syntax highlighters that the
+  content follows relaxed JSON rules
+
+### Pitfall 11: Invalid Placeholders in JSON Code Blocks
+
+Documentation sometimes uses `[...]` or `...` as shorthand for "more items here."
+These are not valid JSON. Either use `jsonc` as the fence tag, or replace the
+placeholder with valid JSON.
+
+````markdown
+❌ WRONG: Invalid placeholder in json block
+```json
+{
+  "items": [
+    "first",
+    [...]
+  ]
+}
+```
+
+✅ CORRECT option A: Use jsonc tag
+```jsonc
+{
+  "items": [
+    "first",
+    // ... more items
+  ]
+}
+```
+
+✅ CORRECT option B: Use valid JSON
+```json
+{
+  "items": [
+    "first",
+    "second",
+    "third"
+  ]
+}
+```
+````
+
 ---
 
 ## VS Code Integration
@@ -789,7 +878,7 @@ Add to `.vscode/extensions.json`:
 
 Add to `.vscode/settings.json`:
 
-```json
+```jsonc
 {
   "markdownlint.config": {
     "MD040": true,  // Require language identifiers
@@ -931,7 +1020,7 @@ Before committing markdown changes:
 - Rust: `rust`
 - Shell: `bash` or `sh`
 - Plain text: `text`
-- JSON/YAML/TOML: `json`, `yaml`, `toml`
+- JSON/YAML/TOML: `json`, `jsonc` (with comments), `yaml`, `toml`
 
 ### Capitalization
 

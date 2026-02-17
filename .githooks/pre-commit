@@ -205,9 +205,25 @@ if [ -n "$STAGED_DOCS_MD" ]; then
     for md_file in $STAGED_DOCS_MD; do
         if [ -f "$md_file" ]; then
             base_dir=$(dirname "$md_file")
-            # Extract relative links and check they resolve
-            # Uses grep to find markdown links [text](url), filters to relative paths
-            for url in $(grep -oE '\[[^]]*\]\([^)]+\)' "$md_file" 2>/dev/null | sed -E 's/.*\(([^)]+)\).*/\1/' | grep -vE '^(https?://|mailto:|#)' || true); do
+            # Extract relative links with fence-aware AWK (skips links inside code blocks
+            # and inline code spans to avoid false positives on example links).
+            for url in $(awk '
+              /^```/ {
+                if (!fence_width) {
+                  n=0;s=$0;while(substr(s,1,1)=="`"){n++;s=substr(s,2)};fence_width=n
+                } else {
+                  n=0;s=$0;while(substr(s,1,1)=="`"){n++;s=substr(s,2)}
+                  if(n>=fence_width&&s~/^[ \t]*$/)fence_width=0
+                }
+                next
+              }
+              !fence_width { line=$0; gsub(/`[^`]+`/,"",line)
+                while(match(line,/\[([^]]+)\]\(([^)]+)\)/)){
+                  u=substr(line,RSTART,RLENGTH);sub(/.*\(/,"",u);sub(/\).*/,"",u);print u
+                  line=substr(line,RSTART+RLENGTH)
+                }
+              }
+            ' "$md_file" | grep -vE '^(https?://|mailto:|#)' || true); do
                 # Strip anchor for file check
                 file_part="${url%%#*}"
                 [ -z "$file_part" ] && continue

@@ -35,7 +35,7 @@ Response:
     "game_name": "my-game",
     "max_players": 8,
     "supports_authority": true,
-    "current_players": [...],
+    "current_players": [{"id": "your-player-id", "name": "Player1"}],
     "is_authority": false,
     "lobby_state": "Waiting",
     "ready_players": [],

@@ -744,6 +744,9 @@ Before committing workflow changes, verify:
 | `unused dependency` | Dependency in Cargo.toml but not used | Remove from Cargo.toml or document reason to keep |
 | `Permission denied` | Workflow needs additional permissions | Add `permissions:` section to workflow |
 | `Resource not accessible by integration` | GitHub token lacks permission | Grant required permission in `permissions:` |
+| `regex parse error` in lychee | `.lychee.toml` `exclude` uses glob syntax instead of regex | Escape `.` as `\\.`, `{}` as `\\{\\}`, use `.*` not `*` |
+| Script exits with code 1, no error message | `grep` found no matches under `set -euo pipefail` | Add `\|\| true` after grep, or use AWK instead |
+| False positive broken links in code blocks | Link checker scans inside fenced code blocks | Use AWK with fence tracking and inline code stripping |
 
 ---
 
@@ -1217,7 +1220,7 @@ fi
 
 **Add VS Code integration:**
 
-```json
+```jsonc
 
 // .vscode/extensions.json
 {
@@ -1548,7 +1551,7 @@ lychee --config .lychee.toml './**/*.md'
 
 **Lychee configuration best practices:**
 
-- `exclude` field is for URL patterns (regex), not file globs
+- `exclude` field is for URL patterns (**regex**, not globs) -- see Pattern 13 below
 - Use URL patterns to exclude placeholder links while keeping real ones
 - File path filtering is done via CLI args, not config
 - Test locally before pushing: `lychee --config .lychee.toml './**/*.md'`
@@ -1900,6 +1903,327 @@ git clone repo
 
 ---
 
+## Pattern 13: Lychee Config Regex Pitfalls (.lychee.toml)
+
+### Symptom
+
+```text
+CI link checker reports errors on URLs that should be excluded,
+or lychee fails to start with a regex compilation error:
+
+ERROR: regex parse error: \.github/test-fixtures/{bad-link}.md
+                                                 ^
+ERROR: repetition quantifier expects a valid decimal
+```
+
+### Root Cause
+
+**The `exclude` field in `.lychee.toml` takes regular expressions, NOT glob patterns.**
+
+Common mistakes:
+
+```toml
+# ❌ WRONG: Glob syntax -- {} and . are regex metacharacters
+exclude = [
+    ".github/test-fixtures/{bad-link}.md",
+    "https://example.com/*.html",
+]
+
+# ✅ CORRECT: Regex syntax -- escape metacharacters, anchor patterns
+exclude = [
+    # Anchored regex with escaped metacharacters
+    "^https://example\\.com/.*\\.html$",
+    # Literal braces escaped
+    "^\\.github/test-fixtures/\\{bad-link\\}\\.md$",
+]
+```
+
+**Key metacharacters that need escaping:**
+
+| Character | Glob meaning | Regex meaning | Fix |
+|-----------|-------------|---------------|-----|
+| `.` | Literal dot | Any character | Escape: `\\.` |
+| `{}` | Brace expansion | Repetition quantifier | Escape: `\\{\\}` |
+| `*` | Wildcard | Zero or more of previous | Use `.*` for wildcard |
+| `?` | Single char | Zero or one of previous | Escape: `\\?` |
+| `+` | Literal | One or more of previous | Escape: `\\+` |
+| `()` | Literal | Capture group | Escape: `\\(\\)` |
+| `[]` | Literal (some shells) | Character class | Escape: `\\[\\]` |
+
+### Solution
+
+**Always treat `.lychee.toml` `exclude` patterns as regex:**
+
+```toml
+# .lychee.toml
+
+exclude = [
+    # ✅ Escaped dots, anchored pattern
+    "^https://example\\.com/",
+
+    # ✅ Use .* instead of glob *
+    "^https://github\\.com/owner/repo/.*",
+
+    # ✅ Escaped braces for literal braces in URL
+    "^https://github\\.com/%7B%7B%7D/.*",
+
+    # ✅ Localhost patterns
+    "^http://localhost",
+
+    # ✅ Add comments explaining each exclusion
+    # RFC 2606 reserved example domain
+    "^https?://example\\.",
+]
+```
+
+### Prevention
+
+**Regex review checklist for `.lychee.toml`:**
+
+- [ ] Every `.` in a domain name or file extension is escaped as `\\.`
+- [ ] Patterns use `^` anchors to avoid unintended substring matches
+- [ ] Globs like `*` are replaced with regex `.*`
+- [ ] Literal braces `{}` are escaped as `\\{\\}`
+- [ ] Each exclusion has a comment explaining why it exists
+- [ ] Test patterns locally: `lychee --config .lychee.toml './**/*.md'`
+
+---
+
+## Pattern 14: Shell Script Validation Pitfalls (grep Exit Codes, Code Blocks)
+
+### Symptom
+
+```text
+# CI script crashes unexpectedly
+Error: Process completed with exit code 1.
+
+# OR: CI reports broken links that are actually inside code blocks
+ERROR: Broken internal link: ./nonexistent-example.md (docs/guide.md:42)
+# But line 42 is inside a fenced code block example
+```
+
+### Root Causes
+
+**A. `grep` returns exit code 1 when no matches are found:**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail   # ← -e exits on ANY non-zero exit code
+
+# ❌ WRONG: grep returns 1 if no matches, killing the script
+links=$(grep -oP '\[.*?\]\(.*?\)' "$file")
+
+# ✅ CORRECT: Append || true to suppress no-match exit code
+links=$(grep -oP '\[.*?\]\(.*?\)' "$file" || true)
+
+# ✅ BETTER: Use AWK instead (always exits 0)
+links=$(awk '/\[.*\]\(.*\)/' "$file")
+```
+
+**Why this is dangerous:**
+
+- `set -euo pipefail` is best practice for shell scripts
+- `grep` exit codes: 0 = match found, 1 = no match, 2 = error
+- With `-e`, exit code 1 (no match) terminates the script identically to exit code 2 (error)
+- Files with no links silently crash the validator
+
+**B. Link extraction scans inside fenced code blocks:**
+
+```bash
+# ❌ WRONG: Scans ALL lines, including code block examples
+grep -oP '\[([^\]]+)\]\(([^)]+)\)' "$file"
+
+# ✅ CORRECT: Use AWK to skip fenced code blocks and inline code
+awk '
+  /^```/ { in_block = !in_block; next }
+  in_block { next }
+  {
+    line = $0
+    # Strip inline code spans before matching links
+    gsub(/`[^`]+`/, "", line)
+    # Now extract links from non-code content only
+    while (match(line, /\[([^\]]+)\]\(([^)]+)\)/, arr)) {
+      print arr[2]
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }
+' "$file"
+```
+
+**D. Nested fence tracking -- simple toggle breaks on 4+ backtick fences:**
+
+The simple `in_fence = !in_fence` toggle treats every ```` ``` ```` line as a
+fence boundary. This breaks when a 4+ backtick outer fence contains 3-backtick
+examples (common in documentation-about-documentation). For example, a
+5-backtick fence wrapping a 3-backtick code block example: the inner
+```` ``` ```` lines are **not** fence boundaries -- they are content of the
+outer 5-backtick fence. The correct approach uses **fence-width tracking**:
+
+```awk
+# ✅ CORRECT: Width-based fence tracking
+/^[ \t]*`{3,}/ {
+    n = 0
+    s = $0
+    while (substr(s, 1, 1) == " " || substr(s, 1, 1) == "\t") s = substr(s, 2)
+    while (substr(s, 1, 1) == "`") { n++; s = substr(s, 2) }
+
+    if (!in_fence) {
+        fence_width = n
+        in_fence = 1
+    } else if (n >= fence_width && s ~ /^[ \t]*$/) {
+        # Closing fence: >= opening width AND no trailing content
+        # (trailing whitespace is allowed per CommonMark spec)
+        in_fence = 0
+    }
+    next
+}
+in_fence { next }
+```
+
+For validators (JSON/YAML/TOML/Bash) that extract content from inner fenced
+blocks, use a separate `outer_fence` variable for 4+ backtick fences while the
+inner block tracking handles 3-backtick fences:
+
+```awk
+# Track outer 4+ backtick fences separately from inner 3-backtick blocks
+/^`{4,}/ {
+    if (!outer_fence) { outer_fence = 1 } else { outer_fence = 0 }
+    next
+}
+outer_fence { next }
+# Now handle 3-backtick blocks normally for content extraction
+/^```/ { in_block = !in_block; next }
+```
+
+**C. Link validator only checks files, not directories:**
+
+```bash
+# ❌ WRONG: Only checks if target is a file
+if [ ! -f "$full_path" ]; then
+    echo "ERROR: Broken link: $link"
+fi
+
+# ✅ CORRECT: Check both files and directories
+if [ ! -f "$full_path" ] && [ ! -d "$full_path" ]; then
+    echo "ERROR: Broken link: $link"
+fi
+```
+
+### Prevention
+
+**Shell script validation checklist:**
+
+- [ ] Every `grep` in a `set -e` script has `|| true` or is wrapped in `if`
+- [ ] Link extraction skips fenced code blocks (track `` ``` `` toggles)
+- [ ] Link extraction strips inline code spans before matching
+- [ ] Path validation checks both files (`-f`) and directories (`-d`)
+- [ ] AWK is preferred over `grep` for pattern extraction in validation scripts
+- [ ] Fence tracking handles nested fences (4+ backtick outer fences skip inner 3-backtick blocks)
+- [ ] Closing fence check allows trailing whitespace (`s ~ /^[ \t]*$/` per CommonMark spec)
+
+**Testing pattern:**
+
+```bash
+# Create test fixtures that exercise edge cases:
+# 1. File with no links (tests grep exit code handling)
+# 2. File with links inside code blocks (tests code block skipping)
+# 3. File with links to directories (tests directory link handling)
+# 4. File with inline code containing link-like syntax (tests inline code stripping)
+```
+
+---
+
+## Pattern 15: Test Fixture Exclusion Consistency
+
+### Symptom
+
+```text
+# One validator passes, another fails on the same test fixture
+JSON validator: PASS (excludes .github/test-fixtures/)
+YAML validator: FAIL on .github/test-fixtures/bad.yml
+Link checker:   FAIL on .github/test-fixtures/broken-links.md
+```
+
+### Root Cause
+
+**Test fixtures are excluded from some validators but not all.**
+
+When adding test fixtures that contain intentionally invalid content, every
+validator in the CI pipeline must be updated to exclude them. Common validators
+that need exclusion:
+
+1. JSON validator
+2. YAML validator
+3. TOML validator
+4. Bash/shell validator
+5. Markdown linter
+6. Link checker (lychee and internal)
+7. Spell checker (typos)
+
+### Solution
+
+**Audit ALL validators when adding test fixture directories:**
+
+```yaml
+# In doc-validation.yml or equivalent workflow
+
+# JSON validator
+- name: Validate JSON
+  run: |
+    find . -name '*.json' \
+      ! -path './.github/test-fixtures/*' \
+      ! -path './test-fixtures/*' \
+      ! -path './target/*' \
+      -exec jq . {} +
+
+# YAML validator
+- name: Validate YAML
+  run: |
+    find . -name '*.yml' -o -name '*.yaml' \
+      ! -path './.github/test-fixtures/*' \
+      ! -path './test-fixtures/*' \
+      ! -path './target/*' \
+      | xargs yamllint
+
+# Internal link checker
+- name: Check internal links
+  run: |
+    find . -name '*.md' \
+      ! -path './.github/test-fixtures/*' \
+      ! -path './test-fixtures/*' \
+      ! -path './target/*' \
+      | while read -r file; do
+        # validate links...
+      done
+```
+
+### Prevention
+
+**Establish a single exclusion list pattern:**
+
+```yaml
+# Define exclusion paths once at the top of the workflow
+env:
+  EXCLUDE_PATHS: >-
+    ! -path './.github/test-fixtures/*'
+    ! -path './test-fixtures/*'
+    ! -path './target/*'
+    ! -path './node_modules/*'
+```
+
+**When adding a new test fixture directory:**
+
+1. Search the workflow for ALL `find` commands and `grep` invocations
+2. Add exclusion to every validator, not just the one you are testing
+3. Verify by running the full CI pipeline, not just the modified job
+
+**Key insight:** Test fixture exclusion is an all-or-nothing pattern. If you
+exclude fixtures from one validator, you must exclude them from all validators,
+because test fixtures often contain intentionally broken content across multiple
+formats (invalid JSON inside a Markdown file, broken links, syntax errors, etc.).
+
+---
+
 ## Lesson Learned: rustfmt --check on Documentation Code Blocks
 
 `rustfmt --check` returns exit code 1 for **both** parse errors and formatting
@@ -2038,3 +2362,11 @@ Based on recent issues fixed in this project:
 - **Detection:** Age checks, compilation failures
 - **Prevention:** Quarterly review, document update criteria
 - **Fix Time:** Minutes (update version) to Hours (if dependencies broke)
+
+### Category 4: Validation Script Fragility
+
+- **Example:** `grep` exit code 1 kills script; link checker scans code blocks; lychee regex vs glob confusion
+- **Detection:** CI failures with no error message, false positive broken links
+- **Prevention:** Use AWK over grep in validation scripts; always `|| true` with grep;
+  treat `.lychee.toml` exclude as regex; fence-aware link extraction
+- **Fix Time:** Minutes (once root cause identified) but Hours (to diagnose initially)

@@ -183,7 +183,8 @@ jobs:
             -not -path "./target/*" \
             -not -path "./third_party/*" \
             -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" | sort | while read -r md_file; do
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
 
             # Local variable - use lowercase
             [ -f "$md_file" ] || continue
@@ -371,9 +372,25 @@ jobs:
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
-            -not -path "./.git/*" | sort | while read -r md_file; do
+            -not -path "./.git/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
 
             awk '
+              # Skip content inside outer fences (4+ backticks) which may contain
+              # nested 3-backtick examples (e.g., documentation about code blocks).
+              # CommonMark: closing fences may have trailing spaces/tabs.
+              /^````/ {
+                if (!outer_fence) {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  outer_fence = n
+                } else {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  if (n >= outer_fence && s ~ /^[ \t]*$/) outer_fence = 0
+                }
+                next
+              }
+              outer_fence { next }
               # Match opening fence for JSON code blocks
               /^```json$/ {
                 in_block = 1
@@ -453,9 +470,23 @@ jobs:
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
-            -not -path "./.git/*" | sort | while read -r md_file; do
+            -not -path "./.git/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
 
             awk '
+              # Skip content inside outer fences (4+ backticks)
+              /^````/ {
+                if (!outer_fence) {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  outer_fence = n
+                } else {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  if (n >= outer_fence && s ~ /^[ \t]*$/) outer_fence = 0
+                }
+                next
+              }
+              outer_fence { next }
               # Match opening fence for YAML code blocks
               /^```yaml$/ || /^```yml$/ {
                 in_block = 1
@@ -535,9 +566,23 @@ jobs:
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
-            -not -path "./.git/*" | sort | while read -r md_file; do
+            -not -path "./.git/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
 
             awk '
+              # Skip content inside outer fences (4+ backticks)
+              /^````/ {
+                if (!outer_fence) {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  outer_fence = n
+                } else {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  if (n >= outer_fence && s ~ /^[ \t]*$/) outer_fence = 0
+                }
+                next
+              }
+              outer_fence { next }
               # Match opening fence for TOML code blocks
               /^```toml$/ {
                 in_block = 1
@@ -616,9 +661,23 @@ jobs:
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
-            -not -path "./.git/*" | sort | while read -r md_file; do
+            -not -path "./.git/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
 
             awk '
+              # Skip content inside outer fences (4+ backticks)
+              /^````/ {
+                if (!outer_fence) {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  outer_fence = n
+                } else {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  if (n >= outer_fence && s ~ /^[ \t]*$/) outer_fence = 0
+                }
+                next
+              }
+              outer_fence { next }
               # Match opening fence for Bash/shell code blocks
               /^```bash$/ || /^```sh$/ || /^```shell$/ {
                 in_block = 1
@@ -715,6 +774,8 @@ jobs:
             --exclude-path './target/*'
             --exclude-path './third_party/*'
             --exclude-path './.git/*'
+            --exclude-path './.github/test-fixtures/*'
+            --exclude-path './test-fixtures/*'
             '**/*.md'
           # Fail on broken links (exit code 1 if any links are broken)
           fail: true
@@ -740,15 +801,43 @@ jobs:
           find . -type f -name "*.md" \
             -not -path "./target/*" \
             -not -path "./third_party/*" \
-            -not -path "./.git/*" | sort | while read -r md_file; do
+            -not -path "./.git/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
 
             # Local variable - use lowercase
             [ -f "$md_file" ] || continue
 
             echo "Checking links in: $md_file"
 
-            # Extract markdown links [text](url) - handle multiline with grep -o
-            grep -oE '\[([^]]+)\]\(([^)]+)\)' "$md_file" | while read -r link; do
+            # Extract markdown links [text](url), skipping fenced code blocks and inline code.
+            # AWK toggles in_fence on ``` lines so example links inside fences are ignored.
+            # Inline code spans (`...`) are stripped before matching to avoid false positives
+            # on example links like `[title](path)` in educational documentation.
+            # Empty output is handled gracefully (no links = while loop doesn't execute).
+            (awk '
+              # Fence tracking with proper nesting: record opening fence width,
+              # close only when a line has >= that many backticks followed by
+              # optional whitespace (CommonMark allows trailing spaces/tabs).
+              /^```/ {
+                if (!fence_width) {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  fence_width = n
+                } else {
+                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+                  if (n >= fence_width && s ~ /^[ \t]*$/) fence_width = 0
+                }
+                next
+              }
+              !fence_width {
+                line = $0
+                gsub(/`[^`]+`/, "", line)
+                while (match(line, /\[([^]]+)\]\(([^)]+)\)/)) {
+                  print substr(line, RSTART, RLENGTH)
+                  line = substr(line, RSTART + RLENGTH)
+                }
+              }
+            ' "$md_file") | while read -r link; do
               # Local variables - use lowercase
               # Extract the URL part
               url=$(echo "$link" | sed -E 's/.*\(([^)]+)\).*/\1/')
@@ -783,7 +872,7 @@ jobs:
               full_path=$(realpath -m "$full_path")
 
               # Check if file exists
-              if [ ! -f "$full_path" ]; then
+              if [ ! -f "$full_path" ] && [ ! -d "$full_path" ]; then
                 echo "  ✗ Broken link in $md_file: $url (resolved to $full_path)"
                 read -r broken < "$BROKEN_LINKS_FILE"
                 echo "$((broken + 1))" > "$BROKEN_LINKS_FILE"
