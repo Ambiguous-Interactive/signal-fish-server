@@ -1,12 +1,17 @@
 # Skill: SOLID Principles Enforcement
 
-<!-- trigger: solid, single-responsibility, open-closed, liskov, interface-segregation, dependency-inversion, clean-code, architecture | Enforcing SOLID principles in Rust and TypeScript | Core -->
+<!--
+  trigger: solid, single-responsibility, open-closed, liskov, interface-segregation, dependency-inversion, clean-code, architecture
+  | Enforcing SOLID principles in Rust and TypeScript
+  | Core
+-->
 
 **Trigger**: When designing, reviewing, or refactoring code to ensure adherence to SOLID principles and clean architecture.
 
 ---
 
 ## When to Use
+
 - Designing new modules, traits, or structs
 - Reviewing PRs for architectural quality
 - Refactoring code that has grown unwieldy
@@ -16,6 +21,7 @@
 ---
 
 ## When NOT to Use
+
 - Prototyping or spike work (SOLID comes during cleanup)
 - Performance-critical inner loops where abstraction has overhead
 - Simple utility functions that don't warrant trait extraction
@@ -23,6 +29,7 @@
 ---
 
 ## TL;DR
+
 - Each struct/module should have exactly one reason to change
 - Extend behavior through traits and composition, not modification
 - Keep traits small and focused (2-5 methods)
@@ -61,7 +68,9 @@ struct GameServer {
 
 ```
 
-**File-level SRP**: One concern per file. `src/server.rs` with 2000 lines → split into `src/server/room_manager.rs`, `src/server/player_handler.rs`, `src/server/message_router.rs`.
+**File-level SRP**: One concern per file.
+`src/server.rs` with 2000 lines → split into `src/server/room_manager.rs`, `src/server/player_handler.rs`,
+`src/server/message_router.rs`.
 
 **Function-level SRP**: Functions over 50 lines usually do too much. Extract helper functions with descriptive names.
 
@@ -108,7 +117,8 @@ interface DashboardWidget {
 
 ## Liskov Substitution Principle (LSP)
 
-**Rule**: Every trait implementation must honor the trait's documented contract. Callers must not need to know which concrete type they're using.
+**Rule**: Every trait implementation must honor the trait's documented contract.
+Callers must not need to know which concrete type they're using.
 
 ```rust
 
@@ -126,13 +136,15 @@ pub trait Database: Send + Sync {
 
 ```
 
-**Violation smell**: An implementation that panics, returns different error types, or has different side effects than other implementations of the same trait.
+**Violation smell**: An implementation that panics, returns different error types,
+or has different side effects than other implementations of the same trait.
 
 ---
 
 ## Interface Segregation Principle (ISP)
 
-**Rule**: Many small, focused traits beat one large trait. No implementor should be forced to provide methods it doesn't use.
+**Rule**: Many small, focused traits beat one large trait.
+No implementor should be forced to provide methods it doesn't use.
 
 ```rust
 
@@ -203,11 +215,13 @@ struct GameServer<D: Database> {
 Code structured for SOLID is also structured for AI agents. These patterns help agents understand and modify code effectively:
 
 ### Naming
+
 - **Domain-specific vocabulary**: `RoomManager`, `PeerConnection`, `SignalingMessage` — not `Manager`, `Connection`, `Message`
 - **Intent-revealing functions**: `establish_peer_connection()` not `do_connect()`
 - **Consistent terminology**: If it's a "room" everywhere, don't alternate with "channel" or "session"
 
 ### Structure
+
 - **One concern per file/module** — AI reads entire files; focused files = faster comprehension
 - **Consistent patterns across the codebase** — AI learns patterns and replicates them
 - **Flat module trees** — prefer `src/auth/`, `src/rooms/` over `src/core/internal/impl/auth/`

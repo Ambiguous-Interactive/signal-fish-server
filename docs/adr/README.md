@@ -4,7 +4,8 @@ This directory contains Architecture Decision Records (ADRs) for the Signal Fish
 
 ## What are ADRs?
 
-Architecture Decision Records document important architectural decisions made during the development of the project. Each ADR captures:
+Architecture Decision Records document important architectural decisions made during the development of the project.
+Each ADR captures:
 
 - **Context**: The problem or situation requiring a decision
 - **Decision**: The architectural choice that was made

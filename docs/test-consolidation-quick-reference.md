@@ -112,6 +112,7 @@ fn report_stats(stats: &ValidationStats) -> String;
 ## Common Validation Patterns
 
 ### Pattern 1: File Existence
+
 ```rust
 const REQUIRED_FILES: &[(&str, &str)] = &[
     ("Cargo.toml", "Rust manifest"),
@@ -125,6 +126,7 @@ for (file, desc) in REQUIRED_FILES {
 ```
 
 ### Pattern 2: Config Field Validation
+
 ```rust
 const REQUIRED_CONFIG_FIELDS: &[(&str, &str, &str)] = &[
     ("clippy.toml", "msrv", "1.88.0"),
@@ -139,6 +141,7 @@ for (file, field, expected) in REQUIRED_CONFIG_FIELDS {
 ```
 
 ### Pattern 3: Workflow Action Validation
+
 ```rust
 const REQUIRED_ACTIONS: &[(&str, &[&str])] = &[
     ("ci.yml", &["actions/checkout", "actions/cache"]),
@@ -155,7 +158,7 @@ for (workflow, actions) in REQUIRED_ACTIONS {
 
 ## Migration Checklist
 
-### For Each Consolidation:
+### For Each Consolidation
 
 - [ ] Create data structure for specs
 - [ ] Implement consolidated test
@@ -186,13 +189,15 @@ cargo test --test ci_config_tests 2>&1 | grep -i "warning"
 
 ## Common Pitfalls
 
-### ❌ Don't:
+### What to Avoid
+
 - Remove old tests immediately
 - Change validation logic while consolidating
 - Skip error message improvements
 - Forget to add statistics
 
-### ✅ Do:
+### What to Do
+
 - Keep old tests with `#[ignore]` initially
 - Preserve exact validation logic
 - Improve error messages during consolidation
@@ -201,6 +206,7 @@ cargo test --test ci_config_tests 2>&1 | grep -i "warning"
 ## Example: MSRV Consolidation
 
 ### Before (4 tests, 225 lines)
+
 ```rust
 #[test] fn test_msrv_consistency_across_config_files() { /* ... */ }
 #[test] fn test_msrv_version_normalization_logic() { /* ... */ }
@@ -209,6 +215,7 @@ cargo test --test ci_config_tests 2>&1 | grep -i "warning"
 ```
 
 ### After (2 tests, 150 lines)
+
 ```rust
 const MSRV_CONFIG_FILES: &[MsrvConfigFile] = &[/* ... */];
 const MSRV_SCRIPTS: &[&str] = &[/* ... */];
@@ -218,6 +225,7 @@ const MSRV_SCRIPTS: &[&str] = &[/* ... */];
 ```
 
 **Benefits:**
+
 - -50% test count
 - -33% lines of code
 - +100% data-driven
@@ -283,7 +291,7 @@ assert!(errors.is_empty(), "Errors:\n{}", format_violations(&errors));
 4. Test and validate (30 minutes)
 5. Apply pattern to other tests
 
-**Total time to first consolidation: ~2 hours**
+Total time to first consolidation: ~2 hours
 
 ---
 

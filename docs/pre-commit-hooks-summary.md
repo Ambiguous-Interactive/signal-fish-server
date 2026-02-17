@@ -2,7 +2,8 @@
 
 ## Overview
 
-This document summarizes the enhancements made to the pre-commit hooks for the Signal Fish Server project, specifically designed to prevent the types of issues encountered in recent CI/CD failures.
+This document summarizes the enhancements made to the pre-commit hooks for the Signal Fish Server project,
+specifically designed to prevent the types of issues encountered in recent CI/CD failures.
 
 ## Issues That Motivated These Changes
 
@@ -21,7 +22,7 @@ From commit `1c8ed3b` (fix: CI/CD issues - clippy format args, MSRV version, AWK
    - Prevention: MSRV consistency check on config file changes
 
 3. **AWK regex pattern too strict**
-   - Issue: `/^```[Rr]ust(,.*)?$/` didn't match `rust ignore` (space-separated attributes)
+   - Issue: `/^```[Rr]ust(,.*)?$/` didn't match `Rust ignore` (space-separated attributes)
    - Location: `.github/workflows/doc-validation.yml:210`
    - Prevention: AWK anti-pattern validation on workflow changes
 
@@ -30,11 +31,13 @@ From commit `1c8ed3b` (fix: CI/CD issues - clippy format args, MSRV version, AWK
 ### 1. Enhanced Pre-Commit Hook (`.githooks/pre-commit`)
 
 **Previous behavior:**
+
 - Only checked: code formatting and panic-prone patterns
 - No clippy validation
 - No context-aware checks
 
 **New behavior:**
+
 - **7 comprehensive checks** with color-coded output
 - **Context-aware execution** (only runs relevant checks for changed files)
 - **Clear error messages** with fix suggestions
@@ -53,6 +56,7 @@ From commit `1c8ed3b` (fix: CI/CD issues - clippy format args, MSRV version, AWK
 | 7 | Link Checking | When `.md` files staged | Broken links (offline mode) |
 
 **User experience improvements:**
+
 - Color-coded pass/fail/skip indicators
 - Summary showing X passed, Y failed
 - Quick fix suggestions for each failure
@@ -63,6 +67,7 @@ From commit `1c8ed3b` (fix: CI/CD issues - clippy format args, MSRV version, AWK
 **Purpose:** Validate AWK scripts in GitHub Actions workflows for anti-patterns and portability issues.
 
 **What it checks:**
+
 - ✗ **Error:** `match()` function (GNU-specific, not POSIX)
   - Fix: Use `sub()` or `gsub()` instead
 - ⚠ **Warning:** `\0` in printf (not POSIX)
@@ -72,6 +77,7 @@ From commit `1c8ed3b` (fix: CI/CD issues - clippy format args, MSRV version, AWK
 - ⚠ **Warning:** Complex AWK scripts without explanatory comments
 
 **Why this matters:**
+
 - GitHub Actions runners use different AWK implementations (gawk, mawk)
 - POSIX-compliant code works everywhere
 - Prevents runtime failures in CI/CD pipelines
@@ -90,6 +96,7 @@ Checking: doc-validation.yml
 **Purpose:** Run all CI checks locally before pushing to catch issues early.
 
 **Modes:**
+
 ```bash
 ./scripts/run-local-ci.sh           # Run all checks (mirrors CI)
 ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests)
@@ -97,6 +104,7 @@ Checking: doc-validation.yml
 ```
 
 **Checks performed:**
+
 1. Code formatting (cargo fmt)
 2. Clippy lints - default features
 3. Clippy lints - all features
@@ -109,6 +117,7 @@ Checking: doc-validation.yml
 10. Markdown linting
 
 **Benefits:**
+
 - **Faster feedback** than waiting for CI
 - **Lower CI load** (fewer failed builds)
 - **Confidence before pushing** (know your code will pass CI)
@@ -132,6 +141,7 @@ Tip: Run with --fix to auto-fix some issues
 ### 4. Comprehensive Documentation: `docs/git-hooks-guide.md`
 
 **Sections:**
+
 - Installation and setup
 - Detailed explanation of each check
 - Troubleshooting guide for common issues
@@ -140,11 +150,13 @@ Tip: Run with --fix to auto-fix some issues
 - FAQ
 
 **Real-world examples:**
+
 - Every section includes actual examples from our codebase
 - References specific commits that encountered issues
 - Shows exact error messages and how to fix them
 
 **Example troubleshooting entry:**
+
 ```markdown
 ### AWK Validation Fails
 
@@ -162,6 +174,7 @@ doc-validation.yml:210 - AWK syntax error
 ### 5. Updated `scripts/enable-hooks.sh`
 
 **Changes:**
+
 - Lists all 7 checks that will run
 - Points to documentation (`docs/git-hooks-guide.md`)
 - Suggests local CI runner
@@ -179,6 +192,7 @@ doc-validation.yml:210 - AWK syntax error
 ```
 
 **Problems:**
+
 - No clippy validation → clippy warnings reach CI
 - No MSRV checking → version mismatches reach CI
 - No AWK validation → workflow errors reach CI
@@ -215,6 +229,7 @@ doc-validation.yml:210 - AWK syntax error
 ```
 
 **Benefits:**
+
 - ✓ Catches clippy issues pre-commit
 - ✓ Prevents MSRV mismatches
 - ✓ Validates AWK scripts
@@ -247,17 +262,20 @@ The new hooks integrate seamlessly with existing validation scripts:
 ### Pre-Commit Hook Performance
 
 **Fast execution through:**
+
 1. **Context-aware checks** - Only run checks relevant to staged files
 2. **Staged files only** - Don't check entire codebase
 3. **Skipped checks** - Clear indicators when checks don't apply
 
 **Typical execution times:**
+
 - Formatting change only: < 5 seconds
 - Rust code change: 10-30 seconds (includes clippy)
 - Workflow change: < 5 seconds (AWK validation is fast)
 - Markdown change: < 5 seconds
 
 **For large changes:**
+
 ```bash
 # Option 1: Commit in smaller chunks
 git add src/specific_file.rs
@@ -414,6 +432,7 @@ git commit --no-verify -m "WIP: partial work"
 ### When to Update Hooks
 
 Update `.githooks/pre-commit` when:
+
 - New linting tools are added to CI
 - New file types need validation
 - CI failure patterns emerge repeatedly
@@ -496,12 +515,17 @@ After implementing these enhancements, we expect:
 
 ## Conclusion
 
-These enhancements transform our pre-commit hooks from basic formatting checks into a comprehensive quality gate that prevents the specific types of issues we've encountered in production. By catching problems at commit time rather than in CI, we save developer time, reduce CI load, and maintain higher code quality standards.
+These enhancements transform our pre-commit hooks from basic formatting checks into a comprehensive quality gate
+that prevents the specific types of issues we've encountered in production.
+By catching problems at commit time rather than in CI, we save developer time, reduce CI load,
+and maintain higher code quality standards.
 
 The hooks are designed to be:
+
 - **Fast** - Only check what's necessary
 - **Clear** - Easy to understand what failed and why
 - **Helpful** - Provide actionable fix suggestions
 - **Maintainable** - Well-documented and easy to extend
 
-Most importantly, they're based on **real issues we've faced**, ensuring they provide genuine value rather than theoretical checks.
+Most importantly, they're based on **real issues we've faced**,
+ensuring they provide genuine value rather than theoretical checks.

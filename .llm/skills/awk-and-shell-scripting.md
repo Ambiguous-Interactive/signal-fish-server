@@ -1,8 +1,13 @@
 # Skill: AWK and Shell Scripting in CI/CD
 
-<!-- trigger: awk, shell script, bash, posix, mawk, gawk, nul delimiter, multi-line processing | POSIX-compatible AWK and shell scripting for CI/CD pipelines | Infrastructure -->
+<!--
+  trigger: awk, shell script, bash, posix, mawk, gawk, nul delimiter, multi-line processing
+  | POSIX-compatible AWK and shell scripting for CI/CD pipelines
+  | Infrastructure
+-->
 
-**Trigger**: When writing AWK scripts for CI/CD workflows, processing multi-line content, or ensuring shell script portability across environments.
+**Trigger**: When writing AWK scripts for CI/CD workflows, processing multi-line content,
+or ensuring shell script portability across environments.
 
 ---
 
@@ -228,8 +233,8 @@ echo '```rust ignore' | mawk '/^```[Rr]ust/ {print "MATCH"}'
 |----------|--------------|---------|-----------|
 | Code fence detection | Prefix | `/^```[Rr]ust/` | Flexible attribute handling |
 | Closing fence | Exact | `/^```$/` | Must match exactly (no prefix) |
-| Language-only detection | Exact | `/^```rust$/` | Only plain code blocks |
-| Strict validation | Exact | `/^```rust,ignore$/` | Enforce specific format |
+| Language-only detection | Exact | `/^```Rust$/` | Only plain code blocks |
+| Strict validation | Exact | `/^```Rust,ignore$/` | Enforce specific format |
 | General extraction | Prefix | `/^```python/` | Handle any Python fence |
 
 ---
@@ -757,6 +762,13 @@ jobs that reference that step name.
   patterns -- set a flag on the start pattern, clear it on the
   end pattern, and process lines only when the flag is set
 
+### Opening Fence Pattern is a Prefix Match
+
+The AWK pattern `/^```[Rr]ust/` is a **prefix** match -- it would also match
+`` ```rustic `` or `` ```rusty ``. For stricter language detection, anchor the
+end with an optional attribute suffix: `/^```[Rr]ust(,.*| .*)?$/`. In practice
+false positives are rare, but anchoring is safer for polyglot repositories.
+
 ### Local Validation with `scripts/validate-ci.sh`
 
 Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
@@ -796,4 +808,5 @@ Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
 4. **File-based counters** - Survive pipeline subshells
 5. **Shellcheck validation** - Catch issues before CI
 
-**Key insight:** CI environments (Ubuntu/mawk) differ from local development (macOS/gawk). Always test scripts in CI-like environments before committing.
+**Key insight:** CI environments (Ubuntu/mawk) differ from local development (macOS/gawk).
+Always test scripts in CI-like environments before committing.

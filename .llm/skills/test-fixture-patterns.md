@@ -1,8 +1,13 @@
 # Skill: Test Fixture Patterns and Data-Driven CI Testing
 
-<!-- trigger: test fixture, data-driven test, ci config test, configuration testing, preventative testing | Creating test fixtures and data-driven tests for CI/CD validation | Testing -->
+<!--
+  trigger: test fixture, data-driven test, ci config test, configuration testing, preventative testing
+  | Creating test fixtures and data-driven tests for CI/CD validation
+  | Testing
+-->
 
-**Trigger**: When creating test fixtures, writing configuration tests, or implementing data-driven test patterns for CI/CD validation.
+**Trigger**: When creating test fixtures, writing configuration tests,
+or implementing data-driven test patterns for CI/CD validation.
 
 ---
 
@@ -19,7 +24,7 @@
 
 - Application unit tests (see [testing-strategies](./testing-strategies.md))
 - Integration tests (see [testing-tools-and-frameworks](./testing-tools-and-frameworks.md))
-- Performance benchmarks (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Performance benchmarks (see [Rust Performance Optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -89,9 +94,11 @@ These fixtures are used by `tests/ci_config_tests.rs` to validate:
 Tests reference these fixtures to validate detection of specific issues:
 
 ```rust
+
 // Example: Test detects placeholder URLs
 let fixture = read_fixture("workflows/invalid-placeholder.yml");
 assert!(contains_placeholder_url(&fixture));
+
 ```
 
 ## Maintenance
@@ -99,7 +106,6 @@ assert!(contains_placeholder_url(&fixture));
 - Keep fixtures minimal (only what's needed to demonstrate the pattern)
 - Update fixtures when configuration format changes
 - Document why each fixture exists (what issue it demonstrates)
-```
 
 ### 3. Fixture Naming Convention
 
@@ -375,7 +381,7 @@ fn is_pattern_excluded(lychee_content: &str, pattern: &str) -> bool {
 
 1. **Explain what's wrong**: "MSRV mismatch between Cargo.toml and Dockerfile"
 2. **Show expected vs actual**: "Expected: 1.88.0, Found: 1.87.0"
-3. **Provide fix instructions**: "Fix: Update Dockerfile to use rust:1.88.0-bookworm"
+3. **Provide fix instructions**: "Fix: Update Dockerfile to use `rust:1.88.0-bookworm`"
 4. **Explain why it matters**: "This ensures consistent Rust version across local and CI builds"
 
 **Example:**

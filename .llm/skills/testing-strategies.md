@@ -1,6 +1,10 @@
 # Skill: Testing Strategies
 
-<!-- trigger: test, testing, unit, integration, mock, table-driven, async test, naming convention | Core testing methodology and patterns | Core -->
+<!--
+  trigger: test, testing, unit, integration, mock, table-driven, async test, naming convention
+  | Core testing methodology and patterns
+  | Core
+-->
 
 **Trigger**: When writing tests, choosing test patterns, or structuring test code.
 
@@ -32,7 +36,8 @@
 - Test names follow `test_<unit>_<condition>_<expected_behavior>` convention.
 - Run tests with `cargo nextest` for parallel execution and better output.
 
-> **Note:** In test code, `.unwrap()` and `.expect()` are acceptable — test panics indicate test failures. The strict anti-unwrap policy applies only to production code in `src/`.
+> **Note:** In test code, `.unwrap()` and `.expect()` are acceptable — test panics indicate test failures.
+> The strict anti-unwrap policy applies only to production code in `src/`.
 
 ---
 
@@ -74,9 +79,11 @@ mod tests {
 test_<unit>_<condition>_<expected_behavior>
 
 ```rust
+
 #[test] fn room_code_empty_input_returns_invalid_length() { ... }
 #[test] fn player_join_room_full_returns_room_full_error() { ... }
 #[test] fn broadcast_no_recipients_succeeds_silently() { ... }
+
 ```
 
 ---
@@ -84,6 +91,7 @@ test_<unit>_<condition>_<expected_behavior>
 ## Data-Driven / Table-Driven Tests
 
 ```rust
+
 #[test]
 fn test_room_code_validation() {
     let cases = [
@@ -113,6 +121,7 @@ Include a `desc` string in every case for clear failure messages.
 ## Testing Async Code
 
 ```rust
+
 #[tokio::test]
 async fn test_websocket_message_handling() {
     let server = TestServer::start().await;
@@ -179,6 +188,7 @@ async fn test_join_room_db_failure() {
 ## Testing Error Paths and Edge Cases
 
 ```rust
+
 #[tokio::test]
 async fn test_join_after_room_deleted() {
     let server = TestServer::start().await;
@@ -204,13 +214,15 @@ Always test: empty collections, Unicode input, zero-value parameters, concurrent
 
 ## Test Organization
 
-Unit tests: `#[cfg(test)] mod tests { }` co-located with code in `src/`. Integration tests: `tests/` directory. Share utilities via `tests/common/mod.rs`.
+Unit tests: `#[cfg(test)] mod tests { }` co-located with code in `src/`.
+Integration tests: `tests/` directory. Share utilities via `tests/common/mod.rs`.
 
 ---
 
 ## Testing Concurrent Code
 
 ```rust
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_no_data_race_on_room_state() {
     let server = Arc::new(TestServer::start().await);
@@ -440,7 +452,7 @@ Every test failure message should include:
 - [ ] **Why** the test failed (e.g., "Dockerfile version doesn't match Cargo.toml")
 - [ ] **Expected** value (e.g., "Expected: 1.88")
 - [ ] **Actual** value (e.g., "Found: 1.87")
-- [ ] **How** to fix (e.g., "Fix: Update Dockerfile line 7 to: FROM rust:1.88-bookworm")
+- [ ] **How** to fix (e.g., "Fix: Update Dockerfile line 7 to: `FROM rust:1.88-bookworm`")
 - [ ] **Context** if needed (e.g., "Note: Docker Hub uses X.Y format, not X.Y.Z")
 - [ ] **Examples** for complex fixes (e.g., show before/after)
 

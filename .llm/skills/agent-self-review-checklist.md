@@ -1,12 +1,17 @@
 # Skill: Agent Self-Review Checklist
 
-<!-- trigger: review, self-review, verify, checklist, done, quality-check, pre-commit | Structured self-verification before marking any task complete | Core -->
+<!--
+  trigger: review, self-review, verify, checklist, done, quality-check, pre-commit
+  | Structured self-verification before marking any task complete
+  | Core
+-->
 
 **Trigger**: Before marking any task as complete, before presenting changes to user, or when reviewing own work for correctness.
 
 ---
 
 ## When to Use
+
 - Before marking any task as complete
 - Before presenting changes to user (user commits, not you)
 - When reviewing your own work for quality and correctness
@@ -18,11 +23,13 @@
 ---
 
 ## When NOT to Use
+
 - When reviewing another developer's code (use [code-review-checklist](./code-review-checklist.md) instead)
 - When just exploring or reading code without making changes
 - During initial research or context gathering
 
 ## TL;DR
+
 - Run cargo check → clippy → test → fmt after every change
 - Use Deep Review checklist for significant changes
 - Walk the "Am I Done?" decision tree before committing
@@ -79,6 +86,7 @@ Run from the specific project directory. All three must pass.
 For non-trivial changes, dispatch as a subagent or work through manually:
 
 ### Rust Code Quality
+
 - [ ] No new `unwrap()` on user input or external data
 - [ ] No new `clone()` where a reference would work
 - [ ] Error messages are actionable (include context about what failed)
@@ -89,6 +97,7 @@ For non-trivial changes, dispatch as a subagent or work through manually:
 - [ ] Sensitive data not logged at info/debug level
 
 ### Test Coverage
+
 - [ ] New behavior has corresponding new tests
 - [ ] Edge cases covered (empty input, max values, invalid data)
 - [ ] Error paths tested, not just happy paths
@@ -100,11 +109,11 @@ For non-trivial changes, dispatch as a subagent or work through manually:
 
 For changes in `.github/workflows/` or CI configuration:
 
-- [ ] **Language ecosystem match**: Caching and tools match project language (Rust = rust-cache, not pip)
+- [ ] **Language ecosystem match**: Caching and tools match project language (Rust = `rust-cache`, not pip)
 - [ ] **Hash files exist**: Files in `hashFiles()` exist (Cargo.lock for Rust, not requirements.txt)
 - [ ] **Pinned versions recent**: Action SHAs <1 year old, nightly toolchains <6 months old
 - [ ] **Documentation complete**: Workflow has header comment, pinned versions have update criteria
-- [ ] **MSRV consistency**: If Rust version changed, updated in ALL files (Cargo.toml, rust-toolchain.toml,
+- [ ] **MSRV consistency**: If Rust version changed, updated in ALL files (`Cargo.toml`, `rust-toolchain.toml`,
 
   clippy.toml, Dockerfile)
 
@@ -188,7 +197,8 @@ Git safety verified? ─── NO ──► Remove git commits/config; provide i
 
 ```
 
-**Key rule**: Never modify test expectations to make tests pass. If a test fails, understand *why* the existing expectation exists before changing anything.
+**Key rule**: Never modify test expectations to make tests pass.
+If a test fails, understand _why_ the existing expectation exists before changing anything.
 
 ---
 

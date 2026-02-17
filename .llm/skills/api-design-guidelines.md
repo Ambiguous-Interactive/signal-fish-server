@@ -1,6 +1,10 @@
 # Skill: API Design Guidelines
 
-<!-- trigger: api, design, public, interface, sdk, newtype, endpoint | Designing public APIs, protocol types, or SDK interfaces | Feature -->
+<!--
+  trigger: api, design, public, interface, sdk, newtype, endpoint
+  | Designing public APIs, protocol types, or SDK interfaces
+  | Feature
+-->
 
 **Trigger**: When designing or modifying any public API surface, protocol types, HTTP endpoints, or SDK interfaces.
 
@@ -98,15 +102,19 @@ impl IntoIterator for Room {
 
 ## Interoperability — Common Traits
 
-Derive `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`, `Default`, `Serialize`/`Deserialize` eagerly on all public types. Implement `Display`, `From`/`TryFrom`, and `AsRef` where applicable.
+Derive `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`, `Default`, `Serialize`/`Deserialize` eagerly on all public types.
+Implement `Display`, `From`/`TryFrom`, and `AsRef` where applicable.
 
-See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the full common traits derive checklist and conversion trait patterns.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the full common traits derive checklist
+and conversion trait patterns.
 
 ---
 
 ## Type Safety
 
-Use newtypes for domain identifiers and enums instead of booleans for function parameters to get compile-time safety. See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for newtypes and enums-over-booleans patterns.
+Use newtypes for domain identifiers and enums instead of booleans for function parameters to get
+compile-time safety. See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for newtypes
+and enums-over-booleans patterns.
 
 ### Bitflags for Options
 
@@ -259,15 +267,18 @@ pub async fn create_room(&self, config: RoomConfig) -> Result<Room, CreateError>
 
 ## Public API Surface Minimization
 
-Start with minimum visibility (`pub(crate)` by default), expand only when needed. Expose stable, documented methods as `pub`; keep implementation details `pub(crate)` or `pub(super)`.
+Start with minimum visibility (`pub(crate)` by default), expand only when needed.
+Expose stable, documented methods as `pub`; keep implementation details `pub(crate)` or `pub(super)`.
 
 ---
 
 ## Semver Compatibility
 
-**Breaking** (major bump): Removing public items, changing signatures, adding required fields without `#[non_exhaustive]`, changing trait bounds, changing enum variants.
+**Breaking** (major bump): Removing public items, changing signatures,
+adding required fields without `#[non_exhaustive]`, changing trait bounds, changing enum variants.
 
-**Non-breaking**: Adding new public items, adding variants/fields to `#[non_exhaustive]` types, adding default trait methods, weakening trait bounds.
+**Non-breaking**: Adding new public items, adding variants/fields to `#[non_exhaustive]` types,
+adding default trait methods, weakening trait bounds.
 
 ---
 
@@ -309,7 +320,8 @@ to clients. For REST APIs with multiple endpoints, maintain an OpenAPI specifica
 
 ### Protocol Messages
 
-Use `#[non_exhaustive]` and `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums. See [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
+Use `#[non_exhaustive]` and `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums.
+See [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
 
 ### Error Responses
 
@@ -326,7 +338,8 @@ pub struct ApiError {
 
 ### Connection State
 
-Use the typestate pattern to prevent invalid operations. See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
+Use the typestate pattern to prevent invalid operations.
+See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
 
 ---
 

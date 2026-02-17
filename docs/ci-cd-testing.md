@@ -66,7 +66,7 @@ Tests that validate markdown formatting and consistency:
 |------|---------|-----------------|
 | `test_markdown_files_have_language_identifiers` | Ensures code blocks have language identifiers | MD040 violations (missing language on code blocks) |
 | `test_markdown_no_capitalized_filenames_in_links` | Catches capitalization issues in links | Link breakage on case-sensitive filesystems |
-| `test_markdown_technical_terms_consistency` | Validates technical term capitalization | Inconsistent documentation (GitHub vs github) |
+| `test_markdown_technical_terms_consistency` | Validates technical term capitalization | Inconsistent documentation (GitHub vs `github`) |
 | `test_markdown_common_patterns_are_correct` | Data-driven pattern validation | Common formatting mistakes |
 | `test_markdown_config_exists` | Validates `.markdownlint.json` exists | Missing markdownlint configuration |
 
@@ -353,7 +353,7 @@ README.md:42 MD040/fenced-code-language Fenced code blocks should have a languag
 
 Add language identifier to code blocks:
 
-```markdown
+`````markdown
 <!-- Before (fails) -->
 ````text
 code here
@@ -363,8 +363,7 @@ code here
 ````bash
 code here
 ````
-
-```
+`````
 
 **Why it happens:** Missing language identifier prevents syntax highlighting.
 
@@ -535,7 +534,8 @@ total=$((total + 1))
 echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
 ```
 
-**Reason:** Bash subshells (from pipes and while loops) cannot modify parent shell variables. Files persist state across subshells.
+**Reason:** Bash subshells (from pipes and while loops) cannot modify parent shell variables.
+Files persist state across subshells.
 
 **Alternative considered:** Using process substitution (`< <(command)`), but file-based approach is more portable and debuggable.
 
@@ -545,72 +545,72 @@ echo "$total $validated $skipped $failed" > "$COUNTER_FILE"
 
 1. Add test case to `test_lychee_excludes_placeholder_urls`:
 
-```rust
-let test_cases = vec![
-    // ... existing cases ...
-    ("https://my-new-placeholder.com", "New placeholder pattern"),
-];
-```
+    ```rust
+    let test_cases = vec![
+        // ... existing cases ...
+        ("https://my-new-placeholder.com", "New placeholder pattern"),
+    ];
+    ```
 
 2. Update `.lychee.toml` with the exclusion:
 
-```toml
-exclude = [
-    # ... existing exclusions ...
-    "https://my-new-placeholder.com/*",
-]
-```
+    ```toml
+    exclude = [
+        # ... existing exclusions ...
+        "https://my-new-placeholder.com/*",
+    ]
+    ```
 
 3. Run tests to verify:
 
-```bash
-cargo test test_lychee_excludes_placeholder_urls
-```
+    ```bash
+    cargo test test_lychee_excludes_placeholder_urls
+    ```
 
 ### Adding New Markdown Pattern Tests
 
 1. Add test case to `test_markdown_common_patterns_are_correct`:
 
-```rust
-let test_cases = vec![
-    // ... existing cases ...
-    (
-        r"new_anti_pattern",
-        "Description of the issue",
-        "Suggested fix",
-    ),
-];
-```
+    ```rust
+    let test_cases = vec![
+        // ... existing cases ...
+        (
+            r"new_anti_pattern",
+            "Description of the issue",
+            "Suggested fix",
+        ),
+    ];
+    ```
 
 2. Run tests to verify:
 
-```bash
-cargo test test_markdown_common_patterns_are_correct
-```
+    ```bash
+    cargo test test_markdown_common_patterns_are_correct
+    ```
 
 ### Adding New Workflow Validation Tests
 
 1. Create new test function in `tests/ci_config_tests.rs`:
 
-```rust
-#[test]
-fn test_my_new_workflow_validation() {
-    let root = repo_root();
-    let workflow = root.join(".github/workflows/my-workflow.yml");
+    ```rust
+    #[test]
+    fn test_my_new_workflow_validation() {
+        let root = repo_root();
+        let workflow = root.join(".github/workflows/my-workflow.yml");
 
-    // Add validation logic
-    assert!(workflow.exists(), "Workflow is missing");
+        // Add validation logic
+        assert!(workflow.exists(), "Workflow is missing");
 
-    let content = read_file(&workflow);
-    assert!(content.contains("expected-content"), "Missing required content");
-}
-```
+        let content = read_file(&workflow);
+        assert!(content.contains("expected-content"), "Missing required content");
+    }
+    ```
 
 2. Run the test:
 
-```bash
-cargo test test_my_new_workflow_validation
-```
+    ```bash
+    cargo test test_my_new_workflow_validation
+    ```
 
 ## Summary
 

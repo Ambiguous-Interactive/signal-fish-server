@@ -1,6 +1,10 @@
 # Skill: Testing Tools and Frameworks
 
-<!-- trigger: testcontainers, proptest, insta, criterion, fuzz, nextest, coverage, tarpaulin | Testing tools, frameworks, and coverage measurement | Core -->
+<!--
+  trigger: testcontainers, proptest, insta, criterion, fuzz, nextest, coverage, tarpaulin
+  | Testing tools, frameworks, and coverage measurement
+  | Core
+-->
 
 **Trigger**: When choosing or configuring testing tools, frameworks, or coverage measurement.
 

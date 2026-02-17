@@ -1,8 +1,13 @@
 # Skill: Supply Chain Security
 
-<!-- trigger: supply-chain, cargo-audit, cargo-deny, sbom, dependency, cve, vulnerability, advisory, license, reproducible-build | Securing the dependency supply chain for Rust projects | Security -->
+<!--
+  trigger: supply-chain, cargo-audit, cargo-deny, sbom, dependency, cve, vulnerability, advisory, license, reproducible-build
+  | Securing the dependency supply chain for Rust projects
+  | Security
+-->
 
-**Trigger**: When auditing dependencies for vulnerabilities, configuring cargo-deny policies, generating SBOMs, enforcing reproducible builds, or managing dependency pinning and update workflows.
+**Trigger**: When auditing dependencies for vulnerabilities, configuring cargo-deny policies, generating SBOMs,
+enforcing reproducible builds, or managing dependency pinning and update workflows.
 
 ---
 
@@ -50,7 +55,8 @@ cargo audit --json       # JSON output for CI parsing
 
 ```
 
-Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`), or **Deny** (replace the crate).
+Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`),
+or **Deny** (replace the crate).
 
 ```rust
 
@@ -173,7 +179,8 @@ serde = "1.0"              # Non-security — semver range OK
 
 ### Always Commit `Cargo.lock`
 
-Applications and servers **must** commit `Cargo.lock`. This project is a server — `Cargo.lock` is committed. Workspace crates share a single `Cargo.lock` at the root.
+Applications and servers **must** commit `Cargo.lock`. This project is a server — `Cargo.lock` is committed.
+Workspace crates share a single `Cargo.lock` at the root.
 
 ### Lockfile Verification in CI
 
@@ -376,7 +383,9 @@ echo "Supply chain checks passed."
 
 ## 8. CI Action Version Compatibility
 
-GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when the lockfile format changes. Always verify that CI action versions are compatible with the project's `Cargo.lock` version after upgrading the Rust toolchain.
+GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when the lockfile format changes.
+Always verify
+that CI action versions are compatible with the project's `Cargo.lock` version after upgrading the Rust toolchain.
 
 ### `Cargo.lock` Version History
 
@@ -387,10 +396,14 @@ GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when
 
 ### Rules
 
-- **`Cargo.lock` v4 requires `EmbarkStudios/cargo-deny-action@v2` or later** — `@v1` ships an older Cargo that cannot parse v4 lockfiles and will fail silently or with cryptic errors.
-- **When upgrading the Rust toolchain**, check whether the new version bumps the `Cargo.lock` format. If it does, audit every CI action that touches `Cargo.lock` for compatibility.
-- **When adding or updating CI actions** that invoke Cargo or parse `Cargo.lock`, verify they support the lockfile version used by the project.
-- **Run `scripts/check-ci-config.sh`** before pushing — it detects outdated action versions and lockfile incompatibilities automatically.
+- **`Cargo.lock` v4 requires `EmbarkStudios/cargo-deny-action@v2` or later** — `@v1` ships an older Cargo
+  that cannot parse v4 lockfiles and will fail silently or with cryptic errors.
+- **When upgrading the Rust toolchain**, check whether the new version bumps the `Cargo.lock` format.
+  If it does, audit every CI action that touches `Cargo.lock` for compatibility.
+- **When adding or updating CI actions** that invoke Cargo or parse `Cargo.lock`,
+  verify they support the lockfile version used by the project.
+- **Run `scripts/check-ci-config.sh`** before pushing — it detects outdated action versions
+  and lockfile incompatibilities automatically.
 
 ```bash
 # ❌ Bad — using v1 with Cargo.lock v4 (will fail in CI)

@@ -1,6 +1,7 @@
 # CI/CD Testing Infrastructure - Summary
 
-This document provides a quick overview of the comprehensive testing and automation infrastructure added to prevent CI/CD issues from recurring.
+This document provides a quick overview of the comprehensive testing
+and automation infrastructure added to prevent CI/CD issues from recurring.
 
 ## What Was Added
 
@@ -86,6 +87,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 **Before:** CI failed because lychee tried to check placeholder URLs like `https://github.com/owner/repo`
 
 **Now:**
+
 - Test validates `.lychee.toml` excludes placeholder URLs
 - Test warns if actual placeholder URLs exist in docs
 - Pre-commit hook catches broken internal links before commit
@@ -96,6 +98,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 **Before:** CI failed because code blocks were missing language identifiers
 
 **Now:**
+
 - Test validates all code blocks have language identifiers
 - Test checks for common markdown formatting issues
 - Pre-commit hook runs markdownlint on changed files
@@ -106,6 +109,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 **Before:** CI failed because Dockerfile used different Rust version than Cargo.toml
 
 **Now:**
+
 - Comprehensive tests validate version consistency across all files
 - Tests validate version normalization logic in CI
 - Tests ensure local scripts match CI behavior
@@ -115,6 +119,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 **Before:** CI failed because of non-portable AWK patterns or bash syntax errors
 
 **Now:**
+
 - Test validates doc-validation workflow includes shellcheck
 - Shellcheck runs on inline workflow scripts
 - Tests catch AWK compatibility issues
@@ -124,6 +129,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 **Before:** Manual workflow changes could break CI without validation
 
 **Now:**
+
 - Tests validate all critical workflows exist
 - Tests check workflows use concurrency groups
 - Tests check workflows have timeouts

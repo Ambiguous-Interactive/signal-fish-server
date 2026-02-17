@@ -1,12 +1,18 @@
 # Skill: WebSocket Session Security
 
-<!-- trigger: session, hijack, token-rotation, peer-identity, replay, csrf, cswsh, WebSocket-auth, session-fixation, session-timeout | WebSocket session lifecycle security for game signaling | Security -->
+<!--
+  trigger: session, hijack, token-rotation, peer-identity, replay, csrf, cswsh, WebSocket-auth, session-fixation, session-timeout
+  | WebSocket session lifecycle security for game signaling
+  | Security
+-->
 
-**Trigger**: When implementing, reviewing, or hardening WebSocket session management, token handling, reconnection security, peer identity verification, or anti-replay mechanisms in the signaling server.
+**Trigger**: When implementing, reviewing, or hardening WebSocket session management, token handling,
+reconnection security, peer identity verification, or anti-replay mechanisms in the signaling server.
 
 ---
 
 ## When to Use
+
 - Adding or modifying session lifecycle (creation, validation, timeout, invalidation)
 - Implementing token-based auth for WebSocket handshakes
 - Handling reconnection flows with cryptographic tokens
@@ -15,6 +21,7 @@
 - Reviewing Origin validation and CSWSH defenses
 
 ## When NOT to Use
+
 - General HTTP auth patterns without WebSocket context (see [web-service-security](./web-service-security.md))
 - Rate limiting and connection caps (see [ddos-and-rate-limiting](./ddos-and-rate-limiting.md))
 - WebSocket framing, protocol design, or heartbeat (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
@@ -245,7 +252,8 @@ impl Drop for TokenSecret { fn drop(&mut self) { self.key.zeroize(); } }
 
 ## 4. Cross-Site WebSocket Hijacking (CSWSH)
 
-CORS does **not** protect WebSocket upgrades. Browsers send cookies on cross-origin `new WebSocket(...)` without preflight. You MUST validate Origin.
+CORS does **not** protect WebSocket upgrades. Browsers send cookies on cross-origin
+`new WebSocket(...)` without preflight. You MUST validate Origin.
 
 ### Origin Allowlist
 

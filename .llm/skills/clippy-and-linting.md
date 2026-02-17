@@ -1,6 +1,10 @@
 # Skill: Clippy and Linting
 
-<!-- trigger: clippy, lint, warning, allow, deny, cargo clippy, ci | Configuring lints; resolving clippy warnings; CI setup | Core -->
+<!--
+  trigger: clippy, lint, warning, allow, deny, cargo clippy, ci
+  | Configuring lints; resolving clippy warnings; CI setup
+  | Core
+-->
 
 **Trigger**: When configuring lints, resolving clippy warnings, or setting up CI lint enforcement.
 
@@ -37,7 +41,8 @@
 
 Add this to the project's `Cargo.toml`:
 
-> **Note:** This `[lints.clippy]` configuration is recommended but not yet in the project's `Cargo.toml`. Add it when ready to enforce stricter linting.
+> **Note:** This `[lints.clippy]` configuration is recommended but not yet in the project's `Cargo.toml`.
+> Add it when ready to enforce stricter linting.
 
 ```toml
 [lints.rust]
@@ -245,7 +250,8 @@ cargo clippy --all-targets --all-features --fix --allow-dirty
 
 ```
 
-Handles well: redundant clones, match simplification, unnecessary borrows, `use` suggestions. Always review with `git diff` after.
+Handles well: redundant clones, match simplification, unnecessary borrows, `use` suggestions.
+Always review with `git diff` after.
 
 ---
 
@@ -267,7 +273,8 @@ Use `-D warnings` in CI to fail on any lint warning.
 
 ## The `deny(warnings)` Anti-Pattern
 
-Don't use `#![deny(warnings)]` in libraries — new compiler warnings break downstream builds. In binaries, use `-D warnings` as a CI flag instead of in source code.
+Don't use `#![deny(warnings)]` in libraries — new compiler warnings break downstream builds.
+In binaries, use `-D warnings` as a CI flag instead of in source code.
 
 ---
 

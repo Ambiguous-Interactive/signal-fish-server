@@ -1,6 +1,10 @@
 # Skill: Git Hooks Setup and Maintenance
 
-<!-- trigger: git hook, pre-commit hook, git hooks, hook installation, executable permission, hook maintenance | Creating and maintaining git hooks with proper permissions | Infrastructure -->
+<!--
+  trigger: git hook, pre-commit hook, git hooks, hook installation, executable permission, hook maintenance
+  | Creating and maintaining git hooks with proper permissions
+  | Infrastructure
+-->
 
 **Trigger**: When setting up pre-commit hooks, ensuring hook permissions, or debugging git hook failures.
 
@@ -57,13 +61,13 @@ error: cannot run .git/hooks/pre-commit: Permission denied
 
 ### The Solution: Two-Step Permission Setup
 
-**Step 1: Set filesystem permission**
+#### Step 1: Set filesystem permission
 
 ```bash
 chmod +x .githooks/pre-commit
 ```
 
-**Step 2: Tell Git to track the executable bit**
+#### Step 2: Tell Git to track the executable bit
 
 ```bash
 git update-index --chmod=+x .githooks/pre-commit
@@ -178,7 +182,9 @@ git commit -m "Add hook installation script"
 ### Enable Git Hooks
 
 ```bash
+
 ./scripts/enable-hooks.sh
+
 ```
 
 This configures git to use pre-commit hooks that validate:
@@ -192,7 +198,6 @@ This configures git to use pre-commit hooks that validate:
 
 ```bash
 git commit --no-verify
-```
 ```
 
 ---
@@ -574,7 +579,7 @@ DEBUG=1 git commit -m "message"
 
 ### Common Issues
 
-**Issue 1: Hook not running**
+#### Issue 1: Hook not running
 
 ```bash
 # Check if hooks are enabled
@@ -585,7 +590,7 @@ git config core.hooksPath
 git config core.hooksPath .githooks
 ```
 
-**Issue 2: Permission denied**
+#### Issue 2: Permission denied
 
 ```bash
 # Check permissions
@@ -597,7 +602,7 @@ chmod +x .githooks/pre-commit
 git update-index --chmod=+x .githooks/pre-commit
 ```
 
-**Issue 3: Command not found**
+#### Issue 3: Command not found
 
 ```bash
 # Check PATH in hook
@@ -678,7 +683,9 @@ cargo clippy
 ### Installation
 
 ```bash
+
 ./scripts/enable-hooks.sh
+
 ```
 
 ### What Hooks Check
@@ -701,7 +708,6 @@ Only in emergencies:
 
 ```bash
 git commit --no-verify
-```
 ```
 
 ---

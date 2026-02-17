@@ -1,6 +1,10 @@
 # Skill: MSRV and Toolchain Consistency Management
 
-<!-- trigger: msrv, rust-version, toolchain, Rust version, dependency incompatibility, cargo msrv, minimum supported Rust version | Managing MSRV and ensuring toolchain version consistency | Infrastructure -->
+<!--
+  trigger: msrv, rust-version, toolchain, Rust version, dependency incompatibility, cargo msrv, minimum supported Rust version
+  | Managing MSRV and ensuring toolchain version consistency
+  | Infrastructure
+-->
 
 **Trigger**: When updating Rust version, adding dependencies, or encountering toolchain-related CI failures.
 
@@ -37,7 +41,8 @@
 
 ## What is MSRV?
 
-**Minimum Supported Rust Version (MSRV)** is the oldest Rust compiler version that can build your project. It's a contract with users and CI environments about toolchain requirements.
+**Minimum Supported Rust Version (MSRV)** is the oldest Rust compiler version that can build your project.
+It's a contract with users and CI environments about toolchain requirements.
 
 ### Why MSRV Matters
 
@@ -228,7 +233,7 @@ cargo msrv --min 1.80.0  # Check if a specific version works
 **Checklist for MSRV update from `1.87.0` to `1.88.0` (example):**
 
 - [ ] **Cargo.toml**: Update `rust-version = "1.88.0"`
-- [ ] **rust-toolchain.toml**: Update `channel = "1.88.0"`
+- [ ] **`rust-toolchain.toml`**: Update `channel = "1.88.0"`
 - [ ] **clippy.toml**: Update `msrv = "1.88.0"`
 - [ ] **Dockerfile**: Update `FROM rust:1.88-bookworm AS chef`
 - [ ] **.devcontainer/Dockerfile**: Add comment `# Project MSRV: 1.88.0` (devcontainer may use newer)
@@ -434,7 +439,7 @@ The `.github/dependabot.yml` is configured to prevent automatic MSRV drift:
 
 ---
 
-## Toolchain Pinning: rust-toolchain.toml
+## Toolchain Pinning: `rust-toolchain.toml`
 
 The `rust-toolchain.toml` file pins the exact Rust version for developers and CI:
 
@@ -903,7 +908,7 @@ When asked to update nightly version:
 
 ## References
 
-- [Cargo Book: rust-version field](https://doc.Rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
-- [Rust Toolchain Files](https://Rust-lang.github.io/rustup/overrides.html#the-toolchain-file)
+- [Cargo Book: `rust-version` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
+- [Rust Toolchain Files](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file)
 - [cargo-msrv documentation](https://github.com/foresterre/cargo-msrv)
 - [Clippy MSRV Configuration](https://doc.Rust-lang.org/clippy/configuration.html#msrv)

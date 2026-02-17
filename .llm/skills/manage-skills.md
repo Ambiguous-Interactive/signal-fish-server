@@ -1,6 +1,10 @@
 # Skill: Manage Skills
 
-<!-- trigger: skill, skills, manage, create-skill, edit-skill, split-skill | Creating, editing, and maintaining skill files | Core -->
+<!--
+  trigger: skill, skills, manage, create-skill, edit-skill, split-skill
+  | Creating, editing, and maintaining skill files
+  | Core
+-->
 
 **Trigger**: When creating, editing, splitting, or organizing skill files in `.llm/skills/`.
 

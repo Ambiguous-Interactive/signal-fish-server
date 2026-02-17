@@ -7,7 +7,10 @@
 
 ## Executive Summary
 
-The CI configuration test suite is comprehensive and well-structured, with 35 tests covering MSRV consistency, workflow validation, markdown linting, and AWK script validation. While the tests are thorough, there are significant opportunities for consolidation through data-driven patterns, improved diagnostics, and helper function extraction.
+The CI configuration test suite is comprehensive and well-structured, with 35 tests covering MSRV
+consistency, workflow validation, markdown linting, and AWK script validation. While the tests are
+thorough, there are significant opportunities for consolidation through data-driven patterns,
+improved diagnostics, and helper function extraction.
 
 ### Key Findings
 
@@ -24,12 +27,15 @@ The CI configuration test suite is comprehensive and well-structured, with 35 te
 ### 1. MSRV Consistency Tests (4 tests)
 
 **Current Tests:**
-1. `test_msrv_consistency_across_config_files` - Validates MSRV across Cargo.toml, rust-toolchain.toml, clippy.toml, Dockerfile
+
+1. `test_msrv_consistency_across_config_files` - Validates MSRV across `Cargo.toml`,
+   `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 2. `test_msrv_version_normalization_logic` - Unit test for version comparison logic
 3. `test_ci_workflow_msrv_normalization` - Validates CI workflow normalization
 4. `test_msrv_script_consistency_with_ci` - Validates local script matches CI
 
 **Overlapping Concerns:**
+
 - All tests validate MSRV-related logic
 - Tests 1, 3, and 4 all read and parse similar files
 - Tests 2 is a pure unit test (no I/O)
@@ -37,12 +43,14 @@ The CI configuration test suite is comprehensive and well-structured, with 35 te
 **Consolidation Opportunity:** ✅ HIGH
 
 **Recommendation:**
+
 - **Keep:** `test_msrv_version_normalization_logic` (pure unit test)
 - **Keep:** `test_msrv_consistency_across_config_files` (comprehensive file validation)
 - **Consolidate:** Merge tests 3 and 4 into the main test as additional validation steps
 - **Result:** 4 tests → 2 tests
 
 **Data-Driven Improvement:**
+
 ```rust
 // Instead of hardcoded checks, use a data structure:
 struct MsrvConfigFile {
@@ -112,6 +120,7 @@ fn test_msrv_consistency_across_config_files() {
 ```
 
 **Enhanced Diagnostics:**
+
 ```rust
 // Instead of:
 assert_eq!(toolchain_version, msrv, "rust-toolchain.toml channel must match Cargo.toml rust-version");
@@ -142,6 +151,7 @@ assert_eq!(
 ### 2. Workflow Validation Tests (7 tests)
 
 **Current Tests:**
+
 1. `test_required_ci_workflows_exist` - Checks for required workflow files
 2. `test_ci_workflow_has_required_jobs` - Validates ci.yml has required jobs
 3. `test_workflow_files_are_valid_yaml` - Basic YAML syntax validation
@@ -151,6 +161,7 @@ assert_eq!(
 7. `test_doc_validation_workflow_has_shellcheck` - Validates doc-validation.yml
 
 **Overlapping Concerns:**
+
 - Tests 1, 5, 6, 7 all validate workflow file existence and configuration
 - Tests 2 and 1 both validate ci.yml structure
 - All tests read and parse workflow files
@@ -158,11 +169,13 @@ assert_eq!(
 **Consolidation Opportunity:** ✅ HIGH
 
 **Recommendation:**
+
 - Create a data-driven `WorkflowSpec` structure
 - Single test validates all workflows against their specs
 - **Result:** 7 tests → 2-3 tests (generic validation + specific edge cases)
 
 **Data-Driven Improvement:**
+
 ```rust
 struct WorkflowSpec {
     filename: &'static str,
@@ -289,11 +302,13 @@ fn test_workflow_configurations() {
 ### 3. GitHub Actions Security Tests (3 tests)
 
 **Current Tests:**
+
 1. `test_github_actions_are_pinned_to_sha` - Validates SHA pinning
 2. `test_cargo_deny_action_minimum_version` - Validates cargo-deny version
 3. `test_action_version_comments_exist` - Validates version comments
 
 **Overlapping Concerns:**
+
 - All three tests parse the same workflow files
 - All three examine `uses:` lines
 - Tests 1 and 3 both validate SHA-pinned actions
@@ -301,11 +316,13 @@ fn test_workflow_configurations() {
 **Consolidation Opportunity:** ✅ MEDIUM
 
 **Recommendation:**
+
 - Merge into a single `test_github_actions_security` test
 - Parse `uses:` lines once, validate multiple aspects
 - **Result:** 3 tests → 1 test
 
 **Data-Driven Improvement:**
+
 ```rust
 struct ActionSecurityRule {
     action_pattern: &'static str,
@@ -384,6 +401,7 @@ fn test_github_actions_security() {
 ### 4. Markdown Validation Tests (7 tests)
 
 **Current Tests:**
+
 1. `test_markdown_files_have_language_identifiers` - MD040 validation
 2. `test_markdown_config_exists` - Validates .markdownlint.json exists
 3. `test_markdown_no_capitalized_filenames_in_links` - Link case validation
@@ -393,6 +411,7 @@ fn test_github_actions_security() {
 7. `test_no_actual_placeholder_urls_in_docs` - Placeholder detection
 
 **Overlapping Concerns:**
+
 - Tests 1, 3, 4, 5, 7 all parse markdown files
 - Tests 2 and 6 validate config files
 - All tests read similar file structures
@@ -400,11 +419,13 @@ fn test_github_actions_security() {
 **Consolidation Opportunity:** ✅ MEDIUM
 
 **Recommendation:**
+
 - Create a single markdown validation test with data-driven rules
 - Separate config validation from content validation
 - **Result:** 7 tests → 3 tests (config, content, links)
 
 **Data-Driven Improvement:**
+
 ```rust
 struct MarkdownRule {
     name: &'static str,
@@ -505,12 +526,14 @@ fn test_markdown_content_validation() {
 ### 5. AWK Script Validation Tests (4 tests)
 
 **Current Tests:**
+
 1. `test_doc_validation_awk_script_extraction` - Validates AWK patterns in workflow
 2. `test_awk_pattern_matching_with_fixtures` - Fixture-based validation
 3. `test_awk_posix_compatibility` - POSIX compliance checks
 4. `test_awk_script_syntax_validation` - Syntax validation
 
 **Overlapping Concerns:**
+
 - All tests parse the same workflow file
 - All tests examine AWK script content
 - Tests 1, 3, 4 all validate similar patterns
@@ -518,11 +541,13 @@ fn test_markdown_content_validation() {
 **Consolidation Opportunity:** ✅ MEDIUM-HIGH
 
 **Recommendation:**
+
 - Merge tests 1, 3, 4 into a single comprehensive AWK validation test
 - Keep test 2 separate (fixture-based testing has different goals)
 - **Result:** 4 tests → 2 tests
 
 **Data-Driven Improvement:**
+
 ```rust
 struct AwkValidationRule {
     name: &'static str,
@@ -603,6 +628,7 @@ fn test_awk_script_validation() {
 ### 6. Configuration File Tests (6 tests)
 
 **Current Tests:**
+
 1. `test_typos_config_exists_and_is_valid` - .typos.toml validation
 2. `test_typos_passes_on_known_files` - Typos integration test
 3. `test_lychee_config_exists_and_is_valid` - .lychee.toml validation
@@ -611,6 +637,7 @@ fn test_awk_script_validation() {
 6. `test_scripts_are_executable` - Script permissions
 
 **Overlapping Concerns:**
+
 - Tests 3 and 4 both validate .lychee.toml
 - Tests 1 and 2 both validate .typos.toml
 - Tests 3, 4, 5 all relate to link checking configuration
@@ -618,12 +645,14 @@ fn test_awk_script_validation() {
 **Consolidation Opportunity:** ✅ MEDIUM
 
 **Recommendation:**
+
 - Merge lychee tests (3, 4, 5) into one comprehensive test
 - Merge typos tests (1, 2) into one test
 - Keep script permissions separate (different concern)
 - **Result:** 6 tests → 3 tests
 
 **Data-Driven Improvement:**
+
 ```rust
 struct ConfigFileSpec {
     path: &'static str,
@@ -735,11 +764,13 @@ fn test_config_files() {
 ### 7. Workflow Best Practices Tests (3 tests)
 
 **Current Tests:**
+
 1. `test_workflows_use_concurrency_groups` - Validates concurrency configuration
 2. `test_workflows_have_timeouts` - Validates timeout configuration
 3. `test_workflows_use_minimal_permissions` - Validates permissions
 
 **Overlapping Concerns:**
+
 - All three tests iterate over workflow files
 - All three validate similar structural patterns
 - All three are best practices checks
@@ -747,10 +778,12 @@ fn test_config_files() {
 **Consolidation Opportunity:** ✅ HIGH
 
 **Recommendation:**
+
 - Merge into a single `test_workflow_best_practices` test
 - **Result:** 3 tests → 1 test
 
 **Data-Driven Improvement:**
+
 ```rust
 struct WorkflowBestPractice {
     name: &'static str,
@@ -854,40 +887,48 @@ fn test_workflow_best_practices() {
 
 ### Proposed Test Organization (19 tests)
 
-**Category: MSRV Validation (2 tests)**
+#### Category: MSRV Validation (2 tests)
+
 1. `test_msrv_version_normalization_logic` - Pure unit test for version comparison
 2. `test_msrv_consistency` - Comprehensive MSRV validation across all config files (merges 3 tests)
 
-**Category: Workflow Validation (3 tests)**
-3. `test_workflow_configurations` - Data-driven workflow spec validation (merges 5 tests)
-4. `test_workflow_yaml_syntax` - YAML syntax validation
-5. `test_workflow_best_practices` - Concurrency, timeouts, permissions (merges 3 tests)
+#### Category: Workflow Validation (3 tests)
 
-**Category: GitHub Actions Security (1 test)**
-6. `test_github_actions_security` - SHA pinning, versions, comments (merges 3 tests)
+1. `test_workflow_configurations` - Data-driven workflow spec validation (merges 5 tests)
+2. `test_workflow_yaml_syntax` - YAML syntax validation
+3. `test_workflow_best_practices` - Concurrency, timeouts, permissions (merges 3 tests)
 
-**Category: Markdown Validation (3 tests)**
-7. `test_markdown_config_files` - Config existence and format (merges 2 tests)
-8. `test_markdown_content_validation` - Data-driven content rules (merges 4 tests)
-9. `test_markdown_link_validation` - Link checker config and placeholder detection (merges 2 tests)
+#### Category: GitHub Actions Security (1 test)
 
-**Category: AWK Script Validation (2 tests)**
-10. `test_awk_script_validation` - POSIX compliance, syntax, patterns (merges 3 tests)
-11. `test_awk_pattern_matching_with_fixtures` - Fixture-based testing (kept separate)
+1. `test_github_actions_security` - SHA pinning, versions, comments (merges 3 tests)
 
-**Category: Configuration Files (3 tests)**
-12. `test_config_files` - Data-driven config validation (merges 4 tests)
-13. `test_scripts_are_executable` - Script permissions (kept separate)
-14. `test_dockerfile_uses_docker_version_format` - Docker-specific validation (kept separate)
+#### Category: Markdown Validation (3 tests)
 
-**Category: Language/Platform Validation (1 test)**
-15. `test_no_language_specific_cache_mismatch` - Prevents incorrect cache configurations
+1. `test_markdown_config_files` - Config existence and format (merges 2 tests)
+2. `test_markdown_content_validation` - Data-driven content rules (merges 4 tests)
+3. `test_markdown_link_validation` - Link checker config and placeholder detection (merges 2 tests)
 
-**Category: Integration Tests (4 tests)**
-16. `test_ci_workflow_integration` - CI workflow structure and job validation
-17. `test_link_check_integration` - Link checking workflow integration
-18. `test_markdownlint_integration` - Markdown linting workflow integration
-19. `test_typos_integration` - Spell checking integration
+#### Category: AWK Script Validation (2 tests)
+
+1. `test_awk_script_validation` - POSIX compliance, syntax, patterns (merges 3 tests)
+2. `test_awk_pattern_matching_with_fixtures` - Fixture-based testing (kept separate)
+
+#### Category: Configuration Files (3 tests)
+
+1. `test_config_files` - Data-driven config validation (merges 4 tests)
+2. `test_scripts_are_executable` - Script permissions (kept separate)
+3. `test_dockerfile_uses_docker_version_format` - Docker-specific validation (kept separate)
+
+#### Category: Language/Platform Validation (1 test)
+
+1. `test_no_language_specific_cache_mismatch` - Prevents incorrect cache configurations
+
+#### Category: Integration Tests (4 tests)
+
+1. `test_ci_workflow_integration` - CI workflow structure and job validation
+2. `test_link_check_integration` - Link checking workflow integration
+3. `test_markdownlint_integration` - Markdown linting workflow integration
+4. `test_typos_integration` - Spell checking integration
 
 ### Summary
 
@@ -910,7 +951,8 @@ Error messages are generally good but could be more actionable.
 
 ### Recommendations
 
-**1. Include Fix Commands**
+#### 1. Include Fix Commands
+
 ```rust
 // Instead of:
 panic!("MSRV mismatch");
@@ -931,7 +973,8 @@ panic!(
 );
 ```
 
-**2. Add Context About Why It Matters**
+#### 2. Add Context About Why It Matters
+
 ```rust
 panic!(
     "GitHub Actions must use SHA pinning\n\
@@ -956,7 +999,8 @@ panic!(
 );
 ```
 
-**3. Show Progress and Context**
+#### 3. Show Progress and Context
+
 ```rust
 // Add diagnostic information to failures
 panic!(
@@ -977,7 +1021,8 @@ panic!(
 );
 ```
 
-**4. Provide Multiple Fix Options**
+#### 4. Provide Multiple Fix Options
+
 ```rust
 panic!(
     "Script permissions issue\n\
@@ -1006,6 +1051,7 @@ panic!(
 ### Current Duplication
 
 Many tests reimplement similar logic:
+
 - File reading with error messages
 - YAML/TOML parsing
 - Workflow file iteration
@@ -1175,6 +1221,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
 ### Missing Edge Cases
 
 1. **Empty File Handling**
+
    ```rust
    #[test]
    fn test_empty_config_files_are_rejected() {
@@ -1183,6 +1230,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
    ```
 
 2. **Concurrent Workflow Runs**
+
    ```rust
    #[test]
    fn test_workflow_concurrency_configuration() {
@@ -1192,6 +1240,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
    ```
 
 3. **Workflow Secret Usage**
+
    ```rust
    #[test]
    fn test_workflows_dont_expose_secrets() {
@@ -1201,6 +1250,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
    ```
 
 4. **Caching Strategy**
+
    ```rust
    #[test]
    fn test_workflow_caching_strategies() {
@@ -1210,6 +1260,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
    ```
 
 5. **Dependency Pinning**
+
    ```rust
    #[test]
    fn test_workflow_dependency_pinning() {
@@ -1219,6 +1270,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
    ```
 
 6. **Fail-Fast Configuration**
+
    ```rust
    #[test]
    fn test_matrix_fail_fast_configuration() {
@@ -1228,6 +1280,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
    ```
 
 7. **Workflow Triggers**
+
    ```rust
    #[test]
    fn test_workflow_trigger_configurations() {
@@ -1241,33 +1294,38 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
 ## Implementation Priority
 
 ### Phase 1: High-Impact Consolidation (Week 1)
+
 1. **MSRV Tests** - Merge 4 → 2 tests
 2. **Workflow Validation** - Merge 7 → 3 tests
 3. **Workflow Best Practices** - Merge 3 → 1 test
    - **Impact:** Remove 11 tests, improve maintainability significantly
 
 ### Phase 2: Medium-Impact Improvements (Week 2)
-4. **GitHub Actions Security** - Merge 3 → 1 test
-5. **Markdown Validation** - Merge 7 → 3 tests
-6. **Configuration Files** - Merge 6 → 3 tests
+
+1. **GitHub Actions Security** - Merge 3 → 1 test
+2. **Markdown Validation** - Merge 7 → 3 tests
+3. **Configuration Files** - Merge 6 → 3 tests
    - **Impact:** Remove 12 more tests, add data-driven patterns
 
 ### Phase 3: Helper Functions & Enhancement (Week 3)
-7. Extract common helper functions
-8. Improve error message quality
-9. Add missing edge case tests
+
+1. Extract common helper functions
+2. Improve error message quality
+3. Add missing edge case tests
    - **Impact:** Reduce future maintenance burden, better diagnostics
 
 ### Phase 4: AWK Validation (Week 4)
-10. **AWK Tests** - Merge 4 → 2 tests
-11. Add AWK fixture testing infrastructure
-    - **Impact:** Better AWK validation, easier to add new patterns
+
+1. **AWK Tests** - Merge 4 → 2 tests
+2. Add AWK fixture testing infrastructure
+   - **Impact:** Better AWK validation, easier to add new patterns
 
 ---
 
 ## Metrics
 
 ### Before Consolidation
+
 - **Total Tests:** 35
 - **Total Lines:** 2,492
 - **Average Lines per Test:** 71
@@ -1275,6 +1333,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
 - **Data-Driven Tests:** 2-3 (~8%)
 
 ### After Consolidation (Projected)
+
 - **Total Tests:** 19
 - **Total Lines:** ~1,800 (estimated with helpers)
 - **Average Lines per Test:** 95
@@ -1282,6 +1341,7 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
 - **Data-Driven Tests:** 12-15 (~70%)
 
 ### Benefits
+
 - **45% fewer tests** to maintain
 - **27% less code** overall
 - **Easier to add new validations** (just add to data structures)
@@ -1292,11 +1352,16 @@ fn validate_toml_syntax(content: &str) -> Vec<String> {
 
 ## Conclusion
 
-The CI configuration test suite is comprehensive and catches real issues, but it suffers from duplication and lacks data-driven patterns. By consolidating tests and extracting helper functions, we can significantly improve maintainability while retaining all current validation coverage.
+The CI configuration test suite is comprehensive and catches real issues, but it suffers from
+duplication and lacks data-driven patterns. By consolidating tests and extracting helper functions,
+we can significantly improve maintainability while retaining all current validation coverage.
 
-The recommended consolidation reduces the test count from 35 to 19 (-45%) while making it easier to add new validations and improving error message quality. The data-driven approach will make the test suite more maintainable and consistent.
+The recommended consolidation reduces the test count from 35 to 19 (-45%) while making it easier
+to add new validations and improving error message quality. The data-driven approach will make the
+test suite more maintainable and consistent.
 
 **Next Steps:**
+
 1. Review this analysis with the team
 2. Prioritize consolidation phases
 3. Implement Phase 1 (high-impact consolidations)

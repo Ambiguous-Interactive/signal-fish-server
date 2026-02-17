@@ -1,12 +1,18 @@
 # Skill: DDoS Prevention & Rate Limiting
 
-<!-- trigger: ddos, rate-limit, rate-limiting, throttle, connection-limit, flood, abuse, load-shedding, backpressure, graceful-degradation | Protecting a Rust/axum WebSocket signaling server from DDoS and abuse | Core -->
+<!--
+  trigger: ddos, rate-limit, rate-limiting, throttle, connection-limit, flood, abuse, load-shedding, backpressure, graceful-degradation
+  | Protecting a Rust/axum WebSocket signaling server from DDoS and abuse
+  | Core
+-->
 
-**Trigger**: When implementing, reviewing, or hardening rate limiting, connection management, abuse prevention, or graceful degradation for the signaling server.
+**Trigger**: When implementing, reviewing, or hardening rate limiting, connection management, abuse prevention,
+or graceful degradation for the signaling server.
 
 ---
 
 ## When to Use
+
 - Adding or modifying rate limiting middleware or connection caps
 - Implementing WebSocket message throttling or frame size limits
 - Configuring infrastructure-layer DDoS protection (WAF, Shield, CloudFront)
@@ -15,6 +21,7 @@
 - Setting up monitoring and alerting for abuse detection
 
 ## When NOT to Use
+
 - General authentication/authorization logic (see [web-service-security](./web-service-security.md))
 - WebSocket protocol design unrelated to abuse (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
 - Performance optimization without a security motivation (see [Rust-performance-optimization](./rust-performance-optimization.md))
@@ -260,7 +267,9 @@ async fn heartbeat_loop(sender: &mut SplitSink<WebSocket, Message>) -> bool {
 
 ### Upgrade Handshake Validation
 
-Validate Origin header before accepting WebSocket upgrades. Version negotiation (Sec-WebSocket-Version: 13) is handled automatically by axum/tungstenite — do not re-validate manually.
+Validate Origin header before accepting WebSocket upgrades.
+Version negotiation (Sec-WebSocket-Version: 13) is handled automatically by axum/tungstenite — do not re-validate
+manually.
 
 ```rust
 
@@ -401,7 +410,8 @@ Configure rate-based rules specifically for WebSocket upgrade requests:
 
 Emit these counters and gauges for DDoS detection:
 
-> **Note:** Examples use the `metrics` crate API. If the project uses `opentelemetry`, adapt to its Meter API. The metric names and patterns remain the same.
+> **Note:** Examples use the `metrics` crate API. If the project uses `opentelemetry`, adapt to its Meter API.
+> The metric names and patterns remain the same.
 
 ```rust
 use metrics::{counter, gauge, histogram};
@@ -427,13 +437,15 @@ Implement three escalation levels triggered by metric thresholds:
 
 ### Circuit Breakers
 
-Wrap downstream calls (DB, Redis, auth service) in a circuit breaker. Open after N consecutive failures; half-open after a recovery interval. Use `AtomicU8` for lock-free state tracking.
+Wrap downstream calls (DB, Redis, auth service) in a circuit breaker.
+Open after N consecutive failures; half-open after a recovery interval. Use `AtomicU8` for lock-free state tracking.
 
 ---
 
 ## 7. Graceful Degradation
 
-Implement three degradation levels: **Healthy** (all features), **Degraded** (non-essential disabled), **Critical** (reject new connections, drain existing).
+Implement three degradation levels: **Healthy** (all features), **Degraded** (non-essential disabled),
+**Critical** (reject new connections, drain existing).
 
 ```rust
 #[repr(u8)]

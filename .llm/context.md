@@ -7,15 +7,18 @@
 
 - **Company:** Ambiguous Interactive
 - **Product:** A lightweight, in-memory WebSocket signaling server for peer-to-peer game networking
-- **Repository:** `signal-fish-server` — extracted from the matchbox-signaling-server with production-ready signaling
-
-  stripped down to a single self-contained binary
-
+- **Repository:** `signal-fish-server` — extracted from the matchbox-signaling-server
+  with production-ready signaling stripped down to a single self-contained binary
 - **Crate name:** Binary: `signal-fish-server` | Library: `signal_fish_server`
 - **Code name:** Signal Fish
-- **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team. The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon, but our product and infrastructure are our own
+- **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team.
+  The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon,
+  but our product and infrastructure are our own
 - **Author attribution:** Always use "Ambiguous Interactive" in `authors` fields, copyright notices, and user-facing branding
-- **Documentation voice:** In docs and comments, refer to the product as "Signal Fish Server" or "the signaling server" — not "Matchbox Signaling Server" as a product name. "Signal Fish" is acceptable as an informal project reference
+- **Documentation voice:** In docs and comments,
+  refer to the product as "Signal Fish Server"
+  or "the signaling server" — not "Matchbox Signaling Server" as a product name.
+  "Signal Fish" is acceptable as an informal project reference
 
 ---
 
@@ -125,7 +128,7 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 ## Software Design Philosophy
 
-> **Details -> [skills/rust-idioms-and-patterns.md](skills/rust-idioms-and-patterns.md) and [skills/solid-principles-enforcement.md](skills/solid-principles-enforcement.md)**
+> **Details -> [Rust Idioms and Patterns](skills/rust-idioms-and-patterns.md) and [SOLID Principles Enforcement](skills/solid-principles-enforcement.md)**
 
 - Code should be self-documenting -- only comment "why", never "what"
 - Apply SOLID, DRY, and Clean Architecture consistently
@@ -137,7 +140,7 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 ## Rust Coding Standards
 
-> **Performance patterns -> [skills/rust-performance-optimization.md](skills/rust-performance-optimization.md) and [skills/async-rust-best-practices.md](skills/async-rust-best-practices.md)**
+> **Performance patterns -> [Rust Performance Optimization](skills/rust-performance-optimization.md) and [Async Rust Best Practices](skills/async-rust-best-practices.md)**
 > **Error handling -> [skills/error-handling-guide.md](skills/error-handling-guide.md)**
 > **Defensive programming -> [skills/defensive-programming.md](skills/defensive-programming.md)**
 > **Linting -> [skills/clippy-and-linting.md](skills/clippy-and-linting.md)**
@@ -287,7 +290,8 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 
 ### Adding a New Protocol Message
 
-1. Define in `src/protocol/messages.rs` -> handler in `src/server.rs` or `src/server/` submodule -> serialization tests -> e2e tests
+1. Define in `src/protocol/messages.rs` -> handler in `src/server.rs`
+   or `src/server/` submodule -> serialization tests -> e2e tests
 2. Run `/add-protocol-message` for full checklist
 
 ### Adding a Configuration Option
@@ -335,8 +339,8 @@ cargo bench                                    # Benchmarks
 | [manage-skills](skills/manage-skills.md)                             | Creating, editing, and maintaining skill files                           |
 | [mandatory-workflow](skills/mandatory-workflow.md)                   | Mandatory linting, formatting, and validation workflow for every change  |
 | [markdown-best-practices](skills/markdown-best-practices.md)         | Markdown documentation, code blocks, proper nouns, link validation       |
-| [rust-idioms-and-patterns](skills/rust-idioms-and-patterns.md)       | Canonical Rust patterns for writing and reviewing code                   |
-| [rust-refactoring-guide](skills/rust-refactoring-guide.md)           | Safe incremental Rust refactoring workflows                              |
+| [`rust-idioms-and-patterns`](skills/rust-idioms-and-patterns.md)     | Canonical Rust patterns for writing and reviewing code                   |
+| [`rust-refactoring-guide`](skills/rust-refactoring-guide.md)         | Safe incremental Rust refactoring workflows                              |
 | [solid-principles-enforcement](skills/solid-principles-enforcement.md) | Enforcing SOLID principles in Rust                                     |
 | [testing-strategies](skills/testing-strategies.md)                   | Core testing methodology and patterns                                    |
 | [testing-tools-and-frameworks](skills/testing-tools-and-frameworks.md) | Testing tools, frameworks, and coverage measurement                    |
@@ -360,9 +364,9 @@ cargo bench                                    # Benchmarks
 
 | Skill                                                                    | When to Use                                                 |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| [async-rust-best-practices](skills/async-rust-best-practices.md)         | Working with tokio, channels, async code, or concurrency    |
+| [`async-rust-best-practices`](skills/async-rust-best-practices.md)       | Working with tokio, channels, async code, or concurrency    |
 | [observability-and-logging](skills/observability-and-logging.md)         | Adding metrics, tracing spans, and structured logging       |
-| [rust-performance-optimization](skills/rust-performance-optimization.md) | Optimizing hot paths, reducing allocations, and profiling   |
+| [`rust-performance-optimization`](skills/rust-performance-optimization.md) | Optimizing hot paths, reducing allocations, and profiling |
 | [api-design-guidelines](skills/api-design-guidelines.md)                 | Designing public APIs, protocol types, or interfaces        |
 | [dependency-management](skills/dependency-management.md)                 | Adding, auditing, and managing Rust crate dependencies      |
 | [`websocket-protocol-patterns`](skills/websocket-protocol-patterns.md)   | WebSocket lifecycle, message design, and broadcast patterns |

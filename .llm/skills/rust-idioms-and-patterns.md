@@ -1,6 +1,10 @@
 # Skill: Rust Idioms and Patterns
 
-<!-- trigger: naming, convention, derive, newtype, builder, enum, trait, pattern, idiomatic | Canonical Rust patterns for writing and reviewing code | Core -->
+<!--
+  trigger: naming, convention, derive, newtype, builder, enum, trait, pattern, idiomatic
+  | Canonical Rust patterns for writing and reviewing code
+  | Core
+-->
 
 **Trigger**: When writing new Rust code or reviewing code for idiomatic style and patterns.
 
@@ -74,7 +78,8 @@ impl Player {
 
 ### Iterator Naming
 
-Use `iter()`, `iter_mut()`, `into_iter()` for standard iteration. Use descriptive names like `player_ids()` for filtered/mapped iterators.
+Use `iter()`, `iter_mut()`, `into_iter()` for standard iteration.
+Use descriptive names like `player_ids()` for filtered/mapped iterators.
 
 ---
 
@@ -120,7 +125,8 @@ impl AsRef<str> for RoomCode {
 
 ```
 
-**In function signatures:** Use `impl Into<T>` for owned+flexibility, `&str`/`AsRef<T>` for read-only, `impl AsRef<Path>` for file paths.
+**In function signatures:** Use `impl Into<T>` for owned+flexibility, `&str`/`AsRef<T>` for read-only,
+`impl AsRef<Path>` for file paths.
 
 ---
 
@@ -265,7 +271,8 @@ let sorted_players = {
 
 ## `#[must_use]` and `#[non_exhaustive]`
 
-Use `#[must_use]` on Result-returning functions, guards, and important return values. Use `#[non_exhaustive]` on public enums and structs to allow adding variants/fields without semver breaks.
+Use `#[must_use]` on Result-returning functions, guards, and important return values.
+Use `#[non_exhaustive]` on public enums and structs to allow adding variants/fields without semver breaks.
 
 See [api-design-guidelines](./api-design-guidelines.md) for detailed future-proofing patterns.
 
@@ -273,7 +280,8 @@ See [api-design-guidelines](./api-design-guidelines.md) for detailed future-proo
 
 ## Exhaustive Matching
 
-Always match all enum variants explicitly without wildcard `_` catch-alls on owned enums. Destructure structs in trait impls to catch new fields at compile time.
+Always match all enum variants explicitly without wildcard `_` catch-alls on owned enums.
+Destructure structs in trait impls to catch new fields at compile time.
 
 See [defensive-programming.md](defensive-programming.md) for exhaustive matching and destructuring patterns with examples.
 

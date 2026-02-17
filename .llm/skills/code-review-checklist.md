@@ -1,12 +1,17 @@
 # Skill: Code Review Checklist
 
-<!-- trigger: review, code-review, pr-review, pull-request, quality, audit | AI-driven code review with structured output | Core -->
+<!--
+  trigger: review, code-review, pr-review, pull-request, quality, audit
+  | AI-driven code review with structured output
+  | Core
+-->
 
 **Trigger**: When reviewing code changes, pull requests, or auditing code quality.
 
 ---
 
 ## When to Use
+
 - Reviewing pull requests or merge requests
 - Before committing significant changes
 - During refactoring sessions
@@ -16,6 +21,7 @@
 ---
 
 ## When NOT to Use
+
 - Writing brand new code from scratch
 - Purely cosmetic/formatting changes (use linters instead)
 - Reviewing auto-generated code (migrations, bindings)
@@ -23,6 +29,7 @@
 ---
 
 ## TL;DR
+
 - Use structured output: severity, file, line, issue, fix
 - Focus on bugs, security, and logic — never nitpick formatting
 - Apply Writer/Reviewer separation: fresh context catches more issues
@@ -88,6 +95,7 @@ room.add_player(player_id).map_err(JoinError::RoomFull)?;
 ## Security Checklist
 
 ### Rust-Specific
+
 - [ ] No `unwrap()` / `expect()` on user-controlled input
 - [ ] SQL queries use parameterized queries (sqlx bind params)
 - [ ] No secrets, tokens, or API keys hardcoded
@@ -97,6 +105,7 @@ room.add_player(player_id).map_err(JoinError::RoomFull)?;
 - [ ] WebSocket message sizes bounded
 
 ### TypeScript-Specific
+
 - [ ] Input validation on all API boundaries
 - [ ] No `eval()` or dynamic code execution
 - [ ] XSS prevention in rendered output
@@ -159,12 +168,14 @@ See [solid-principles-enforcement](./solid-principles-enforcement.md) for detail
 ## Anti-Patterns in AI Code Review
 
 ### DO NOT
+
 - Flag formatting issues (linters handle this)
 - Invent issues that don't exist — if uncertain, say "Potential issue (low confidence)"
 - Suggest rewriting working code without clear defect
 - Use vague language ("this could be improved") without a specific suggestion
 
 ### DO
+
 - Show reasoning for each finding
 - Provide concrete fix suggestions with code
 - Rate confidence honestly — low confidence is better than false certainty

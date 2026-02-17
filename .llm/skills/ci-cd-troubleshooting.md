@@ -1,6 +1,10 @@
 # Skill: CI/CD Troubleshooting Guide
 
-<!-- trigger: ci failure, ci error, workflow failure, GitHub actions failure, ci debug, cache error, configuration mismatch | Common CI failures and their solutions | Infrastructure -->
+<!--
+  trigger: ci failure, ci error, workflow failure, GitHub actions failure, ci debug, cache error, configuration mismatch
+  | Common CI failures and their solutions
+  | Infrastructure
+-->
 
 **Trigger**: When debugging CI/CD pipeline failures, diagnosing workflow issues, or investigating configuration problems.
 
@@ -484,7 +488,7 @@ env -i PATH=$PATH HOME=$HOME cargo test
 
 #### Prevention
 
-**Use rust-toolchain.toml for version pinning:**
+**Use `rust-toolchain.toml` for version pinning:**
 
 ```toml
 # rust-toolchain.toml — enforces exact version
@@ -693,14 +697,14 @@ Before committing workflow changes, verify:
 
 ### Configuration Matching
 
-- [ ] Workflow uses caching appropriate for project language (Rust = rust-cache, not pip/npm)
+- [ ] Workflow uses caching appropriate for project language (Rust = `rust-cache`, not pip/npm)
 - [ ] All cache paths reference files that actually exist (e.g., Cargo.lock, not requirements.txt)
 - [ ] Base images match project MSRV (Docker `FROM rust:X.Y` = Cargo.toml `rust-version`)
 - [ ] No language-specific commands for wrong ecosystem (no `pip install` in Rust project)
 
 ### Version Consistency
 
-- [ ] MSRV consistent across: Cargo.toml, rust-toolchain.toml, clippy.toml, Dockerfile
+- [ ] MSRV consistent across: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 - [ ] Pinned nightly toolchains documented with age and update criteria
 - [ ] Action SHA pins are recent (<1 year) or have documented reason for age
 - [ ] Docker base images are recent (<6 months) or have documented reason for age
@@ -1424,6 +1428,7 @@ exclude = [
 ```
 
 **Why exclude by pattern, not file path:**
+
 - Allows placeholder URLs in test fixtures without excluding the entire file
 - Other links in the same file are still validated
 - Prevents false positives from documentation examples
@@ -1440,6 +1445,7 @@ sed -i 's|Skills/testing-strategies.md|skills/testing-strategies.md|g' docs/*.md
 ```
 
 **Prevention:**
+
 ```bash
 # Use tab completion when creating links (respects case)
 # Test on Linux before pushing (WSL, Docker, or CI)
@@ -1527,22 +1533,21 @@ fn test_markdown_links_case_sensitive() {
 
 ## Before Committing
 
-```bash
-# Check links locally
 lychee --config .lychee.toml './**/*.md'
 
 # Fix broken links or add to exclusions
-```
 ```
 
 ### Key Insights
 
 **Link validation is environment-specific:**
+
 1. **Filesystem case sensitivity** - macOS/Windows are case-insensitive, Linux is case-sensitive
 2. **External link availability** - Sites change, get rate-limited, or go offline temporarily
 3. **Placeholder vs real URLs** - Documentation examples shouldn't cause CI failures
 
 **Lychee configuration best practices:**
+
 - `exclude` field is for URL patterns (regex), not file globs
 - Use URL patterns to exclude placeholder links while keeping real ones
 - File path filtering is done via CLI args, not config
@@ -1576,7 +1581,8 @@ ERROR: cargo-deny-action v2.0.5 cannot parse CVSS 4.0 entries
 
 **cargo-deny-action versions prior to v2.0.15 cannot parse CVSS 4.0 entries** in the RustSec advisory database.
 
-The RustSec advisory database was updated to include CVSS 4.0 vulnerability scores. Older versions of cargo-deny (using rustsec < 0.31) cannot parse these entries and fail.
+The RustSec advisory database was updated to include CVSS 4.0 vulnerability scores.
+Older versions of cargo-deny (using rustsec < 0.31) cannot parse these entries and fail.
 
 **Why this matters:**
 
@@ -1713,7 +1719,7 @@ on:
 
 ---
 
-## Pattern 11: Git Hook Permission Issues
+## Pattern 12: Git Hook Permission Issues
 
 ### Symptom
 
@@ -1894,6 +1900,17 @@ git clone repo
 
 ---
 
+## Lesson Learned: rustfmt --check on Documentation Code Blocks
+
+`rustfmt --check` returns exit code 1 for **both** parse errors and formatting
+differences, making it impossible to distinguish "not valid Rust" from "valid but
+unformatted." When validating Rust code blocks in documentation, treat `rustfmt`
+failures as **warnings**, not hard errors -- doc snippets are often fragments or
+pseudo-code that won't parse. Reserve hard errors for `cargo clippy` / `cargo test`
+on production code.
+
+---
+
 ## Related Skills
 
 - [GitHub-actions-best-practices](./github-actions-best-practices.md) — Workflow patterns and best practices
@@ -2002,18 +2019,21 @@ Self-service troubleshooting should resolve 90% of CI issues. Escalate when:
 Based on recent issues fixed in this project:
 
 ### Category 1: Configuration Mismatch
+
 - **Example:** Python caching on Rust project
 - **Detection:** Language-specific tools/paths in wrong ecosystem
 - **Prevention:** Match configuration to project language
 - **Fix Time:** Minutes (remove wrong config, add correct)
 
 ### Category 2: Dependency Hygiene
+
 - **Example:** 15+ unused dependencies accumulating
 - **Detection:** cargo-machete, cargo-udeps
 - **Prevention:** Regular audits (weekly CI job)
 - **Fix Time:** Hours (identify + remove + test)
 
 ### Category 3: Toolchain Staleness
+
 - **Example:** Nightly from 360 days ago
 - **Detection:** Age checks, compilation failures
 - **Prevention:** Quarterly review, document update criteria

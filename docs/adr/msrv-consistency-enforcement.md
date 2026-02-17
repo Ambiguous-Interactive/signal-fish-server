@@ -17,10 +17,11 @@ future toolchain-related CI/CD issues.
 
 The project defines its MSRV in multiple configuration files:
 
-- `Cargo.toml` (rust-version field) - Cargo's MSRV metadata
+- `Cargo.toml` (`rust-version` field) - Cargo's MSRV metadata
 - `rust-toolchain.toml` (channel field) - Developer toolchain pinning
 - `clippy.toml` (msrv field) - MSRV-aware linting
-- `Dockerfile` (FROM rust:X.Y) - Production build environment
+<!-- markdownlint-disable-next-line MD044 -- rust:X.Y is a Docker image name -->
+- `Dockerfile` (`FROM rust:X.Y`) - Production build environment
 - `.devcontainer/Dockerfile` - Development environment
 
 When updating the MSRV, all files must be updated consistently. Manual updates are error-prone
@@ -142,7 +143,7 @@ Updated `docs/development.md` with:
 When a dependency requires a newer Rust version:
 
 1. **Evaluate necessity**: Can we pin an older dependency version? Use alternatives?
-2. **Update all files**: Cargo.toml, rust-toolchain.toml, clippy.toml, Dockerfile
+2. **Update all files**: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 3. **Verify consistency**: Run `./scripts/check-msrv-consistency.sh`
 4. **Test thoroughly**: `cargo clean && cargo test --all-features`
 5. **Document**: Update CHANGELOG.md and commit message
@@ -180,8 +181,8 @@ The `msrv` CI job runs on every push and pull request:
 
 **Steps**:
 
-1. Extract MSRV from Cargo.toml using `grep` and `sed`
-2. Validate rust-toolchain.toml channel matches (exact match: `1.88.0`)
+1. Extract MSRV from `Cargo.toml` using `grep` and `sed`
+2. Validate `rust-toolchain.toml` channel matches (exact match: `1.88.0`)
 3. Validate clippy.toml msrv matches (exact match: `1.88.0`)
 4. Validate Dockerfile Rust version matches (normalized comparison: `1.88` ↔ `1.88.0`)
 5. Install exact MSRV toolchain via dtolnay/Rust-toolchain
@@ -249,7 +250,7 @@ fi
 
 **Rejected**: Error-prone, doesn't scale, easy to miss in code review.
 
-### Alternative 2: Single rust-toolchain.toml (no Cargo.toml rust-version)
+### Alternative 2: Single `rust-toolchain.toml` (no `Cargo.toml` `rust-version`)
 
 **Rejected**: Loses Cargo's native MSRV validation and crates.io metadata.
 
@@ -294,7 +295,7 @@ Current policy: Dependabot ignores Rust version updates; manual MSRV bumps only.
 
 ## References
 
-- [Cargo Book: rust-version field](https://doc.Rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
-- [Rust RFC 2495: Minimum Supported Rust Version](https://Rust-lang.github.io/rfcs/2495-min-rust-version.html)
+- [Cargo Book: `rust-version` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
+- [Rust RFC 2495: Minimum Supported Rust Version](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)
 - [cargo-msrv tool](https://github.com/foresterre/cargo-msrv)
 - GitHub Issue: (Link to original CI failure issue once created)

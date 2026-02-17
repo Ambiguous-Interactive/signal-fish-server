@@ -1,12 +1,19 @@
 # Skill: Web Service Security
 
-<!-- trigger: security, auth, authentication, authorization, tls, secrets, input-validation, WebSocket-security, cors, headers, audit | Hardening a Rust/axum WebSocket signaling server against common attacks | Core -->
+<!--
+  trigger: security, auth, authentication, authorization, tls, secrets,
+  input-validation, WebSocket-security, cors, headers, audit
+  | Hardening a Rust/axum WebSocket signaling server against common attacks
+  | Core
+-->
 
-**Trigger**: When implementing, reviewing, or hardening authentication, authorization, input validation, TLS, secrets management, or any security-sensitive code path.
+**Trigger**: When implementing, reviewing, or hardening authentication, authorization, input validation, TLS,
+secrets management, or any security-sensitive code path.
 
 ---
 
 ## When to Use
+
 - Adding or modifying authentication/authorization logic
 - Accepting external input (HTTP, WebSocket, query params, headers)
 - Managing secrets, API keys, or tokens
@@ -15,6 +22,7 @@
 - Adding logging for security-relevant events
 
 ## When NOT to Use
+
 - Pure business logic with no external input or auth boundaries
 - Test fixtures or mock data (but tests should still cover security paths)
 - Frontend-only styling or layout changes
@@ -228,7 +236,8 @@ tokio::select! {
 
 ### Disable `permessage-deflate`
 
-Compression enables CRIME/BREACH-style attacks and adds CPU overhead for small signaling messages. axum does NOT enable it by default — do not add `.enable_compression()`.
+Compression enables CRIME/BREACH-style attacks and adds CPU overhead for small signaling messages.
+axum does NOT enable it by default — do not add `.enable_compression()`.
 
 ---
 
@@ -248,6 +257,7 @@ let pool = PgPool::connect(config.db_url.expose_secret()).await?;
 ```
 
 > **Note:** The `secrecy` and `subtle` crates must be added to `Cargo.toml` if not already present:
+>
 > ```toml
 > secrecy = "0.10"
 > subtle = "2"
@@ -270,7 +280,8 @@ let jwt_secret = Secret::new(
 
 ### Separate Secrets Per Environment
 
-Never share secrets between dev/staging/production. Use distinct env vars, vault paths, or secret manager entries for each environment.
+Never share secrets between dev/staging/production.
+Use distinct env vars, vault paths, or secret manager entries for each environment.
 
 ---
 
@@ -420,7 +431,8 @@ tracing_subscriber::fmt().json()
 
 ### Log Security-Relevant Events
 
-Always emit structured events for: auth success/failure, authorization denial, rate limit triggers, connection open/close with peer address, invalid message format.
+Always emit structured events for: auth success/failure, authorization denial, rate limit triggers,
+connection open/close with peer address, invalid message format.
 
 ```rust
 

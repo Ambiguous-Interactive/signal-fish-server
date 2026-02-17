@@ -21,11 +21,13 @@
 ## Common Fixes
 
 ### Formatting Error
+
 ```bash
 cargo fmt
 ```
 
 ### Clippy Warnings
+
 ```bash
 # Auto-fix
 cargo clippy --fix --allow-dirty --all-features
@@ -35,6 +37,7 @@ cargo clippy --all-features
 ```
 
 ### MSRV Mismatch
+
 ```bash
 # Check consistency
 ./scripts/check-msrv-consistency.sh
@@ -44,6 +47,7 @@ cargo clippy --all-features
 ```
 
 ### Markdown Issues
+
 ```bash
 ./scripts/check-markdown.sh fix
 ```
@@ -68,11 +72,13 @@ git commit --no-verify
 ```
 
 **⚠️ Only use for:**
+
 - WIP commits on feature branch
 - Emergency hotfixes
 - When hook incorrectly flags valid code
 
 **Then run before merging:**
+
 ```bash
 ./scripts/run-local-ci.sh
 ```
@@ -80,6 +86,7 @@ git commit --no-verify
 ## Common Issues
 
 ### Hook Doesn't Run
+
 ```bash
 # Re-enable hooks
 ./scripts/enable-hooks.sh
@@ -90,6 +97,7 @@ git config --local core.hooksPath
 ```
 
 ### Hook Too Slow
+
 ```bash
 # Commit smaller changesets
 git add src/specific_file.rs
@@ -100,6 +108,7 @@ git commit -m "Part 1"
 ```
 
 ### Clippy Fails But Not Locally
+
 ```bash
 # Ensure same Rust version as CI
 rustc --version

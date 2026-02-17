@@ -1,6 +1,10 @@
 # Skill: WebSocket Protocol Patterns
 
-<!-- trigger: WebSocket, ws, connection, message, broadcast, heartbeat, close, upgrade | WebSocket lifecycle, message design, and broadcast patterns | Feature -->
+<!--
+  trigger: WebSocket, ws, connection, message, broadcast, heartbeat, close, upgrade
+  | WebSocket lifecycle, message design, and broadcast patterns
+  | Feature
+-->
 
 **Trigger**: When working with WebSocket handlers, message protocol design, or broadcast patterns.
 
@@ -145,7 +149,8 @@ Use timeouts at every stage: upgrade (10s), auth (5s), idle (300s).
 
 ### JSON vs MessagePack
 
-This project supports both JSON and MessagePack (via `rmp-serde`). Dispatch on `WireFormat` to encode/decode with `serde_json` or `rmp_serde`.
+This project supports both JSON and MessagePack (via `rmp-serde`).
+Dispatch on `WireFormat` to encode/decode with `serde_json` or `rmp_serde`.
 
 ### Enum-Based Message Types with Serde Tagging
 
@@ -180,7 +185,8 @@ pub enum ServerMessage {
 
 ### Message Framing and Versioning
 
-Include a `version: u32` field in the handshake for forward compatibility. Use route versioning (`/v2/ws`, `/v1/ws`) for breaking protocol changes.
+Include a `version: u32` field in the handshake for forward compatibility.
+Use route versioning (`/v2/ws`, `/v1/ws`) for breaking protocol changes.
 
 ### Binary Message Handling
 
@@ -220,7 +226,8 @@ impl RoomHandle {
 
 ```
 
-`Bytes::clone()` is O(1) (reference-counted). Always use bounded `mpsc` channels per client — drop or disconnect slow receivers rather than buffering unboundedly.
+`Bytes::clone()` is O(1) (reference-counted).
+Always use bounded `mpsc` channels per client — drop or disconnect slow receivers rather than buffering unboundedly.
 
 ---
 

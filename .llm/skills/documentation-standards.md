@@ -1,6 +1,10 @@
 # Skill: Documentation Standards
 
-<!-- trigger: docs, documentation, changelog, doc-comments, readme, api-docs | Documentation requirements and quality standards for all changes | Core -->
+<!--
+  trigger: docs, documentation, changelog, doc-comments, readme, api-docs
+  | Documentation requirements and quality standards for all changes
+  | Core
+-->
 
 **Trigger**: When adding features, fixing bugs, or making any user-facing change that requires documentation updates.
 
@@ -59,6 +63,7 @@
 
 ````rust
 ````rust
+
 /// Creates a new room with the specified configuration.
 ///
 /// # Arguments
@@ -76,7 +81,7 @@
 /// let room_code = server.create_room(config).await?;
 /// ```
 ///
-/// *Added in v2.3.0*
+/// _Added in v2.3.0_
 pub async fn create_room(&self, config: RoomConfig) -> Result<RoomCode, RoomError>
 
 `````
@@ -88,6 +93,7 @@ pub async fn create_room(&self, config: RoomConfig) -> Result<RoomCode, RoomErro
 Use [Keep a Changelog](https://keepachangelog.com/) format:
 
 ```markdown
+
 ## [Unreleased]
 
 ### Added
@@ -121,7 +127,8 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 **Rules:**
 
 - Add entries under `[Unreleased]` during development
-- Use imperative mood in entry text ("Add feature X", not "Added feature X") — section headers use past tense per Keep a Changelog convention
+- Use imperative mood in entry text ("Add feature X", not "Added feature X") -- section headers
+  use past tense per Keep a Changelog convention
 - Reference issue/PR numbers
 - Mark breaking changes explicitly
 - Group by type (Added, Changed, Fixed, etc.)
@@ -182,10 +189,13 @@ Tables must have consistent column alignment:
 **Check markdown files before committing:**
 
 ```bash
+
 # Check all markdown files
+
 ./scripts/check-markdown.sh
 
 # Auto-fix issues where possible
+
 ./scripts/check-markdown.sh fix
 
 ```
@@ -193,10 +203,13 @@ Tables must have consistent column alignment:
 **Install local tools:**
 
 ```bash
+
 # Install markdownlint-cli2
+
 npm install -g markdownlint-cli2
 
 # Verify installation
+
 markdownlint-cli2 --version
 
 ```
@@ -213,13 +226,19 @@ Install recommended extensions for real-time feedback:
 The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is installed):
 
 ```bash
+
 # Enable hooks
+
 ./scripts/enable-hooks.sh
 
 # Pre-commit will now check:
+
 # 1. Code formatting (cargo fmt)
+
 # 2. Panic-prone patterns
+
 # 3. Markdown linting (if markdownlint-cli2 installed)
+
 ```
 
 ### Common Markdown Linting Issues
@@ -236,9 +255,13 @@ The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is
 Technical terms must be whitelisted in `.typos.toml`:
 
 ```toml
+
 # .typos.toml
+
 [default.extend-words]
+
 # Add project-specific and technical terms
+
 rustc = "rustc"
 tokio = "tokio"
 websocket = "websocket"

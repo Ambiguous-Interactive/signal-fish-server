@@ -1,18 +1,25 @@
 # Skill: Graceful Degradation & Reliability
 
-<!-- trigger: degradation, circuit-breaker, health-check, failover, resilience, availability, deployment, drain, shutdown | Reliability patterns for real-time game services | Core -->
+<!--
+  trigger: degradation, circuit-breaker, health-check, failover, resilience, availability, deployment, drain, shutdown
+  | Reliability patterns for real-time game services
+  | Core
+-->
 
-**Trigger**: When implementing, reviewing, or hardening health checks, graceful shutdown, circuit breakers, deployment strategies, or any reliability-critical code path for the signaling server.
+**Trigger**: When implementing, reviewing, or hardening health checks, graceful shutdown, circuit breakers,
+deployment strategies, or any reliability-critical code path for the signaling server.
 
 ---
 
 ## When to Use
+
 - Adding or modifying health check, graceful shutdown, or connection draining logic
 - Wrapping dependent services (database, Redis, auth) in circuit breakers
 - Configuring Kubernetes deployments, PDBs, or rolling updates
 - Adding feature flags, gradual rollout, or connection lifecycle management
 
 ## When NOT to Use
+
 - Rate limiting or DDoS prevention (see [ddos-and-rate-limiting](./ddos-and-rate-limiting.md))
 - WebSocket protocol design unrelated to availability (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
 - General error handling without a reliability motivation (see [error-handling-guide](./error-handling-guide.md))
@@ -295,7 +302,8 @@ spec:
 | `terminationGracePeriodSeconds` | 45 | 5s preStop + 30s drain + 10s buffer |
 | PDB `maxUnavailable` | 1 | Prevents cluster ops from killing multiple pods |
 
-**Blue/green**: deploy green alongside blue, shift new connections via LB weight, wait for blue to drain naturally, then tear down.
+**Blue/green**: deploy green alongside blue, shift new connections via LB weight, wait for blue to drain naturally,
+then tear down.
 
 ---
 

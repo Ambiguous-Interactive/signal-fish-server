@@ -1,12 +1,17 @@
 # Skill: Git Safety Protocol
 
-<!-- trigger: git, commit, git-config, git-commit, git-push, version-control, repository-safety | Critical safety rules for git operations | Core -->
+<!--
+  trigger: git, commit, git-config, git-commit, git-push, version-control, repository-safety
+  | Critical safety rules for git operations
+  | Core
+-->
 
 **Trigger**: Before performing ANY git operation (commit, config, push, etc.)
 
 ---
 
 ## When to Use
+
 - **ALWAYS** - Before any git command that modifies repository state or configuration
 - Before staging files (`git add`)
 - Before creating commits (`git commit`)
@@ -17,6 +22,7 @@
 ---
 
 ## When NOT to Use
+
 - Read-only git operations (git status, git log, git diff, git show) are safe
 - Git operations explicitly requested by the user in their CLAUDE.md or project configuration
 
@@ -253,6 +259,7 @@ Instead:
 **❌ BAD Response:**
 
 ```bash
+
 git add file.rs
 git commit -m "fix: something"
 
@@ -305,11 +312,14 @@ I noticed the git configuration may need updating. Currently:
 If this is incorrect, you can update it with:
 
 ```bash
+
 # For this repository only:
+
 git config user.name "Your Name"
 git config user.email "your.email@example.com"
 
 # Or globally for all repositories:
+
 git config --global user.name "Your Name"
 git config --global user.email "your.email@example.com"
 
@@ -356,7 +366,8 @@ Would you like to review the changes before committing?
 Following a documented workflow blindly and executing `git commit` commands.
 
 **✅ GOOD Response:**
-Recognize that documented workflows are **templates** for the user to execute, not instructions for you to automate. Present the commands to the user instead.
+Recognize that documented workflows are **templates** for the user to execute, not instructions for you to automate.
+Present the commands to the user instead.
 
 ---
 
@@ -420,6 +431,7 @@ This git safety protocol integrates with:
 ## Summary
 
 ### ⛔ NEVER
+
 - Create commits (`git commit`)
 - Modify git configuration (`git config user.*`)
 - Stage files without explicit user request (`git add`)
@@ -427,12 +439,14 @@ This git safety protocol integrates with:
 - Modify git history (`git rebase`, `git reset`, `git amend`)
 
 ### ✅ ALWAYS
+
 - Use read-only git operations (`git status`, `git diff`, `git log`)
 - Provide clear commit instructions to user
 - Let user control when and what gets committed
 - Respect user's git identity and configuration
 
 ### 🎯 PRINCIPLE
+
 **You prepare the work. The user commits it.**
 
 Your role is to:

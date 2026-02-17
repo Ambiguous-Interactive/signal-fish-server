@@ -1,6 +1,10 @@
 # Skill: Observability and Logging
 
-<!-- trigger: logging, tracing, metrics, opentelemetry, spans, instrument, structured | Adding metrics, tracing spans, and structured logging | Performance -->
+<!--
+  trigger: logging, tracing, metrics, opentelemetry, spans, instrument, structured
+  | Adding metrics, tracing spans, and structured logging
+  | Performance
+-->
 
 **Trigger**: When adding logging, metrics, tracing spans, or OpenTelemetry instrumentation.
 
@@ -35,7 +39,7 @@
 
 ## Structured Logging with tracing
 
-### Use tracing, Not println!
+### Use tracing, Not println
 
 ```rust
 // ❌ Unstructured, no levels, no context
@@ -138,7 +142,8 @@ fn init_tracing() {
 
 ```
 
-Use `fmt::layer().json()` for machine-readable production output. For file rotation, use `tracing_appender::rolling` (hold the `_guard` for app lifetime).
+Use `fmt::layer().json()` for machine-readable production output.
+For file rotation, use `tracing_appender::rolling` (hold the `_guard` for app lifetime).
 
 ---
 

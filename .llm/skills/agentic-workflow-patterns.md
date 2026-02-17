@@ -1,12 +1,18 @@
 # Skill: Agentic Workflow Patterns
 
-<!-- trigger: agent, agentic, workflow, subagent, ai-review, automation, ai-workflow, code-review-automation | Patterns for effective AI agent workflows and subagent dispatch | Core -->
+<!--
+  trigger: agent, agentic, workflow, subagent, ai-review, automation, ai-workflow, code-review-automation
+  | Patterns for effective AI agent workflows and subagent dispatch
+  | Core
+-->
 
-**Trigger**: When planning or executing multi-step AI agent workflows, dispatching subagents, or structuring automated code review.
+**Trigger**: When planning or executing multi-step AI agent workflows, dispatching subagents,
+or structuring automated code review.
 
 ---
 
 ## When to Use
+
 - Planning multi-step implementation tasks
 - Dispatching subagents for review or implementation
 - Structuring automated code review workflows
@@ -16,6 +22,7 @@
 ---
 
 ## When NOT to Use
+
 - Simple single-file changes that don't need orchestration
 - User-interactive workflows (this is for autonomous operation)
 - Manual code review by humans
@@ -36,6 +43,7 @@
 ---
 
 ## TL;DR
+
 - Implement → Verify → Review → Fix → Commit cycle for every change
 - Use subagents for isolated tasks to keep context clean
 - Verification beats inspection — always run cargo check/clippy/test
@@ -69,6 +77,7 @@ Every significant code change follows this cycle:
 ## Subagent Dispatch Patterns
 
 ### When to Use Subagents
+
 - Tasks affecting different files/subsystems (parallel-safe)
 - Code review of your own changes (fresh context)
 - Research tasks that require reading many files
@@ -100,7 +109,9 @@ Do NOT:
 Return: List of changes made with before/after snippets.
 
 ```markdown
+
 ## Bad Subagent Prompt (too vague)
+
 Fix the error handling in the server code.
 Make it better and more robust.
 
@@ -197,7 +208,8 @@ For the complete verification command sequence, see [agent-self-review-checklist
 
 ## Quality Gates
 
-Before considering any task "done", walk through the verification checklist in [agent-self-review-checklist](./agent-self-review-checklist.md). All gates must pass before committing.
+Before considering any task "done", walk through the verification checklist in
+[agent-self-review-checklist](./agent-self-review-checklist.md). All gates must pass before committing.
 
 ---
 
@@ -236,9 +248,11 @@ If you've attempted to fix an issue twice and it's still broken:
 When acting as a reviewer, use this format:
 
 ```markdown
+
 ## Code Review: [description of changes]
 
 ### Summary
+
 [1-2 sentence overview of what was changed and overall assessment]
 
 ### Findings
@@ -254,11 +268,13 @@ Fix: Suggested improvement
 Confidence: medium
 
 ### Verdict
+
 - [ ] Ready to merge
 - [ ] Needs fixes (list critical items)
 - [ ] Needs rework (fundamental issues)
 
 ### Verification
+
 - [x] cargo check passes
 - [x] cargo clippy clean
 - [x] cargo test passes

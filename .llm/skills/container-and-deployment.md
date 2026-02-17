@@ -1,8 +1,13 @@
 # Skill: Container Security & Deployment
 
-<!-- trigger: Docker, container, dockerfile, kubernetes, k8s, deploy, helm, image, registry, ci-cd, pipeline | Container security and deployment patterns for game servers | Infrastructure -->
+<!--
+  trigger: Docker, container, dockerfile, kubernetes, k8s, deploy, helm, image, registry, ci-cd, pipeline
+  | Container security and deployment patterns for game servers
+  | Infrastructure
+-->
 
-**Trigger**: When building Docker images, writing Kubernetes manifests, configuring CI/CD pipelines, or hardening container deployments for the signaling server.
+**Trigger**: When building Docker images, writing Kubernetes manifests, configuring CI/CD pipelines,
+or hardening container deployments for the signaling server.
 
 ---
 
@@ -702,7 +707,10 @@ groups:
 
 ### The Problem
 
-When a Cargo feature requires native C libraries (e.g., `kafka` → `rdkafka` → `librdkafka` → `cmake`, `libcurl-dev`, `libssl-dev`), CI workflows using `--all-features` will fail unless those libraries are installed in the runner environment. This is easy to miss because developers often have these packages locally.
+When a Cargo feature requires native C libraries (e.g., `kafka` → `rdkafka` → `librdkafka` → `cmake`, `libcurl-dev`,
+`libssl-dev`),
+CI workflows using `--all-features` will fail unless those libraries are installed in the runner environment.
+This is easy to miss because developers often have these packages locally.
 
 ### The Solution: Composite Action
 

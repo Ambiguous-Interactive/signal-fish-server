@@ -4,7 +4,8 @@ This guide explains how to install, configure, and troubleshoot git hooks for th
 
 ## Overview
 
-Pre-commit hooks run automatically before each commit to catch issues early and maintain code quality. Our hooks prevent the types of issues that have caused CI failures in the past.
+Pre-commit hooks run automatically before each commit to catch issues early and maintain code quality.
+Our hooks prevent the types of issues that have caused CI failures in the past.
 
 ## Installation
 
@@ -117,10 +118,11 @@ let value = match some_option {
 
 **What it checks:** Minimum Supported Rust Version (MSRV) is consistent across:
 
-- `Cargo.toml` (rust-version)
+- `Cargo.toml` (`rust-version`)
 - `rust-toolchain.toml` (channel)
 - `clippy.toml` (msrv)
-- `Dockerfile` (FROM rust:X.Y.Z)
+<!-- markdownlint-disable-next-line MD044 -- rust:X.Y.Z is a Docker image name -->
+- `Dockerfile` (`FROM rust:X.Y.Z`)
 
 **When it runs:** When `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, or `Dockerfile` are modified.
 
@@ -143,7 +145,8 @@ let value = match some_option {
 
 **Real-world issue this prevents:**
 
-In commit `1c8ed3b`, we had `Dockerfile` using `rust:1.88` while `Cargo.toml` specified `1.88.0`. This check catches such inconsistencies.
+In commit `1c8ed3b`, we had `Dockerfile` using `rust:1.88` while `Cargo.toml` specified `1.88.0`.
+This check catches such inconsistencies.
 
 ### 5. Workflow AWK Validation
 
@@ -172,7 +175,9 @@ In commit `1c8ed3b`, we had `Dockerfile` using `rust:1.88` while `Cargo.toml` sp
 
 **Real-world issue this prevents:**
 
-In commit `1c8ed3b`, we changed `/^```[Rr]ust(,.*)?$/` to `/^```[Rr]ust/` to handle variations like `rust ignore` vs `rust,ignore`. This check catches regex patterns that are too strict.
+In commit `1c8ed3b`,
+we changed `/^```[Rr]ust(,.*)?$/` to `/^```[Rr]ust/` to handle variations like `rust ignore` vs `rust,ignore`.
+This check catches regex patterns that are too strict.
 
 ### 6. Markdown Linting
 
@@ -584,7 +589,8 @@ fi
 
 ### Q: Can I use `git commit -a` with hooks?
 
-**A:** Yes, `git commit -a` (commit all modified files) works fine with hooks. The hook checks all staged files, whether staged manually with `git add` or automatically with `-a`.
+**A:** Yes, `git commit -a` (commit all modified files) works fine with hooks.
+The hook checks all staged files, whether staged manually with `git add` or automatically with `-a`.
 
 ### Q: Do hooks run on `git commit --amend`?
 
@@ -592,7 +598,8 @@ fi
 
 ### Q: Do hooks run on merge commits?
 
-**A:** Yes, hooks run on all commits including merges. However, the hook only checks **new changes** (files you modified), not the entire merged state.
+**A:** Yes, hooks run on all commits including merges.
+However, the hook only checks **new changes** (files you modified), not the entire merged state.
 
 ### Q: What if I need to commit broken code temporarily?
 
@@ -610,7 +617,8 @@ git commit --no-verify -m "WIP: broken but saving progress"
 
 ### Q: Can hooks auto-fix issues and commit them?
 
-**A:** No. Hooks should never modify your working directory automatically. They detect issues; you fix them manually or with auto-fix commands, then recommit.
+**A:** No. Hooks should never modify your working directory automatically.
+They detect issues; you fix them manually or with auto-fix commands, then recommit.
 
 ## Support
 

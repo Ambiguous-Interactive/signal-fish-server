@@ -80,7 +80,8 @@
 
 ### The Problem: Ecosystem Mismatch
 
-Using caching or tooling from the wrong language ecosystem causes silent failures, cache misses, and cryptic errors. This is surprisingly common when copying workflow templates.
+Using caching or tooling from the wrong language ecosystem causes silent failures, cache misses, and cryptic errors.
+This is surprisingly common when copying workflow templates.
 
 **Critical Rule:** Workflow configuration MUST match the project's primary language.
 
@@ -224,19 +225,14 @@ grep -r "cargo\|Cargo\.toml\|rust-cache" .          # Rust
 
 Before committing a new or modified workflow:
 
-- [ ] **Identify project language**: Check repository for `Cargo.toml` (Rust), `package.json` (Node),
-
-      `requirements.txt` (Python), etc.
-
+- [ ] **Identify project language**: Check repository for `Cargo.toml` (Rust),
+  `package.json` (Node), `requirements.txt` (Python), etc.
 - [ ] **Verify cache configuration**: Cache paths must match project language (see table above)
 - [ ] **Check hash files in cache keys**: Files referenced in `hashFiles()` must exist
 - [ ] **Validate tool/action selection**: Use language-appropriate actions
-
-      (rust-cache for Rust, setup-python for Python, etc.)
-
+  (`rust-cache` for Rust, `setup-python` for Python, etc.)
 - [ ] **Review dependency install commands**: Must match project language
-
-      (`cargo build`, not `pip install`)
+  (`cargo build`, not `pip install`)
 
 - [ ] **Test workflow with cold cache**: Ensure workflow works even when cache misses
 
@@ -404,7 +400,8 @@ fn test_all_github_actions_are_sha_pinned() {
 
 ### The Problem: Docker Hub Tag Format vs Semantic Versioning
 
-Docker Hub uses a shortened version format for official images (e.g., `rust:1.88` instead of `rust:1.88.0`), which can cause MSRV consistency validation to fail when comparing against `Cargo.toml` versions.
+Docker Hub uses a shortened version format for official images (e.g., `rust:1.88` instead of `rust:1.88.0`),
+which can cause MSRV consistency validation to fail when comparing against `Cargo.toml` versions.
 
 **Critical Rule:** When using Docker Hub official images, use the X.Y format (not X.Y.Z) to match Docker Hub conventions.
 
@@ -626,7 +623,8 @@ FROM Rust:1.88-bookworm AS chef
 #          ^^^^ Shortened format - matches Docker Hub convention
 ```
 
-**Key Insight:** Docker Hub official images use X.Y tags to provide automatic patch updates. Full X.Y.Z versions are not published for official images.
+**Key Insight:** Docker Hub official images use X.Y tags to provide automatic patch updates.
+Full X.Y.Z versions are not published for official images.
 
 ---
 
@@ -634,7 +632,10 @@ FROM Rust:1.88-bookworm AS chef
 
 ### The Problem
 
-AWK record separators default to newlines. When extracting multi-line code blocks (e.g., from Markdown), using newline-separated output causes each line to become a separate record in the downstream pipeline, breaking validation logic.
+AWK record separators default to newlines.
+When extracting multi-line code blocks (e.g., from Markdown),
+using newline-separated output causes each line to become a separate record in the downstream pipeline,
+breaking validation logic.
 
 ### The Solution: NUL Byte Delimiters
 
@@ -670,7 +671,8 @@ done
 
 ### Multi-Field AWK Output with NUL Delimiters
 
-When you need multiple fields (e.g., line number, attributes, content), use a custom field separator that won't appear in content:
+When you need multiple fields (e.g., line number, attributes, content),
+use a custom field separator that won't appear in content:
 
 ```bash
 
@@ -1068,7 +1070,8 @@ awk '
 
 ```
 
-**Solution**: AWK scripts are validated through actual execution in CI. If an AWK script has syntax errors, the workflow will fail at runtime.
+**Solution**: AWK scripts are validated through actual execution in CI.
+If an AWK script has syntax errors, the workflow will fail at runtime.
 
 ### Variable Naming Conventions
 
@@ -1168,7 +1171,8 @@ echo "Failed: $FAILED / $TOTAL"
 
 ### The Problem
 
-Lychee's `include` field in `.lychee.toml` is for **URL regex filtering**, not file glob patterns. Using file globs in `include` silently fails to filter anything.
+Lychee's `include` field in `.lychee.toml` is for **URL regex filtering**, not file glob patterns.
+Using file globs in `include` silently fails to filter anything.
 
 ```toml
 # ❌ WRONG: include is for URL patterns, not file paths
@@ -1256,7 +1260,8 @@ See [testing guide](skills/testing-strategies.md)
 
 ### The Problem
 
-Windows and macOS default to case-insensitive filesystems, but Linux (including CI runners) is case-sensitive. Links and imports that work locally may break in CI.
+Windows and macOS default to case-insensitive filesystems, but Linux (including CI runners) is case-sensitive.
+Links and imports that work locally may break in CI.
 
 ### Common Failures
 

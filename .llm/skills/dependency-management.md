@@ -1,6 +1,10 @@
 # Skill: Dependency Management
 
-<!-- trigger: dependency, crate, cargo deny, audit, feature flag, workspace, update | Adding, auditing, and managing Rust crate dependencies | Feature -->
+<!--
+  trigger: dependency, crate, cargo deny, audit, feature flag, workspace, update
+  | Adding, auditing, and managing Rust crate dependencies
+  | Feature
+-->
 
 **Trigger**: When adding, updating, removing, or auditing Rust crate dependencies.
 
@@ -46,7 +50,8 @@ cargo deny check sources      # Crate source restrictions
 
 ```
 
-The deny.toml configures: `vulnerability = "deny"`, `yanked = "deny"`, allowed licenses (MIT, Apache-2.0, BSD, ISC, etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
+The deny.toml configures: `vulnerability = "deny"`, `yanked = "deny"`, allowed licenses (MIT, Apache-2.0, BSD, ISC,
+etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
 
 ---
 
@@ -88,9 +93,13 @@ kafka = ["rdkafka"]
 
 ### Best Practices
 
-Put heavy/optional dependencies behind feature flags. Use `#[cfg(feature = "...")]` on modules and functions. Don't put commonly-needed deps behind flags (if 90% of users need it, make it default).
+Put heavy/optional dependencies behind feature flags. Use `#[cfg(feature = "...")]` on modules and functions.
+Don't put commonly-needed deps behind flags (if 90% of users need it, make it default).
 
-**Native C dependencies:** If a feature pulls in a crate that requires native libraries (e.g., `rdkafka` needs `cmake`, `libcurl-dev`, `libssl-dev`), you must also update `.github/actions/install-build-deps/action.yml` and the `Dockerfile` builder stage. See [container-and-deployment § CI Native Build Dependencies](./container-and-deployment.md) for details.
+**Native C dependencies:** If a feature pulls in a crate that requires native libraries (e.g., `rdkafka` needs `cmake`,
+`libcurl-dev`, `libssl-dev`),
+you must also update `.github/actions/install-build-deps/action.yml` and the `Dockerfile` builder stage.
+See [container-and-deployment § CI Native Build Dependencies](./container-and-deployment.md) for details.
 
 ### Testing All Feature Combinations
 
@@ -263,7 +272,7 @@ cargo tree --features                 # Feature usage
 
 When cargo-machete or cargo-udeps reports a false positive:
 
-**Step 1: Verify it's actually used**
+#### Step 1: Verify it is actually used
 
 ```bash
 # Search for usage in code
@@ -275,7 +284,7 @@ cargo metadata --format-version=1 | jq '.packages[] | select(.name == "dependenc
 # If output includes "proc-macro", it's used at compile-time
 ```
 
-**Step 2: Document why it's kept**
+#### Step 2: Document why it is kept
 
 ```toml
 
@@ -286,7 +295,7 @@ serde = { version = "1.0", features = ["derive"] }
 
 ```
 
-**Step 3: Consider CI configuration**
+#### Step 3: Consider CI configuration
 
 For known false positives, you can configure tools to ignore them:
 
@@ -352,7 +361,8 @@ cargo outdated --root-deps-only    # Focus on direct deps
 
 ```
 
-**Update workflow:** Update one dep at a time → `cargo check` → `cargo test --all-features` → `cargo deny check` → commit as `deps: update <crate> to <version>`.
+**Update workflow:** Update one dep at a time → `cargo check` → `cargo test --all-features` → `cargo deny check` →
+commit as `deps: update <crate> to <version>`.
 
 ---
 
@@ -418,7 +428,7 @@ rand = "=0.9.0"  # Pin to version compatible with current MSRV
 
 ```
 
-**Option 2: Evaluate alternatives**
+#### Option 2: Evaluate alternatives
 
 - Search for alternative crates with lower MSRV
 - Check if the feature requiring newer Rust is actually needed
@@ -478,7 +488,8 @@ See [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) for comp
 
 ## When to Vendor vs Depend
 
-Vendor when: crate is unmaintained and you need patches, crate is <100 lines and you need one function, or you've forked with significant modifications. Depend normally otherwise.
+Vendor when: crate is unmaintained and you need patches, crate is <100 lines and you need one function,
+or you've forked with significant modifications. Depend normally otherwise.
 
 This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "third_party/rmp" }`
 

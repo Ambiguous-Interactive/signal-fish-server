@@ -1,6 +1,10 @@
 # Skill: Markdown Best Practices
 
-<!-- trigger: markdown, documentation, link validation, code blocks, proper nouns, capitalization, technical writing | Best practices for writing and validating Markdown documentation | Documentation -->
+<!--
+  trigger: markdown, documentation, link validation, code blocks, proper nouns, capitalization, technical writing
+  | Best practices for writing and validating Markdown documentation
+  | Documentation
+-->
 
 **Trigger**: When writing Markdown documentation, fixing link validation issues, or improving documentation quality.
 
@@ -28,21 +32,25 @@
 ## TL;DR
 
 **Code Blocks:**
-- Always specify language identifier: ` ```rust`, ` ```bash`, ` ```json`, never ` ```
-- Use lowercase language names: ` ```rust` not ` ```Rust`
+
+- Always specify language identifier: ` ```Rust`, ` ```bash`, ` ```json`, never ` ```
+- Use lowercase language names: ` ```Rust` not ` ```Rust`
 - For plain text examples, use ` ```text`
 
 **Proper Nouns:**
+
 - Capitalize correctly: "HashiCorp", "GitHub", "WebSocket", "Rust"
 - Technical identifiers (filenames, field names) stay lowercase in prose
 - When in doubt, check the official brand guidelines
 
 **Links:**
+
 - Use relative paths for internal documentation: `[guide](../docs/guide.md)`
 - Case sensitivity matters on Linux - verify exact filename case
 - Test links locally with lychee before pushing
 
 **Spell Checking:**
+
 - Add technical terms to `.typos.toml`
 - Lowercase terms go in `[default.extend-words]`
 - Mixed-case terms go in `[default.extend-identifiers]`
@@ -55,7 +63,7 @@
 
 Every code block MUST have a language identifier for proper syntax highlighting and validation.
 
-```markdown
+````markdown
 ❌ WRONG: No language identifier
 ```
 some code here
@@ -67,13 +75,13 @@ fn main() {
     println!("Hello, world!");
 }
 ```
-```
+````
 
 ### Common Language Identifiers
 
 | Content Type | Identifier | Example |
 |--------------|------------|---------|
-| Rust code | `rust` | ` ```rust` |
+| Rust code | `rust` | ` ```Rust` |
 | Shell commands | `bash` or `sh` | ` ```bash` |
 | JSON | `json` | ` ```json` |
 | TOML | `toml` | ` ```toml` |
@@ -89,7 +97,7 @@ fn main() {
 
 Rust code blocks can have special attributes:
 
-```markdown
+````markdown
 ```rust,ignore
 // This code won't be tested by rustdoc
 ```
@@ -105,18 +113,19 @@ Rust code blocks can have special attributes:
 ```rust,edition2021
 // Specify Rust edition
 ```
-```
+````
 
 **Attribute Formats:**
-- Comma-separated: ` ```rust,ignore`
-- Space-separated: ` ```rust ignore` (also valid)
-- Multiple attributes: ` ```rust,ignore,no_run` or ` ```rust ignore no_run`
+
+- Comma-separated: ` ```Rust,ignore`
+- Space-separated: ` ```Rust ignore` (also valid)
+- Multiple attributes: ` ```Rust,ignore,no_run` or ` ```rust ignore no_run`
 
 ### Case Sensitivity
 
 Language identifiers should be lowercase for consistency:
 
-```markdown
+````markdown
 ✅ CORRECT: Lowercase
 ```rust
 fn main() {}
@@ -126,7 +135,7 @@ fn main() {}
 ```Rust
 fn main() {}
 ```
-```
+````
 
 **Exception:** Both `rust` and `Rust` are valid and work identically. Use lowercase for consistency.
 
@@ -137,6 +146,7 @@ fn main() {}
 ### The Challenge
 
 Technical documentation contains a mix of:
+
 1. **Proper nouns** (company names, product names) - require specific capitalization
 2. **Technical identifiers** (filenames, field names, code patterns) - must match code exactly
 3. **Common nouns** (general terms) - follow standard English rules
@@ -158,6 +168,7 @@ Always use official capitalization:
 | TypeScript | `Typescript`, `typescript` |
 
 **How to find official capitalization:**
+
 1. Check the company's official website
 2. Look at their GitHub organization name
 3. Check their brand guidelines
@@ -170,11 +181,12 @@ Protocol and technology names often have specific capitalization:
 | Term | Capitalization | Context |
 |------|----------------|---------|
 | WebSocket | Mixed case | Protocol name (proper noun) |
-| websocket | Lowercase | In code, URLs (`ws://`), or when referring to the concept generically |
+| `websocket` | Lowercase | In code, URLs (`ws://`), or when referring to the concept generically |
 | WebRTC | Mixed case | Protocol name |
 | REST API | Uppercase | Architectural style |
 
 **Pattern:**
+
 - Proper noun/brand: Use official capitalization
 - In prose referring to the concept: Can be lowercase
 - In code/technical context: Match code exactly
@@ -215,6 +227,7 @@ See the [configuration guide](https://github.com/myorg/myrepo/blob/main/docs/con
 ```
 
 **Benefits of relative links:**
+
 - Work in forks and local clones
 - Work offline
 - No broken links when repository is renamed
@@ -242,6 +255,7 @@ See [testing guide](skills/testing-strategies.md)
 ```
 
 **How to avoid case sensitivity issues:**
+
 1. Use tab completion when creating links locally
 2. Run link validation locally before pushing
 3. Test on Linux (WSL, Docker, or CI) if developing on macOS/Windows
@@ -277,6 +291,7 @@ See [testing patterns](testing.md#Unit-Testing-Patterns).
 ```
 
 **Anchor transformation rules:**
+
 1. Convert to lowercase
 2. Replace spaces with hyphens
 3. Remove most punctuation (except hyphens)
@@ -301,11 +316,13 @@ exclude = [
 ```
 
 **Pattern:** Exclude by URL pattern, not by file path. This allows you to:
+
 - Keep placeholder URLs in test fixtures
 - Skip validation of example code
 - Avoid false positives in CI
 
 **When NOT to exclude:**
+
 - Real documentation links (even in test files)
 - Links to actual dependencies or tools
 - Links that readers will actually follow
@@ -341,6 +358,7 @@ async = "async"
 ```
 
 **Use for:**
+
 - Rust crate names
 - Command-line tools
 - File formats
@@ -367,6 +385,7 @@ PascalCase = "PascalCase"
 ```
 
 **Use for:**
+
 - Company names with specific capitalization
 - Product/brand names with mixed case
 - Protocol names with mixed case
@@ -375,10 +394,12 @@ PascalCase = "PascalCase"
 ### Why Two Sections?
 
 The `typos` tool splits identifiers on case boundaries:
+
 - `HashiCorp` → `Hash` + `I` + `Corp` (analyzed as separate components)
 - `hashicorp` → `hashicorp` (analyzed as single word)
 
 **This means:**
+
 - `extend-words` handles unsplit, lowercase words
 - `extend-identifiers` handles split, mixed-case terms
 
@@ -387,6 +408,7 @@ The `typos` tool splits identifiers on case boundaries:
 ### Adding New Technical Terms
 
 **Process:**
+
 1. CI fails with typo error
 2. Verify it's a legitimate technical term (not an actual typo)
 3. Determine if it's lowercase or mixed-case
@@ -411,6 +433,7 @@ HashiCorp = "HashiCorp"  # Company name, proper capitalization
 ### Common Terms to Whitelist
 
 **Rust Ecosystem:**
+
 ```toml
 [default.extend-words]
 rustc = "rustc"
@@ -426,6 +449,7 @@ impl = "impl"
 ```
 
 **Build and Infrastructure:**
+
 ```toml
 [default.extend-words]
 dockerfile = "dockerfile"
@@ -438,6 +462,7 @@ cicd = "cicd"
 ```
 
 **Networking and Protocols:**
+
 ```toml
 [default.extend-words]
 websocket = "websocket"
@@ -461,7 +486,8 @@ WebRTC = "WebRTC"
 **Why:** Enables syntax highlighting, aids accessibility, prevents ambiguity.
 
 **Fix:**
-```markdown
+
+````markdown
 ❌ BEFORE:
 ```
 fn main() {}
@@ -471,7 +497,7 @@ fn main() {}
 ```rust
 fn main() {}
 ```
-```
+````
 
 ### MD060: Table Alignment
 
@@ -480,6 +506,7 @@ fn main() {}
 **Why:** Improves readability, prevents parsing errors.
 
 **Fix:**
+
 ```markdown
 ❌ BEFORE:
 | Column | Value |
@@ -503,6 +530,7 @@ fn main() {}
 **When to disable:** Technical documentation often has long lines (URLs, code examples, tables).
 
 **Configuration:**
+
 ```json
 {
   "MD013": false
@@ -516,6 +544,7 @@ fn main() {}
 **Why:** Improves document structure, aids navigation.
 
 **Fix:**
+
 ```markdown
 ❌ BEFORE:
 This is a paragraph...
@@ -622,6 +651,7 @@ jobs:
 ```
 
 **Key features:**
+
 - Only runs on markdown file changes (path filters)
 - Separate jobs for different types of validation
 - Uses official actions with SHA pinning
@@ -636,6 +666,7 @@ jobs:
 **Symptom:** CI fails with MD040 errors.
 
 **Solution:**
+
 ```bash
 # Find all code blocks without language identifiers
 grep -r '^```$' --include="*.md" .
@@ -649,11 +680,13 @@ grep -r '^```$' --include="*.md" .
 **Symptom:** Links work locally (macOS/Windows) but fail in CI (Linux).
 
 **Solution:**
+
 - Verify link case matches filename exactly
 - Use tab completion when creating links
 - Test on Linux before pushing (WSL, Docker)
 
 **Prevention:**
+
 ```rust
 // Add to tests/ci_config_tests.rs
 #[test]
@@ -668,6 +701,7 @@ fn test_documentation_links_case_sensitive() {
 **Symptom:** Typos checker still flags "HashiCorp" even though it's in `.typos.toml`.
 
 **Solution:**
+
 ```toml
 # ❌ WRONG: Mixed-case in extend-words
 [default.extend-words]
@@ -708,6 +742,32 @@ exclude = [
 ]
 ```
 
+### Pitfall 6: MD044 Proper Names vs Docker Image References
+
+<!-- markdownlint-disable-next-line MD044 -->
+MD044 flags lowercase `rust` as a proper noun violation, but Docker image names
+like `rust:1.88` **must** stay lowercase. Wrap Docker image references in backtick
+inline code (e.g., `` `rust:1.88` ``) to suppress MD044 inside code spans.
+
+### Pitfall 7: Code Block Fence Tracking in Nested Examples
+
+Opening fences can have info strings (`` ```rust ``), but closing fences must be
+bare (`` ``` ``). A naive toggle (flip `in_block` on every `` ``` `` line) breaks
+when documentation contains nested fence examples. Always match closing fences with
+an exact `/^```$/` pattern.
+
+### Pitfall 8: MD060 and Compact Table Styles
+
+MD060 (no-space-in-code) may fire false positives on compact table styles that omit
+padding around pipe characters. If your project uses compact tables, consider
+disabling MD060 in `.markdownlint.json`.
+
+### Pitfall 9: Lint Test Fixtures
+
+Test fixture markdown files often contain intentional lint violations. Exclude them
+from linting by adding paths to `.markdownlintignore` rather than weakening rules
+project-wide.
+
 ---
 
 ## VS Code Integration
@@ -746,6 +806,7 @@ Add to `.vscode/settings.json`:
 ```
 
 **Benefits:**
+
 - Real-time linting feedback
 - Auto-fix on save (if configured)
 - Spell checking with technical terms
@@ -828,6 +889,7 @@ fn test_markdownlint_config_exists() {
 ```
 
 **Benefits:**
+
 - Catch issues during `cargo test` (before CI)
 - Fast execution (< 1 second)
 - Clear error messages with file locations
@@ -865,21 +927,25 @@ Before committing markdown changes:
 ## Quick Reference
 
 ### Language Identifiers
+
 - Rust: `rust`
 - Shell: `bash` or `sh`
 - Plain text: `text`
 - JSON/YAML/TOML: `json`, `yaml`, `toml`
 
 ### Capitalization
+
 - Company names: Official capitalization (HashiCorp, GitHub)
 - Technical terms: Match code exactly (`Cargo.toml`, `main.rs`)
 - Protocols: Mixed case for proper noun (WebSocket), lowercase in technical context
 
 ### Spell Checking
+
 - Lowercase technical terms: `[default.extend-words]`
 - Mixed-case company names: `[default.extend-identifiers]`
 
 ### Validation Commands
+
 ```bash
 markdownlint-cli2 '**/*.md'                # Lint
 markdownlint-cli2 --fix '**/*.md'          # Auto-fix

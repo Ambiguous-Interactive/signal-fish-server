@@ -1,6 +1,10 @@
 # Skill: Rust Performance Optimization
 
-<!-- trigger: performance, allocation, profiling, benchmark, cache, zero-copy, smallvec, dashmap | Optimizing hot paths, reducing allocations, and profiling | Performance -->
+<!--
+  trigger: performance, allocation, profiling, benchmark, cache, zero-copy, smallvec, dashmap
+  | Optimizing hot paths, reducing allocations, and profiling
+  | Performance
+-->
 
 **Trigger**: When optimizing hot paths, reducing allocations, or profiling performance-critical code.
 
@@ -36,13 +40,18 @@
 
 ## Release Profile Configuration
 
-This project's [Cargo.toml](../../Cargo.toml) already has optimized release profiles (`lto = "thin"`, `codegen-units = 1`, `strip = true`, `opt-level = 3` for deps). Use `lto = "fat"` only if benchmarks show measurable gain. Consider `panic = "abort"` for production binaries (smaller binary, no unwind overhead).
+This project's [Cargo.toml](../../Cargo.toml) already has optimized release profiles (`lto = "thin"`,
+`codegen-units = 1`, `strip = true`, `opt-level = 3` for deps).
+Use `lto = "fat"` only if benchmarks show measurable gain.
+Consider `panic = "abort"` for production binaries (smaller binary, no unwind overhead).
 
 ---
 
 ## Alternative Allocators
 
-Consider `tikv-jemallocator` (multi-threaded server workloads) or `mimalloc` (good cross-platform default). Neither is currently in project dependencies. Benchmark before committing — the default allocator is often fine for I/O-bound servers.
+Consider `tikv-jemallocator` (multi-threaded server workloads) or `mimalloc` (good cross-platform default).
+Neither is currently in project dependencies.
+Benchmark before committing — the default allocator is often fine for I/O-bound servers.
 
 ```rust
 #[cfg(not(target_env = "msvc"))]
@@ -90,7 +99,8 @@ let name: Arc<str> = "room_alpha".into();  // One fewer indirection vs Arc<Strin
 
 ## Avoid Unnecessary `format!`
 
-Use `tracing`/`log` macros (format lazily) instead of `format!()` in log calls. Use `&str` literals for static strings. See [observability-and-logging](./observability-and-logging.md).
+Use `tracing`/`log` macros (format lazily) instead of `format!()` in log calls. Use `&str` literals for static strings.
+See [observability-and-logging](./observability-and-logging.md).
 
 ---
 
@@ -103,7 +113,8 @@ Use `tracing`/`log` macros (format lazily) instead of `format!()` in log calls. 
 | `DashMap` | Concurrent reads/writes (uses AHash internally) |
 | `std SipHash` | Only when HashDoS resistance is paramount |
 
-This project uses `DashMap` for concurrent access. Add `rustc-hash`/`ahash` to `Cargo.toml` for single-threaded hot-path maps.
+This project uses `DashMap` for concurrent access.
+Add `rustc-hash`/`ahash` to `Cargo.toml` for single-threaded hot-path maps.
 
 ---
 
@@ -210,7 +221,8 @@ println!("Tick: {}", archived.tick);  // No allocation
 
 ## Cache-Friendly Data Structures
 
-Prefer struct-of-arrays for batch processing over array-of-structs. Use contiguous storage (`Vec<T>`) over linked structures (`LinkedList`). `Vec<T>` has O(1) cache-friendly iteration.
+Prefer struct-of-arrays for batch processing over array-of-structs.
+Use contiguous storage (`Vec<T>`) over linked structures (`LinkedList`). `Vec<T>` has O(1) cache-friendly iteration.
 
 ```rust
 
@@ -275,7 +287,8 @@ const GREETING: &str = concat!("matchbox-signaling-server/", env!("CARGO_PKG_VER
 
 ## Avoid Cloning in Hot Paths
 
-Use references/borrows, `Arc` for shared ownership across tasks, and `Bytes` for network data sharing (O(1) clone via refcount bump).
+Use references/borrows, `Arc` for shared ownership across tasks,
+and `Bytes` for network data sharing (O(1) clone via refcount bump).
 
 ```rust
 

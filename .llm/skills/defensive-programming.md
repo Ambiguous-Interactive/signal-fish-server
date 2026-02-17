@@ -1,6 +1,10 @@
 # Skill: Defensive Programming
 
-<!-- trigger: panic, unwrap, indexing, validation, safety, bounds, overflow, cast | Eliminating runtime panics and compile-time safety | Core -->
+<!--
+  trigger: panic, unwrap, indexing, validation, safety, bounds, overflow, cast
+  | Eliminating runtime panics and compile-time safety
+  | Core
+-->
 
 **Trigger**: When handling external input, fallible operations, or any code that could panic at runtime.
 
@@ -135,7 +139,8 @@ Without destructuring, new fields are silently ignored.
 
 ## Enforce Construction via Constructors
 
-Use private fields with validated constructors to make invalid states unrepresentable. See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the newtype pattern and enums-over-booleans.
+Use private fields with validated constructors to make invalid states unrepresentable.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the newtype pattern and enums-over-booleans.
 
 ```rust
 
@@ -197,7 +202,8 @@ let players: u16 = u16::try_from(count).unwrap_or(u16::MAX);
 
 ## Option/Result Chaining Patterns
 
-Prefer `?`, `.ok_or()`, `.unwrap_or_default()`, `.map()`, `.and_then()`, and `.transpose()` over unwrapping. Chain transformations to avoid intermediate unwraps.
+Prefer `?`, `.ok_or()`, `.unwrap_or_default()`, `.map()`, `.and_then()`, and `.transpose()` over unwrapping.
+Chain transformations to avoid intermediate unwraps.
 
 See [error-handling-guide.md](error-handling-guide.md) for the full unwrap hierarchy and chaining examples.
 
@@ -331,7 +337,7 @@ Validate at the handler entry point. Interior code should use validated newtypes
 
 Use the typestate pattern to make invalid state transitions a compile error.
 
-See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the full typestate pattern with examples.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the full typestate pattern with examples.
 
 ---
 

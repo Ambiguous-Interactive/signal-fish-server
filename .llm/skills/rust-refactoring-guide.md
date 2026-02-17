@@ -1,6 +1,10 @@
 # Skill: Rust Refactoring Guide
 
-<!-- trigger: refactor, extract, split, rename, modernize, code smell, cleanup | Safe incremental Rust refactoring workflows | Core -->
+<!--
+  trigger: refactor, extract, split, rename, modernize, code smell, cleanup
+  | Safe incremental Rust refactoring workflows
+  | Core
+-->
 
 **Trigger**: When restructuring, extracting, splitting, or modernizing existing Rust code.
 
@@ -162,13 +166,16 @@ See [error-handling-guide](./error-handling-guide.md) for the full unwrap hierar
 
 ## Moving from `String` to `&str` in Parameters
 
-Change parameter from `String` to `&str`. Callers passing `String` get automatic coercion. If the function needs ownership internally, use `impl Into<String>`.
+Change parameter from `String` to `&str`. Callers passing `String` get automatic coercion.
+If the function needs ownership internally, use `impl Into<String>`.
 
 ---
 
 ## Replacing HashMap with DashMap
 
-Replace `Arc<Mutex<HashMap<K,V>>>` with `DashMap<K,V>`, remove `.lock().unwrap()` calls, and update `.get()` (returns `Ref` guard). The `.entry()` API differs slightly from `HashMap` — check DashMap docs. Run concurrent tests to verify.
+Replace `Arc<Mutex<HashMap<K,V>>>` with `DashMap<K,V>`, remove `.lock().unwrap()` calls,
+and update `.get()` (returns `Ref` guard). The `.entry()` API differs slightly from `HashMap` — check DashMap docs.
+Run concurrent tests to verify.
 
 ---
 
@@ -176,7 +183,8 @@ Replace `Arc<Mutex<HashMap<K,V>>>` with `DashMap<K,V>`, remove `.lock().unwrap()
 
 See [async-Rust-best-practices](./async-rust-best-practices.md) for async patterns.
 
-**Quick workflow:** Add `async`, replace blocking I/O with async equivalents (e.g., `tokio::fs`), add `.await`, update callers, check for `std::sync::Mutex` → `tokio::sync::Mutex`, test with `#[tokio::test]`.
+**Quick workflow:** Add `async`, replace blocking I/O with async equivalents (e.g., `tokio::fs`), add `.await`,
+update callers, check for `std::sync::Mutex` → `tokio::sync::Mutex`, test with `#[tokio::test]`.
 
 ---
 
@@ -211,7 +219,8 @@ impl Database for InMemoryDatabase { ... }
 
 See [Rust-performance-optimization](./rust-performance-optimization.md) for detailed clone reduction and zero-copy patterns.
 
-**Quick checks:** Can you pass `&T` instead? Use `Arc<T>` for shared ownership across tasks? Use `Bytes` for network data? Use `Cow<str>` for conditional ownership?
+**Quick checks:** Can you pass `&T` instead? Use `Arc<T>` for shared ownership across tasks? Use `Bytes` for network
+data? Use `Cow<str>` for conditional ownership?
 
 ---
 
@@ -254,7 +263,8 @@ See [code-review-checklist](./code-review-checklist.md) for review patterns and
 
 See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration and `--fix` usage.
 
-**Quick workflow:** Commit → `cargo clippy --fix --allow-dirty` → `git diff` to review → revert readability regressions → commit.
+**Quick workflow:** Commit → `cargo clippy --fix --allow-dirty` → `git diff` to review → revert readability regressions
+→ commit.
 
 ---
 

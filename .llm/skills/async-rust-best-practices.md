@@ -1,6 +1,10 @@
 # Skill: Async Rust Best Practices
 
-<!-- trigger: async, await, tokio, spawn, channel, select, concurrency, cancellation | Working with tokio, channels, async code, or concurrency | Performance -->
+<!--
+  trigger: async, await, tokio, spawn, channel, select, concurrency, cancellation
+  | Working with tokio, channels, async code, or concurrency
+  | Performance
+-->
 
 **Trigger**: When writing or modifying any async code, tokio tasks, channels, or concurrent data access.
 
@@ -116,7 +120,8 @@ rooms.insert(room_id, room);
 
 ```
 
-**Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block. Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
+**Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block.
+Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
 
 ---
 
@@ -154,7 +159,8 @@ tokio::select! {
 
 ```
 
-**Cancellation-safe:** `recv()`, `oneshot`, `sleep()`, `accept()`. **NOT safe:** `read_exact()`, `read_to_end()`, most streaming mid-read.
+**Cancellation-safe:** `recv()`, `oneshot`, `sleep()`, `accept()`.
+**NOT safe:** `read_exact()`, `read_to_end()`, most streaming mid-read.
 
 ---
 
@@ -237,7 +243,9 @@ using atomic flags and condition variables. The key principle is coordinated shu
 
 ## Async Trait Methods
 
-Use native async traits (Rust 1.75+) for static dispatch. Use `#[async_trait]` when you need `dyn Trait` (trait objects, dependency injection). This project uses `async_trait` for trait objects.
+Use native async traits (Rust 1.75+) for static dispatch.
+Use `#[async_trait]` when you need `dyn Trait` (trait objects, dependency injection).
+This project uses `async_trait` for trait objects.
 
 ```rust
 

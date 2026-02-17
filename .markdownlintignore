@@ -15,6 +15,10 @@ node_modules/
 !.github
 !.llm
 
+# Test fixtures (contain intentional markdown violations)
+.github/test-fixtures/
+test-fixtures/
+
 # Generated documentation
 docs/generated/
 

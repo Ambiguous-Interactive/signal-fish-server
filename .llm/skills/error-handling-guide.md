@@ -1,6 +1,10 @@
 # Skill: Error Handling Guide
 
-<!-- trigger: error, thiserror, anyhow, result, unwrap, context, map_err, propagation | Designing error types and propagation patterns | Core -->
+<!--
+  trigger: error, thiserror, anyhow, result, unwrap, context, map_err, propagation
+  | Designing error types and propagation patterns
+  | Core
+-->
 
 **Trigger**: When designing error types, converting `.unwrap()` to proper handling, or adding error context.
 
@@ -274,7 +278,8 @@ See [async-Rust-best-practices](./async-rust-best-practices.md) for structured c
 
 ## Error Types in Public APIs (axum Handlers)
 
-Map domain errors to HTTP status codes via `IntoResponse`. See [api-design-guidelines](./api-design-guidelines.md) for the full pattern.
+Map domain errors to HTTP status codes via `IntoResponse`.
+See [api-design-guidelines](./api-design-guidelines.md) for the full pattern.
 
 ```rust
 

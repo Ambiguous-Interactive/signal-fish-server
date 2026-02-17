@@ -1,6 +1,10 @@
 # Skill: Mandatory Workflow
 
-<!-- trigger: workflow, lint, format, ci, commit, pre-commit, check, validate | Mandatory linting, formatting, and validation workflow for every change | Core -->
+<!--
+  trigger: workflow, lint, format, ci, commit, pre-commit, check, validate
+  | Mandatory linting, formatting, and validation workflow for every change
+  | Core
+-->
 
 **Trigger**: Before committing any change — ensures all linters, formatters, and validation gates pass.
 
@@ -138,4 +142,5 @@ chore: update MSRV from 1.87.0 to 1.88.0
 - [ ] No integer overflow in arithmetic (use `saturating_*` or `checked_*`)
 - [ ] No unchecked array/slice indexing (use `.get()` or `.last()`)
 
-Use [web-service-security](./web-service-security.md) and [code-review-checklist](./code-review-checklist.md) skills for comprehensive audit.
+Use [web-service-security](./web-service-security.md)
+and [code-review-checklist](./code-review-checklist.md) skills for comprehensive audit.

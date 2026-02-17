@@ -7,7 +7,8 @@
 
 ## Context
 
-After fixing multiple CI/CD issues in the Signal Fish Server repository, we identified the need for systematic preventative measures to catch similar problems early:
+After fixing multiple CI/CD issues in the Signal Fish Server repository,
+we identified the need for systematic preventative measures to catch similar problems early:
 
 ### Issues Fixed
 
@@ -76,7 +77,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 
 **Test Coverage:**
 
-- **MSRV consistency**: Validates rust-version matches across Cargo.toml, rust-toolchain.toml, clippy.toml, Dockerfile
+- **MSRV consistency**: Validates `rust-version` matches across `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 - **Required workflows exist**: Ensures critical workflows (ci.yml, yaml-lint.yml, etc.) are present
 - **CI workflow jobs**: Validates main CI has required jobs (check, test, deny, msrv, Docker)
 - **YAML validity**: Basic YAML syntax validation (balanced quotes, required fields)
@@ -284,15 +285,19 @@ fn test_msrv_consistency_across_config_files() {
 ## Alternatives Considered
 
 ### Alternative 1: Manual Code Review Only
+
 **Rejected:** Human review misses subtle issues, not scalable
 
 ### Alternative 2: External CI Validation Tools
+
 **Rejected:** Adds dependencies, not tailored to our specific issues
 
 ### Alternative 3: Pre-commit Hooks Only
+
 **Rejected:** Developers can bypass, doesn't catch drift over time
 
 ### Alternative 4: More Complex YAML Parsing
+
 **Rejected:** Adds dependencies (serde_yaml), increases complexity unnecessarily
 
 ## Validation
@@ -358,11 +363,13 @@ ls -la scripts/*.sh
 ## Future Enhancements
 
 ### Short Term (1-3 months)
+
 1. Add integration test that temporarily breaks config and validates detection
 2. Expand CI config tests to cover more edge cases
 3. Add metric tracking for CI failure reasons
 
 ### Long Term (3-12 months)
+
 1. Automated nightly toolchain update PRs (GitHub Actions bot)
 2. Dependency staleness detection (unused deps not updated in X months)
 3. CI performance regression detection

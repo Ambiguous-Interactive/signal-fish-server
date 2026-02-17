@@ -246,6 +246,7 @@ fn extract_dockerfile_version(content: &str, _field: &str) -> Option<String> {
 ```
 
 **Benefits:**
+
 - Single test instead of 3
 - Easy to add new files (just add to `MSRV_CONFIG_FILES`)
 - Consistent error messages
@@ -524,6 +525,7 @@ impl ValidationStats {
 ```
 
 **Benefits:**
+
 - Single source of truth for workflow requirements
 - Easy to add new workflows or requirements
 - Comprehensive validation in one test
@@ -851,6 +853,7 @@ fn format_security_violations(violations: &[SecurityViolation]) -> String {
 ```
 
 **Benefits:**
+
 - All security policies in one place
 - Comprehensive action validation
 - Extensible policy system
@@ -941,21 +944,25 @@ fn format_violations(violations: &[Violation]) -> String {
 ## Migration Strategy
 
 ### Phase 1: Add New Tests (Don't Remove Old)
+
 1. Implement consolidated test
 2. Run both old and new tests
 3. Ensure new test catches all issues old tests catch
 
 ### Phase 2: Enhance New Test
+
 1. Add missing validations
 2. Improve error messages
 3. Add statistics
 
 ### Phase 3: Remove Old Tests
+
 1. Mark old tests with `#[ignore]`
 2. Run CI for a week
 3. Remove old tests if no issues
 
 ### Phase 4: Document
+
 1. Update test documentation
 2. Add examples to CLAUDE.md
 3. Update contribution guide
@@ -980,6 +987,7 @@ cargo tarpaulin --test ci_config_tests
 ## Conclusion
 
 These consolidation patterns provide:
+
 - **Single source of truth** for validation rules
 - **Easy extensibility** (just add to data structures)
 - **Consistent error messages** across all tests

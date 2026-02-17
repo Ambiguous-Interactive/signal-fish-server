@@ -21,7 +21,7 @@
 
 - **MSRV Update: Rust 1.87.0 → 1.88.0**
   - Minimum supported Rust version updated from 1.87.0 to 1.88.0
-  - Updated in `Cargo.toml` (rust-version field) and `rust-toolchain.toml`
+  - Updated in `Cargo.toml` (`rust-version` field) and `rust-toolchain.toml`
   - Required to support rand 0.10 dependency update
   - All documentation and configuration files updated to reflect new MSRV
 

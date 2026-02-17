@@ -5,6 +5,7 @@
 #
 # Configuration:
 #   - .markdownlint.json: Rule configuration
+#   - .markdownlint-cli2.jsonc: CLI tool configuration (ignores)
 #   - .markdownlintignore: Files/directories to exclude
 #
 # Runs on:
@@ -19,6 +20,7 @@ on:
     paths:
       - '**.md'
       - '.markdownlint.json'
+      - '.markdownlint-cli2.jsonc'
       - '.markdownlintignore'
       - '.github/workflows/markdownlint.yml'
   pull_request:
@@ -26,6 +28,7 @@ on:
     paths:
       - '**.md'
       - '.markdownlint.json'
+      - '.markdownlint-cli2.jsonc'
       - '.markdownlintignore'
       - '.github/workflows/markdownlint.yml'
 
@@ -54,3 +57,5 @@ jobs:
             !target/**
             !third_party/**
             !node_modules/**
+            !.github/test-fixtures/**
+            !test-fixtures/**

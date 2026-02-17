@@ -1481,9 +1481,21 @@ fn test_no_actual_placeholder_urls_in_docs() {
             let line_num = line_num + 1;
             let trimmed = line.trim_start();
 
-            // Track fenced code block state
-            if trimmed.starts_with("```") && !trimmed.starts_with("````") {
-                in_code_block = !in_code_block;
+            // Track fenced code block state per CommonMark spec:
+            // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
+            // - Closing fence: 3+ backticks with NO info string (bare backticks only)
+            // When inside a code block, only a bare fence closes it; inner ```rust
+            // lines are content, not real fences.
+            let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_count >= 3 {
+                let after_backticks = trimmed[backtick_count..].trim();
+                if in_code_block {
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                    }
+                } else {
+                    in_code_block = true;
+                }
                 continue;
             }
 
@@ -1720,16 +1732,26 @@ fn test_markdown_technical_terms_consistency() {
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
 
-            // Toggle fenced code block state on standard 3-backtick fences only.
-            // 4-tick and 5-tick fences are used for nested examples in skill docs
-            // and should not affect the outer tracking state.
+            // Track fenced code block state per CommonMark spec:
+            // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
+            // - Closing fence: 3+ backticks with NO info string (just backticks + optional spaces)
+            // When already inside a code block, only a bare fence (no info string) closes it.
+            // This correctly handles nested code examples in markdown skill docs where
+            // inner ```rust fences are content, not real fences.
             let trimmed = line.trim_start();
             let backtick_prefix_len = trimmed.len() - trimmed.trim_start_matches('`').len();
-            if backtick_prefix_len == 3 {
-                in_code_block = !in_code_block;
-                continue;
-            } else if backtick_prefix_len > 3 {
-                // Skip 4-tick/5-tick fence lines but don't toggle state
+            if backtick_prefix_len >= 3 {
+                let after_backticks = trimmed[backtick_prefix_len..].trim();
+                if in_code_block {
+                    // Inside a code block: only a bare fence line (no info string) closes it
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                    }
+                    // Lines like ```rust inside a code block are just content
+                } else {
+                    // Outside a code block: any 3+ backtick line opens one
+                    in_code_block = true;
+                }
                 continue;
             }
 
@@ -1769,6 +1791,98 @@ fn test_markdown_technical_terms_consistency() {
              If markdownlint MD044 should catch these, verify .markdownlint.json 'names' array \
              is configured correctly.",
             violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_code_block_fence_tracking_commonmark_compliant() {
+    // This test validates that the CommonMark-correct code block fence tracking logic
+    // handles all markdown files without mismatched fences.
+    //
+    // Background: The previous code block tracking used a blind toggle
+    // (`in_code_block = !in_code_block`) which broke on nested code fences in markdown
+    // skill docs. The fix uses proper CommonMark parsing:
+    //   - Opening fences can have info strings (e.g., ```rust, ```bash)
+    //   - Closing fences must be bare (just backticks + optional whitespace)
+    //
+    // This test ensures every markdown file has balanced fence opens/closes,
+    // meaning the parser ends outside any code block after processing the entire file.
+
+    let root = repo_root();
+    // Exclude test-fixtures which may contain intentionally malformed markdown
+    let markdown_files =
+        find_files_with_extension(&root, "md", &["target", "third_party", "test-fixtures"]);
+
+    assert!(
+        !markdown_files.is_empty(),
+        "Expected to find markdown files in the repository"
+    );
+
+    let mut violations = Vec::new();
+
+    for file in &markdown_files {
+        let content = read_file(file);
+
+        let mut in_code_block = false;
+        let mut opens = 0usize;
+        let mut closes = 0usize;
+        let mut last_open_line = 0usize;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+            let trimmed = line.trim_start();
+
+            // Count the leading backtick characters
+            let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_count >= 3 {
+                let after_backticks = trimmed[backtick_count..].trim();
+                if in_code_block {
+                    // Inside a code block: only a bare fence (no info string) closes it.
+                    // Lines like ```rust inside a code block are just content, not real fences.
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                        closes += 1;
+                    }
+                } else {
+                    // Outside a code block: any 3+ backtick line opens one
+                    // (may have an info string like ```rust or ```bash)
+                    in_code_block = true;
+                    opens += 1;
+                    last_open_line = line_num;
+                }
+            }
+        }
+
+        // After processing the entire file, we must be outside any code block
+        if in_code_block {
+            violations.push(format!(
+                "{}: Unclosed code block at end of file (last opened at line {}, opens={}, closes={})",
+                file.display(),
+                last_open_line,
+                opens,
+                closes,
+            ));
+        }
+
+        // Opens and closes must balance
+        if opens != closes {
+            violations.push(format!(
+                "{}: Mismatched fences: {} opens vs {} closes",
+                file.display(),
+                opens,
+                closes,
+            ));
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Code block fence tracking found CommonMark violations:\n\n{}\n\n\
+             Fix: Ensure every opening fence (```) has a matching bare closing fence.\n\
+             Opening fences may have info strings (e.g., ```rust), \
+             but closing fences must be bare (just backticks).",
+            violations.join("\n")
         );
     }
 }
@@ -1815,9 +1929,18 @@ fn test_markdown_common_patterns_are_correct() {
             let line_num = line_num + 1;
             let trimmed = line.trim_start();
 
-            // Track code block state (opening and closing fences)
-            if trimmed.starts_with("```") && !trimmed.starts_with("````") {
-                in_code_block = !in_code_block;
+            // Track fenced code block state per CommonMark spec:
+            // Opening fences may have info strings; closing fences must be bare.
+            let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_count >= 3 {
+                let after_backticks = trimmed[backtick_count..].trim();
+                if in_code_block {
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                    }
+                } else {
+                    in_code_block = true;
+                }
                 continue;
             }
 
@@ -2576,8 +2699,14 @@ fn extract_markdown_links(content: &str) -> Vec<(usize, String, String)> {
 
     for (line_idx, line) in content.lines().enumerate() {
         for cap in link_pattern.captures_iter(line) {
-            let text = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-            let url = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let text = cap
+                .get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let url = cap
+                .get(2)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
             links.push((line_idx + 1, text, url));
         }
     }
@@ -2906,7 +3035,9 @@ fn test_validate_ci_script_exists() {
     );
 
     assert!(
-        content.contains("markdown") || content.contains("validate_markdown") || content.contains("link"),
+        content.contains("markdown")
+            || content.contains("validate_markdown")
+            || content.contains("link"),
         "scripts/validate-ci.sh should validate markdown links"
     );
 }
