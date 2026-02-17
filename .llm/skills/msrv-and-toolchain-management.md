@@ -232,7 +232,7 @@ cargo msrv --min 1.80.0  # Check if a specific version works
 - [ ] **clippy.toml**: Update `msrv = "1.88.0"`
 - [ ] **Dockerfile**: Update `FROM rust:1.88-bookworm AS chef`
 - [ ] **.devcontainer/Dockerfile**: Add comment `# Project MSRV: 1.88.0` (devcontainer may use newer)
-- [ ] **.github/dependabot.yml**: Update MSRV comments in ignore rules documentation
+- [ ] **`.github/dependabot.yml`**: Update MSRV comments in ignore rules documentation
 - [ ] **README.md**: Update "Requirements" section if present
 - [ ] **docs/development.md**: Update developer setup instructions
 - [ ] **CHANGELOG.md**: Document MSRV bump under `[Unreleased]` or next version

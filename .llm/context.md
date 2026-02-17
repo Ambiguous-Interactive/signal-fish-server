@@ -347,11 +347,14 @@ cargo bench                                    # Benchmarks
 | Skill                                                              | When to Use                                                       |
 | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | [supply-chain-security](skills/supply-chain-security.md)                     | Dependency auditing, cargo-deny, SBOM, reproducible builds        |
-| [websocket-session-security](skills/websocket-session-security.md)           | WebSocket session lifecycle security, token rotation, anti-replay |
+| [`websocket-session-security`](skills/websocket-session-security.md)         | WebSocket session lifecycle security, token rotation, anti-replay |
 | [container-and-deployment](skills/container-and-deployment.md)               | Docker, CI/CD, container security for game servers                |
-| [github-actions-best-practices](skills/github-actions-best-practices.md)     | GitHub Actions workflows, Bash/AWK pipelines, CI/CD debugging     |
+| [`github-actions-best-practices`](skills/github-actions-best-practices.md)   | GitHub Actions workflows, Bash/AWK pipelines, CI/CD debugging     |
 | [ci-cd-troubleshooting](skills/ci-cd-troubleshooting.md)                     | Common CI failures, cache errors, configuration mismatches        |
 | [msrv-and-toolchain-management](skills/msrv-and-toolchain-management.md)     | MSRV updates, toolchain consistency, dependency compatibility     |
+| [awk-and-shell-scripting](skills/awk-and-shell-scripting.md)                 | POSIX-compatible AWK/shell scripts, multi-line processing in CI   |
+| [git-hooks-setup](skills/git-hooks-setup.md)                                 | Creating and maintaining git hooks with proper permissions        |
+| [test-fixture-patterns](skills/test-fixture-patterns.md)                     | Test fixtures and data-driven CI configuration testing            |
 
 ### Performance & Feature Skills
 
@@ -362,7 +365,7 @@ cargo bench                                    # Benchmarks
 | [rust-performance-optimization](skills/rust-performance-optimization.md) | Optimizing hot paths, reducing allocations, and profiling   |
 | [api-design-guidelines](skills/api-design-guidelines.md)                 | Designing public APIs, protocol types, or interfaces        |
 | [dependency-management](skills/dependency-management.md)                 | Adding, auditing, and managing Rust crate dependencies      |
-| [websocket-protocol-patterns](skills/websocket-protocol-patterns.md)     | WebSocket lifecycle, message design, and broadcast patterns |
+| [`websocket-protocol-patterns`](skills/websocket-protocol-patterns.md)   | WebSocket lifecycle, message design, and broadcast patterns |
 
 <!-- END GENERATED SKILLS INDEX -->
 

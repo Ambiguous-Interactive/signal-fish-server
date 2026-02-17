@@ -149,13 +149,13 @@ Always use official capitalization:
 
 | Correct | Incorrect |
 |---------|-----------|
-| HashiCorp | Hashicorp, hashicorp |
-| GitHub | Github, github |
-| WebSocket | Websocket, websocket |
-| PostgreSQL | Postgresql, postgres |
-| MongoDB | Mongodb, mongo |
-| JavaScript | Javascript, javascript |
-| TypeScript | Typescript, typescript |
+| HashiCorp | `Hashicorp`, `hashicorp` |
+| GitHub | `Github`, `github` |
+| WebSocket | `Websocket`, `websocket` |
+| PostgreSQL | `Postgresql`, `postgres` |
+| MongoDB | `Mongodb`, `mongo` |
+| JavaScript | `Javascript`, `javascript` |
+| TypeScript | `Typescript`, `typescript` |
 
 **How to find official capitalization:**
 1. Check the company's official website
@@ -855,7 +855,7 @@ Before committing markdown changes:
 ## Related Skills
 
 - [documentation-standards](./documentation-standards.md) - Overall documentation requirements and quality standards
-- [github-actions-best-practices](./github-actions-best-practices.md) - CI/CD integration for validation
+- [`github-actions-best-practices`](./github-actions-best-practices.md) - CI/CD integration for validation
 - [ci-cd-troubleshooting](./ci-cd-troubleshooting.md) - Debugging link check and markdown lint failures
 - [testing-strategies](./testing-strategies.md) - Data-driven tests for markdown validation
 - [api-design-guidelines](./api-design-guidelines.md) - API documentation patterns

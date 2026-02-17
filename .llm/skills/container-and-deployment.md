@@ -528,6 +528,8 @@ spec:
         secretName: signaling-secrets
         defaultMode: 0400 # Read-only by owner
 
+```
+
 ```rust
 
 // Read secret from mounted file

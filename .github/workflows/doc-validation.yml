@@ -220,8 +220,8 @@ jobs:
                 # - ```Rust           (capitalized)
                 # Prefix match /^```[Rr]ust/ catches all these variants, then sub() strips the prefix
                 attrs = $0
-                sub(/^```[Rr]ust,?/, "", attrs)  # Remove "```rust" or "```Rust" and optional comma
-                next                  # Skip to next line (don't include fence in content)
+                sub(/^```[Rr]ust,?/, "", attrs)  # Remove ```rust or ```Rust and optional comma
+                next                  # Skip to next line (do not include fence in content)
               }
               # Match closing fence only if in a block
               /^```$/ && in_block {
@@ -229,7 +229,7 @@ jobs:
                 # Format: line_number:::attributes:::content<NUL>
                 # The ":::" separator is chosen to be unlikely to appear in normal text
                 # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
-                # (mawk doesn't support "\0" in printf format strings, but does support %c with value 0)
+                # (mawk does not support "\0" in printf format strings, but does support %c with value 0)
                 printf "%s:::%s:::%s%c", block_start, attrs, content, 0
                 in_block = 0          # Exit code block state
                 next                  # Skip to next line

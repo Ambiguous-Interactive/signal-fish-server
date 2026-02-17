@@ -99,6 +99,8 @@ allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
          "BSD-2-Clause", "BSD-3-Clause", "ISC", "OpenSSL",
          "Unicode-DFS-2016", "Unicode-3.0", "Zlib", "0BSD", "CC0-1.0"]
 
+```
+
 ```rust
 
 // ❌ Bad — adding a GPL-licensed crate to a permissive project
@@ -120,6 +122,8 @@ name = "openssl"
 wrappers = ["native-tls"]
 reason = "Prefer rustls for TLS - openssl has had numerous CVEs"
 
+```
+
 ```rust
 
 // ❌ Bad — pulling in openssl via native-tls feature
@@ -138,6 +142,8 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+
+```
 
 ```rust
 
