@@ -193,7 +193,13 @@ if [ -f scripts/check-no-panics.sh ]; then
         scripts/check-no-panics.sh patterns
 fi
 
-# Check 10: Markdown Linting
+# Check 10: CI Configuration Validation (AWK, shell, markdown links)
+if [ -f scripts/validate-ci.sh ]; then
+    run_check_quiet "ci-validation" "Validating CI configuration (AWK, shell, links)" \
+        scripts/validate-ci.sh --quiet
+fi
+
+# Check 11: Markdown Linting
 if command -v markdownlint-cli2 >/dev/null 2>&1; then
     if [ -f scripts/check-markdown.sh ]; then
         if [ "$FIX_MODE" = true ]; then

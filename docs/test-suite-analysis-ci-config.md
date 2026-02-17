@@ -1,7 +1,7 @@
 # CI Configuration Test Suite Analysis
 
 **Date:** 2026-02-17
-**Test File:** `/workspaces/signal-fish-server/tests/ci_config_tests.rs`
+**Test File:** `tests/ci_config_tests.rs`
 **Total Tests:** 35
 **Lines of Code:** 2,492
 

@@ -31,7 +31,7 @@ The CI/CD testing infrastructure was created in response to several actual produ
 
 ## Test Infrastructure
 
-All CI/CD tests are located in [`tests/ci_config_tests.rs`](/workspaces/signal-fish-server/tests/ci_config_tests.rs).
+All CI/CD tests are located in [`tests/ci_config_tests.rs`](../tests/ci_config_tests.rs).
 
 ### Test Categories
 

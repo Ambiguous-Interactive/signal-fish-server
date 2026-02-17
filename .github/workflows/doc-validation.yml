@@ -33,6 +33,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/doc-validation.yml'
+      - '.github/scripts/**'
   pull_request:
     branches: [main]
     paths:
@@ -41,6 +42,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/doc-validation.yml'
+      - '.github/scripts/**'
 
 # Minimal required permissions (security best practice)
 permissions:
@@ -81,17 +83,18 @@ jobs:
           # Future improvement: automated extraction of all run: | blocks
 
           # Extract the main Rust code validation script
-          # Note: The shellcheck job validates shell script syntax in this workflow's bash blocks.
-          # However, AWK heredocs embedded within bash scripts are not fully validated by shellcheck.
-          # AWK syntax and compatibility (gawk vs mawk) are validated through actual execution
-          # in CI when the workflow runs.
-          awk '/name: Extract and validate Rust code blocks/,/^      - name:/ {
-            if (/run: \|/) { in_script=1; next }
-            if (in_script && /^      - name:/) { exit }
+          # Note: The AWK program for Rust block extraction lives in .github/scripts/extract-rust-blocks.awk
+          # (external file avoids shell quoting issues that confuse shellcheck).
+          awk '
+            # Use flag-based extraction instead of range pattern to avoid
+            # the start line matching the end pattern (both begin with "      - name:")
+            found==0 && /^      - name: Extract and validate Rust code blocks/ { found=1; next }
+            found && /run: \|/ { in_script=1; next }
+            in_script && /^      - name:/ { exit }
             # Extract script content: skip the 10-space indentation (6 spaces for YAML step level + 4 for script content)
             # plus line number + tab from workflow YAML structure = 11 characters to skip
-            if (in_script && /^          /) { print substr($0, 11) }
-          }' "$workflow_file" > "$TEMP_DIR/rust_validation.sh"
+            in_script && /^          / { print substr($0, 11) }
+          ' "$workflow_file" > "$TEMP_DIR/rust_validation.sh"
 
           # Validate extracted scripts
           for script in "$TEMP_DIR"/*.sh; do
@@ -186,76 +189,13 @@ jobs:
             echo ""
             echo "Processing: $md_file"
 
-            # Extract Rust code blocks with improved regex to catch all variants:
-            # ```rust, ```rust,ignore, ```rust,no_run, ```rust,should_panic, etc.
+            # Extract Rust code blocks using external AWK script.
+            # The AWK script is in a separate file to avoid shell quoting issues
+            # (shellcheck cannot parse AWK programs embedded in single-quoted strings).
             #
-            # IMPORTANT: AWK outputs records separated by NUL bytes (\0) instead of newlines
-            # to preserve multi-line code blocks. The bash read loop uses -d '' to read
-            # NUL-delimited records. Without this, multi-line blocks would be split across
-            # multiple records, causing validation failures.
-            #
-            # Bug fixes applied:
-            # 1. Content accumulation: Fixed to handle empty first lines correctly
-            # 2. END block: Added to handle unclosed blocks at EOF
-            # 3. Case-insensitive matching: Fixed attribute extraction for Rust/rust
-            # 4. AWK compatibility: Replaced GNU awk's match() with POSIX sub() for mawk
-            awk '
-              # AWK state variables (uninitialized variables start at 0/""):
-              #   in_block     - 1 if currently parsing inside a code block, 0 otherwise
-              #   block_start  - line number (NR) where the current block started
-              #   content      - accumulated content of the current code block
-              #   attrs        - extracted attributes from fence (e.g., "ignore", "no_run")
-
-              # Match opening fence with optional attributes (case-insensitive)
-              /^```[Rr]ust/ {
-                in_block = 1          # Enter code block state
-                block_start = NR      # Record starting line number
-                content = ""          # Reset content accumulator
-                attributes = $0       # Save full fence line for reference
-                # POSIX-compatible: use sub() instead of match() for mawk compatibility
-                # Extract attributes after rust (case-insensitive)
-                # Uses prefix match pattern instead of exact match to handle multiple fence formats:
-                # - ```rust           (plain)
-                # - ```rust,ignore    (with attribute)
-                # - ```Rust           (capitalized)
-                # Prefix match /^```[Rr]ust/ catches all these variants, then sub() strips the prefix
-                attrs = $0
-                sub(/^```[Rr]ust,?/, "", attrs)  # Remove ```rust or ```Rust and optional comma
-                next                  # Skip to next line (do not include fence in content)
-              }
-              # Match closing fence only if in a block
-              /^```$/ && in_block {
-                # Output with NUL byte separator to preserve multi-line content
-                # Format: line_number:::attributes:::content<NUL>
-                # The ":::" separator is chosen to be unlikely to appear in normal text
-                # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
-                # (mawk does not support "\0" in printf format strings, but does support %c with value 0)
-                printf "%s:::%s:::%s%c", block_start, attrs, content, 0
-                in_block = 0          # Exit code block state
-                next                  # Skip to next line
-              }
-              # Accumulate content while in block
-              # FIXED: Always append lines with newline separator, handling empty first lines
-              in_block {
-                if (content == "") {
-                  content = $0        # First line: no leading newline
-                } else {
-                  content = content "\n" $0  # Subsequent lines: add newline separator
-                }
-              }
-              # Reset if we hit another opening fence while already in a block (nested/malformed)
-              /^```/ && in_block {
-                in_block = 0          # Reset state on malformed/nested blocks
-              }
-              # FIXED: Handle unclosed blocks at end of file
-              END {
-                if (in_block) {
-                  # Output whatever we accumulated, even if block wasn't closed
-                  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
-                  printf "%s:::%s:::%s%c", block_start, attrs, content, 0
-                }
-              }
-            ' "$md_file" | while IFS=':::' read -r -d '' line_num attributes content; do
+            # AWK outputs NUL-delimited records in format: line_number<TAB>attributes<TAB>content
+            # See .github/scripts/extract-rust-blocks.awk for full documentation.
+            awk -f .github/scripts/extract-rust-blocks.awk "$md_file" | while IFS=$'\t' read -r -d '' line_num attributes content; do
               # Read current counters from file
               read -r total validated skipped failed < "$COUNTER_FILE"
               total=$((total + 1))

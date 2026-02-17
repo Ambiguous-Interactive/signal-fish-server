@@ -576,9 +576,9 @@ fi
 
 ## Related Documentation
 
-- [Mandatory Workflow](.llm/skills/mandatory-workflow.md) - Required checks before every commit
-- [CI/CD Troubleshooting](.llm/skills/ci-cd-troubleshooting.md) - Debugging CI failures
-- [MSRV Management](.llm/skills/msrv-and-toolchain-management.md) - Rust version management
+- [Mandatory Workflow](../.llm/skills/mandatory-workflow.md) - Required checks before every commit
+- [CI/CD Troubleshooting](../.llm/skills/ci-cd-troubleshooting.md) - Debugging CI failures
+- [MSRV Management](../.llm/skills/msrv-and-toolchain-management.md) - Rust version management
 
 ## FAQ
 

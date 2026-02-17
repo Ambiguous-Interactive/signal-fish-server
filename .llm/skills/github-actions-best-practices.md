@@ -2041,6 +2041,53 @@ This ensures that:
 
 ---
 
+## 17. Extracting Inline Scripts to External Files
+
+### The Problem: AWK in YAML Breaks Shellcheck
+
+Inline AWK programs in YAML `run: |` blocks cause shellcheck
+failures when the AWK code contains apostrophes or single quotes.
+Shellcheck parses the entire block as bash and misinterprets AWK
+quoting boundaries.
+
+### The Solution: External Script Files
+
+Extract AWK programs (especially those > 10 lines) to
+`.github/scripts/`:
+
+```yaml
+# ❌ WRONG: Inline AWK with apostrophes breaks shellcheck
+- name: Extract blocks
+  run: |
+    awk '/pattern/ { gsub(/'\''/,"") }' file.md
+
+# ✅ CORRECT: External AWK file avoids quoting conflicts
+- name: Extract blocks
+  run: |
+    awk -f .github/scripts/extract-rust-blocks.awk file.md
+
+```
+
+**Benefits:**
+
+- Eliminates shellcheck false positives from AWK quoting
+- AWK files can be validated independently
+  (`awk -f script.awk /dev/null`)
+- Easier to test, version, and review
+- `scripts/validate-ci.sh` validates external AWK files
+  automatically
+
+### When to Extract vs Inline
+
+| AWK Program Size          | Recommendation   | Rationale                       |
+|---------------------------|------------------|---------------------------------|
+| 1-5 lines, no quotes     | Inline OK        | Simple enough to keep inline    |
+| 5-10 lines                | Consider extract | Readability benefit             |
+| > 10 lines                | Always extract   | Maintainability and testability |
+| Any size with apostrophes | Always extract   | Shellcheck compatibility        |
+
+---
+
 ## Agent Checklist
 
 ### AWK Best Practices
@@ -2050,6 +2097,8 @@ This ensures that:
 - [ ] AWK uses `sub()` instead of `match()` with capture groups (mawk compatibility)
 - [ ] AWK END block handles unclosed blocks at EOF
 - [ ] AWK scripts tested on Ubuntu/mawk, not just local gawk
+- [ ] AWK programs > 10 lines extracted to `.github/scripts/` (not inline in YAML)
+- [ ] AWK programs containing apostrophes always in external files
 
 ### Shellcheck & Bash Best Practices
 

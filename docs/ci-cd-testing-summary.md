@@ -185,10 +185,10 @@ To add new test categories:
 
 ## References
 
-- Full documentation: [`docs/ci-cd-testing.md`](/workspaces/signal-fish-server/docs/ci-cd-testing.md)
-- Test implementation: [`tests/ci_config_tests.rs`](/workspaces/signal-fish-server/tests/ci_config_tests.rs)
-- Pre-commit hook: [`.githooks/pre-commit`](/workspaces/signal-fish-server/.githooks/pre-commit)
-- Helper scripts: [`scripts/`](/workspaces/signal-fish-server/scripts/)
+- Full documentation: [`docs/ci-cd-testing.md`](ci-cd-testing.md)
+- Test implementation: [`tests/ci_config_tests.rs`](../tests/ci_config_tests.rs)
+- Pre-commit hook: [`.githooks/pre-commit`](../.githooks/pre-commit)
+- Helper scripts: [`scripts/`](../scripts/)
 
 ## Success Metrics
 

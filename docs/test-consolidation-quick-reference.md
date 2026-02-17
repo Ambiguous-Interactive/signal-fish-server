@@ -271,9 +271,9 @@ assert!(errors.is_empty(), "Errors:\n{}", format_violations(&errors));
 
 ## Resources
 
-- **Full Analysis:** `/workspaces/signal-fish-server/docs/test-suite-analysis-ci-config.md`
-- **Code Examples:** `/workspaces/signal-fish-server/docs/test-consolidation-examples.md`
-- **Summary:** `/workspaces/signal-fish-server/docs/test-suite-recommendations-summary.md`
+- **Full Analysis:** `docs/test-suite-analysis-ci-config.md`
+- **Code Examples:** `docs/test-consolidation-examples.md`
+- **Summary:** `docs/test-suite-recommendations-summary.md`
 
 ## Quick Start
 

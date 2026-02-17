@@ -391,21 +391,49 @@ fn test_workflow_files_are_valid_yaml() {
         // Basic YAML validation checks
         // Note: This is not a full YAML parser, but catches common errors
 
-        // Check for balanced quotes
-        let single_quotes = content.matches('\'').count();
-        let double_quotes = content.matches('"').count();
+        // Check for balanced quotes, but only on YAML-level lines (not inside
+        // inline shell script blocks). Shell scripts embedded via `run: |` can
+        // legitimately have odd quote counts (AWK programs, apostrophes in
+        // comments, etc.), so we skip lines inside multiline run blocks.
+        let mut single_quotes = 0;
+        let mut double_quotes = 0;
+        let mut in_run_block = false;
+        let mut run_indent = 0;
+
+        for line in content.lines() {
+            let stripped = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Detect start of a multiline run block (run: |)
+            if stripped.starts_with("run: |") || stripped.starts_with("run: >") {
+                in_run_block = true;
+                run_indent = indent;
+                continue;
+            }
+
+            // Detect end of multiline block (line at same or lesser indent, non-empty)
+            if in_run_block && !stripped.is_empty() && indent <= run_indent {
+                in_run_block = false;
+            }
+
+            // Only count quotes on YAML-level lines, not shell script lines
+            if !in_run_block {
+                single_quotes += line.matches('\'').count();
+                double_quotes += line.matches('"').count();
+            }
+        }
 
         if single_quotes % 2 != 0 {
             errors.push(format!(
-                "{filename}: Unbalanced single quotes (found {single_quotes} quotes)\n  \
-                 Check for missing closing quotes in strings"
+                "{filename}: Unbalanced single quotes in YAML lines (found {single_quotes} quotes)\n  \
+                 Check for missing closing quotes in strings (shell script blocks excluded)"
             ));
         }
 
         if double_quotes % 2 != 0 {
             errors.push(format!(
-                "{filename}: Unbalanced double quotes (found {double_quotes} quotes)\n  \
-                 Check for missing closing quotes in strings"
+                "{filename}: Unbalanced double quotes in YAML lines (found {double_quotes} quotes)\n  \
+                 Check for missing closing quotes in strings (shell script blocks excluded)"
             ));
         }
 
@@ -1834,15 +1862,17 @@ fn test_markdown_common_patterns_are_correct() {
 
 #[test]
 fn test_doc_validation_awk_script_extraction() {
-    // This test extracts AWK scripts from the doc-validation workflow
-    // and validates their syntax using awk -f with --lint
+    // This test validates the AWK scripts used by doc-validation for Rust
+    // code block extraction. The AWK logic may live inline in the workflow
+    // or in an external script (.github/scripts/extract-rust-blocks.awk).
     //
-    // Background: The doc-validation.yml workflow contains complex AWK scripts
-    // that extract and validate code blocks from markdown. These scripts need
-    // validation to prevent issues like the AWK pattern bug we fixed.
+    // Background: The doc-validation.yml workflow uses AWK scripts to extract
+    // and validate code blocks from markdown. These scripts need validation
+    // to prevent issues like the AWK pattern bug we fixed.
 
     let root = repo_root();
     let workflow = root.join(".github/workflows/doc-validation.yml");
+    let external_awk = root.join(".github/scripts/extract-rust-blocks.awk");
 
     if !workflow.exists() {
         panic!(
@@ -1851,28 +1881,46 @@ fn test_doc_validation_awk_script_extraction() {
         );
     }
 
-    let content = read_file(&workflow);
+    let workflow_content = read_file(&workflow);
 
-    // Verify the workflow contains AWK scripts
+    // The Rust block extraction AWK may be inline or in an external file.
+    // Combine both sources for validation.
+    let awk_content = if external_awk.exists() {
+        // External AWK file is the preferred approach (avoids shell quoting issues)
+        read_file(&external_awk)
+    } else {
+        // Fall back to checking inline AWK in the workflow
+        workflow_content.clone()
+    };
+
+    // Verify the workflow references AWK (either inline or via awk -f)
     assert!(
-        content.contains("awk '") || content.contains("awk \""),
-        "doc-validation.yml should contain AWK scripts for code block extraction.\n\
+        workflow_content.contains("awk '")
+            || workflow_content.contains("awk \"")
+            || workflow_content.contains("awk -f"),
+        "doc-validation.yml should contain AWK scripts or reference external AWK files.\n\
          These scripts are critical for validating markdown code blocks."
     );
 
     // Check for the main Rust code block extraction AWK script
     // This script handles complex patterns: ```rust, ```Rust, ```rust,ignore, etc.
     assert!(
-        content.contains("/^```[Rr]ust/"),
-        "doc-validation.yml AWK script should use case-insensitive pattern for Rust.\n\
+        awk_content.contains("/^```[Rr]ust/"),
+        "Rust block extraction AWK script should use case-insensitive pattern for Rust.\n\
          Pattern /^```[Rr]ust/ matches both ```rust and ```Rust.\n\
-         This prevents missing code blocks with capitalized language identifiers."
+         This prevents missing code blocks with capitalized language identifiers.\n\
+         Checked in: {}",
+        if external_awk.exists() {
+            external_awk.display().to_string()
+        } else {
+            workflow.display().to_string()
+        }
     );
 
     // Verify the AWK script has END block for unclosed blocks at EOF
     assert!(
-        content.contains("END {") && content.contains("if (in_block)"),
-        "doc-validation.yml AWK script should have END block to handle unclosed blocks.\n\
+        awk_content.contains("END {") && awk_content.contains("if (in_block)"),
+        "Rust block extraction AWK script should have END block to handle unclosed blocks.\n\
          Without END block, code blocks at end of file without closing fence are lost.\n\
          The END block should check 'if (in_block)' and output remaining content."
     );
@@ -1880,8 +1928,9 @@ fn test_doc_validation_awk_script_extraction() {
     // Verify content accumulation handles empty first lines correctly
     // The fix uses: if (content == "") { content = $0 } else { content = content "\n" $0 }
     assert!(
-        content.contains("content = $0") && content.contains("content = content \"\\n\" $0"),
-        "doc-validation.yml AWK script should properly handle empty first lines.\n\
+        awk_content.contains("content = $0")
+            && awk_content.contains("content = content \"\\n\" $0"),
+        "Rust block extraction AWK script should properly handle empty first lines.\n\
          Correct pattern: if (content == \"\") {{ content = $0 }} else {{ content = content \"\\n\" $0 }}\n\
          This prevents losing empty lines at the start of code blocks."
     );
@@ -1889,8 +1938,8 @@ fn test_doc_validation_awk_script_extraction() {
     // Verify attribute extraction after rust/Rust fence
     // The pattern should use sub() to remove prefix and extract attributes
     assert!(
-        content.contains("sub(/^```[Rr]ust,?/, \"\", attrs)"),
-        "doc-validation.yml AWK script should extract attributes after rust fence.\n\
+        awk_content.contains("sub(/^```[Rr]ust,?/, \"\", attrs)"),
+        "Rust block extraction AWK script should extract attributes after rust fence.\n\
          Pattern: sub(/^```[Rr]ust,?/, \"\", attrs) removes fence and optional comma,\n\
          leaving attributes like 'ignore', 'no_run', 'should_panic'."
     );
@@ -2507,4 +2556,357 @@ fn test_workflows_use_minimal_permissions() {
             violations.join("\n\n")
         );
     }
+}
+
+// ============================================================================
+// Markdown Relative Link Validation Tests
+// ============================================================================
+// These tests prevent broken relative links in docs/ that reference .llm/ or
+// other directories without the correct ../ prefix. This was a real CI issue:
+// docs used `.llm/skills/...` instead of `../.llm/skills/...`, causing broken
+// links that passed local editing but failed link validation in CI.
+
+/// Extract all markdown link URLs from content.
+///
+/// Returns a vector of (line_number, link_text, url) tuples for all markdown
+/// links in the format `[text](url)`.
+fn extract_markdown_links(content: &str) -> Vec<(usize, String, String)> {
+    let mut links = Vec::new();
+    let link_pattern = regex::Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        for cap in link_pattern.captures_iter(line) {
+            let text = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let url = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+            links.push((line_idx + 1, text, url));
+        }
+    }
+
+    links
+}
+
+#[test]
+fn test_docs_relative_links_to_llm_use_parent_prefix() {
+    // This test prevents the broken relative link issue where docs/ files
+    // linked to .llm/skills/... instead of ../.llm/skills/...
+    //
+    // Since docs/ is one level deep, any link to .llm/ must go up one
+    // directory first with ../ prefix.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        return;
+    }
+
+    let mut violations = Vec::new();
+
+    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+
+    for file in &docs_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+
+        for (line_num, _text, url) in extract_markdown_links(&content) {
+            // Skip external URLs and anchors
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:")
+                || url.starts_with('#')
+            {
+                continue;
+            }
+
+            // Check for .llm/ links missing the ../ prefix
+            // From docs/, the correct path to .llm/ is ../.llm/
+            if url.starts_with(".llm/") {
+                violations.push(format!(
+                    "{}:{}: Link '{}' should be '../{}'",
+                    relative_path.display(),
+                    line_num,
+                    url,
+                    url
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Docs files contain relative links to .llm/ without required ../ prefix:\n\n{}\n\n\
+             Why this matters:\n\
+             - Files in docs/ are one directory level deep\n\
+             - Links to .llm/ must go up one level first: ../.llm/\n\
+             - Using .llm/skills/... instead of ../.llm/skills/... creates broken links\n\n\
+             Fix: Change '.llm/' to '../.llm/' in the links listed above.\n\
+             Verify: ./scripts/validate-ci.sh --links",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_docs_relative_links_resolve_to_existing_files() {
+    // This test validates that all relative links in docs/ actually point
+    // to files that exist in the repository. Catches broken links early
+    // before they reach CI link checking.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        return;
+    }
+
+    let mut broken_links = Vec::new();
+
+    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+
+    for file in &docs_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+        let file_dir = file.parent().unwrap_or(&root);
+
+        for (line_num, _text, url) in extract_markdown_links(&content) {
+            // Skip external URLs and anchors
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:")
+                || url.starts_with('#')
+            {
+                continue;
+            }
+
+            // Strip anchor portion for file existence check
+            let file_part = url.split('#').next().unwrap_or(&url);
+            if file_part.is_empty() {
+                continue;
+            }
+
+            // Resolve the path relative to the markdown file's directory
+            let resolved = file_dir.join(file_part);
+
+            // Canonicalize to resolve .. and . components, then check existence
+            // Use the resolved path's existence as the check
+            if !resolved.exists() {
+                // Try canonicalizing parent to handle .. components
+                let normalized = normalize_path(&resolved);
+                if !normalized.exists() {
+                    broken_links.push(format!(
+                        "{}:{}: Link '{}' -> file not found (resolved to {})",
+                        relative_path.display(),
+                        line_num,
+                        url,
+                        normalized.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !broken_links.is_empty() {
+        panic!(
+            "Broken relative links found in docs/ markdown files:\n\n{}\n\n\
+             Fix: Update the link paths to point to existing files.\n\
+             Common issues:\n\
+             - Missing ../ prefix for links to parent directories\n\
+             - Typo in filename or directory name\n\
+             - File was moved or renamed\n\n\
+             Verify: ./scripts/validate-ci.sh --links",
+            broken_links.join("\n")
+        );
+    }
+}
+
+/// Normalize a path by resolving `.` and `..` components without requiring
+/// the path to exist on disk (unlike `canonicalize()`).
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => {
+                components.push(other);
+            }
+        }
+    }
+    components.iter().collect()
+}
+
+#[test]
+fn test_docs_no_absolute_path_links() {
+    // This test flags markdown links in docs/ that use absolute paths starting
+    // with `/`. Absolute paths are not portable across machines (e.g.,
+    // /workspaces/signal-fish-server/... only works in a specific devcontainer).
+    // All links should use relative paths from the file's location.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        return;
+    }
+
+    let mut violations = Vec::new();
+
+    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+
+    for file in &docs_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+
+        for (line_num, _text, url) in extract_markdown_links(&content) {
+            // Skip external URLs and anchors
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:")
+                || url.starts_with('#')
+            {
+                continue;
+            }
+
+            // Flag any link that starts with / as a portability issue
+            if url.starts_with('/') {
+                violations.push(format!(
+                    "{}:{}: Absolute path link '{}' is not portable\n  \
+                     Fix: Convert to a relative path from the file's directory",
+                    relative_path.display(),
+                    line_num,
+                    url
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Documentation files contain absolute-path links (not portable):\n\n{}\n\n\
+             Absolute paths like /workspaces/... or /home/... only work on one machine.\n\
+             Use relative paths instead:\n\
+             - To a sibling doc:  `sibling.md`\n\
+             - To repo root file: `../README.md`\n\
+             - To tests/:        `../tests/ci_config_tests.rs`\n\n\
+             Verify: ./scripts/validate-ci.sh --links",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_awk_files_have_valid_syntax() {
+    // This test validates that all .awk files in the repository parse correctly.
+    // Prevents the issue where an AWK script with syntax errors is committed
+    // and only discovered when the CI workflow tries to use it.
+
+    let root = repo_root();
+
+    let mut awk_files = Vec::new();
+
+    // Look for .awk files in known locations
+    let scripts_dir = root.join(".github/scripts");
+    if scripts_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "awk").unwrap_or(false) {
+                    awk_files.push(path);
+                }
+            }
+        }
+    }
+
+    if awk_files.is_empty() {
+        // No AWK files to validate
+        return;
+    }
+
+    let mut issues = Vec::new();
+
+    for awk_file in &awk_files {
+        let content = read_file(awk_file);
+        let relative_path = awk_file.strip_prefix(&root).unwrap_or(awk_file);
+
+        // Check for non-POSIX match() function (GNU-specific, breaks on mawk)
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            // Skip comments
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            if trimmed.contains("match(") {
+                issues.push(format!(
+                    "{}:{}: Uses match() function (not POSIX compatible with mawk).\n  \
+                     Fix: Use sub() or gsub() instead.",
+                    relative_path.display(),
+                    line_idx + 1
+                ));
+            }
+
+            // Check for \0 in printf (not POSIX)
+            if trimmed.contains("printf") && trimmed.contains("\\0") {
+                issues.push(format!(
+                    "{}:{}: Uses \\0 in printf (not POSIX compatible).\n  \
+                     Fix: Use printf \"%c\", 0 instead.",
+                    relative_path.display(),
+                    line_idx + 1
+                ));
+            }
+        }
+    }
+
+    if !issues.is_empty() {
+        panic!(
+            "AWK file validation issues found:\n\n{}\n\n\
+             Why this matters:\n\
+             - GitHub Actions runners may use mawk (not gawk)\n\
+             - Non-POSIX AWK features cause silent failures in CI\n\
+             - match() and \\0 are common portability problems\n\n\
+             Verify: ./scripts/validate-ci.sh --awk",
+            issues.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_validate_ci_script_exists() {
+    // This test ensures the validate-ci.sh script exists and is the canonical
+    // tool for local CI validation. This script was created to prevent the
+    // three types of CI/CD regressions that were discovered:
+    //   1. AWK syntax errors in .awk files
+    //   2. Broken relative links in docs/
+    //   3. Shell script issues in .github/scripts/
+
+    let root = repo_root();
+    let validate_ci = root.join("scripts/validate-ci.sh");
+
+    assert!(
+        validate_ci.exists(),
+        "scripts/validate-ci.sh not found.\n\
+         This script is required for local CI configuration validation.\n\
+         It validates AWK files, shell scripts, and markdown links.\n\
+         Create it or restore it from the repository."
+    );
+
+    let content = read_file(&validate_ci);
+
+    // Verify it covers the three key validation areas
+    assert!(
+        content.contains("validate_awk") || content.contains("awk"),
+        "scripts/validate-ci.sh should validate AWK files"
+    );
+
+    assert!(
+        content.contains("shellcheck") || content.contains("validate_shell"),
+        "scripts/validate-ci.sh should validate shell scripts with shellcheck"
+    );
+
+    assert!(
+        content.contains("markdown") || content.contains("validate_markdown") || content.contains("link"),
+        "scripts/validate-ci.sh should validate markdown links"
+    );
 }

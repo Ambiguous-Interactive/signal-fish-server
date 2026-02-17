@@ -11,8 +11,11 @@
 #   3. Panic-prone patterns
 #   4. MSRV consistency (if Cargo.toml or config files modified)
 #   5. Workflow AWK scripts (if workflow files modified)
-#   6. Markdown linting (if markdown files modified)
-#   7. Link checking (if markdown files modified)
+#   6. AWK file syntax (if .awk files modified)
+#   7. Shellcheck for CI scripts (if .github/scripts/ files modified)
+#   8. Markdown relative link validation (if docs/ markdown modified)
+#   9. Markdown linting (if markdown files modified)
+#  10. Link checking (if markdown files modified)
 
 set -e
 
@@ -31,6 +34,8 @@ if [ ! -t 1 ]; then
     BLUE=''
     NC=''
 fi
+
+TOTAL_CHECKS=10
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -55,7 +60,7 @@ check_skip() {
 }
 
 # Check 1: Code formatting (always run)
-echo "${BLUE}[1/7]${NC} Checking code formatting..."
+echo "${BLUE}[1/${TOTAL_CHECKS}]${NC} Checking code formatting..."
 if cargo fmt --check 2>/dev/null; then
     check_pass "Code formatting"
 else
@@ -65,7 +70,7 @@ else
 fi
 
 # Check 2: Clippy lints (fast check on staged Rust files only)
-echo "${BLUE}[2/7]${NC} Running clippy on staged files..."
+echo "${BLUE}[2/${TOTAL_CHECKS}]${NC} Running clippy on staged files..."
 # Get list of staged Rust files
 STAGED_RS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
 
@@ -84,7 +89,7 @@ else
 fi
 
 # Check 3: Panic-prone patterns (fast pattern scan only)
-echo "${BLUE}[3/7]${NC} Checking for panic-prone patterns..."
+echo "${BLUE}[3/${TOTAL_CHECKS}]${NC} Checking for panic-prone patterns..."
 if [ -x scripts/check-no-panics.sh ]; then
     if scripts/check-no-panics.sh patterns 2>&1 | grep -q "ERROR"; then
         check_fail "Panic patterns" "Remove .unwrap(), panic!(), expect() from production code."
@@ -97,7 +102,7 @@ else
 fi
 
 # Check 4: MSRV consistency (only if relevant files changed)
-echo "${BLUE}[4/7]${NC} Checking MSRV consistency..."
+echo "${BLUE}[4/${TOTAL_CHECKS}]${NC} Checking MSRV consistency..."
 MSRV_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(Cargo.toml|rust-toolchain.toml|clippy.toml|Dockerfile)$' || true)
 
 if [ -n "$MSRV_FILES" ]; then
@@ -117,7 +122,7 @@ else
 fi
 
 # Check 5: Workflow AWK validation (only if workflow files changed)
-echo "${BLUE}[5/7]${NC} Validating AWK scripts in workflows..."
+echo "${BLUE}[5/${TOTAL_CHECKS}]${NC} Validating AWK scripts in workflows..."
 WORKFLOW_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.github/workflows/.*\.ya?ml$' || true)
 
 if [ -n "$WORKFLOW_FILES" ]; then
@@ -137,8 +142,105 @@ else
     check_skip "AWK validation" "no workflow files changed"
 fi
 
-# Check 6: Markdown linting (only if markdown files changed)
-echo "${BLUE}[6/7]${NC} Checking markdown files..."
+# Check 6: AWK file syntax (only if .awk files are staged)
+echo "${BLUE}[6/${TOTAL_CHECKS}]${NC} Validating AWK file syntax..."
+STAGED_AWK_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.awk$' || true)
+
+if [ -n "$STAGED_AWK_FILES" ]; then
+    AWK_ERRORS=0
+    for awk_file in $STAGED_AWK_FILES; do
+        if [ -f "$awk_file" ]; then
+            if ! awk -f "$awk_file" < /dev/null > /dev/null 2>&1; then
+                echo "${RED}  AWK syntax error:${NC} $awk_file"
+                awk -f "$awk_file" < /dev/null 2>&1 || true
+                AWK_ERRORS=$((AWK_ERRORS + 1))
+            fi
+        fi
+    done
+    if [ "$AWK_ERRORS" -gt 0 ]; then
+        check_fail "AWK file syntax" "Fix AWK syntax errors in staged .awk files."
+        echo ""
+    else
+        check_pass "AWK file syntax"
+    fi
+else
+    check_skip "AWK file syntax" "no .awk files staged"
+fi
+
+# Check 7: Shellcheck for CI scripts (only if .github/scripts/ files are staged)
+echo "${BLUE}[7/${TOTAL_CHECKS}]${NC} Running shellcheck on CI scripts..."
+STAGED_CI_SCRIPTS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.github/scripts/.*\.sh$' || true)
+
+if [ -n "$STAGED_CI_SCRIPTS" ]; then
+    if command -v shellcheck >/dev/null 2>&1; then
+        SC_ERRORS=0
+        for script in $STAGED_CI_SCRIPTS; do
+            if [ -f "$script" ]; then
+                if ! shellcheck -s bash "$script" > /dev/null 2>&1; then
+                    echo "${RED}  shellcheck errors:${NC} $script"
+                    shellcheck -s bash "$script" 2>&1 | head -10
+                    SC_ERRORS=$((SC_ERRORS + 1))
+                fi
+            fi
+        done
+        if [ "$SC_ERRORS" -gt 0 ]; then
+            check_fail "Shellcheck CI scripts" "Fix shellcheck errors in .github/scripts/."
+            echo ""
+        else
+            check_pass "Shellcheck CI scripts"
+        fi
+    else
+        check_skip "Shellcheck CI scripts" "shellcheck not installed"
+    fi
+else
+    check_skip "Shellcheck CI scripts" "no .github/scripts/*.sh files staged"
+fi
+
+# Check 8: Markdown relative link validation (only if docs/ markdown files are staged)
+echo "${BLUE}[8/${TOTAL_CHECKS}]${NC} Validating markdown relative links in docs/..."
+STAGED_DOCS_MD=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^docs/.*\.md$' || true)
+
+if [ -n "$STAGED_DOCS_MD" ]; then
+    LINK_ERRORS=0
+    for md_file in $STAGED_DOCS_MD; do
+        if [ -f "$md_file" ]; then
+            base_dir=$(dirname "$md_file")
+            # Extract relative links and check they resolve
+            # Uses grep to find markdown links [text](url), filters to relative paths
+            for url in $(grep -oE '\[[^]]*\]\([^)]+\)' "$md_file" 2>/dev/null | sed -E 's/.*\(([^)]+)\).*/\1/' | grep -vE '^(https?://|mailto:|#)' || true); do
+                # Strip anchor for file check
+                file_part="${url%%#*}"
+                [ -z "$file_part" ] && continue
+
+                resolved="$base_dir/$file_part"
+                if [ ! -f "$resolved" ] && [ ! -d "$resolved" ]; then
+                    echo "${RED}  Broken link:${NC} $md_file -> $url"
+                    LINK_ERRORS=$((LINK_ERRORS + 1))
+                fi
+
+                # Check for .llm/ links missing ../ prefix
+                case "$url" in
+                    .llm/*)
+                        echo "${RED}  Invalid prefix:${NC} $md_file -> $url (should be ../$url)"
+                        LINK_ERRORS=$((LINK_ERRORS + 1))
+                        ;;
+                esac
+            done
+        fi
+    done
+    if [ "$LINK_ERRORS" -gt 0 ]; then
+        check_fail "Docs link validation" "Fix broken or incorrect relative links in docs/."
+        echo "${YELLOW}Tip:${NC} ./scripts/validate-ci.sh --links"
+        echo ""
+    else
+        check_pass "Docs link validation"
+    fi
+else
+    check_skip "Docs link validation" "no docs/*.md files staged"
+fi
+
+# Check 9: Markdown linting (only if markdown files changed)
+echo "${BLUE}[9/${TOTAL_CHECKS}]${NC} Checking markdown files..."
 STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
 
 if [ -n "$STAGED_MD_FILES" ]; then
@@ -161,8 +263,8 @@ else
     check_skip "Markdown linting" "no markdown files changed"
 fi
 
-# Check 7: Link checking (only if markdown files changed)
-echo "${BLUE}[7/7]${NC} Checking links in markdown files..."
+# Check 10: Link checking (only if markdown files changed)
+echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking links in markdown files..."
 
 if [ -n "$STAGED_MD_FILES" ]; then
     if command -v lychee >/dev/null 2>&1; then
@@ -198,6 +300,7 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  cargo fmt                                    # Fix formatting"
     echo "  cargo clippy --fix --allow-dirty            # Fix clippy warnings"
     echo "  ./scripts/check-markdown.sh fix             # Fix markdown"
+    echo "  ./scripts/validate-ci.sh                    # Validate CI config"
     echo "  ./scripts/run-local-ci.sh --fix             # Fix all issues"
     echo ""
     echo "${YELLOW}To bypass (NOT recommended):${NC}"

@@ -488,11 +488,11 @@ After implementing these enhancements, we expect:
 
 ## Related Documentation
 
-- **[Git Hooks Guide](docs/git-hooks-guide.md)** - Detailed user guide with troubleshooting
-- **[Mandatory Workflow](.llm/skills/mandatory-workflow.md)** - Required checks for all commits
-- **[CI/CD Troubleshooting](.llm/skills/ci-cd-troubleshooting.md)** - Debugging CI failures
-- **[MSRV Management](.llm/skills/msrv-and-toolchain-management.md)** - Rust version management
-- **[GitHub Actions Best Practices](.llm/skills/github-actions-best-practices.md)** - Workflow patterns
+- **[Git Hooks Guide](git-hooks-guide.md)** - Detailed user guide with troubleshooting
+- **[Mandatory Workflow](../.llm/skills/mandatory-workflow.md)** - Required checks for all commits
+- **[CI/CD Troubleshooting](../.llm/skills/ci-cd-troubleshooting.md)** - Debugging CI failures
+- **[MSRV Management](../.llm/skills/msrv-and-toolchain-management.md)** - Rust version management
+- **[GitHub Actions Best Practices](../.llm/skills/github-actions-best-practices.md)** - Workflow patterns
 
 ## Conclusion
 

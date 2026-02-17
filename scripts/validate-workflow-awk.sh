@@ -82,8 +82,8 @@ check_awk_antipatterns() {
     # Example: /^```[Rr]ust(,.*)?$/ should be /^```[Rr]ust/
     if grep -nE '/\^\`\`\`[^/]+\(,\.\*\)\?\$/' "$workflow"; then
         echo -e "${YELLOW}⚠${NC} Uses strict regex with (,.*)?$ - might not match space-separated attributes"
-        echo "  Example: /^\\`\\`\\`[Rr]ust(,.*)?\\$/ misses 'rust ignore' (space-separated)"
-        echo "  Fix: Use simpler prefix match: /^\\`\\`\\`[Rr]ust/"
+        echo '  Example: /^```[Rr]ust(,.*)?$/ misses "rust ignore" (space-separated)'
+        echo '  Fix: Use simpler prefix match: /^```[Rr]ust/'
         echo ""
         WARNINGS=$((WARNINGS + 1))
     fi

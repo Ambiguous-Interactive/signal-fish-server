@@ -709,6 +709,64 @@ Before committing AWK/shell scripts:
 
 ---
 
+## Lessons Learned: Common Pitfalls from Production CI/CD
+
+### AWK Apostrophes in YAML Workflow Inline Scripts
+
+**Never embed AWK containing apostrophes inside single-quoted bash
+strings in YAML `run: |` blocks.** Shellcheck parses the YAML-embedded
+script as bash, and single quotes inside AWK programs break
+shellcheck's quoting analysis, producing false positives or masking
+real errors.
+
+- **Symptom:** Shellcheck reports quoting errors (SC1003, SC2016)
+  on AWK programs embedded in workflow YAML
+- **Root cause:** YAML `run: |` blocks are parsed as bash by
+  shellcheck; apostrophes in AWK conflict with bash single-quotes
+- **Solution:** Extract AWK programs to external files in
+  `.github/scripts/` and invoke with `awk -f .github/scripts/script.awk`
+- **Rule of thumb:** Prefer external script files for any AWK
+  program longer than ~10 lines
+
+### Bash IFS is a Character Set, Not a String Delimiter
+
+**`IFS=':::'` does NOT split on the string `:::`.** Bash `IFS` is a
+set of individual delimiter characters -- `IFS=':::'` is equivalent
+to `IFS=':'`, splitting on every single `:`.
+
+- **Symptom:** Fields split incorrectly when using multi-character
+  IFS values (e.g., `IFS=':::'` with `read -r -d ''`)
+- **Root cause:** `IFS` treats each character independently,
+  not as a substring
+- **Solution:** Use `IFS=$'\t'` (tab) or another single-character
+  delimiter that won't appear in content
+
+### AWK Range Pattern Self-Matching
+
+**When using AWK to extract script blocks from workflow YAML files,
+range patterns (e.g., `/start/,/end/`) can match references to the
+target block name in other jobs.** For example, extracting a `run:`
+block named "Validate Rust code" may also capture lines in other
+jobs that reference that step name.
+
+- **Symptom:** AWK extraction captures too many lines or content
+  from unrelated workflow jobs
+- **Root cause:** Range patterns match any line containing the
+  pattern, not just the intended block boundary
+- **Solution:** Use flag-based state machines instead of range
+  patterns -- set a flag on the start pattern, clear it on the
+  end pattern, and process lines only when the flag is set
+
+### Local Validation with `scripts/validate-ci.sh`
+
+Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
+
+- AWK file syntax (files in `.github/scripts/`)
+- Shell script lint (shellcheck on `scripts/` and `.githooks/`)
+- Markdown link integrity (relative paths resolve correctly)
+
+---
+
 ## Related Skills
 
 - [`github-actions-best-practices`](./github-actions-best-practices.md) — Workflow patterns and AWK examples
