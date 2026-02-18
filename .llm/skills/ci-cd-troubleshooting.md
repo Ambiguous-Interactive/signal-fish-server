@@ -58,7 +58,7 @@
 
 #### Symptom
 
-```yaml
+```text
 # CI fails with:
 ERROR: Cache entry deserialization failed, entry ignored
 ERROR: Unable to locate executable file: pip
@@ -747,6 +747,9 @@ Before committing workflow changes, verify:
 | `regex parse error` in lychee | `.lychee.toml` `exclude` uses glob syntax instead of regex | Escape `.` as `\\.`, `{}` as `\\{\\}`, use `.*` not `*` |
 | Script exits with code 1, no error message | `grep` found no matches under `set -euo pipefail` | Add `\|\| true` after grep, or use AWK instead |
 | False positive broken links in code blocks | Link checker scans inside fenced code blocks | Use AWK with fence tracking and inline code stripping |
+| YAML parse error in markdown file | Non-YAML content in `yaml`-fenced code block | Use `text` for logs, `bash` for shell; split mixed blocks |
+| Lychee reports broken URL from `.lychee.toml` | Lychee scans its own config and extracts partial URLs from regex | Exclude `.lychee.toml` via `--exclude-path` or add truncated URL exclusions |
+| Test assertion fails on config regex pattern | `contains("http://localhost")` vs regex `^https?://localhost` | Test regex behavior (compile + match), not literal substrings |
 
 ---
 
@@ -2224,6 +2227,206 @@ formats (invalid JSON inside a Markdown file, broken links, syntax errors, etc.)
 
 ---
 
+## Pattern 16: YAML Validation Fails on Non-YAML Code Blocks
+
+### Symptom
+
+```text
+CI fails with:
+ERROR: YAML parse error in docs/guide.md
+  mapping values are not allowed in this context
+  at line 5, column 12
+```
+
+Even though the YAML in the document looks correct.
+
+### Root Cause
+
+**Code blocks with `yaml` language tags that contain non-YAML content**
+(error logs, shell commands, AWK scripts, or mixed content) cause YAML
+validators to fail when they extract and validate fenced code blocks by
+language tag.
+
+```markdown
+<!-- ❌ WRONG: Tagged as yaml but contains shell + YAML mix -->
+(triple backticks)yaml
+$ kubectl get pods
+NAME                    READY   STATUS
+my-pod-abc123           1/1     Running
+
+# config.yml output:
+server:
+  port: 8080
+(triple backticks)
+```
+
+### Solution
+
+**Use the correct language tag for the actual content:**
+
+| Content Type | Correct Tag | Wrong Tag |
+|--------------|-------------|-----------|
+| Error logs, CLI output | `text` | `yaml` |
+| Shell commands | `bash` | `yaml` |
+| AWK scripts | `bash` or `awk` | `yaml` |
+| Actual YAML config | `yaml` | `text` |
+| Mixed shell + YAML | Split into separate blocks | Single `yaml` block |
+
+**Split mixed-content blocks into separate blocks:**
+
+```markdown
+<!-- ✅ CORRECT: Separate blocks with appropriate tags -->
+Run the command:
+
+(triple backticks)bash
+$ kubectl get pods
+NAME                    READY   STATUS
+my-pod-abc123           1/1     Running
+(triple backticks)
+
+The config file:
+
+(triple backticks)yaml
+server:
+  port: 8080
+(triple backticks)
+```
+
+### Prevention
+
+- Before tagging a code block as `yaml`, `json`, `toml`, or `bash`,
+  verify the **entire** block content is valid in that language
+- Use `text` for output logs, error messages, or mixed content
+- When documenting a workflow that mixes commands and config, split into
+  multiple blocks rather than combining under one tag
+- CI validators that extract code blocks by language tag will attempt to
+  parse them -- incorrect tags cause false failures
+
+---
+
+## Pattern 17: Lychee Scans Its Own Config File
+
+### Symptom
+
+```text
+CI link check reports broken URLs that don't appear in any documentation:
+
+✗ [404] https://lib/ | .lychee.toml:8:5
+✗ [404] https://crates/ | .lychee.toml:12:5
+```
+
+### Root Cause
+
+**Lychee scans `*.toml` files and extracts partial URLs from regex
+patterns inside `.lychee.toml` itself.** When the config contains exclude
+patterns like `^https://lib\\.rs`, lychee extracts a truncated URL
+(`https://lib/`) and attempts to check it.
+
+```toml
+# .lychee.toml
+exclude = [
+    "^https://lib\\.rs",     # ← lychee extracts "https://lib/" from this
+    "^https://crates\\.io",  # ← lychee extracts "https://crates/" from this
+]
+```
+
+### Solution
+
+**Exclude `.lychee.toml` itself from lychee's scan, or exclude the
+truncated URLs that lychee extracts from the regex patterns:**
+
+```toml
+# Option A: Exclude the config file via CLI
+# lychee --exclude-path .lychee.toml ...
+
+# Option B: Exclude the truncated URLs lychee extracts from its own patterns
+exclude = [
+    "^https://lib\\.rs",
+    "^https://crates\\.io",
+    # Self-referential: lychee extracts partial URLs from the regex
+    # patterns above (e.g., "https://lib/", "https://crates/")
+    "^https://lib/$",
+    "^https://crates/$",
+]
+```
+
+### Prevention
+
+- When adding URL-based regex patterns to `.lychee.toml`, consider what
+  partial URL lychee might extract from the pattern itself
+- Use `--exclude-path .lychee.toml` in CI to avoid self-scanning entirely
+- Test locally after changing `.lychee.toml`:
+  `lychee --config .lychee.toml './**/*.md' './**/*.toml'`
+
+---
+
+## Pattern 18: Config Test Assertions vs Regex Patterns
+
+### Symptom
+
+```text
+CI test fails:
+assertion failed: content.contains("http://localhost")
+  .lychee.toml should exclude localhost URLs
+```
+
+But `.lychee.toml` does exclude localhost -- via a regex pattern like
+`^https?://localhost`, not a literal URL.
+
+### Root Cause
+
+**Test assertions use substring matching (`contains()`) against config
+files that contain regex patterns, not literal strings.** The regex
+`^https?://localhost` does not contain the substring `http://localhost`
+as a literal match.
+
+```rust
+// ❌ WRONG: Substring check fails on regex patterns
+assert!(content.contains("http://localhost"));
+// The config has "^https?://localhost" which doesn't contain "http://localhost"
+
+// ✅ CORRECT: Compile and test the regex pattern
+let re = regex::Regex::new(r"^https?://localhost").unwrap();
+assert!(re.is_match("http://localhost:8080"));
+assert!(re.is_match("https://localhost"));
+```
+
+### Solution
+
+**Tests that validate config files containing regex patterns should
+either:**
+
+1. Check for the regex pattern string itself (exact match)
+2. Compile the regex and test it against representative URLs
+3. Use a pattern match that accounts for regex syntax
+
+```rust
+// Option 1: Check for the actual regex string in the config
+assert!(
+    content.contains("localhost"),
+    ".lychee.toml should have a localhost exclusion pattern"
+);
+
+// Option 2: Extract and compile regex patterns, then test behavior
+let exclude_patterns = extract_exclude_patterns(&content);
+let test_urls = vec!["http://localhost", "http://localhost:8080"];
+for url in test_urls {
+    assert!(
+        exclude_patterns.iter().any(|re| re.is_match(url)),
+        "No exclude pattern matches: {}", url
+    );
+}
+```
+
+### Prevention
+
+- When testing config files that contain regex, grep, or glob patterns,
+  never use `contains()` to check for a literal URL that should be matched
+- Instead, test the **behavior** (does the pattern match the intended URLs?)
+- Document in the test why regex-aware checking is needed
+
+---
+
 ## Lesson Learned: rustfmt --check on Documentation Code Blocks
 
 `rustfmt --check` returns exit code 1 for **both** parse errors and formatting
@@ -2370,3 +2573,13 @@ Based on recent issues fixed in this project:
 - **Prevention:** Use AWK over grep in validation scripts; always `|| true` with grep;
   treat `.lychee.toml` exclude as regex; fence-aware link extraction
 - **Fix Time:** Minutes (once root cause identified) but Hours (to diagnose initially)
+
+### Category 5: Code Fence and Config File Mismatches
+
+- **Example:** YAML validator fails on `yaml`-tagged code block containing shell output;
+  lychee reports broken links from its own regex patterns; test uses `contains()` on regex config
+- **Detection:** CI failures in validators that parse code blocks by language tag;
+  phantom broken URLs from `.lychee.toml`; test assertion mismatches
+- **Prevention:** Match code fence language tags to actual content; exclude `.lychee.toml`
+  from self-scanning; test regex configs by compiling and matching, not substring search
+- **Fix Time:** Minutes (once the mismatch pattern is recognized)

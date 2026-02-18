@@ -896,7 +896,7 @@ done
 
 #### Documentation Pattern
 
-```yaml
+```bash
 # .github/workflows/doc-validation.yml
 
 # Extract Rust code blocks from markdown files

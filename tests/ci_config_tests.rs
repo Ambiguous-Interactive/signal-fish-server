@@ -1386,45 +1386,236 @@ fn test_lychee_excludes_placeholder_urls() {
     // - https://github.com/{}
     // - http://localhost:3000
     // These should be excluded to avoid false failures
+    //
+    // Note: .lychee.toml exclude patterns are **regex** (not globs), so we must
+    // compile them and test for matches rather than checking literal substrings.
 
     let root = repo_root();
     let lychee_config = root.join(".lychee.toml");
     let content = read_file(&lychee_config);
 
-    // Define test cases: (pattern, reason)
-    let test_cases = vec![
+    // Parse the exclude array from .lychee.toml by extracting quoted strings
+    // between `exclude = [` and the closing `]`.
+    let exclude_patterns = parse_lychee_exclude_patterns(&content);
+    assert!(
+        !exclude_patterns.is_empty(),
+        ".lychee.toml must contain an 'exclude' array with at least one pattern"
+    );
+
+    // Compile all exclude patterns as regexes (just like lychee does)
+    let compiled: Vec<(&str, regex::Regex)> = exclude_patterns
+        .iter()
+        .map(|p| {
+            let re = regex::Regex::new(p)
+                .unwrap_or_else(|e| panic!("Invalid regex in .lychee.toml exclude: {p:?}: {e}"));
+            (p.as_str(), re)
+        })
+        .collect();
+
+    // Define test cases: (url, reason)
+    let test_cases: &[(&str, &str)] = &[
         ("http://localhost", "Localhost URLs are placeholders"),
         ("http://127.0.0.1", "Loopback IPs are placeholders"),
         ("ws://localhost", "WebSocket localhost is placeholder"),
         ("mailto:", "Email addresses should be excluded"),
         (
-            "https://github.com/owner/repo",
+            "https://github.com/owner/repo/",
             "Generic placeholder pattern",
         ),
-        ("https://github.com/{}", "Template placeholder pattern"),
+        ("https://github.com/{}/", "Template placeholder pattern"),
     ];
 
     let mut missing_exclusions = Vec::new();
-    for (pattern, reason) in test_cases {
-        // Check if pattern is in exclude list (allowing for wildcards)
-        let pattern_prefix = pattern.split('*').next().unwrap_or(pattern);
-        if !content.contains(pattern_prefix) {
-            missing_exclusions.push(format!("  - {pattern}\n    Reason: {reason}"));
+    for &(url, reason) in test_cases {
+        let matched = compiled.iter().any(|(_, re)| re.is_match(url));
+        if !matched {
+            let tried: Vec<String> = compiled
+                .iter()
+                .map(|(pat, _)| format!("    {pat:?}"))
+                .collect();
+            missing_exclusions.push(format!(
+                "  - URL: {url}\n    Reason: {reason}\n    Patterns tried:\n{}",
+                tried.join("\n")
+            ));
         }
     }
 
     if !missing_exclusions.is_empty() {
         panic!(
-            ".lychee.toml should exclude common placeholder URLs:\n\n{}\n\n\
-             Add these patterns to the 'exclude' list in .lychee.toml.\n\
-             Example:\n\
-             exclude = [\n\
-             \x20   \"http://localhost\",\n\
-             \x20   \"https://github.com/owner/repo/*\",\n\
-             ]\n",
-            missing_exclusions.join("\n")
+            ".lychee.toml exclude patterns do not match these placeholder URLs:\n\n{}\n\n\
+             Add or fix regex patterns in the 'exclude' list in .lychee.toml.\n\
+             Remember: exclude values are regex, not literal strings.\n",
+            missing_exclusions.join("\n\n")
         );
     }
+}
+
+/// Parse the `exclude = [...]` array from `.lychee.toml` content, returning
+/// the list of unescaped string values (regex patterns).
+fn parse_lychee_exclude_patterns(content: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    let mut in_exclude = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect the start of the exclude array
+        if trimmed.starts_with("exclude") && trimmed.contains('[') {
+            // Could also be `exclude_path` or `exclude_link_local` — only match bare `exclude`
+            let key = trimmed.split('=').next().unwrap_or("").trim();
+            if key != "exclude" {
+                continue;
+            }
+            in_exclude = true;
+            // If the opening `[` and closing `]` are on the same line, handle inline
+            if trimmed.contains(']') {
+                extract_quoted_strings(trimmed, &mut patterns);
+                in_exclude = false;
+            }
+            continue;
+        }
+
+        if in_exclude {
+            if trimmed.starts_with(']') {
+                break;
+            }
+            extract_quoted_strings(trimmed, &mut patterns);
+        }
+    }
+
+    patterns
+}
+
+/// Extract double-quoted strings from a line, stripping comments.
+fn extract_quoted_strings(line: &str, out: &mut Vec<String>) {
+    // Strip trailing `# comment`
+    let without_comment = strip_trailing_comment(line);
+    let mut chars = without_comment.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            let mut s = String::new();
+            loop {
+                match chars.next() {
+                    None | Some('"') => break,
+                    Some('\\') => {
+                        // TOML basic string escape sequences:
+                        // `\\` -> `\`, `\"` -> `"`, `\n` -> newline, etc.
+                        // In .lychee.toml, regex backslashes are written as `\\`
+                        // (e.g., `\\.` in TOML source becomes `\.` as a regex).
+                        if let Some(next) = chars.next() {
+                            match next {
+                                '\\' => s.push('\\'),
+                                '"' => s.push('"'),
+                                'n' => s.push('\n'),
+                                't' => s.push('\t'),
+                                'r' => s.push('\r'),
+                                // For any other char, preserve both (lenient)
+                                other => {
+                                    s.push('\\');
+                                    s.push(other);
+                                }
+                            }
+                        }
+                    }
+                    Some(c) => s.push(c),
+                }
+            }
+            out.push(s);
+        }
+    }
+}
+
+/// Strip a trailing `# comment` from a TOML line, being careful not to
+/// strip `#` that appears inside a quoted string.
+fn strip_trailing_comment(line: &str) -> &str {
+    let mut in_quote = false;
+    let mut prev_backslash = false;
+    for (i, ch) in line.char_indices() {
+        if ch == '"' && !prev_backslash {
+            in_quote = !in_quote;
+        }
+        if ch == '#' && !in_quote {
+            return &line[..i];
+        }
+        // After `\\`, reset so the next char is not treated as escaped.
+        prev_backslash = ch == '\\' && !prev_backslash;
+    }
+    line
+}
+
+#[test]
+fn test_strip_trailing_comment() {
+    // Basic comment stripping
+    assert_eq!(strip_trailing_comment("value # comment"), "value ");
+    assert_eq!(strip_trailing_comment("no comment"), "no comment");
+
+    // Preserves # inside quoted strings
+    assert_eq!(
+        strip_trailing_comment(r#""pattern#with#hash""#),
+        r#""pattern#with#hash""#
+    );
+
+    // Strips comment after quoted string
+    assert_eq!(
+        strip_trailing_comment(r#""value" # comment"#),
+        r#""value" "#
+    );
+
+    // Handles escaped quotes inside strings
+    assert_eq!(
+        strip_trailing_comment(r#""escaped\"quote" # comment"#),
+        r#""escaped\"quote" "#
+    );
+
+    // Handles double-backslash before closing quote (not an escape)
+    assert_eq!(
+        strip_trailing_comment(r#""ends_with_backslash\\" # comment"#),
+        r#""ends_with_backslash\\" "#
+    );
+}
+
+#[test]
+fn test_extract_quoted_strings() {
+    let mut out = Vec::new();
+
+    // Basic string extraction
+    extract_quoted_strings(r#""hello""#, &mut out);
+    assert_eq!(out, vec!["hello"]);
+
+    // Multiple strings
+    out.clear();
+    extract_quoted_strings(r#""a", "b""#, &mut out);
+    assert_eq!(out, vec!["a", "b"]);
+
+    // TOML escape: \\ becomes single backslash
+    out.clear();
+    extract_quoted_strings(r#""^https?://127\\.0""#, &mut out);
+    assert_eq!(out, vec![r"^https?://127\.0"]);
+
+    // TOML escape: \{ and \} preserved as-is (lenient fallback)
+    out.clear();
+    extract_quoted_strings(r#""\\{\\}""#, &mut out);
+    assert_eq!(out, vec![r"\{\}"]);
+}
+
+#[test]
+fn test_parse_lychee_exclude_patterns() {
+    // Parses only the `exclude` array, not `exclude_path` or `exclude_link_local`
+    let content = r#"
+exclude = [
+    "^https?://localhost",
+    "^mailto:",
+]
+
+exclude_path = [
+    "target/",
+    "tests/",
+]
+
+exclude_link_local = true
+"#;
+    let patterns = parse_lychee_exclude_patterns(content);
+    assert_eq!(patterns, vec!["^https?://localhost", "^mailto:"]);
 }
 
 #[test]

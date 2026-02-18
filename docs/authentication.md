@@ -206,10 +206,12 @@ secrets:
 
 ### Kubernetes ConfigMap and Secrets
 
-```yaml
+```bash
 # Create secret from file
 kubectl create secret generic signal-fish-config --from-file=config.json=./config.secret.json
+```
 
+```yaml
 # deployment.yaml
 apiVersion: v1
 kind: Deployment

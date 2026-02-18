@@ -35,10 +35,18 @@ exclude = [
 
     # Test fixture and example URLs (from tests/ci_config_tests.rs)
     # These are placeholder/example URLs in error messages and documentation
-    # URL pattern exclusions handle test placeholder URLs, making file-level exclusion unnecessary
-    "^https://github\\.com/owner/repo/",
-    "^https://github\\.com/%7B%7B%7D/",   # URL-encoded template placeholder
-    "^https://github\\.com/\\{\\}/",       # Template placeholder (braces escaped for regex)
+    # (tests/ is also in exclude_path as defense-in-depth)
+    "^https://github\\.com/owner/repo",
+    "^https://github\\.com/%7B",           # URL-encoded brace placeholders: %7B=%7D = {}, %7B%7B%7D = {{}
+    "^https://github\\.com/\\{\\}",        # Template placeholder (braces escaped for regex)
+
+    # Placeholder server URLs used in test strings
+    "^https?://your-server",
+
+    # Truncated URLs extracted by lychee from regex patterns in .lychee.toml itself
+    # (lychee parses its own config and extracts partial URLs from exclude regexes)
+    "^https?://github/",
+    "^https?://lib/",
 ]
 
 # Retry settings
@@ -59,6 +67,7 @@ exclude_path = [
     "third_party/",  # Vendored dependencies, check once during updates
     ".github/test-fixtures/",  # Intentional test fixtures with example/placeholder content
     "test-fixtures/",           # Root test fixtures directory
+    "tests/",                   # Test files contain intentional placeholder/example URLs
 ]
 
 # Exclude specific link patterns

@@ -175,6 +175,21 @@ Key rules (details in skills above):
 
 Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, README updates if user-facing.
 
+### Code Fence and CI Pitfalls
+
+These conventions prevent CI failures in documentation validation workflows:
+
+- **Code fence language tags must match content** -- tag blocks as `yaml` only for valid YAML,
+  `bash` for shell/AWK, `text` for logs or mixed output. Validators parse blocks by tag.
+- **Split mixed-content blocks** -- a block with both shell commands and YAML must be two
+  separate fenced blocks with appropriate tags, not one `yaml` block.
+- **`.lychee.toml` `exclude` patterns are regex, not globs** -- escape `.` as `\\.`,
+  use `.*` not `*`, anchor with `^`. See [ci-cd-troubleshooting Pattern 13](skills/ci-cd-troubleshooting.md).
+- **Lychee self-scans `.toml` files** -- it extracts partial URLs from regex patterns in its
+  own config. Use `--exclude-path .lychee.toml` or add exclusions for truncated URLs.
+- **Test config files by behavior, not substrings** -- when a config contains regex patterns
+  (e.g., `^https?://localhost`), tests should compile and match the regex, not use `contains("http://localhost")`.
+
 ---
 
 ## File Reference
