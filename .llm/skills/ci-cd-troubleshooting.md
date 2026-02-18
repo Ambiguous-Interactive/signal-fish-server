@@ -414,7 +414,7 @@ CI:    cargo test  → ✓ Passes
 
 **A. Different Rust versions:**
 
-```bash
+```text
 # Local (using latest stable)
 $ rustc --version
 rustc 1.89.0
@@ -437,11 +437,11 @@ cargo test                  # Tests WITHOUT features
 
 **C. Different OS:**
 
-```bash
-# Local: macOS (case-insensitive filesystem)
+```rust
+// Local: macOS (case-insensitive filesystem)
 use crate::Config;  // finds config.rs, Config.rs, or CONFIG.rs
 
-# CI: Linux (case-sensitive filesystem)
+// CI: Linux (case-sensitive filesystem)
 use crate::Config;  // ONLY finds config.rs (exact match)
 
 ```
@@ -561,7 +561,7 @@ CI:    docker build -t myapp .  → ✗ Fails with package not found
 
 **C. Build context includes files that shouldn't be there:**
 
-```bash
+```text
 # Local: .dockerignore not properly configured
 COPY . /app  # Includes target/, .git/, etc. (breaks build)
 

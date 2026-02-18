@@ -52,7 +52,7 @@
 
 **Symptom:**
 
-```bash
+```text
 # Locally works fine, but on clone or in CI:
 error: cannot run .git/hooks/pre-commit: Permission denied
 ```
@@ -337,7 +337,7 @@ lychee --offline $STAGED_FILES
 
 # 3. Skip slow checks if tool not installed
 if command -v slow_tool >/dev/null 2>&1; then
-  # Only run if installed
+  slow_tool --check  # Only run if installed
 fi
 
 # 4. Parallel execution for independent checks
@@ -353,7 +353,7 @@ wait $PANICS_PID || FAILURES=$((FAILURES + 1))
 
 # 5. Cache expensive operations
 if [ ! -f .git/hook-cache/last-check ]; then
-  # First run or cache cleared
+  : # First run or cache cleared
 fi
 ```
 
@@ -661,7 +661,7 @@ echo "  git commit --no-verify"
 
 **Hooks should match CI validation:**
 
-```bash
+```yaml
 # Pre-commit hook
 cargo fmt --check
 cargo clippy

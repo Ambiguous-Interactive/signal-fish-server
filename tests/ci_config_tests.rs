@@ -1433,14 +1433,49 @@ fn test_lychee_excludes_placeholder_urls() {
     // Define test cases: (url, reason)
     let test_cases: &[(&str, &str)] = &[
         ("http://localhost", "Localhost URLs are placeholders"),
+        (
+            "http://localhost:3000",
+            "Localhost with port is a placeholder",
+        ),
+        ("https://localhost", "HTTPS localhost is a placeholder"),
         ("http://127.0.0.1", "Loopback IPs are placeholders"),
+        ("http://0.0.0.0", "Unspecified IPs are placeholders"),
         ("ws://localhost", "WebSocket localhost is placeholder"),
+        (
+            "wss://localhost",
+            "Secure WebSocket localhost is placeholder",
+        ),
         ("mailto:", "Email addresses should be excluded"),
         (
             "https://github.com/owner/repo/",
             "Generic placeholder pattern",
         ),
         ("https://github.com/{}/", "Template placeholder pattern"),
+        (
+            "https://github.com/{}/releases",
+            "Template placeholder with path suffix",
+        ),
+        ("http://your-server/", "Placeholder server URL"),
+        // Truncated URLs extracted by lychee from regex patterns in .lychee.toml
+        // itself (defense-in-depth in case exclude_path fails for dotfiles)
+        ("https://github/", "Truncated URL from .lychee.toml regex"),
+        ("https://github", "Truncated URL without trailing slash"),
+        ("https://lib/", "Truncated URL from .lychee.toml regex"),
+        ("https://lib", "Truncated URL without trailing slash"),
+        // file:// protocol for local file links
+        ("file:///tmp/foo", "Local file URLs should be excluded"),
+        // Anchor-only links (same-page references)
+        ("#section-heading", "Anchor-only links should be excluded"),
+        // lib.rs returns 403 for automated checks
+        (
+            "https://lib.rs/crates/foo",
+            "lib.rs returns 403 for automated checks",
+        ),
+        // URL-encoded brace placeholders
+        (
+            "https://github.com/%7Buser%7D",
+            "URL-encoded brace placeholder should be excluded",
+        ),
     ];
 
     let mut missing_exclusions = Vec::new();

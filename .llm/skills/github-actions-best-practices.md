@@ -512,24 +512,24 @@ fn test_dockerfile_rust_version_matches_msrv() {
 
 ```dockerfile
 # Primary patterns (CORRECT for Docker Hub)
-FROM Rust:1.88-bookworm        # Debian 12 base
-FROM Rust:1.88-alpine          # Alpine base
-FROM Rust:1.88-slim            # Slim Debian
-FROM Rust:1.88                 # Default (Debian bookworm)
+FROM rust:1.88-bookworm        # Debian 12 base
+FROM rust:1.88-alpine          # Alpine base
+FROM rust:1.88-slim            # Slim Debian
+FROM rust:1.88                 # Default (Debian bookworm)
 
 # NOT available on Docker Hub
-FROM Rust:1.88.0-bookworm      # ❌ Won't work
-FROM Rust:1.88.0               # ❌ Won't work
+FROM rust:1.88.0-bookworm      # ❌ Won't work
+FROM rust:1.88.0               # ❌ Won't work
 
 ```
 
 **Check available tags:**
 
 ```bash
-# List available tags for Rust image
-docker search Rust --limit 5
-docker pull Rust:1.88-bookworm  # Works
-docker pull Rust:1.88.0-bookworm  # Error: manifest unknown
+# List available tags for rust image
+docker search rust --limit 5
+docker pull rust:1.88-bookworm  # Works
+docker pull rust:1.88.0-bookworm  # Error: manifest unknown
 
 ```
 
@@ -538,8 +538,8 @@ docker pull Rust:1.88.0-bookworm  # Error: manifest unknown
 **Automatic security updates:**
 
 ```dockerfile
-# Using Rust:1.88 automatically pulls latest patch
-FROM Rust:1.88-bookworm
+# Using rust:1.88 automatically pulls latest patch
+FROM rust:1.88-bookworm
 # Today: Gets 1.88.0
 # Tomorrow: Automatically gets 1.88.1 (with security fixes)
 # Next week: Automatically gets 1.88.2 (with bug fixes)
@@ -549,7 +549,7 @@ FROM Rust:1.88-bookworm
 
 ```dockerfile
 # Using full version requires manual updates
-FROM Rust:1.88.0-bookworm
+FROM rust:1.88.0-bookworm
 # Stuck on 1.88.0 forever
 # Must manually update Dockerfile to get 1.88.1
 ```
@@ -567,7 +567,7 @@ FROM Rust:1.88.0-bookworm
 
 ```dockerfile
 # Custom registry: Use full versions for reproducibility
-FROM my-registry.example.com/Rust:1.88.0-bookworm
+FROM my-registry.example.com/rust:1.88.0-bookworm
 # Not Docker Hub, so full version is appropriate
 ```
 
@@ -590,7 +590,7 @@ Before committing Dockerfile changes:
 # Using bookworm (Debian 12) which has mold in its repositories
 # Version 1.88 matches MSRV in Cargo.toml
 # Docker Hub uses X.Y format, not X.Y.Z
-FROM Rust:1.88-bookworm AS chef
+FROM rust:1.88-bookworm AS chef
 #          ^^^^ Shortened format for Docker Hub (automatically includes patches)
 RUN cargo install cargo-chef --locked
 WORKDIR /app
@@ -603,7 +603,7 @@ WORKDIR /app
 
 ```dockerfile
 # Dockerfile:7
-FROM Rust:1.88.0-bookworm AS chef
+FROM rust:1.88.0-bookworm AS chef
 #          ^^^^^^ Full version - tag doesn't exist on Docker Hub
 ```
 
@@ -611,7 +611,7 @@ FROM Rust:1.88.0-bookworm AS chef
 
 ```text
 
-ERROR: manifest for Rust:1.88.0-bookworm not found
+ERROR: manifest for rust:1.88.0-bookworm not found
 
 ```
 
@@ -619,7 +619,7 @@ ERROR: manifest for Rust:1.88.0-bookworm not found
 
 ```dockerfile
 # Dockerfile:7
-FROM Rust:1.88-bookworm AS chef
+FROM rust:1.88-bookworm AS chef
 #          ^^^^ Shortened format - matches Docker Hub convention
 ```
 
@@ -1061,7 +1061,7 @@ done < <(find . -name "*.txt")
 Shellcheck validates Bash syntax but does **not** validate AWK syntax
 embedded in heredocs or inline scripts.
 
-```bash
+```text
 # Shellcheck will NOT catch AWK syntax errors here:
 awk '
   BEGIN { print "hello" }    # Shellcheck ignores this
@@ -1421,7 +1421,7 @@ jobs:
 
 ### Document AWK Field Extraction
 
-```bash
+```awk
 # ❌ WRONG: Magic number without context
 print substr($0, 11)
 

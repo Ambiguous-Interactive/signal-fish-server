@@ -46,8 +46,9 @@ exclude = [
     # Truncated URLs extracted by lychee from regex patterns in .lychee.toml itself.
     # These are a safety net in case the exclude_path for .lychee.toml doesn't take effect
     # (see known lychee bug: TOML exclude_path may not apply to glob-expanded paths).
-    "^https?://github/",
-    "^https?://lib/",
+    # Match with or without trailing slash since extraction behavior varies.
+    "^https?://github(/|$)",
+    "^https?://lib(/|$)",
 ]
 
 # Retry settings

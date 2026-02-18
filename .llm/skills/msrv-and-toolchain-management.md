@@ -218,7 +218,7 @@ grep '^rust-version = ' Cargo.toml
 
 # 2. Identify why MSRV bump is needed
 # Usually: dependency update requires newer Rust
-cargo update -p <dependency>
+cargo update -p "$DEPENDENCY"
 cargo check  # Will fail if dependency needs newer Rust
 
 # 3. Determine minimum required version
@@ -344,7 +344,7 @@ while the currently active rustc version is 1.87.0
    ```toml
    [dependencies]
    rand = "=0.9.0"  # Pin to older version compatible with current MSRV
-   ```text
+   ```
 
 ### Issue 2: CI Passes Locally But Fails in CI
 
@@ -911,4 +911,4 @@ When asked to update nightly version:
 - [Cargo Book: `rust-version` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field)
 - [Rust Toolchain Files](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file)
 - [cargo-msrv documentation](https://github.com/foresterre/cargo-msrv)
-- [Clippy MSRV Configuration](https://doc.Rust-lang.org/clippy/configuration.html#msrv)
+- [Clippy MSRV Configuration](https://doc.rust-lang.org/clippy/configuration.html#msrv)

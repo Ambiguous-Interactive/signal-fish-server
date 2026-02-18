@@ -77,9 +77,9 @@ jobs:
             --exclude-path tests/
             --exclude-path target/
             --exclude-path third_party/
-            --exclude-path '.github/test-fixtures/'
+            --exclude-path '\.github/test-fixtures/'
             --exclude-path 'test-fixtures/'
-            --exclude-path '.lychee.toml'
+            --exclude-path '\.lychee\.toml'
             --
             './**/*.md' './**/*.rs' './**/*.toml'
           fail: true

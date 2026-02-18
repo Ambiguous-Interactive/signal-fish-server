@@ -33,8 +33,8 @@
 
 **Code Blocks:**
 
-- Always specify language identifier: ` ```Rust`, ` ```bash`, ` ```json`, never ` ```
-- Use lowercase language names: ` ```Rust` not ` ```Rust`
+- Always specify language identifier: ` ```rust`, ` ```bash`, ` ```json`, never ` ```
+- Use lowercase language names: ` ```rust` not ` ```Rust`
 - For plain text examples, use ` ```text`
 
 **Proper Nouns:**
@@ -81,7 +81,7 @@ fn main() {
 
 | Content Type | Identifier | Example |
 |--------------|------------|---------|
-| Rust code | `rust` | ` ```Rust` |
+| Rust code | `rust` | ` ```rust` |
 | Shell commands | `bash` or `sh` | ` ```bash` |
 | JSON | `json` | ` ```json` |
 | JSON with Comments | `jsonc` | ` ```jsonc` |
@@ -118,9 +118,9 @@ Rust code blocks can have special attributes:
 
 **Attribute Formats:**
 
-- Comma-separated: ` ```Rust,ignore`
-- Space-separated: ` ```Rust ignore` (also valid)
-- Multiple attributes: ` ```Rust,ignore,no_run` or ` ```rust ignore no_run`
+- Comma-separated: ` ```rust,ignore`
+- Space-separated: ` ```rust ignore` (also valid)
+- Multiple attributes: ` ```rust,ignore,no_run` or ` ```rust ignore no_run`
 
 ### Case Sensitivity
 
@@ -854,6 +854,71 @@ placeholder with valid JSON.
     "third"
   ]
 }
+```
+````
+
+### Pitfall 12: Bash Code Block Validation
+
+Content tagged with `` ```bash `` may be validated as bash syntax. Only use the
+`bash` fence tag for content that is actually valid shell script.
+
+**Common mistakes:**
+
+1. **Angle bracket placeholders are invalid bash** -- `<foo>` is parsed as
+   redirection. Use `"$FOO"` (variable) or `your-foo` (literal) instead.
+
+2. **Wrong fence tag for non-bash content** -- Error messages, Rust compiler
+   output, Dockerfile instructions, AWK scripts, and YAML fragments are not
+   bash. Use `text`, `rust`, `dockerfile`, `awk`, or `yaml` respectively.
+
+3. **Empty if-blocks** -- A bash `if` or `else` branch with only a comment
+   and no command is a syntax error. Use `:` (the colon no-op builtin) as a
+   placeholder.
+
+4. **AWK code with unmatched quotes** -- AWK snippets inside single-quoted
+   bash strings can cause syntax errors when the AWK content contains
+   unmatched quotes (e.g., `won't`). Either use a separate `awk` code block
+   or escape carefully.
+
+````markdown
+❌ WRONG: Angle bracket placeholder in bash block
+```bash
+curl https://example.com/api/<your-token>
+```
+
+✅ CORRECT: Use a variable or literal placeholder
+```bash
+curl "https://example.com/api/${YOUR_TOKEN}"
+```
+
+❌ WRONG: Error output tagged as bash
+```bash
+error[E0308]: mismatched types
+  --> src/main.rs:3:5
+```
+
+✅ CORRECT: Use text for non-bash output
+```text
+error[E0308]: mismatched types
+  --> src/main.rs:3:5
+```
+
+❌ WRONG: Empty else branch (syntax error)
+```bash
+if [ -f "$file" ]; then
+    process "$file"
+else
+    # nothing to do
+fi
+```
+
+✅ CORRECT: Use colon no-op
+```bash
+if [ -f "$file" ]; then
+    process "$file"
+else
+    : # nothing to do
+fi
 ```
 ````
 

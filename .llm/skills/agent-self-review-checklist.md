@@ -70,7 +70,7 @@ For changes in `dashboard/`, `frontend/`, `client-portal/`, or `infra/`:
 
 ```bash
 
-cd <project-dir>
+cd "$PROJECT_DIR"
 npm run format
 npm run lint
 npm run build
