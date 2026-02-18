@@ -1,0 +1,93 @@
+# Lychee link checker configuration
+# See: https://github.com/lycheeverse/lychee
+
+# Maximum number of concurrent network requests
+max_concurrency = 16
+
+# Accept status codes
+accept = [
+    "100..=103",
+    "200..=299",
+    "429",  # Too Many Requests (rate limiting)
+]
+
+# Exclude specific domains that return 403 for automated checks
+# NOTE: Values are treated as regular expressions (not globs).
+# Escape regex metacharacters: use \. for literal dots, \{ \} for braces, .* for wildcards.
+exclude = [
+    # Localhost and examples
+    "^https?://localhost",
+    "^https?://127\\.0\\.0\\.1",
+    "^https?://0\\.0\\.0\\.0",
+    "^wss?://localhost",
+
+    # Email addresses
+    "^mailto:",
+
+    # Relative links that lychee can't resolve
+    "^file://",
+
+    # Anchors within the same file
+    "^#",
+
+    # lib.rs returns 403 for automated checks but works in browsers
+    "^https://lib\\.rs",
+
+    # Test fixture and example URLs (from tests/ci_config_tests.rs)
+    # These are placeholder/example URLs in error messages and documentation
+    # (tests/ is also in exclude_path as defense-in-depth)
+    "^https://github\\.com/owner/repo",
+    "^https://github\\.com/%7B",           # URL-encoded brace placeholders: %7B=%7D = {}, %7B%7B%7D = {{}
+    "^https://github\\.com/\\{\\}",        # Template placeholder (braces escaped for regex)
+
+    # Placeholder server URLs used in test strings
+    "^https?://your-server",
+
+    # Truncated URLs extracted by lychee from regex patterns in .lychee.toml itself.
+    # These are a safety net in case the exclude_path for .lychee.toml doesn't take effect
+    # (see known lychee bug: TOML exclude_path may not apply to glob-expanded paths).
+    # Match with or without trailing slash since extraction behavior varies.
+    "^https?://github(/|$)",
+    "^https?://lib(/|$)",
+]
+
+# Retry settings
+max_retries = 3
+retry_wait_time = 2
+
+# Timeout settings (in seconds)
+timeout = 20
+
+# User agent
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
+
+
+# Exclude specific file paths
+# Note: TOML exclude_path may not apply to glob-expanded paths (known lychee bug).
+# Critical entries are duplicated as CLI --exclude-path in .github/workflows/link-check.yml.
+exclude_path = [
+    "target/",
+    ".git/",
+    "third_party/",  # Vendored dependencies, check once during updates
+    ".github/test-fixtures/",  # Intentional test fixtures with example/placeholder content
+    "test-fixtures/",           # Root test fixtures directory
+    "tests/",                   # Test files contain intentional placeholder/example URLs
+    "\\.lychee\\.toml$",        # Defense-in-depth: CLI --exclude-path in link-check.yml is the primary mechanism
+                                # (TOML exclude_path may not apply to glob-expanded paths; see link-check.yml comments)
+]
+
+# Exclude specific link patterns
+exclude_link_local = true
+
+# Include verbatim sections
+include_verbatim = false
+
+# Remap URLs (useful for local development)
+# remap = [
+#     "https://example.com https://staging.example.com",
+# ]
+
+# Custom headers for specific domains (if needed)
+# [[custom]]
+# pattern = "https://example.com/"
+# headers = ["Authorization: Bearer token"]

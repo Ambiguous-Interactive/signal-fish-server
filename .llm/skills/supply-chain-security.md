@@ -1,8 +1,13 @@
 # Skill: Supply Chain Security
 
-<!-- trigger: supply-chain, cargo-audit, cargo-deny, sbom, dependency, cve, vulnerability, advisory, license, reproducible-build | Securing the dependency supply chain for Rust projects | Security -->
+<!--
+  trigger: supply-chain, cargo-audit, cargo-deny, sbom, dependency, cve, vulnerability, advisory, license, reproducible-build
+  | Securing the dependency supply chain for Rust projects
+  | Security
+-->
 
-**Trigger**: When auditing dependencies for vulnerabilities, configuring cargo-deny policies, generating SBOMs, enforcing reproducible builds, or managing dependency pinning and update workflows.
+**Trigger**: When auditing dependencies for vulnerabilities, configuring cargo-deny policies, generating SBOMs,
+enforcing reproducible builds, or managing dependency pinning and update workflows.
 
 ---
 
@@ -47,25 +52,31 @@
 ```bash
 cargo audit              # Check against RustSec Advisory Database
 cargo audit --json       # JSON output for CI parsing
+
 ```
 
-Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`), or **Deny** (replace the crate).
+Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`),
+or **Deny** (replace the crate).
 
 ```rust
+
 // ❌ Bad — silently ignoring an advisory with no justification
 // Just add RUSTSEC-2024-0001 to the ignore list and move on
 // ✅ Good — documented ignore with expiry and rationale in audit.toml
 // ignore RUSTSEC-2024-0001: "Utc-only usage, not exploitable", expires 2026-06-01
+
 ```
 
 ### `audit.toml` Configuration
 
 ```toml
+
 [advisories]
 ignore = [
     # RUSTSEC-2024-0001: Utc-only, not exploitable. Revisit by 2026-06-01.
     "RUSTSEC-2024-0001",
 ]
+
 ```
 
 ---
@@ -77,30 +88,37 @@ This project's [deny.toml](../../deny.toml) enforces four policy areas:
 ### `[advisories]` — deny vulnerabilities, deny yanked crates
 
 ```toml
+
 [advisories]
 vulnerability = "deny"
 yanked = "deny"
 unmaintained = "workspace"
+
 ```
 
 ### `[licenses]` — allowlist of permissive licenses
 
 ```toml
+
 [licenses]
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
          "BSD-2-Clause", "BSD-3-Clause", "ISC", "OpenSSL",
          "Unicode-DFS-2016", "Unicode-3.0", "Zlib", "0BSD", "CC0-1.0"]
+
 ```
 
 ```rust
+
 // ❌ Bad — adding a GPL-licensed crate to a permissive project
 // Cargo.toml: my-gpl-dep = "1.0"  # License: GPL-3.0
 // ✅ Good — verify license before adding: cargo deny check licenses
+
 ```
 
 ### `[bans]` — block problematic crates, detect duplicates
 
 ```toml
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
@@ -109,31 +127,38 @@ wildcards = "deny"
 name = "openssl"
 wrappers = ["native-tls"]
 reason = "Prefer rustls for TLS - openssl has had numerous CVEs"
+
 ```
 
 ```rust
+
 // ❌ Bad — pulling in openssl via native-tls feature
 // reqwest = { version = "0.12", features = ["native-tls"] }
 // ✅ Good — using rustls backend to stay off the banned list
 // reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 ```
 
 ### `[sources]` — no git dependencies in production
 
 ```toml
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+
 ```
 
 ```rust
+
 // ❌ Bad — git dep bypasses crates.io auditing
 // my-crate = { git = "https://github.com/user/my-crate" }
 // ✅ Good — use crates.io or vendor locally
 // my-crate = "1.2.3"
 // Or: [patch.crates-io] my-crate = { path = "third_party/my-crate" }
+
 ```
 
 ---
@@ -143,16 +168,19 @@ allow-git = []
 ### Exact Pinning for Security-Critical Deps
 
 ```toml
+
 [dependencies]
 rustls = "=0.23.20"        # TLS — pin exactly
 ring = "=0.17.8"           # Crypto — pin exactly
 jsonwebtoken = "=9.3.0"    # Auth tokens — pin exactly
 serde = "1.0"              # Non-security — semver range OK
+
 ```
 
 ### Always Commit `Cargo.lock`
 
-Applications and servers **must** commit `Cargo.lock`. This project is a server — `Cargo.lock` is committed. Workspace crates share a single `Cargo.lock` at the root.
+Applications and servers **must** commit `Cargo.lock`. This project is a server — `Cargo.lock` is committed.
+Workspace crates share a single `Cargo.lock` at the root.
 
 ### Lockfile Verification in CI
 
@@ -162,6 +190,7 @@ cargo build
 # ✅ Good — fails if lockfile is stale or missing
 cargo build --locked
 cargo test --locked
+
 ```
 
 ---
@@ -171,25 +200,32 @@ cargo test --locked
 ### `--locked` Everywhere in CI
 
 ```yaml
+
 steps:
+
   - run: cargo build --release --locked
   - run: cargo test --locked
   - run: cargo clippy --locked -- -D warnings
+
+
 ```
 
 ### Deterministic Compilation
 
 ```toml
+
 [profile.release]
 lto = "thin"
 codegen-units = 1        # Single codegen unit for deterministic output
 strip = "symbols"
 overflow-checks = true
+
 ```
 
 ### Docker Multi-Stage with Locked Deps
 
 ```dockerfile
+
 FROM rust:1.83-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -202,6 +238,7 @@ RUN cargo build --release --locked
 FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /app/target/release/matchbox-server /
 ENTRYPOINT ["/matchbox-server"]
+
 ```
 
 ---
@@ -209,27 +246,35 @@ ENTRYPOINT ["/matchbox-server"]
 ## 5. SBOM Generation
 
 ```bash
+
 cargo install cargo-sbom
 cargo sbom --output-format cyclonedx-json > sbom.cdx.json   # CycloneDX
 cargo sbom --output-format spdx-json > sbom.spdx.json       # SPDX
+
 ```
 
 ### Integration with Vulnerability Scanners
 
 ```bash
+
 grype sbom:sbom.cdx.json --output table              # Grype
 trivy sbom sbom.cdx.json --severity HIGH,CRITICAL     # Trivy
+
 ```
 
 ### CI Artifact Upload
 
 ```yaml
+
+
 - run: cargo sbom --output-format cyclonedx-json > sbom.cdx.json
 - uses: actions/upload-artifact@v4
+
   with:
     name: sbom-${{ github.sha }}
     path: sbom.cdx.json
     retention-days: 90
+
 ```
 
 ---
@@ -242,7 +287,9 @@ trivy sbom sbom.cdx.json --severity HIGH,CRITICAL     # Trivy
 # .github/dependabot.yml
 version: 2
 updates:
+
   - package-ecosystem: "cargo"
+
     directory: "/"
     schedule:
       interval: "weekly"
@@ -250,6 +297,7 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+
 ```
 
 ### Update Urgency Guide
@@ -283,12 +331,14 @@ on:
     branches: [main]
   pull_request:
   schedule:
+
     - cron: "0 8 * * *"  # Daily scan
 
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
+
       - uses: actions/checkout@v4
       - run: cargo install cargo-audit cargo-deny cargo-sbom
       - run: cargo deny check
@@ -296,9 +346,11 @@ jobs:
       - run: cargo build --release --locked
       - run: cargo sbom --output-format cyclonedx-json > sbom.cdx.json
       - uses: actions/upload-artifact@v4
+
         with:
           name: sbom-${{ github.sha }}
           path: sbom.cdx.json
+
 ```
 
 ### Local Pre-Push Hook
@@ -309,6 +361,7 @@ jobs:
 set -e
 cargo deny check && cargo audit
 echo "Supply chain checks passed."
+
 ```
 
 ### Alerting on New Advisories
@@ -316,19 +369,23 @@ echo "Supply chain checks passed."
 ```yaml
 # In scheduled workflow — notify on failure
 - name: Notify on vulnerability
+
   if: failure()
   uses: slackapi/slack-github-action@v2
   with:
     webhook: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
     payload: |
       {"text": "🚨 cargo audit found new advisories in matchbox-signaling-server"}
+
 ```
 
 ---
 
 ## 8. CI Action Version Compatibility
 
-GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when the lockfile format changes. Always verify that CI action versions are compatible with the project's `Cargo.lock` version after upgrading the Rust toolchain.
+GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when the lockfile format changes.
+Always verify
+that CI action versions are compatible with the project's `Cargo.lock` version after upgrading the Rust toolchain.
 
 ### `Cargo.lock` Version History
 
@@ -339,10 +396,14 @@ GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when
 
 ### Rules
 
-- **`Cargo.lock` v4 requires `EmbarkStudios/cargo-deny-action@v2` or later** — `@v1` ships an older Cargo that cannot parse v4 lockfiles and will fail silently or with cryptic errors.
-- **When upgrading the Rust toolchain**, check whether the new version bumps the `Cargo.lock` format. If it does, audit every CI action that touches `Cargo.lock` for compatibility.
-- **When adding or updating CI actions** that invoke Cargo or parse `Cargo.lock`, verify they support the lockfile version used by the project.
-- **Run `scripts/check-ci-config.sh`** before pushing — it detects outdated action versions and lockfile incompatibilities automatically.
+- **`Cargo.lock` v4 requires `EmbarkStudios/cargo-deny-action@v2` or later** — `@v1` ships an older Cargo
+  that cannot parse v4 lockfiles and will fail silently or with cryptic errors.
+- **When upgrading the Rust toolchain**, check whether the new version bumps the `Cargo.lock` format.
+  If it does, audit every CI action that touches `Cargo.lock` for compatibility.
+- **When adding or updating CI actions** that invoke Cargo or parse `Cargo.lock`,
+  verify they support the lockfile version used by the project.
+- **Run `scripts/check-ci-config.sh`** before pushing — it detects outdated action versions
+  and lockfile incompatibilities automatically.
 
 ```bash
 # ❌ Bad — using v1 with Cargo.lock v4 (will fail in CI)
@@ -350,6 +411,8 @@ GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when
 
 # ✅ Good — v2 supports Cargo.lock v4
 - uses: EmbarkStudios/cargo-deny-action@v2
+
+
 ```
 
 ### Pre-Push Validation
@@ -357,6 +420,7 @@ GitHub Actions that parse `Cargo.lock` or invoke Cargo internally may break when
 ```bash
 # Run the CI config validator to catch version mismatches before pushing
 bash scripts/check-ci-config.sh
+
 ```
 
 This script checks:
@@ -390,4 +454,3 @@ This script checks:
 - [web-service-security](./web-service-security.md) — Application-level security, auth, input validation, TLS
 - [container-and-deployment](./container-and-deployment.md) — Dockerfile hardening, image scanning, CI/CD pipelines
 - [clippy-and-linting](./clippy-and-linting.md) — CI integration for static analysis gates
-- [incident-response-patterns](./incident-response-patterns.md) — Responding to disclosed vulnerabilities

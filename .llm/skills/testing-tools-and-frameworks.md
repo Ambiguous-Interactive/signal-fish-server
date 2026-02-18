@@ -1,6 +1,10 @@
 # Skill: Testing Tools and Frameworks
 
-<!-- trigger: testcontainers, proptest, insta, criterion, fuzz, nextest, coverage, tarpaulin | Testing tools, frameworks, and coverage measurement | Core -->
+<!--
+  trigger: testcontainers, proptest, insta, criterion, fuzz, nextest, coverage, tarpaulin
+  | Testing tools, frameworks, and coverage measurement
+  | Core
+-->
 
 **Trigger**: When choosing or configuring testing tools, frameworks, or coverage measurement.
 
@@ -62,6 +66,7 @@ async fn test_room_persistence_in_postgres() {
 
     assert_eq!(found.unwrap().code, room.code);
 }
+
 ```
 
 ---
@@ -69,6 +74,7 @@ async fn test_room_persistence_in_postgres() {
 ## Property-Based Testing with proptest
 
 ```rust
+
 use proptest::prelude::*;
 
 proptest! {
@@ -110,6 +116,7 @@ fn arb_message() -> impl Strategy<Value = Message> {
         "[A-Z0-9]{6}".prop_map(|code| Message::JoinRoom(code)),
     ]
 }
+
 ```
 
 ---
@@ -119,6 +126,7 @@ fn arb_message() -> impl Strategy<Value = Message> {
 > **Note:** `insta` is not currently in dev-dependencies. Add `insta = "1.x"` to `[dev-dependencies]` to use snapshot testing.
 
 ```rust
+
 use insta::assert_json_snapshot;
 
 #[test]
@@ -142,6 +150,7 @@ fn test_room_info_serialization() {
 }
 
 // Review changes: cargo insta review
+
 ```
 
 ---
@@ -149,6 +158,7 @@ fn test_room_info_serialization() {
 ## Benchmark Testing with Criterion
 
 ```rust
+
 // benches/room_operations.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
@@ -188,6 +198,7 @@ fn bench_room_lookup(c: &mut Criterion) {
 
 criterion_group!(benches, bench_room_create, bench_broadcast, bench_room_lookup);
 criterion_main!(benches);
+
 ```
 
 ---
@@ -195,6 +206,7 @@ criterion_main!(benches);
 ## Fuzz Testing Basics
 
 ```rust
+
 // fuzz/fuzz_targets/parse_message.rs
 #![no_main]
 use libfuzzer_sys::fuzz_target;
@@ -205,6 +217,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 // Run: cargo +nightly fuzz run parse_message
+
 ```
 
 ---
@@ -214,6 +227,7 @@ fuzz_target!(|data: &[u8]| {
 Use `axum-test` (in dev-dependencies) for testing axum handlers:
 
 ```rust
+
 use axum_test::TestServer;
 
 #[tokio::test]
@@ -223,6 +237,7 @@ async fn test_health_endpoint() {
     let response = server.get("/health").await;
     response.assert_status_ok();
 }
+
 ```
 
 ---
@@ -247,6 +262,7 @@ cargo nextest run -E 'test(websocket)'
 
 # With output capture on failure only
 cargo nextest run --failure-output immediate
+
 ```
 
 ---
@@ -260,6 +276,7 @@ cargo tarpaulin --all-features --out html
 # Using llvm-cov for more accurate coverage
 cargo llvm-cov --all-features --html
 cargo llvm-cov --all-features --lcov --output-path lcov.info
+
 ```
 
 ---
@@ -281,5 +298,5 @@ cargo llvm-cov --all-features --lcov --output-path lcov.info
 
 - [testing-strategies](./testing-strategies.md) — Core testing methodology and patterns
 - [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
-- [rust-performance-optimization](./rust-performance-optimization.md) — Benchmark setup with criterion
-- [async-rust-best-practices](./async-rust-best-practices.md) — Async test patterns
+- [Rust-performance-optimization](./rust-performance-optimization.md) — Benchmark setup with criterion
+- [async-Rust-best-practices](./async-rust-best-practices.md) — Async test patterns

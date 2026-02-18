@@ -1,6 +1,10 @@
 # Skill: Mandatory Workflow
 
-<!-- trigger: workflow, lint, format, ci, commit, pre-commit, check, validate | Mandatory linting, formatting, and validation workflow for every change | Core -->
+<!--
+  trigger: workflow, lint, format, ci, commit, pre-commit, check, validate
+  | Mandatory linting, formatting, and validation workflow for every change
+  | Core
+-->
 
 **Trigger**: Before committing any change — ensures all linters, formatters, and validation gates pass.
 
@@ -43,11 +47,25 @@ cargo test --all-features
 
 # 3. Supply chain checks (run before pushing)
 cargo deny --all-features check            # Advisories, licenses, bans, sources
+
 ```
 
 ### Pre-Push Validation
 
-Run `scripts/check-ci-config.sh` before pushing to catch CI configuration issues (e.g., outdated action versions incompatible with the current `Cargo.lock` format). See [supply-chain-security](./supply-chain-security.md) for details.
+```bash
+# Always run before pushing
+scripts/check-ci-config.sh           # Catch CI configuration issues
+scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related changes)
+
+```
+
+- `check-ci-config.sh`: Catches outdated action versions incompatible with current `Cargo.lock`
+
+  format (see [supply-chain-security](./supply-chain-security.md))
+
+- `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
+
+  `Cargo.toml` (see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
 
 ---
 
@@ -65,13 +83,19 @@ Run `scripts/check-ci-config.sh` before pushing to catch CI configuration issues
 # Rust toolchain
 rustup component add rustfmt
 rustup component add clippy
+
 ```
 
 ---
 
-## Commit Format
+## Commit Format (User Executes, Not You)
 
-```
+**⛔ CRITICAL: YOU NEVER CREATE COMMITS. Provide these instructions to the user.**
+
+Suggested commit message format for user:
+
+```text
+
 <type>: <imperative subject>
 
 feat: add spectator mode to rooms
@@ -79,7 +103,15 @@ fix: resolve WebSocket cleanup race (#152)
 perf: reduce allocations in message broadcast
 test: add concurrency tests for room joins
 docs: update protocol documentation
+chore: update MSRV from 1.87.0 to 1.88.0
+
 ```
+
+**When changes are ready:**
+
+1. ✅ Verify all checks pass (fmt, clippy, test)
+2. ✅ Provide commit instructions to user
+3. ❌ NEVER execute `git commit` yourself
 
 ---
 
@@ -90,10 +122,12 @@ docs: update protocol documentation
 - [ ] `cargo test --all-features` — all tests pass
 - [ ] `cargo deny --all-features check` — supply chain checks pass
 - [ ] `scripts/check-ci-config.sh` — CI config validated
+- [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
 - [ ] New code has exhaustive tests (see [testing-strategies](./testing-strategies.md))
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
 - [ ] CHANGELOG updated for user-facing changes
 - [ ] Breaking changes documented
+- [ ] MSRV update documented (if applicable, see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
 
 ---
 
@@ -108,4 +142,5 @@ docs: update protocol documentation
 - [ ] No integer overflow in arithmetic (use `saturating_*` or `checked_*`)
 - [ ] No unchecked array/slice indexing (use `.get()` or `.last()`)
 
-Use [web-service-security](./web-service-security.md) and [code-review-checklist](./code-review-checklist.md) skills for comprehensive audit.
+Use [web-service-security](./web-service-security.md)
+and [code-review-checklist](./code-review-checklist.md) skills for comprehensive audit.

@@ -1,12 +1,19 @@
 # Skill: Web Service Security
 
-<!-- trigger: security, auth, authentication, authorization, tls, secrets, input-validation, websocket-security, cors, headers, audit | Hardening a Rust/axum WebSocket signaling server against common attacks | Core -->
+<!--
+  trigger: security, auth, authentication, authorization, tls, secrets,
+  input-validation, WebSocket-security, cors, headers, audit
+  | Hardening a Rust/axum WebSocket signaling server against common attacks
+  | Core
+-->
 
-**Trigger**: When implementing, reviewing, or hardening authentication, authorization, input validation, TLS, secrets management, or any security-sensitive code path.
+**Trigger**: When implementing, reviewing, or hardening authentication, authorization, input validation, TLS,
+secrets management, or any security-sensitive code path.
 
 ---
 
 ## When to Use
+
 - Adding or modifying authentication/authorization logic
 - Accepting external input (HTTP, WebSocket, query params, headers)
 - Managing secrets, API keys, or tokens
@@ -15,6 +22,7 @@
 - Adding logging for security-relevant events
 
 ## When NOT to Use
+
 - Pure business logic with no external input or auth boundaries
 - Test fixtures or mock data (but tests should still cover security paths)
 - Frontend-only styling or layout changes
@@ -51,6 +59,7 @@ impl TryFrom<String> for RoomCode {
         Ok(Self(value))
     }
 }
+
 ```
 
 ### Serde Validation at Deserialization
@@ -64,25 +73,30 @@ pub struct JoinRequest {
     #[serde(default)]
     pub metadata: Option<BoundedString<256>>,
 }
+
 ```
 
 ### Allowlists, Not Denylists
 
 ```rust
+
 // ❌ Denylist — always incomplete, bypassable
 fn is_valid(input: &str) -> bool { !input.contains('<') && !input.contains('>') }
 // ✅ Allowlist — only permit known-good characters
 fn is_valid(input: &str) -> bool {
     input.chars().all(|c| c.is_ascii_alphanumeric() || "-_. ".contains(c))
 }
+
 ```
 
 ### Message Size Limits
 
 ```rust
+
 let app = Router::new()
     .route("/api/rooms", post(create_room))
     .layer(DefaultBodyLimit::max(16_384)); // 16 KB
+
 ```
 
 ---
@@ -94,6 +108,7 @@ let app = Router::new()
 Never upgrade an unauthenticated connection:
 
 ```rust
+
 async fn ws_handler(
     claims: AuthClaims,         // extracted + validated before upgrade
     ws: WebSocketUpgrade,
@@ -101,6 +116,7 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, claims, state))
 }
+
 ```
 
 ### Constant-Time Token Comparison
@@ -108,10 +124,12 @@ async fn ws_handler(
 Use `subtle` to prevent timing attacks:
 
 ```rust
+
 use subtle::ConstantTimeEq;
 fn verify_api_key(provided: &[u8], expected: &[u8]) -> bool {
     provided.len() == expected.len() && provided.ct_eq(expected).into()
 }
+
 ```
 
 ### JWT Validation with Explicit Algorithms
@@ -119,11 +137,13 @@ fn verify_api_key(provided: &[u8], expected: &[u8]) -> bool {
 Never allow the token to specify its own algorithm:
 
 ```rust
+
 let mut validation = Validation::new(Algorithm::ES256);
 validation.set_required_spec_claims(&["exp", "iss", "sub"]);
 validation.set_issuer(&["matchbox-server"]);
 validation.set_audience(&["matchbox-client"]);
 let token_data = jsonwebtoken::decode::<Claims>(token, &key, &validation)?;
+
 ```
 
 ### Per-Message Authorization
@@ -131,6 +151,7 @@ let token_data = jsonwebtoken::decode::<Claims>(token, &key, &validation)?;
 Validate permissions on every WebSocket message, not just at connection time:
 
 ```rust
+
 async fn handle_message(msg: ClientMessage, claims: &AuthClaims, state: &AppState)
     -> Result<(), ProtocolError>
 {
@@ -140,15 +161,18 @@ async fn handle_message(msg: ClientMessage, claims: &AuthClaims, state: &AppStat
     }
     process_message(msg, state).await
 }
+
 ```
 
 ### Generic Error Messages
 
 ```rust
+
 // ❌ Leaks whether the user exists
 "Invalid password for user admin@example.com"
 // ✅ Generic — no information leakage
 "Invalid credentials"
+
 ```
 
 ---
@@ -158,6 +182,7 @@ async fn handle_message(msg: ClientMessage, claims: &AuthClaims, state: &AppStat
 ### Origin Validation
 
 ```rust
+
 async fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), StatusCode> {
     let origin = headers.get("origin")
         .and_then(|v| v.to_str().ok())
@@ -165,19 +190,23 @@ async fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), 
     if !allowed.iter().any(|a| a == origin) { return Err(StatusCode::FORBIDDEN); }
     Ok(())
 }
+
 ```
 
 ### Frame/Message Size Limits (64 KB)
 
 ```rust
+
 ws.max_frame_size(16_384)      // 16 KB per frame
   .max_message_size(65_536)    // 64 KB per message
   .on_upgrade(move |socket| handle_socket(socket, claims, state))
+
 ```
 
 ### Connection Caps with Semaphore
 
 ```rust
+
 async fn ws_handler(
     ws: WebSocketUpgrade, State(sem): State<Arc<Semaphore>>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -187,6 +216,7 @@ async fn ws_handler(
         drop(permit); // released on disconnect
     }))
 }
+
 ```
 
 ### Heartbeat / Ping-Pong
@@ -194,17 +224,20 @@ async fn ws_handler(
 Detect dead connections and reclaim resources:
 
 ```rust
+
 tokio::select! {
     msg = socket.recv() => { /* handle message */ }
     _ = tokio::time::sleep(Duration::from_secs(30)) => {
         socket.send(Message::Ping(vec![])).await?;
     }
 }
+
 ```
 
 ### Disable `permessage-deflate`
 
-Compression enables CRIME/BREACH-style attacks and adds CPU overhead for small signaling messages. axum does NOT enable it by default — do not add `.enable_compression()`.
+Compression enables CRIME/BREACH-style attacks and adds CPU overhead for small signaling messages.
+axum does NOT enable it by default — do not add `.enable_compression()`.
 
 ---
 
@@ -213,15 +246,18 @@ Compression enables CRIME/BREACH-style attacks and adds CPU overhead for small s
 ### Use the `secrecy` Crate
 
 ```rust
+
 use secrecy::{Secret, ExposeSecret};
 pub struct AppConfig {
     pub db_url: Secret<String>,
     pub jwt_secret: Secret<String>,
 }
 let pool = PgPool::connect(config.db_url.expose_secret()).await?;
+
 ```
 
 > **Note:** The `secrecy` and `subtle` crates must be added to `Cargo.toml` if not already present:
+>
 > ```toml
 > secrecy = "0.10"
 > subtle = "2"
@@ -230,10 +266,12 @@ let pool = PgPool::connect(config.db_url.expose_secret()).await?;
 ### Load from Environment or Vault — Never Hardcode
 
 ```rust
+
 let jwt_secret = Secret::new(
     std::env::var("JWT_SECRET").context("JWT_SECRET must be set")?
 );
 // ❌ NEVER: let jwt_secret = "super-secret-key";
+
 ```
 
 ### Redact from Logs
@@ -242,7 +280,8 @@ let jwt_secret = Secret::new(
 
 ### Separate Secrets Per Environment
 
-Never share secrets between dev/staging/production. Use distinct env vars, vault paths, or secret manager entries for each environment.
+Never share secrets between dev/staging/production.
+Use distinct env vars, vault paths, or secret manager entries for each environment.
 
 ---
 
@@ -251,14 +290,17 @@ Never share secrets between dev/staging/production. Use distinct env vars, vault
 ### Enforce TLS 1.2+
 
 ```rust
+
 let tls_config = RustlsConfig::from_pem_file("certs/server.pem", "certs/server.key").await?;
 // rustls defaults to TLS 1.2+ with safe cipher suites
 axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service()).await?;
+
 ```
 
 ### Security Headers Middleware
 
 ```rust
+
 async fn security_headers(req: Request, next: middleware::Next) -> Response {
     let mut res = next.run(req).await;
     let h = res.headers_mut();
@@ -270,17 +312,20 @@ async fn security_headers(req: Request, next: middleware::Next) -> Response {
     h.insert("cache-control", "no-store".parse().unwrap());
     res
 }
+
 ```
 
 ### CORS Allowlist — Never Wildcard in Production
 
 ```rust
+
 let cors = CorsLayer::new()
     .allow_origin(AllowOrigin::list([
         "https://app.example.com".parse().unwrap(),
     ]))
     .allow_methods([Method::GET, Method::POST])
     .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
+
 ```
 
 ---
@@ -290,16 +335,20 @@ let cors = CorsLayer::new()
 Run in CI on every PR:
 
 ```bash
+
 cargo audit              # known CVE database
 cargo deny check         # license + advisory + ban checks
 cargo vet                # require review of new third-party code
+
 ```
 
 Pin security-critical dependencies with exact versions:
 
 ```toml
+
 [dependencies]
 jsonwebtoken = "=9.3.0"
+
 ```
 
 Always commit `Cargo.lock` to the repository for reproducible builds.
@@ -317,17 +366,21 @@ Always commit `Cargo.lock` to the repository for reproducible builds.
 ### Overflow Checks in Release
 
 ```toml
+
 [profile.release]
 overflow-checks = true
+
 ```
 
 ### Constant-Time Comparisons for All Secrets
 
 ```rust
+
 // ❌ Short-circuits — leaks secret length via timing
 if user_token == stored_token { ... }
 // ✅ Constant-time — no timing side channel
 if user_token.as_bytes().ct_eq(stored_token.as_bytes()).into() { ... }
+
 ```
 
 ### Type-State Pattern for Auth Boundaries
@@ -335,6 +388,7 @@ if user_token.as_bytes().ct_eq(stored_token.as_bytes()).into() { ... }
 Encode auth status in the type system so unauthenticated access cannot compile:
 
 ```rust
+
 pub struct Connection<S> { inner: WebSocket, _state: S }
 pub struct Unauthenticated;
 pub struct Authenticated { claims: AuthClaims }
@@ -346,16 +400,19 @@ impl Connection<Unauthenticated> {
 impl Connection<Authenticated> {
     pub async fn join_room(&self, room: &RoomCode) -> Result<(), Error> { todo!() }
 }
+
 ```
 
 ### Never `.unwrap()` on User Input
 
 ```rust
+
 // ❌ Panics on invalid input — attacker-controlled crash
 let room: RoomCode = serde_json::from_str(&msg).unwrap();
 // ✅ Propagate the error
 let room: RoomCode = serde_json::from_str(&msg)
     .map_err(|e| ProtocolError::InvalidMessage(e.to_string()))?;
+
 ```
 
 ---
@@ -365,34 +422,42 @@ let room: RoomCode = serde_json::from_str(&msg)
 ### Structured JSON for Production
 
 ```rust
+
 tracing_subscriber::fmt().json()
     .with_env_filter(EnvFilter::from_default_env())
     .with_target(true).init();
+
 ```
 
 ### Log Security-Relevant Events
 
-Always emit structured events for: auth success/failure, authorization denial, rate limit triggers, connection open/close with peer address, invalid message format.
+Always emit structured events for: auth success/failure, authorization denial, rate limit triggers,
+connection open/close with peer address, invalid message format.
 
 ```rust
+
 tracing::warn!(
     peer_addr = %addr, room_code = %room, reason = "unauthorized",
     "Authorization denied for room join"
 );
+
 ```
 
 ### Never Log Secrets
 
 ```rust
+
 // ❌ Token in logs — compromises the credential
 tracing::info!(token = %bearer_token, "Auth attempt");
 // ✅ Log only non-sensitive identifiers
 tracing::info!(user_id = %claims.sub, token_prefix = &bearer_token[..8], "Auth attempt");
+
 ```
 
 ### Anomaly Detection Alerts
 
 Set alerting thresholds for security anomalies:
+
 - **Auth failures** > 10/min from single IP → alert + temporary block
 - **Invalid messages** > 50/min from single connection → close + alert
 - **Connection rate** > 100/sec total → trigger rate limiting alert
@@ -437,4 +502,3 @@ Set alerting thresholds for security anomalies:
 - [observability-and-logging](./observability-and-logging.md) — Structured logging, tracing spans, log hygiene
 - [dependency-management](./dependency-management.md) — Cargo.lock, version pinning, audit workflows
 - [ddos-and-rate-limiting](./ddos-and-rate-limiting.md) — Rate limiting, connection management, DDoS prevention
-- [aws-production-security](./aws-production-security.md) — AWS infrastructure hardening for production deployment

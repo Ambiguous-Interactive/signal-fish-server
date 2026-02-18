@@ -1,0 +1,305 @@
+# Dependabot Configuration for Signal Fish Server
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# This configuration is designed to balance security updates with PR noise reduction.
+# Key design decisions:
+# - Grouping is enabled to prevent PR spam by bundling related updates
+# - Schedule intervals are tuned per ecosystem based on update frequency needs
+# - Labels enable automated routing and filtering
+# - Explicit rebase-strategy ensures clean merge history
+# - PR limits prevent overwhelming the review queue
+
+version: 2
+updates:
+  # ============================================================================
+  # Rust Dependencies (Cargo) - Root Workspace
+  # ============================================================================
+  # Covers main server dependencies: tokio, axum, serialization, crypto, etc.
+  # Daily schedule: Rust security advisories are critical and frequent
+  # Higher PR limit: Cargo updates tend to be well-tested and low-risk
+  #
+  # Workspace Structure:
+  # This is a single-crate workspace with one vendored dependency:
+  # - Main crate: signal-fish-server (binary + library)
+  # - Vendored: third_party/rmp (MessagePack library, patched via [patch.crates-io])
+  #
+  # The root Cargo.toml uses [patch.crates-io] to override rmp with our vendored
+  # version, allowing local customizations while maintaining ecosystem compatibility.
+  # Dependabot monitors both locations separately to track upstream changes.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "03:00"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    # Explicit rebase strategy for clean merge history
+    rebase-strategy: "auto"
+    # Use distinct prefix to differentiate from third_party dependencies
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    # Higher limit for primary dependencies as they're critical to monitor
+    open-pull-requests-limit: 10
+    # Organize PRs with clear labels
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    # Group patch and minor updates to reduce PR noise
+    groups:
+      # Group all patch-level updates together (e.g., 1.2.3 -> 1.2.4)
+      patch-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      # Group minor updates for non-critical dependencies
+      minor-updates:
+        patterns:
+          - "*"
+        exclude-patterns:
+          # Keep critical dependencies separate for individual review:
+          # - tokio*: Async runtime - core to all async operations
+          # - axum*/tower*/hyper*: Web framework stack - routing, middleware, HTTP
+          # - rustls*/ring/webpki*: TLS and crypto - security-critical
+          - "tokio*"
+          - "axum*"
+          - "tower*"
+          - "hyper*"
+          - "rustls*"
+          - "ring"
+          - "webpki*"
+        update-types:
+          - "minor"
+
+  # ============================================================================
+  # Rust Dependencies (Cargo) - third_party/rmp
+  # ============================================================================
+  # Vendored MessagePack library referenced in [patch.crates-io]
+  # Daily schedule: Must stay in sync with upstream rmp ecosystem
+  # Lower PR limit: Changes here require careful compatibility testing
+  - package-ecosystem: "cargo"
+    directory: "/third_party/rmp"
+    schedule:
+      interval: "daily"
+      time: "03:00"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    # Distinct prefix to clearly identify third_party dependency updates
+    commit-message:
+      prefix: "chore(third_party)"
+      include: "scope"
+    # Lower limit: third_party changes need careful review
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+      - "third_party"
+      - "automated"
+    # Coordinate rmp-serde related updates to prevent conflicts
+    #
+    # Security Note: While patch updates are ignored here, security vulnerabilities
+    # are still monitored through:
+    # - GitHub Security Advisories (separate from Dependabot version updates)
+    # - cargo-deny in CI (see .github/workflows/ci.yml) for supply chain scanning
+    # - Manual review of upstream rmp releases for critical fixes
+    #
+    # Patch ignores exist only to prevent version drift within the rmp ecosystem,
+    # NOT to skip security patches. Security fixes override this policy.
+    ignore:
+      # rmp ecosystem packages should be updated together
+      # to maintain compatibility across the vendored library
+      - dependency-name: "rmp"
+        update-types: ["version-update:semver-patch"]
+      - dependency-name: "rmp-serde"
+        update-types: ["version-update:semver-patch"]
+    groups:
+      # Group all rmp-related dependencies for coordinated updates
+      rmp-ecosystem:
+        patterns:
+          - "rmp*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ============================================================================
+  # GitHub Actions Dependencies
+  # ============================================================================
+  # Includes CI, documentation validation, linting workflows
+  # Weekly schedule: Actions updates are less frequent and lower risk
+  # Moderate PR limit: Workflow changes need testing but aren't as critical
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    # Moderate limit: Balance between staying current and review capacity
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "ci"
+      - "automated"
+    # Group minor and patch updates to reduce weekly PR noise
+    groups:
+      github-actions-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ============================================================================
+  # Docker Dependencies - Main Dockerfile
+  # ============================================================================
+  # Multi-stage build with rust base image and debian bookworm runtime
+  # Weekly schedule: Base image updates are infrequent and need validation
+  # Lower PR limit: Docker changes require multi-stage build testing
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "03:00"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(docker)"
+      include: "scope"
+    # Low limit: Docker updates need comprehensive testing
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+      - "infrastructure"
+      - "automated"
+    # ========================================================================
+    # Docker Rust Image Policy (DECISION: Align with MSRV - Option A)
+    # ========================================================================
+    #
+    # MSRV Policy:
+    # - MSRV is defined in Cargo.toml (rust-version = "1.88.0")
+    # - CI enforces MSRV compliance via cargo check --locked
+    # - Dockerfile Rust version should track MSRV, not latest stable
+    #
+    # Rationale:
+    # - Production builds must match CI validation environment
+    # - Prevents accidental use of features newer than MSRV
+    # - Ensures reproducible builds across all environments
+    # - MSRV bumps are deliberate, versioned decisions
+    #
+    # Update Dockerfile Rust version ONLY when:
+    # 1. Bumping MSRV in Cargo.toml (primary trigger)
+    # 2. Critical security fix in Rust compiler/std (overrides MSRV freeze)
+    # 3. Major performance improvement in newer rustc (evaluate carefully)
+    #
+    # Dependabot is configured to ignore Rust image updates to prevent
+    # automatic version drift. MSRV bumps are manual, coordinated changes.
+    ignore:
+      - dependency-name: "rust"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+
+  # ============================================================================
+  # Docker Dependencies - Devcontainer
+  # ============================================================================
+  # Development environment with tooling (cargo-nextest, cargo-tarpaulin, etc.)
+  # Weekly schedule: Dev environment updates are less urgent than production
+  # Lower PR limit: Devcontainer changes affect developer workflow
+  - package-ecosystem: "docker"
+    directory: "/.devcontainer"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "03:00"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(devcontainer)"
+      include: "scope"
+    # Low limit: Devcontainer changes need developer testing
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+      - "devcontainer"
+      - "developer-experience"
+      - "automated"
+    # Devcontainer Rust version tracking policy:
+    #
+    # DECISION: Allow devcontainer to track latest stable Rust
+    #
+    # Rationale:
+    # - Developers benefit from latest tooling and diagnostics
+    # - MSRV is enforced by CI, not by dev environment
+    # - Dockerfile and CI validate production MSRV compliance
+    # - Early warning if code won't compile with future Rust versions
+    #
+    # To lock devcontainer to match production MSRV exactly, add:
+    # ignore:
+    #   - dependency-name: "rust"
+    #     update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+    #
+    # For now, no ignore rules to allow tracking latest Rust stable
+    groups:
+      # Group all devcontainer base images for coordinated updates
+      rust-dev-images:
+        patterns:
+          - "rust*"
+        update-types:
+          - "minor"
+          - "patch"
+
+# ============================================================================
+# Configuration Rationale Summary
+# ============================================================================
+#
+# Schedule Intervals:
+# - Cargo (daily): Security advisories are frequent and critical
+# - GitHub Actions (weekly): Lower update frequency, less urgent
+# - Docker main (weekly): Base images update infrequently
+# - Docker devcontainer (weekly): Dev environment, not production-critical
+#
+# PR Limits Rationale:
+# - Cargo root (10): High volume, well-tested ecosystem, critical to monitor
+# - Cargo third_party (5): Lower volume, needs careful compatibility review
+# - GitHub Actions (5): Moderate volume, workflow testing needed
+# - Docker main (3): Low volume, requires comprehensive build testing
+# - Docker devcontainer (3): Low volume, affects developer workflow
+#
+# Grouping Strategy:
+# - Patch updates grouped by default to reduce noise
+# - Critical security dependencies kept separate for visibility
+# - Ecosystem packages (rmp, rust images) grouped for coordination
+# - Minor updates grouped except for core infrastructure packages
+#
+# Ignore Rules:
+# - Rust production image (Dockerfile): Aligned with MSRV policy, manual updates only
+# - Devcontainer Rust: No ignores, tracks latest stable for developer experience
+# - rmp ecosystem patches: Ignored to prevent version drift, security overrides policy
+# - Security scanning: cargo-deny runs in CI for supply chain vulnerabilities
+#
+# Labels:
+# - Enable automated filtering and routing
+# - Support project board automation
+# - Clear categorization for maintainers
+#
+# Rebase Strategy:
+# - Explicit "auto" for clean merge history
+# - Ensures Dependabot rebases when base branch updates
+# - Reduces merge conflicts and keeps PR history linear

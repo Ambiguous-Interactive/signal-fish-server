@@ -1,6 +1,10 @@
 # Skill: Async Rust Best Practices
 
-<!-- trigger: async, await, tokio, spawn, channel, select, concurrency, cancellation | Working with tokio, channels, async code, or concurrency | Performance -->
+<!--
+  trigger: async, await, tokio, spawn, channel, select, concurrency, cancellation
+  | Working with tokio, channels, async code, or concurrency
+  | Performance
+-->
 
 **Trigger**: When writing or modifying any async code, tokio tasks, channels, or concurrent data access.
 
@@ -19,7 +23,7 @@
 ## When NOT to Use
 
 - Synchronous-only code paths with no I/O
-- Pure data structure design (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Pure data structure design (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 - CPU-bound computation that should use `spawn_blocking`
 
 ---
@@ -30,7 +34,7 @@
 - Always use bounded channels with backpressure — never unbounded.
 - Never hold a `std::sync::Mutex` guard across an `.await` point.
 - Use `tokio::select!` with cancellation-safe futures only.
-- Implement graceful shutdown with `CancellationToken` or `broadcast` channels.
+- Implement graceful shutdown with broadcast channels or similar cancellation patterns.
 
 ---
 
@@ -52,6 +56,7 @@ let hash = tokio::task::spawn_blocking(move || {
 
 // ❌ CPU-bound work blocking the async runtime
 let hash = compute_expensive_hash(&data);  // Blocks executor thread!
+
 ```
 
 ---
@@ -59,6 +64,7 @@ let hash = compute_expensive_hash(&data);  // Blocks executor thread!
 ## Bounded Channels with Backpressure
 
 ```rust
+
 // ✅ Bounded channel — provides backpressure
 let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(1024);
 
@@ -90,6 +96,7 @@ match tx.try_send(msg) {
 ## Never Hold Locks Across `.await`
 
 ```rust
+
 // ❌ DEADLOCK: guard held across .await
 let guard = self.state.lock().unwrap();
 let result = database.query(&guard.key).await;  // .await while holding guard!
@@ -110,15 +117,18 @@ let result = database.query(&key).await;
 // ✅ Use DashMap for concurrent read/write access — no lock needed
 let rooms: DashMap<RoomId, Room> = DashMap::new();
 rooms.insert(room_id, room);
+
 ```
 
-**Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block. Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
+**Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block.
+Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
 
 ---
 
 ## Cancellation Safety with `tokio::select!`
 
 ```rust
+
 // ✅ Use cancellation-safe operations in select!
 tokio::select! {
     // recv() is cancellation-safe — no data lost on cancel
@@ -146,15 +156,18 @@ tokio::select! {
     result = read_message(&mut stream) => { ... }  // Custom cancel-safe fn
     _ = shutdown.cancelled() => { return; }
 }
+
 ```
 
-**Cancellation-safe:** `recv()`, `oneshot`, `sleep()`, `accept()`. **NOT safe:** `read_exact()`, `read_to_end()`, most streaming mid-read.
+**Cancellation-safe:** `recv()`, `oneshot`, `sleep()`, `accept()`.
+**NOT safe:** `read_exact()`, `read_to_end()`, most streaming mid-read.
 
 ---
 
 ## Structured Concurrency with JoinSet
 
 ```rust
+
 use tokio::task::JoinSet;
 
 // ✅ JoinSet tracks and cleans up spawned tasks
@@ -175,6 +188,7 @@ while let Some(result) = set.join_next().await {
     }
 }
 // All tasks complete here — no leaked futures
+
 ```
 
 ---
@@ -182,6 +196,7 @@ while let Some(result) = set.join_next().await {
 ## `spawn` vs `spawn_blocking`
 
 ```rust
+
 // ✅ tokio::spawn — for async I/O-bound tasks
 tokio::spawn(async move { handle_websocket(stream).await });
 
@@ -190,13 +205,19 @@ let result = tokio::task::spawn_blocking(move || {
     serde_json::to_string(&large_state)
 }).await?;
 // Don't use spawn_blocking for async work, and don't do CPU work in async tasks.
+
 ```
 
 ---
 
 ## Graceful Shutdown
 
+**Note:** The following demonstrates a common shutdown pattern. This project may use alternative approaches such as
+broadcast channels or similar cancellation mechanisms. Check the actual codebase implementation.
+
 ```rust
+
+// Example pattern (using tokio_util::sync::CancellationToken from external crate)
 use tokio_util::sync::CancellationToken;
 
 async fn run_server(shutdown: CancellationToken) {
@@ -212,17 +233,22 @@ async fn run_server(shutdown: CancellationToken) {
         }
     }
 }
+
 ```
 
-Use `CancellationToken::child_token()` for per-connection tokens. Set up signal handling by spawning a task that calls `token.cancel()` on `ctrl_c().await`.
+**Alternative pattern:** Use `tokio::sync::broadcast` channels for shutdown signals, or implement custom cancellation
+using atomic flags and condition variables. The key principle is coordinated shutdown across all active connections.
 
 ---
 
 ## Async Trait Methods
 
-Use native async traits (Rust 1.75+) for static dispatch. Use `#[async_trait]` when you need `dyn Trait` (trait objects, dependency injection). This project uses `async_trait` for trait objects.
+Use native async traits (Rust 1.75+) for static dispatch.
+Use `#[async_trait]` when you need `dyn Trait` (trait objects, dependency injection).
+This project uses `async_trait` for trait objects.
 
 ```rust
+
 // Native async trait (preferred for generics)
 trait Database: Send + Sync {
     async fn get_room(&self, id: &RoomId) -> Result<Option<Room>, DbError>;
@@ -233,6 +259,7 @@ trait Database: Send + Sync {
 trait DatabaseDyn: Send + Sync {
     async fn get_room(&self, id: &RoomId) -> Result<Option<Room>, DbError>;
 }
+
 ```
 
 ---
@@ -240,6 +267,7 @@ trait DatabaseDyn: Send + Sync {
 ## Timeout Patterns
 
 ```rust
+
 use tokio::time::{timeout, Duration};
 
 // ✅ Timeout on any async operation
@@ -255,6 +283,7 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
     .map_err(|_| Error::WebSocketTimeout)?
     .ok_or(Error::ConnectionClosed)?
     .map_err(Error::WebSocket)?;
+
 ```
 
 ---
@@ -265,7 +294,7 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
 - [ ] No `std::sync::Mutex` guards held across `.await` points
 - [ ] CPU-bound work dispatched via `spawn_blocking`
 - [ ] `tokio::select!` uses only cancellation-safe branches
-- [ ] Graceful shutdown implemented with `CancellationToken`
+- [ ] Graceful shutdown implemented with appropriate cancellation mechanism
 - [ ] Timeouts on all external I/O (database, network, WebSocket)
 - [ ] Connection pools used for database and Redis
 - [ ] `JoinSet` used for structured spawning with cleanup
@@ -277,7 +306,7 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
 
 ## Related Skills
 
-- [rust-performance-optimization](./rust-performance-optimization.md) — Allocation reduction and profiling
+- [Rust-performance-optimization](./rust-performance-optimization.md) — Allocation reduction and profiling
 - [error-handling-guide](./error-handling-guide.md) — Async error propagation patterns
 - [observability-and-logging](./observability-and-logging.md) — Tracing spans for async functions
-- [websocket-protocol-patterns](./websocket-protocol-patterns.md) — Async WebSocket handling
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — Async WebSocket handling

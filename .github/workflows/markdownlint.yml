@@ -1,0 +1,61 @@
+# Markdown Linting Workflow
+#
+# Validates all Markdown files for consistency, formatting, and best practices
+# using markdownlint-cli2 with project-specific rules.
+#
+# Configuration:
+#   - .markdownlint.json: Rule configuration
+#   - .markdownlint-cli2.jsonc: CLI tool configuration (ignores)
+#   - .markdownlintignore: Files/directories to exclude
+#
+# Runs on:
+#   - Push to main branch (only for changed Markdown files)
+#   - Pull requests to main (only for changed Markdown files)
+
+name: Markdownlint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - '.markdownlint.json'
+      - '.markdownlint-cli2.jsonc'
+      - '.markdownlintignore'
+      - '.github/workflows/markdownlint.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.md'
+      - '.markdownlint.json'
+      - '.markdownlint-cli2.jsonc'
+      - '.markdownlintignore'
+      - '.github/workflows/markdownlint.yml'
+
+# Restrict permissions to minimum required for the job
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  markdownlint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@07035fd053f7be764496c0f8d8f9f41f98305101 # v22.0.0
+        with:
+          globs: |
+            **/*.md
+            !target/**
+            !third_party/**
+            !node_modules/**
+            !.github/test-fixtures/**
+            !test-fixtures/**

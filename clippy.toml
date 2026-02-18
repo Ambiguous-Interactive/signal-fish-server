@@ -33,5 +33,5 @@ too-many-arguments-threshold = 8
 
 # MSRV - Minimum Supported Rust Version
 # Set to ensure compatibility with CI and production environments
-# Note: The codebase uses features from Rust 1.87+ (e.g., is_multiple_of)
-msrv = "1.87.0"
+# Note: The codebase uses features from Rust 1.88+
+msrv = "1.88.0"

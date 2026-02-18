@@ -29,6 +29,10 @@
     "[toml]": {
         "editor.defaultFormatter": "tamasfe.even-better-toml"
     },
+    "[markdown]": {
+        "editor.defaultFormatter": "davidanson.vscode-markdownlint",
+        "editor.formatOnSave": true
+    },
     // File associations
     "files.associations": {
         "*.toml": "toml"
@@ -51,5 +55,12 @@
     "terminal.integrated.env.linux": {
         "RUST_LOG": "debug",
         "RUST_BACKTRACE": "1"
-    }
+    },
+    // Markdown linting
+    "markdownlint.config": {
+        // Use project's .markdownlint.json for configuration
+    },
+    // Code spell checker
+    "cSpell.enabled": true,
+    "cSpell.diagnosticLevel": "Information"
 }

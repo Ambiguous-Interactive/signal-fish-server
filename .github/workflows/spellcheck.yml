@@ -1,0 +1,61 @@
+# Spell Checking Workflow
+#
+# Validates spelling across all files in the repository using typos, a fast
+# and accurate spell checker that catches common typos in code and documentation.
+#
+# Configuration:
+#   - _typos.toml: Spell check configuration and custom dictionary
+#
+# Runs on:
+#   - Push to main branch (only for relevant file changes)
+#   - Pull requests to main (only for relevant file changes)
+#
+# Features:
+#   - Fast Rust-based spell checker (typos)
+#   - Checks code, documentation, and config files
+#   - Automatic cancellation of stale runs via concurrency groups
+
+name: Spellcheck
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.rs'
+      - '**/*.toml'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '_typos.toml'
+      - '.github/workflows/spellcheck.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.rs'
+      - '**/*.toml'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '_typos.toml'
+      - '.github/workflows/spellcheck.yml'
+
+# Automatically cancel in-progress runs when a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+# Minimal required permissions (security best practice)
+permissions:
+  contents: read
+
+jobs:
+  spellcheck:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check spelling with typos
+        uses: crate-ci/typos@d628af3f90d261d70feacdd55ff2e9a631c5165f # v1.28.3

@@ -175,7 +175,7 @@ pub(super) async fn handle_socket(
                         let _ = server_clone
                             .send_error_to_player(
                                 &player_id,
-                                format!("Authentication timeout - must authenticate within {} seconds", auth_timeout_secs),
+                                format!("Authentication timeout - must authenticate within {auth_timeout_secs} seconds"),
                                 Some(ErrorCode::AuthenticationTimeout),
                             )
                             .await;
@@ -305,7 +305,7 @@ pub(super) async fn handle_socket(
                                         Some(format) => {
                                             let supported_list: Vec<String> = supported_formats
                                                 .iter()
-                                                .map(|f| format!("{:?}", f))
+                                                .map(|f| format!("{f:?}"))
                                                 .collect();
                                             let error_message = format!(
                                                 "Requested game data format {:?} is not supported. Server supports: {}. Falling back to JSON.",

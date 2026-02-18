@@ -1,6 +1,10 @@
 # Skill: API Design Guidelines
 
-<!-- trigger: api, design, public, interface, sdk, newtype, endpoint | Designing public APIs, protocol types, or SDK interfaces | Feature -->
+<!--
+  trigger: api, design, public, interface, sdk, newtype, endpoint
+  | Designing public APIs, protocol types, or SDK interfaces
+  | Feature
+-->
 
 **Trigger**: When designing or modifying any public API surface, protocol types, HTTP endpoints, or SDK interfaces.
 
@@ -19,7 +23,7 @@
 ## When NOT to Use
 
 - Internal implementation details not exposed to consumers
-- Pure performance optimization (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Pure performance optimization (see [Rust-performance-optimization](./rust-performance-optimization.md))
 - Error type design specifically (see [error-handling-guide](./error-handling-guide.md))
 
 ---
@@ -72,11 +76,13 @@ impl Room {
     fn has_authority(&self) -> bool { self.authority.is_some() }
     fn can_join(&self, player: &Player) -> bool { !self.is_full() && !self.has_player(player) }
 }
+
 ```
 
 ### Iterator Methods
 
 ```rust
+
 impl Room {
     fn iter(&self) -> impl Iterator<Item = &Player> { ... }
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut Player> { ... }
@@ -89,25 +95,31 @@ impl IntoIterator for Room {
     type IntoIter = std::vec::IntoIter<Player>;
     fn into_iter(self) -> Self::IntoIter { self.players.into_iter() }
 }
+
 ```
 
 ---
 
 ## Interoperability — Common Traits
 
-Derive `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`, `Default`, `Serialize`/`Deserialize` eagerly on all public types. Implement `Display`, `From`/`TryFrom`, and `AsRef` where applicable.
+Derive `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`, `Default`, `Serialize`/`Deserialize` eagerly on all public types.
+Implement `Display`, `From`/`TryFrom`, and `AsRef` where applicable.
 
-See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the full common traits derive checklist and conversion trait patterns.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the full common traits derive checklist
+and conversion trait patterns.
 
 ---
 
 ## Type Safety
 
-Use newtypes for domain identifiers and enums instead of booleans for function parameters to get compile-time safety. See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for newtypes and enums-over-booleans patterns.
+Use newtypes for domain identifiers and enums instead of booleans for function parameters to get
+compile-time safety. See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for newtypes
+and enums-over-booleans patterns.
 
 ### Bitflags for Options
 
 ```rust
+
 // ✅ Use bitflags for combinable options
 bitflags::bitflags! {
     pub struct Capabilities: u32 {
@@ -120,6 +132,7 @@ bitflags::bitflags! {
 
 fn configure_client(caps: Capabilities) { todo!() }
 configure_client(Capabilities::RELAY | Capabilities::OBSERVE);
+
 ```
 
 > **Note:** Add `bitflags` to `Cargo.toml` to use; not currently in project dependencies.
@@ -131,16 +144,19 @@ configure_client(Capabilities::RELAY | Capabilities::OBSERVE);
 ### Accept Generics, Return Concrete
 
 ```rust
+
 pub fn set_name(&mut self, name: impl Into<String>) { self.name = name.into(); }
 pub fn get_players(&self) -> &[Player] { &self.players }
 pub fn active_players(&self) -> impl Iterator<Item = &Player> {
     self.players.iter().filter(|p| p.is_connected())
 }
+
 ```
 
 ### Return Iterators, Not Collected Vecs
 
 ```rust
+
 // ✅ Return iterator — caller decides how to use
 pub fn find_rooms(&self, filter: &Filter) -> impl Iterator<Item = RoomInfo> + '_ {
     self.rooms.iter()
@@ -148,6 +164,7 @@ pub fn find_rooms(&self, filter: &Filter) -> impl Iterator<Item = RoomInfo> + '_
         .map(|r| r.info())
 }
 // Caller: let first_5: Vec<_> = server.find_rooms(&f).take(5).collect();
+
 ```
 
 ---
@@ -157,6 +174,7 @@ pub fn find_rooms(&self, filter: &Filter) -> impl Iterator<Item = RoomInfo> + '_
 ### `#[non_exhaustive]` on Public Enums and Structs
 
 ```rust
+
 // ✅ Allows adding variants without semver break
 #[non_exhaustive]
 pub enum DisconnectReason {
@@ -173,11 +191,13 @@ pub struct RoomInfo {
     pub player_count: usize,
     // Can add created_at later without breaking downstream
 }
+
 ```
 
 ### Sealed Traits
 
 ```rust
+
 // ✅ Prevent external implementations — you control the trait
 mod private {
     pub trait Sealed {}
@@ -191,11 +211,13 @@ pub trait Transport: private::Sealed {
 // Only your types can implement Transport
 impl private::Sealed for WebSocketTransport {}
 impl Transport for WebSocketTransport { ... }
+
 ```
 
 ### Private Fields with Constructors
 
 ```rust
+
 // ✅ Private fields → can change representation without breaking API
 pub struct Duration {
     millis: u64,  // Private — could change to nanos later
@@ -207,6 +229,7 @@ impl Duration {
     pub fn as_secs(&self) -> u64 { self.millis / 1000 }
     pub fn as_millis(&self) -> u64 { self.millis }
 }
+
 ```
 
 ---
@@ -214,6 +237,7 @@ impl Duration {
 ## Documentation Standards
 
 Every public item needs:
+
 - Summary line (what, not how)
 - `# Errors` listing each error variant
 - `# Panics` if any panics are possible
@@ -222,6 +246,7 @@ Every public item needs:
 - Cross-references with `[`TypeName`]` links
 
 ```rust
+
 /// Creates a new room with the given configuration.
 ///
 /// # Errors
@@ -235,27 +260,32 @@ Every public item needs:
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub async fn create_room(&self, config: RoomConfig) -> Result<Room, CreateError> { todo!() }
+
 ```
 
 ---
 
 ## Public API Surface Minimization
 
-Start with minimum visibility (`pub(crate)` by default), expand only when needed. Expose stable, documented methods as `pub`; keep implementation details `pub(crate)` or `pub(super)`.
+Start with minimum visibility (`pub(crate)` by default), expand only when needed.
+Expose stable, documented methods as `pub`; keep implementation details `pub(crate)` or `pub(super)`.
 
 ---
 
 ## Semver Compatibility
 
-**Breaking** (major bump): Removing public items, changing signatures, adding required fields without `#[non_exhaustive]`, changing trait bounds, changing enum variants.
+**Breaking** (major bump): Removing public items, changing signatures,
+adding required fields without `#[non_exhaustive]`, changing trait bounds, changing enum variants.
 
-**Non-breaking**: Adding new public items, adding variants/fields to `#[non_exhaustive]` types, adding default trait methods, weakening trait bounds.
+**Non-breaking**: Adding new public items, adding variants/fields to `#[non_exhaustive]` types,
+adding default trait methods, weakening trait bounds.
 
 ---
 
 ## HTTP/WebSocket API Patterns (axum)
 
 ```rust
+
 // Typed extractors with validation
 async fn join_room(
     State(server): State<Arc<GameServer>>,
@@ -278,9 +308,11 @@ impl IntoResponse for AppError {
         (status, Json(ErrorResponse { error: message })).into_response()
     }
 }
+
 ```
 
-Keep [openapi.yaml](../../openapi.yaml) in sync. Use versioned routes (`/v2/...`). Return structured JSON errors. Log internal errors server-side; return generic messages to clients.
+Use versioned routes (`/v2/...`). Return structured JSON errors. Log internal errors server-side; return generic messages
+to clients. For REST APIs with multiple endpoints, maintain an OpenAPI specification to document the API contract.
 
 ---
 
@@ -288,7 +320,8 @@ Keep [openapi.yaml](../../openapi.yaml) in sync. Use versioned routes (`/v2/...`
 
 ### Protocol Messages
 
-Use `#[non_exhaustive]` and `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums. See [websocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
+Use `#[non_exhaustive]` and `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums.
+See [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
 
 ### Error Responses
 
@@ -300,11 +333,13 @@ pub struct ApiError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
+
 ```
 
 ### Connection State
 
-Use the typestate pattern to prevent invalid operations. See [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
+Use the typestate pattern to prevent invalid operations.
+See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
 
 ---
 
@@ -327,7 +362,7 @@ Use the typestate pattern to prevent invalid operations. See [rust-idioms-and-pa
 
 ## Related Skills
 
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Rust naming conventions and canonical patterns
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Rust naming conventions and canonical patterns
 - [error-handling-guide](./error-handling-guide.md) — Designing error types for APIs
 - [defensive-programming](./defensive-programming.md) — Input validation at API boundaries
-- [websocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket-specific API patterns
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket-specific API patterns

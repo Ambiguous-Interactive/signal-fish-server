@@ -4,7 +4,7 @@
 
 # Stage 1: Chef - Install cargo-chef for dependency management
 # Using bookworm (Debian 12) which has mold in its repositories
-FROM rust:1.93-bookworm AS chef
+FROM rust:1.88-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 

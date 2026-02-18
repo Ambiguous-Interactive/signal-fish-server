@@ -1,6 +1,10 @@
 # Skill: Defensive Programming
 
-<!-- trigger: panic, unwrap, indexing, validation, safety, bounds, overflow, cast | Eliminating runtime panics and compile-time safety | Core -->
+<!--
+  trigger: panic, unwrap, indexing, validation, safety, bounds, overflow, cast
+  | Eliminating runtime panics and compile-time safety
+  | Core
+-->
 
 **Trigger**: When handling external input, fallible operations, or any code that could panic at runtime.
 
@@ -20,7 +24,7 @@
 ## When NOT to Use
 
 - Test code where `.unwrap()` and `.expect()` are acceptable
-- Performance-critical inner loops already validated (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Performance-critical inner loops already validated (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -56,6 +60,7 @@ let third = items.get(2).ok_or(Error::InsufficientItems)?;
 
 // ✅ Iterator methods for safe element access
 let second = items.iter().nth(1).ok_or(Error::TooFew)?;
+
 ```
 
 ---
@@ -63,6 +68,7 @@ let second = items.iter().nth(1).ok_or(Error::TooFew)?;
 ## Explicit Field Initialization
 
 ```rust
+
 // ❌ ..Default::default() hides new fields — they get default values silently
 let config = ServerConfig {
     port: 8080,
@@ -77,6 +83,7 @@ let config = ServerConfig {
     tls: None,
 };
 // Adding a new field to ServerConfig forces updates everywhere
+
 ```
 
 ---
@@ -84,6 +91,7 @@ let config = ServerConfig {
 ## Exhaustive Matching Without Wildcards
 
 ```rust
+
 // ❌ Wildcard hides new variants — silent bugs
 match transport {
     Transport::WebSocket => handle_ws(),
@@ -98,6 +106,7 @@ match transport {
     Transport::Tcp => handle_tcp(),
 }
 // Adding Transport::WebTransport forces handling everywhere
+
 ```
 
 ---
@@ -105,6 +114,7 @@ match transport {
 ## Destructure Structs in Trait Impls
 
 ```rust
+
 // ✅ Destructure to catch new fields at compile time
 impl Display for PlayerInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,6 +130,7 @@ impl From<PlayerInfo> for PlayerDto {
         Self { player_id: id.to_string(), display_name: name, online: connected, room_code: room }
     }
 }
+
 ```
 
 Without destructuring, new fields are silently ignored.
@@ -128,9 +139,11 @@ Without destructuring, new fields are silently ignored.
 
 ## Enforce Construction via Constructors
 
-Use private fields with validated constructors to make invalid states unrepresentable. See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the newtype pattern and enums-over-booleans.
+Use private fields with validated constructors to make invalid states unrepresentable.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the newtype pattern and enums-over-booleans.
 
 ```rust
+
 // ✅ For structs: make fields private, provide builder or constructor
 pub struct RateLimitConfig {
     requests_per_second: u32,  // Private!
@@ -144,6 +157,7 @@ impl RateLimitConfig {
         Ok(Self { requests_per_second: rps, burst_size: burst })
     }
 }
+
 ```
 
 ---
@@ -151,6 +165,7 @@ impl RateLimitConfig {
 ## Integer Arithmetic Safety
 
 ```rust
+
 // ✅ checked_ — returns None on overflow
 let total = count
     .checked_mul(size)
@@ -162,6 +177,7 @@ let capped = current.saturating_add(increment);
 
 // ✅ wrapping_ — explicit wrapping (sequence numbers, hashing)
 let seq = current_seq.wrapping_add(1);
+
 ```
 
 ---
@@ -169,6 +185,7 @@ let seq = current_seq.wrapping_add(1);
 ## Safe Casting with `TryFrom`
 
 ```rust
+
 // ❌ `as` silently truncates
 let port: u16 = large_number as u16;
 
@@ -178,13 +195,15 @@ let port: u16 = u16::try_from(large_number)
 
 // ✅ Saturating conversion when clamping is acceptable
 let players: u16 = u16::try_from(count).unwrap_or(u16::MAX);
+
 ```
 
 ---
 
 ## Option/Result Chaining Patterns
 
-Prefer `?`, `.ok_or()`, `.unwrap_or_default()`, `.map()`, `.and_then()`, and `.transpose()` over unwrapping. Chain transformations to avoid intermediate unwraps.
+Prefer `?`, `.ok_or()`, `.unwrap_or_default()`, `.map()`, `.and_then()`, and `.transpose()` over unwrapping.
+Chain transformations to avoid intermediate unwraps.
 
 See [error-handling-guide.md](error-handling-guide.md) for the full unwrap hierarchy and chaining examples.
 
@@ -193,6 +212,7 @@ See [error-handling-guide.md](error-handling-guide.md) for the full unwrap hiera
 ## Lock Poisoning Handling
 
 ```rust
+
 // ✅ Recover from poisoning when the data is still valid
 let guard = state.lock().unwrap_or_else(|poisoned| {
     tracing::warn!("State lock was poisoned, recovering");
@@ -211,6 +231,7 @@ let data = state.read().unwrap_or_else(|poisoned| {
     tracing::warn!("Read lock poisoned, recovering");
     poisoned.into_inner()
 });
+
 ```
 
 ---
@@ -218,6 +239,7 @@ let data = state.read().unwrap_or_else(|poisoned| {
 ## UTF-8 and String Safety
 
 ```rust
+
 // ✅ Handle invalid UTF-8
 let s = String::from_utf8(bytes)
     .map_err(|e| ParseError::InvalidUtf8(e.utf8_error()))?;
@@ -233,6 +255,7 @@ let truncated = &s[..s.floor_char_boundary(max_len)];
 
 // ✅ Character-based operations for Unicode safety
 let first_char = s.chars().next().ok_or(Error::Empty)?;
+
 ```
 
 ---
@@ -240,6 +263,7 @@ let first_char = s.chars().next().ok_or(Error::Empty)?;
 ## Division by Zero Guards
 
 ```rust
+
 // ❌ Panics on zero divisor
 let avg = total / count;
 let pct = (part * 100) / whole;
@@ -255,6 +279,7 @@ use std::num::NonZeroU32;
 fn average(total: u32, count: NonZeroU32) -> u32 {
     total / count.get()  // Can never be zero
 }
+
 ```
 
 ---
@@ -262,6 +287,7 @@ fn average(total: u32, count: NonZeroU32) -> u32 {
 ## `unreachable!()` vs `debug_assert!()`
 
 ```rust
+
 // ✅ unreachable!() — states that are logically impossible
 // Use when you've exhausted all valid states via prior checks
 match self.validated_state {
@@ -281,6 +307,7 @@ match user_input.parse::<u8>() {
     Ok(v) if v < 10 => process(v),
     _ => unreachable!(),  // WRONG: user input CAN be anything
 }
+
 ```
 
 ---
@@ -288,6 +315,7 @@ match user_input.parse::<u8>() {
 ## Input Validation at System Boundaries
 
 ```rust
+
 pub async fn handle_join(
     Json(req): Json<JoinRequest>,
 ) -> Result<Json<JoinResponse>, AppError> {
@@ -298,6 +326,7 @@ pub async fn handle_join(
     let response = server.join_room(room_code, player_name, token).await?;
     Ok(Json(response))
 }
+
 ```
 
 Validate at the handler entry point. Interior code should use validated newtypes, not raw strings.
@@ -308,7 +337,7 @@ Validate at the handler entry point. Interior code should use validated newtypes
 
 Use the typestate pattern to make invalid state transitions a compile error.
 
-See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the full typestate pattern with examples.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the full typestate pattern with examples.
 
 ---
 
@@ -329,6 +358,6 @@ See [rust-idioms-and-patterns.md](rust-idioms-and-patterns.md) for the full type
 ## Related Skills
 
 - [error-handling-guide](./error-handling-guide.md) — Error type design and propagation
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Newtype and typestate patterns
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Newtype and typestate patterns
 - [api-design-guidelines](./api-design-guidelines.md) — Input validation at API boundaries
 - [clippy-and-linting](./clippy-and-linting.md) — Restriction lints that enforce safety

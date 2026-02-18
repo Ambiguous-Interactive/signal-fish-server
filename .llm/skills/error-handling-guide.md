@@ -1,6 +1,10 @@
 # Skill: Error Handling Guide
 
-<!-- trigger: error, thiserror, anyhow, result, unwrap, context, map_err, propagation | Designing error types and propagation patterns | Core -->
+<!--
+  trigger: error, thiserror, anyhow, result, unwrap, context, map_err, propagation
+  | Designing error types and propagation patterns
+  | Core
+-->
 
 **Trigger**: When designing error types, converting `.unwrap()` to proper handling, or adding error context.
 
@@ -68,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     run_server(config).await
         .context("Server exited with error")
 }
+
 ```
 
 ---
@@ -77,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
 Design around **what the caller needs to do**, not implementation details:
 
 ```rust
+
 // ❌ Implementation-leaked errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -108,6 +114,7 @@ impl From<sqlx::Error> for RoomError {
         Self::Internal(err.into())
     }
 }
+
 ```
 
 ---
@@ -115,6 +122,7 @@ impl From<sqlx::Error> for RoomError {
 ## The `?` Operator and Error Propagation
 
 ```rust
+
 // ✅ Chain ? for clean propagation
 pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinError> {
     let room = self.db.find_room(&req.room_code).await?;      // DbError → JoinError
@@ -122,6 +130,7 @@ pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinErro
     room.add_player(player)?;                                   // RoomError → JoinError
     Ok(JoinResponse { room_id: room.id() })
 }
+
 ```
 
 ---
@@ -129,6 +138,7 @@ pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinErro
 ## Adding Context
 
 ```rust
+
 use anyhow::Context;
 
 // ✅ .context() adds human-readable context to error chain
@@ -150,6 +160,7 @@ let room = self.rooms.get(&room_id)
 
 let player = self.rooms.get(&room_id)
     .ok_or_else(|| RoomError::NotFound(room_id.clone()))?;  // Lazy allocation
+
 ```
 
 ---
@@ -157,6 +168,7 @@ let player = self.rooms.get(&room_id)
 ## The Unwrap Hierarchy
 
 ```rust
+
 // ✅ Propagate with ?
 let value = operation()?;
 let value = maybe_value.ok_or(Error::Missing)?;
@@ -168,16 +180,19 @@ let value = maybe_value.unwrap_or_default();
 // ✅ Transform without unwrapping
 let result = maybe_value.map(|v| v.to_string());
 let result = maybe_value.and_then(|v| v.parse().ok());
+
 ```
 
 **`expect()` only for compile-time-provable cases** with a `// SAFETY:` comment — it still panics:
 
 ```rust
+
 // SAFETY: Regex literal is known valid at compile time
 let re = Regex::new(r"^\d+$").expect("valid regex literal");
 
 // ❌ NEVER in production code for runtime-dependent values
 let value = map.get("key").expect("key must exist");  // NOT provable!
+
 ```
 
 ---
@@ -204,6 +219,7 @@ pub enum WebSocketError {
         limit: u32,
     },
 }
+
 ```
 
 ---
@@ -211,6 +227,7 @@ pub enum WebSocketError {
 ## Error Conversion with `From`/`Into`
 
 ```rust
+
 // Use #[from] in thiserror for simple forwarding
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -236,6 +253,7 @@ impl From<sqlx::Error> for AppError {
         }
     }
 }
+
 ```
 
 ---
@@ -245,22 +263,26 @@ impl From<sqlx::Error> for AppError {
 The `?` operator works normally in async functions. For spawned tasks, handle `JoinError` (panics/cancellation) separately:
 
 ```rust
+
 match tokio::spawn(async move { process(msg).await }).await {
     Ok(Ok(())) => {}                           // Task succeeded
     Ok(Err(process_err)) => log_error(process_err),  // Task returned error
     Err(join_err) => tracing::error!("Task failed: {join_err}"), // Panicked/cancelled
 }
+
 ```
 
-See [async-rust-best-practices](./async-rust-best-practices.md) for structured concurrency with `JoinSet`.
+See [async-Rust-best-practices](./async-rust-best-practices.md) for structured concurrency with `JoinSet`.
 
 ---
 
 ## Error Types in Public APIs (axum Handlers)
 
-Map domain errors to HTTP status codes via `IntoResponse`. See [api-design-guidelines](./api-design-guidelines.md) for the full pattern.
+Map domain errors to HTTP status codes via `IntoResponse`.
+See [api-design-guidelines](./api-design-guidelines.md) for the full pattern.
 
 ```rust
+
 impl IntoResponse for RoomError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
@@ -275,6 +297,7 @@ impl IntoResponse for RoomError {
         (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
     }
 }
+
 ```
 
 ---
@@ -284,9 +307,11 @@ impl IntoResponse for RoomError {
 See [observability-and-logging](./observability-and-logging.md) for full structured logging patterns.
 
 ```rust
+
 // ✅ Structured fields, not string interpolation
 tracing::error!(error = %err, room_id = %room_id, "Failed to join room");
 tracing::warn!(error = ?err, "Operation failed, retrying");  // Debug (?) for full chain
+
 ```
 
 ---
@@ -302,6 +327,7 @@ async fn test_join_nonexistent_room() {
     let result = server.join_room("INVALID").await;
     assert!(matches!(result, Err(JoinError::RoomNotFound { .. })));
 }
+
 ```
 
 ---
@@ -339,5 +365,5 @@ See [defensive-programming](./defensive-programming.md) for comprehensive safe a
 
 - [defensive-programming](./defensive-programming.md) — Panic-free patterns and safe alternatives
 - [api-design-guidelines](./api-design-guidelines.md) — Error design for public APIs
-- [async-rust-best-practices](./async-rust-best-practices.md) — Async error propagation
+- [async-Rust-best-practices](./async-rust-best-practices.md) — Async error propagation
 - [observability-and-logging](./observability-and-logging.md) — Structured error logging

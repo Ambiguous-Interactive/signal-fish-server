@@ -1,0 +1,80 @@
+# yamllint configuration
+# See: https://yamllint.readthedocs.io/en/stable/configuration.html
+
+extends: default
+
+rules:
+  # Line length - allow up to 120 characters
+  line-length:
+    max: 120
+    level: warning
+
+  # Allow empty values
+  empty-values:
+    forbid-in-block-mappings: false
+    forbid-in-flow-mappings: true
+
+  # Indentation
+  indentation:
+    spaces: 2
+    indent-sequences: true
+    check-multi-line-strings: false
+
+  # Comments
+  comments:
+    min-spaces-from-content: 1
+
+  # Document start
+  document-start:
+    present: false
+
+  # Truthy values (allow yes/no, on/off, etc.)
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+    check-keys: false
+
+  # Brackets
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+
+  # Braces
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+
+  # Comments indentation
+  comments-indentation: enable
+
+  # Empty lines
+  empty-lines:
+    max: 2
+    max-start: 0
+    max-end: 0
+
+  # Hyphens
+  hyphens:
+    max-spaces-after: 1
+
+  # Key duplicates
+  key-duplicates: enable
+
+  # Octal values
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+
+  # Quoted strings
+  quoted-strings:
+    quote-type: any
+    required: false
+
+  # Trailing spaces
+  trailing-spaces: enable
+
+# Ignore patterns
+ignore: |
+  target/
+  .git/
+  node_modules/
+  *.min.yml

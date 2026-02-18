@@ -1,0 +1,139 @@
+# Unused Dependencies Workflow
+#
+# Detects unused dependencies and features to keep the project lean and maintainable.
+# Uses two complementary tools:
+#   - cargo-machete: Detects unused dependencies in Cargo.toml
+#   - cargo-udeps: Detects unused dependencies and features (requires nightly)
+#
+# Runs on:
+#   - Push to main branch
+#   - Pull requests to main
+#   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
+#
+# Features:
+#   - Binary caching for cargo-machete and cargo-udeps
+#   - Nightly toolchain pinned for reproducibility (see nightly version below)
+#   - cargo-udeps uses continue-on-error as it may have false positives
+#
+# Nightly Toolchain Strategy:
+#   cargo-udeps requires nightly Rust because it uses unstable compiler features
+#   to analyze dependency usage at a deeper level than stable tools can provide.
+#
+#   Nightly Version: nightly-2026-01-15
+#   Last Updated: 2026-02-16
+#
+#   Update Criteria (when to update this nightly version):
+#     - If the nightly version is >6 months old
+#     - If security advisories affect this version
+#     - If cargo-udeps requires newer nightly features
+#     - If the nightly version becomes unavailable or broken
+#
+#   Why We Pin Nightly (instead of using rolling "nightly"):
+#     - Reproducibility: Same nightly = consistent CI results over time
+#     - Stability: Prevents sudden breakage from nightly compiler changes
+#     - Predictability: We control when nightly updates happen
+#
+#   Trade-offs:
+#     - Pinned nightly becomes stale over time (requires periodic updates)
+#     - Rolling "nightly" always has latest features but may break unexpectedly
+#     - For CI-only tools like cargo-udeps, pinning is preferred for stability
+#
+#   Policy:
+#     - Production code MUST use stable MSRV (see Cargo.toml rust-version)
+#     - CI-only analysis tools MAY use nightly if required by the tool
+#     - Nightly is NEVER used for building production artifacts
+#
+#   See also: .llm/skills/msrv-and-toolchain-management.md (Nightly-Only CI Tools section)
+#
+# Note: cargo-udeps may report false positives for proc-macro dependencies
+#       and conditional dependencies. Review its output manually.
+
+name: Unused Dependencies
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly on Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  unused-deps:
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: nightly-2026-01-15
+          components: rustc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      - name: Cache cargo-machete binary
+        id: cache-machete
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/bin/cargo-machete
+          key: ${{ runner.os }}-cargo-machete-0.7.0
+
+      - name: Install cargo-machete
+        if: steps.cache-machete.outputs.cache-hit != 'true'
+        run: cargo install cargo-machete --version 0.7.0 --locked
+
+      - name: Check for unused dependencies
+        run: cargo machete
+
+  unused-features:
+    name: Check Unused Features
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: nightly-2026-01-15
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+
+      - name: Cache cargo-udeps binary
+        id: cache-udeps
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/bin/cargo-udeps
+          key: ${{ runner.os }}-cargo-udeps-0.1.53
+
+      - name: Install cargo-udeps
+        if: steps.cache-udeps.outputs.cache-hit != 'true'
+        run: cargo install cargo-udeps --version 0.1.53 --locked
+
+      - name: Check for unused dependencies (udeps)
+        # Note: continue-on-error is enabled because cargo-udeps may report
+        # false positives for:
+        #   - Proc-macro dependencies (used at compile-time)
+        #   - Platform-specific dependencies (cfg-gated)
+        #   - Build dependencies used only in build.rs
+        # Always review udeps output manually before removing dependencies.
+        run: cargo +nightly-2026-01-15 udeps --all-targets
+        continue-on-error: true

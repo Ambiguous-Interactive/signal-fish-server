@@ -1,6 +1,10 @@
 # Skill: Observability and Logging
 
-<!-- trigger: logging, tracing, metrics, opentelemetry, spans, instrument, structured | Adding metrics, tracing spans, and structured logging | Performance -->
+<!--
+  trigger: logging, tracing, metrics, opentelemetry, spans, instrument, structured
+  | Adding metrics, tracing spans, and structured logging
+  | Performance
+-->
 
 **Trigger**: When adding logging, metrics, tracing spans, or OpenTelemetry instrumentation.
 
@@ -19,7 +23,7 @@
 ## When NOT to Use
 
 - Error type design (see [error-handling-guide](./error-handling-guide.md))
-- Performance profiling with criterion (see [rust-performance-optimization](./rust-performance-optimization.md))
+- Performance profiling with criterion (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -35,7 +39,7 @@
 
 ## Structured Logging with tracing
 
-### Use tracing, Not println!
+### Use tracing, Not println
 
 ```rust
 // ❌ Unstructured, no levels, no context
@@ -50,11 +54,13 @@ tracing::info!(
     room_code = %room_code,
     "Player joined room"
 );
+
 ```
 
 ### Structured Fields vs String Interpolation
 
 ```rust
+
 // ❌ String interpolation — loses queryability
 tracing::error!("Failed to join room {room_code}: {err}");
 
@@ -69,6 +75,7 @@ tracing::error!(
 // Display (%) vs Debug (?)
 tracing::warn!(error = %err, "user-facing format");   // uses Display
 tracing::debug!(error = ?err, "internal detail");      // uses Debug — full chain
+
 ```
 
 ### Log Levels
@@ -84,6 +91,7 @@ tracing::debug!(error = ?err, "internal detail");      // uses Debug — full ch
 ### Spans and the `#[instrument]` Attribute
 
 ```rust
+
 // ✅ #[instrument] creates a span around the function
 #[tracing::instrument(skip(self, db), fields(room_code = %req.room_code))]
 pub async fn join_room(
@@ -111,6 +119,7 @@ tokio::spawn(
     async move { process(msg).await }
         .instrument(tracing::info_span!("process_task", msg_id = %id))
 );
+
 ```
 
 ---
@@ -118,6 +127,7 @@ tokio::spawn(
 ## Subscriber Configuration
 
 ```rust
+
 use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 fn init_tracing() {
@@ -129,9 +139,11 @@ fn init_tracing() {
         .with(fmt::layer())  // Use .json() for production
         .init();
 }
+
 ```
 
-Use `fmt::layer().json()` for machine-readable production output. For file rotation, use `tracing_appender::rolling` (hold the `_guard` for app lifetime).
+Use `fmt::layer().json()` for machine-readable production output.
+For file rotation, use `tracing_appender::rolling` (hold the `_guard` for app lifetime).
 
 ---
 
@@ -140,6 +152,7 @@ Use `fmt::layer().json()` for machine-readable production output. For file rotat
 ### Custom Metrics
 
 ```rust
+
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, Gauge};
 
@@ -162,6 +175,7 @@ impl ServerMetrics {
         }
     }
 }
+
 ```
 
 ### OTLP Export Configuration
@@ -169,9 +183,11 @@ impl ServerMetrics {
 Configure via environment variables or programmatically:
 
 ```bash
+
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 OTEL_SERVICE_NAME=matchbox-signaling-server
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production
+
 ```
 
 ---
@@ -181,6 +197,7 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production
 ### Never Log Secrets or PII
 
 ```rust
+
 // ❌ Leaks auth tokens into logs
 tracing::info!(token = %req.auth_token, "authenticating");
 
@@ -192,11 +209,13 @@ tracing::info!(player_id = %player_id, "authenticating");
 
 // ✅ If IP is needed for security, hash or truncate it
 tracing::info!(ip_hash = %hash_ip(&addr), "connection from");
+
 ```
 
 ### Consistent Field Names Across Spans
 
 ```rust
+
 // ✅ Use consistent field names project-wide
 // Standardized field names:
 //   room_code, player_id, peer_id, session_id
@@ -206,11 +225,13 @@ tracing::info!(ip_hash = %hash_ip(&addr), "connection from");
 tracing::info!(room_code = %code, player_id = %pid, "player joined");
 tracing::info!(room_code = %code, player_id = %pid, "player left");
 // Both events can be correlated by room_code and player_id
+
 ```
 
 ### Log at the Boundary, Not Everywhere
 
 ```rust
+
 // ❌ Logging at every level creates noise
 async fn join_room(&self, req: JoinRequest) -> Result<(), JoinError> {
     tracing::info!("joining room");           // noise
@@ -230,11 +251,13 @@ async fn handle_join(&self, req: JoinRequest) -> Result<Json<Response>, AppError
     }
     result.map(Json)
 }
+
 ```
 
 ### Performance: Avoid Expensive Log Computations
 
 ```rust
+
 // Use debug format (cheaper) instead of serialization in log fields
 tracing::debug!(state = ?large_state, "state snapshot");
 
@@ -243,6 +266,7 @@ if tracing::enabled!(tracing::Level::TRACE) {
     let snapshot = compute_expensive_snapshot();
     tracing::trace!(snapshot = %snapshot, "detailed state");
 }
+
 ```
 
 ---
@@ -265,5 +289,5 @@ if tracing::enabled!(tracing::Level::TRACE) {
 ## Related Skills
 
 - [error-handling-guide](./error-handling-guide.md) — Structured error logging patterns
-- [async-rust-best-practices](./async-rust-best-practices.md) — Tracing spans for async functions
+- [async-Rust-best-practices](./async-rust-best-practices.md) — Tracing spans for async functions
 - [defensive-programming](./defensive-programming.md) — Logging at system boundaries

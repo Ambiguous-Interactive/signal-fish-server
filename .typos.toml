@@ -1,0 +1,176 @@
+# Typos configuration for signal-fish-server
+#
+# This file configures the typos spell checker to recognize:
+# - Rust crate names (dependencies from Cargo.toml)
+# - Technical terminology specific to game networking and WebSockets
+# - Common abbreviations and domain-specific jargon
+# - Project-specific identifiers and conventions
+#
+# Organization:
+# - Files to exclude from checking
+# - Technical terms organized by category (alphabetically within sections)
+# - Code identifiers that are intentionally abbreviated
+#
+# See: https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = [
+    # Build artifacts and dependencies
+    "target/",
+    "third_party/",
+    ".git/",
+
+    # Lock files and generated files
+    "Cargo.lock",
+    "*.snap",
+
+    # Binary and data files
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.svg",
+    "*.ico",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
+
+    # IDE and tooling
+    ".vscode/",
+    ".idea/",
+    ".devcontainer/",
+]
+
+[default.extend-words]
+# === Rust Crates: Core Dependencies ===
+# Web framework and async runtime
+anyhow = "anyhow"
+axum = "axum"
+chrono = "chrono"
+dashmap = "dashmap"
+fastrand = "fastrand"
+hdrhistogram = "hdrhistogram"
+lru = "lru"
+matchbox = "matchbox"
+pemfile = "pemfile"
+proptest = "proptest"
+reqwest = "reqwest"
+rkyv = "rkyv"
+rustls = "rustls"
+semver = "semver"
+serde = "serde"
+smallvec = "smallvec"
+tarpaulin = "tarpaulin"
+thiserror = "thiserror"
+tokio = "tokio"
+tracing = "tracing"
+tungstenite = "tungstenite"
+uuid = "uuid"
+
+# === Rust Crates: Cryptography ===
+aes = "aes"
+gcm = "gcm"
+getrandom = "getrandom"
+hmac = "hmac"
+sha2 = "sha2"
+subtle = "subtle"
+
+# === Rust Crates: Dev Dependencies ===
+criterion = "criterion"
+once_cell = "once_cell"
+regex = "regex"
+tempfile = "tempfile"
+
+# === Rust Tooling ===
+clippy = "clippy"
+rustc = "rustc"
+rustdoc = "rustdoc"
+rustfmt = "rustfmt"
+
+# === Build Tools & Infrastructure ===
+bookworm = "bookworm"    # Debian 12 release name
+clang = "clang"          # C/C++ compiler
+distroless = "distroless" # Google's minimal container images
+dockerfile = "dockerfile"
+ghcr = "ghcr"            # GitHub Container Registry
+HashiCorp = "HashiCorp"  # HashiCorp (company name, proper capitalization)
+hashicorp = "hashicorp"  # hashicorp (lowercase variant)
+mold = "mold"            # Fast linker
+nightly = "nightly"      # Rust nightly toolchain
+
+# === GitHub Actions ===
+dtolnay = "dtolnay"           # rust-toolchain action author
+embarkstudios = "embarkstudios" # cargo-deny action author
+github = "github"             # GitHub platform
+swatinem = "swatinem"         # rust-cache action author
+
+# === Game Engines ===
+bevy = "bevy"
+godot = "godot"
+unity = "unity"
+unreal = "unreal"
+
+# === WebRTC & Networking Protocols ===
+backpressure = "backpressure"
+fishnet = "fishnet"      # Networking library
+netcode = "netcode"      # Network protocol
+sdp = "sdp"              # Session Description Protocol
+stun = "stun"            # Session Traversal Utilities for NAT
+subprotocol = "subprotocol"
+turn = "turn"            # Traversal Using Relays around NAT
+url = "url"
+webrtc = "webrtc"
+
+# === WebSocket & Game Networking Terms ===
+batching = "batching"
+fullmesh = "fullmesh"
+gameplay = "gameplay"
+matchmaking = "matchmaking"
+messagepack = "messagepack"
+msgpack = "msgpack"
+reconnection = "reconnection"
+signaling = "signaling"
+structs = "structs"
+websocket = "websocket"
+websockets = "websockets"
+
+# === Protocol & API Terms ===
+healthcheck = "healthcheck"
+mtls = "mtls"            # Mutual TLS
+prom = "prom"            # Prometheus metrics endpoint abbreviation
+tls = "tls"              # Transport Layer Security
+
+# === Common Technical Abbreviations ===
+ack = "ack"              # Acknowledgment
+async = "async"
+awaitable = "awaitable"
+config = "config"
+configs = "configs"
+crypto = "crypto"
+dedup = "dedup"
+dedupe = "dedupe"
+deser = "deser"          # Deserialization abbreviation
+impl = "impl"
+impls = "impls"
+init = "init"
+nack = "nack"            # Negative acknowledgment
+readonly = "readonly"
+repo = "repo"
+repos = "repos"
+ser = "ser"              # Serialization abbreviation
+
+# === Project-Specific Terms ===
+roomcode = "roomcode"
+roomcodes = "roomcodes"
+
+[default.extend-identifiers]
+# Code identifiers that are intentionally abbreviated
+consts = "consts"
+params = "params"
+stderr = "stderr"
+stdin = "stdin"
+stdout = "stdout"
+
+# Proper nouns and company names with mixed case
+HashiCorp = "HashiCorp"

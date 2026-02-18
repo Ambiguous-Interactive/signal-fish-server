@@ -1,5 +1,5 @@
 // Signal Fish Server — Dev Container Configuration
-// https://github.com/AmbiguousInteractive/signal-fish-server
+// https://github.com/Ambiguous-Interactive/signal-fish-server
 {
     "name": "Signal Fish Server",
     "build": {
@@ -99,7 +99,6 @@
                 // Spell checker — project-specific words
                 "cSpell.words": [
                     "anyhow",
-                    "arrayvec",
                     "axum",
                     "chrono",
                     "clippy",

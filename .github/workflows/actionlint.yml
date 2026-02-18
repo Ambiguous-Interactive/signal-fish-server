@@ -1,0 +1,63 @@
+# Validates GitHub Actions workflow files for syntax errors, best practices,
+# and common mistakes using actionlint. This ensures workflow quality and helps
+# catch issues before they cause CI/CD failures.
+#
+# Runs on:
+# - Push to main branch (when workflow files change)
+# - Pull requests to main (when workflow files change)
+# - Weekly schedule (Monday at 00:00 UTC) for proactive validation
+#
+# Features:
+# - Path filtering to only run when workflow/action files change
+# - Uploads actionlint results as artifacts for review
+# - Enforces timeout to prevent hanging jobs
+# - Automatic cancellation of stale runs via concurrency groups
+
+name: ActionLint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  schedule:
+    # Run every Monday at 00:00 UTC for proactive validation
+    - cron: '0 0 * * 1'
+
+# Limit permissions to minimum required (security best practice)
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: Validate Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run actionlint
+        id: actionlint
+        uses: devops-actions/actionlint@467e2ce19b2310e93c9ffa0b50fe31f86b5a7f23 # v0.1.10
+
+      - name: Upload actionlint results
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        with:
+          name: actionlint-results
+          path: |
+            actionlint-*.log
+            actionlint-*.sarif
+          retention-days: 30
+          if-no-files-found: ignore

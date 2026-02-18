@@ -1,12 +1,17 @@
 # Skill: SOLID Principles Enforcement
 
-<!-- trigger: solid, single-responsibility, open-closed, liskov, interface-segregation, dependency-inversion, clean-code, architecture | Enforcing SOLID principles in Rust and TypeScript | Core -->
+<!--
+  trigger: solid, single-responsibility, open-closed, liskov, interface-segregation, dependency-inversion, clean-code, architecture
+  | Enforcing SOLID principles in Rust and TypeScript
+  | Core
+-->
 
 **Trigger**: When designing, reviewing, or refactoring code to ensure adherence to SOLID principles and clean architecture.
 
 ---
 
 ## When to Use
+
 - Designing new modules, traits, or structs
 - Reviewing PRs for architectural quality
 - Refactoring code that has grown unwieldy
@@ -16,6 +21,7 @@
 ---
 
 ## When NOT to Use
+
 - Prototyping or spike work (SOLID comes during cleanup)
 - Performance-critical inner loops where abstraction has overhead
 - Simple utility functions that don't warrant trait extraction
@@ -23,6 +29,7 @@
 ---
 
 ## TL;DR
+
 - Each struct/module should have exactly one reason to change
 - Extend behavior through traits and composition, not modification
 - Keep traits small and focused (2-5 methods)
@@ -58,9 +65,12 @@ struct GameServer {
     auth: Authenticator,
     metrics: MetricsCollector,
 }
+
 ```
 
-**File-level SRP**: One concern per file. `src/server.rs` with 2000 lines → split into `src/server/room_manager.rs`, `src/server/player_handler.rs`, `src/server/message_router.rs`.
+**File-level SRP**: One concern per file.
+`src/server.rs` with 2000 lines → split into `src/server/room_manager.rs`, `src/server/player_handler.rs`,
+`src/server/message_router.rs`.
 
 **Function-level SRP**: Functions over 50 lines usually do too much. Extract helper functions with descriptive names.
 
@@ -73,6 +83,7 @@ struct GameServer {
 **Pattern**: New transport types, new database backends, new message types.
 
 ```rust
+
 // ✅ Open for extension: new transports without modifying existing code
 #[async_trait]
 pub trait RelayTransport: Send + Sync {
@@ -87,25 +98,30 @@ struct WebSocketTransport { /* ... */ }
 // Adding a new transport = new struct + impl, zero changes to existing code
 struct WebTransportRelay { /* ... */ }
 impl RelayTransport for WebTransportRelay { /* ... */ }
+
 ```
 
 **In TypeScript**: Use interfaces and factory functions, not class hierarchies.
 
 ```typescript
+
 // ✅ Extend with new chart types without modifying existing code
 interface DashboardWidget {
     render(data: MetricsData): HTMLElement;
     update(data: MetricsData): void;
 }
+
 ```
 
 ---
 
 ## Liskov Substitution Principle (LSP)
 
-**Rule**: Every trait implementation must honor the trait's documented contract. Callers must not need to know which concrete type they're using.
+**Rule**: Every trait implementation must honor the trait's documented contract.
+Callers must not need to know which concrete type they're using.
 
 ```rust
+
 // ✅ Both implementations honor the Database contract identically
 #[async_trait]
 pub trait Database: Send + Sync {
@@ -117,17 +133,21 @@ pub trait Database: Send + Sync {
 // - find_room returns None for missing rooms (not an error)
 // - save_room overwrites existing rooms with same code
 // - Both return DbError for infrastructure failures only
+
 ```
 
-**Violation smell**: An implementation that panics, returns different error types, or has different side effects than other implementations of the same trait.
+**Violation smell**: An implementation that panics, returns different error types,
+or has different side effects than other implementations of the same trait.
 
 ---
 
 ## Interface Segregation Principle (ISP)
 
-**Rule**: Many small, focused traits beat one large trait. No implementor should be forced to provide methods it doesn't use.
+**Rule**: Many small, focused traits beat one large trait.
+No implementor should be forced to provide methods it doesn't use.
 
 ```rust
+
 // (simplified signatures — use concrete error types in real code)
 // ❌ Fat interface: test implementations must stub 8+ methods
 trait GameOperations {
@@ -157,6 +177,7 @@ trait Messaging {
 trait Authentication {
     fn authenticate(&self) -> Result<Token>;
 }
+
 ```
 
 **Guideline**: 2-5 methods per trait. If a trait has 8+ methods, it probably needs splitting.
@@ -168,6 +189,7 @@ trait Authentication {
 **Rule**: High-level modules depend on abstractions (traits), not concrete implementations.
 
 ```rust
+
 // ❌ Direct dependency on concrete type
 struct GameServer {
     db: PostgresDatabase,  // Tightly coupled to Postgres
@@ -181,6 +203,7 @@ struct GameServer<D: Database> {
 // Production: GameServer<PostgresDatabase>
 // Testing:    GameServer<InMemoryDatabase>
 // Serverless: GameServer<DynamoDatabase>
+
 ```
 
 **In TypeScript**: Use dependency injection, not direct imports of concrete implementations.
@@ -192,11 +215,13 @@ struct GameServer<D: Database> {
 Code structured for SOLID is also structured for AI agents. These patterns help agents understand and modify code effectively:
 
 ### Naming
+
 - **Domain-specific vocabulary**: `RoomManager`, `PeerConnection`, `SignalingMessage` — not `Manager`, `Connection`, `Message`
 - **Intent-revealing functions**: `establish_peer_connection()` not `do_connect()`
 - **Consistent terminology**: If it's a "room" everywhere, don't alternate with "channel" or "session"
 
 ### Structure
+
 - **One concern per file/module** — AI reads entire files; focused files = faster comprehension
 - **Consistent patterns across the codebase** — AI learns patterns and replicates them
 - **Flat module trees** — prefer `src/auth/`, `src/rooms/` over `src/core/internal/impl/auth/`
@@ -229,6 +254,7 @@ mod player_authentication;
 mod protocol_serialization;
 mod connection_health;
 mod relay_transport;
+
 ```
 
 ---
@@ -251,7 +277,7 @@ mod relay_transport;
 ## Related Skills
 
 - [code-review-checklist](./code-review-checklist.md) — Review process incorporating SOLID checks
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Refactoring workflow for fixing violations
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Idiomatic Rust patterns
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Refactoring workflow for fixing violations
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Idiomatic Rust patterns
 - [api-design-guidelines](./api-design-guidelines.md) — API design following SOLID
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) — AI agent workflow patterns for code review

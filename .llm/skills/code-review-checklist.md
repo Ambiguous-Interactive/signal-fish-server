@@ -1,12 +1,17 @@
 # Skill: Code Review Checklist
 
-<!-- trigger: review, code-review, pr-review, pull-request, quality, audit | AI-driven code review with structured output | Core -->
+<!--
+  trigger: review, code-review, pr-review, pull-request, quality, audit
+  | AI-driven code review with structured output
+  | Core
+-->
 
 **Trigger**: When reviewing code changes, pull requests, or auditing code quality.
 
 ---
 
 ## When to Use
+
 - Reviewing pull requests or merge requests
 - Before committing significant changes
 - During refactoring sessions
@@ -16,6 +21,7 @@
 ---
 
 ## When NOT to Use
+
 - Writing brand new code from scratch
 - Purely cosmetic/formatting changes (use linters instead)
 - Reviewing auto-generated code (migrations, bindings)
@@ -23,6 +29,7 @@
 ---
 
 ## TL;DR
+
 - Use structured output: severity, file, line, issue, fix
 - Focus on bugs, security, and logic — never nitpick formatting
 - Apply Writer/Reviewer separation: fresh context catches more issues
@@ -35,14 +42,16 @@
 
 For each issue found, use this structured format:
 
-```
+```text
 **[SEVERITY]** File: path/to/file | Line: ~N
 Issue: One-line description of the problem
 Fix: Concrete suggested resolution
 Confidence: high | medium | low
+
 ```
 
 Severity levels:
+
 - **CRITICAL** — Bugs, security vulnerabilities, data loss, crashes
 - **WARNING** — Logic errors, missing error handling, performance issues
 - **SUGGESTION** — Improvements, better patterns, readability
@@ -78,6 +87,7 @@ room.add_player(player_id);
 // ✅ All paths handled
 let room = rooms.get(&code).ok_or(JoinError::RoomNotFound)?;
 room.add_player(player_id).map_err(JoinError::RoomFull)?;
+
 ```
 
 ---
@@ -85,6 +95,7 @@ room.add_player(player_id).map_err(JoinError::RoomFull)?;
 ## Security Checklist
 
 ### Rust-Specific
+
 - [ ] No `unwrap()` / `expect()` on user-controlled input
 - [ ] SQL queries use parameterized queries (sqlx bind params)
 - [ ] No secrets, tokens, or API keys hardcoded
@@ -94,6 +105,7 @@ room.add_player(player_id).map_err(JoinError::RoomFull)?;
 - [ ] WebSocket message sizes bounded
 
 ### TypeScript-Specific
+
 - [ ] Input validation on all API boundaries
 - [ ] No `eval()` or dynamic code execution
 - [ ] XSS prevention in rendered output
@@ -123,6 +135,7 @@ async fn load_config() -> Result<Config, ConfigError> {
     let data = tokio::fs::read_to_string("config.json").await?;
     Ok(serde_json::from_str(&data)?)
 }
+
 ```
 
 ---
@@ -155,12 +168,14 @@ See [solid-principles-enforcement](./solid-principles-enforcement.md) for detail
 ## Anti-Patterns in AI Code Review
 
 ### DO NOT
+
 - Flag formatting issues (linters handle this)
 - Invent issues that don't exist — if uncertain, say "Potential issue (low confidence)"
 - Suggest rewriting working code without clear defect
 - Use vague language ("this could be improved") without a specific suggestion
 
 ### DO
+
 - Show reasoning for each finding
 - Provide concrete fix suggestions with code
 - Rate confidence honestly — low confidence is better than false certainty
@@ -197,7 +212,7 @@ For agentic workflows, use a separate subagent for review. See [agentic-workflow
 ## Related Skills
 
 - [solid-principles-enforcement](./solid-principles-enforcement.md) — Detailed SOLID principle guidance
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflows
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflows
 - [defensive-programming](./defensive-programming.md) — Zero runtime panics
 - [error-handling-guide](./error-handling-guide.md) — Proper error propagation
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Subagent review workflows

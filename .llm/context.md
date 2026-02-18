@@ -7,12 +7,46 @@
 
 - **Company:** Ambiguous Interactive
 - **Product:** A lightweight, in-memory WebSocket signaling server for peer-to-peer game networking
-- **Repository:** `signal-fish-server` — extracted from the [matchbox-signaling-server](https://github.com/AmbiguousInteractive/matchbox-signaling-server) with production-ready signaling stripped down to a single self-contained binary
+- **Repository:** `signal-fish-server` — extracted from the matchbox-signaling-server
+  with production-ready signaling stripped down to a single self-contained binary
 - **Crate name:** Binary: `signal-fish-server` | Library: `signal_fish_server`
 - **Code name:** Signal Fish
-- **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team. The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon, but our product and infrastructure are our own
+- **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team.
+  The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon,
+  but our product and infrastructure are our own
 - **Author attribution:** Always use "Ambiguous Interactive" in `authors` fields, copyright notices, and user-facing branding
-- **Documentation voice:** In docs and comments, refer to the product as "Signal Fish Server" or "the signaling server" — not "Matchbox Signaling Server" as a product name. "Signal Fish" is acceptable as an informal project reference
+- **Documentation voice:** In docs and comments,
+  refer to the product as "Signal Fish Server"
+  or "the signaling server" — not "Matchbox Signaling Server" as a product name.
+  "Signal Fish" is acceptable as an informal project reference
+
+---
+
+## ⛔ CRITICAL: Git Safety Protocol - NEVER COMMIT
+
+**NEVER CREATE GIT COMMITS OR MODIFY GIT CONFIGURATION. ZERO EXCEPTIONS. EVER.**
+
+This is the **#1 most important rule**. Even if:
+
+- ❌ The user explicitly asks you to commit
+- ❌ A sub-agent recommends committing
+- ❌ CLAUDE.md mentions commit instructions (those are FOR THE USER)
+- ❌ A workflow document says to commit
+- ❌ It seems helpful or convenient
+
+**YOU NEVER COMMIT. PERIOD.**
+
+Rules:
+
+- ❌ **ABSOLUTELY FORBIDDEN**: `git commit`, `git add`, `git config user.*`, `git push`
+- ✅ **ALLOWED**: `git status`, `git diff`, `git log`, `git show` (read-only operations only)
+- 🎯 **PRINCIPLE**: **You prepare the work. The user commits it. ALWAYS.**
+
+> **See [skills/git-safety-protocol.md](skills/git-safety-protocol.md) for complete details.**
+>
+> When changes are ready, provide clear commit instructions for the user to execute.
+> The user controls their git identity, commit history, and repository state.
+> **NO EXCEPTIONS TO THIS RULE.**
 
 ---
 
@@ -20,7 +54,7 @@
 
 ### What Am I Changing?
 
-```
+```text
 Start here:
     |
     +-- Protocol/Messages? ----------> /add-protocol-message (or see Common Scenarios)
@@ -30,16 +64,21 @@ Start here:
     |                                  skills/web-service-security.md
     |                                  skills/websocket-session-security.md
     +-- Deployment/Containers? ------> skills/container-and-deployment.md
+    +-- CI/CD/GitHub Actions? -------> skills/github-actions-best-practices.md
+    |                                  skills/ci-cd-troubleshooting.md
     +-- Dependencies/Supply Chain? --> skills/supply-chain-security.md
     |                                  skills/dependency-management.md
+    |                                  skills/msrv-and-toolchain-management.md
     +-- Performance Issue? ----------> /performance-audit
     |                                  skills/rust-performance-optimization.md
     +-- Hosting/Provider/Scaling? ---> skills/graceful-degradation.md
+
 ```
 
 ### Should I Add a Test?
 
-```
+```text
+
 YES - ALWAYS. Every change requires comprehensive tests.
   +-- Happy path + positive variations
   +-- Negative cases + error conditions
@@ -48,13 +87,15 @@ YES - ALWAYS. Every change requires comprehensive tests.
 
 CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 -> See skills/testing-strategies.md for full methodology.
+
 ```
 
 ---
 
 ## Architecture At-a-Glance
 
-```
+```text
+
 +-----------------------------------------------------+
 |  CLIENTS: Game Engines | Browser WebRTC | Custom     |
 +------------------------+----------------------------+
@@ -66,6 +107,7 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 |  EnhancedGameServer (Room/Player/Authority Mgmt)     |
 |  Storage: In-Memory Only                             |
 +-----------------------------------------------------+
+
 ```
 
 ---
@@ -77,6 +119,7 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 ```bash
 # Rust changes (ALWAYS run in order)
 cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features
+
 ```
 
 **Zero warnings policy** -- all linters enforce strict compliance. See skill for full table.
@@ -85,7 +128,7 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 ## Software Design Philosophy
 
-> **Details -> [skills/rust-idioms-and-patterns.md](skills/rust-idioms-and-patterns.md) and [skills/solid-principles-enforcement.md](skills/solid-principles-enforcement.md)**
+> **Details -> [Rust Idioms and Patterns](skills/rust-idioms-and-patterns.md) and [SOLID Principles Enforcement](skills/solid-principles-enforcement.md)**
 
 - Code should be self-documenting -- only comment "why", never "what"
 - Apply SOLID, DRY, and Clean Architecture consistently
@@ -97,7 +140,7 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 ## Rust Coding Standards
 
-> **Performance patterns -> [skills/rust-performance-optimization.md](skills/rust-performance-optimization.md) and [skills/async-rust-best-practices.md](skills/async-rust-best-practices.md)**
+> **Performance patterns -> [Rust Performance Optimization](skills/rust-performance-optimization.md) and [Async Rust Best Practices](skills/async-rust-best-practices.md)**
 > **Error handling -> [skills/error-handling-guide.md](skills/error-handling-guide.md)**
 > **Defensive programming -> [skills/defensive-programming.md](skills/defensive-programming.md)**
 > **Linting -> [skills/clippy-and-linting.md](skills/clippy-and-linting.md)**
@@ -131,6 +174,24 @@ Key rules (details in skills above):
 > **Full standards -> [skills/documentation-standards.md](skills/documentation-standards.md)**
 
 Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, README updates if user-facing.
+
+### Code Fence and CI Pitfalls
+
+These conventions prevent CI failures in documentation validation workflows:
+
+- **Code fence language tags must match content** -- tag blocks as `yaml` only for valid YAML,
+  `bash` for shell/AWK, `text` for logs or mixed output. Validators parse blocks by tag.
+- **Split mixed-content blocks** -- a block with both shell commands and YAML must be two
+  separate fenced blocks with appropriate tags, not one `yaml` block.
+- **`.lychee.toml` `exclude` patterns are regex, not globs** -- escape `.` as `\\.`,
+  use `.*` not `*`, anchor with `^`. See [ci-cd-troubleshooting Pattern 13](skills/ci-cd-troubleshooting.md).
+- **Lychee self-scans `.toml` files** -- it extracts partial URLs from regex patterns in its
+  own config. Use `--exclude-path .lychee.toml` or add exclusions for truncated URLs.
+- **Test config files by behavior, not substrings** -- when a config contains regex patterns
+  (e.g., `^https?://localhost`), tests should compile and match the regex, not use `contains("http://localhost")`.
+- **TOML/JSON/YAML "before/after" examples need separate blocks** -- a single `toml`-tagged
+  block with duplicate table headers (e.g., two `[dependencies]`) is invalid TOML and will
+  fail CI validation. Split into separate fenced blocks.
 
 ---
 
@@ -220,22 +281,25 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 ### v2 Client Messages (JSON/MessagePack)
 
 ```json
-{"type": "Authenticate", "data": {"app_id": "...", "app_secret": "..."}}
+{"type": "Authenticate", "data": {"app_id": "..."}}
 {"type": "JoinRoom", "data": {"game_name": "...", "room_code": "ABC123"}}
 {"type": "GameData", "data": {"action": "move", "x": 10}}
 {"type": "AuthorityRequest", "data": {"become_authority": true}}
 {"type": "LeaveRoom"}
 {"type": "Ping"}
+
 ```
 
 ### v2 Server Messages
 
 ```json
+
 {"type": "Authenticated", "data": {"server_version": "2.0.0"}}
 {"type": "RoomJoined", "data": {"room_id": "...", "room_code": "ABC123"}}
 {"type": "PlayerJoined", "data": {"player": {"id": "...", "name": "..."}}}
 {"type": "GameData", "data": {"from_player": "...", "data": {}}}
 {"type": "Error", "data": {"reason": "Room is full"}}
+
 ```
 
 ---
@@ -244,7 +308,8 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 
 ### Adding a New Protocol Message
 
-1. Define in `src/protocol/messages.rs` -> handler in `src/server.rs` or `src/server/` submodule -> serialization tests -> e2e tests
+1. Define in `src/protocol/messages.rs` -> handler in `src/server.rs`
+   or `src/server/` submodule -> serialization tests -> e2e tests
 2. Run `/add-protocol-message` for full checklist
 
 ### Adding a Configuration Option
@@ -260,6 +325,7 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 ```bash
 RUST_LOG=signal_fish_server=trace cargo run   # Trace logging
 cargo bench                                    # Benchmarks
+
 ```
 
 ### Commit Format: `<type>: <imperative subject>` (feat|fix|perf|test|docs|refactor|chore)
@@ -278,6 +344,7 @@ cargo bench                                    # Benchmarks
 
 | Skill                                                                | When to Use                                                              |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| [git-safety-protocol](skills/git-safety-protocol.md)                 | **CRITICAL** - Git operations safety rules (NEVER commit or configure)   |
 | [agentic-workflow-patterns](skills/agentic-workflow-patterns.md)     | Patterns for effective AI agent workflows and subagent dispatch          |
 | [agent-self-review-checklist](skills/agent-self-review-checklist.md) | Structured self-verification before marking any task complete            |
 | [clippy-and-linting](skills/clippy-and-linting.md)                   | Configuring lints; resolving clippy warnings; CI setup                   |
@@ -289,8 +356,9 @@ cargo bench                                    # Benchmarks
 | [graceful-degradation](skills/graceful-degradation.md)               | Reliability patterns: circuit breakers, health checks, graceful shutdown |
 | [manage-skills](skills/manage-skills.md)                             | Creating, editing, and maintaining skill files                           |
 | [mandatory-workflow](skills/mandatory-workflow.md)                   | Mandatory linting, formatting, and validation workflow for every change  |
-| [rust-idioms-and-patterns](skills/rust-idioms-and-patterns.md)       | Canonical Rust patterns for writing and reviewing code                   |
-| [rust-refactoring-guide](skills/rust-refactoring-guide.md)           | Safe incremental Rust refactoring workflows                              |
+| [markdown-best-practices](skills/markdown-best-practices.md)         | Markdown documentation, code blocks, proper nouns, link validation       |
+| [`rust-idioms-and-patterns`](skills/rust-idioms-and-patterns.md)     | Canonical Rust patterns for writing and reviewing code                   |
+| [`rust-refactoring-guide`](skills/rust-refactoring-guide.md)         | Safe incremental Rust refactoring workflows                              |
 | [solid-principles-enforcement](skills/solid-principles-enforcement.md) | Enforcing SOLID principles in Rust                                     |
 | [testing-strategies](skills/testing-strategies.md)                   | Core testing methodology and patterns                                    |
 | [testing-tools-and-frameworks](skills/testing-tools-and-frameworks.md) | Testing tools, frameworks, and coverage measurement                    |
@@ -300,20 +368,26 @@ cargo bench                                    # Benchmarks
 
 | Skill                                                              | When to Use                                                       |
 | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| [supply-chain-security](skills/supply-chain-security.md)           | Dependency auditing, cargo-deny, SBOM, reproducible builds        |
-| [websocket-session-security](skills/websocket-session-security.md) | WebSocket session lifecycle security, token rotation, anti-replay |
-| [container-and-deployment](skills/container-and-deployment.md)     | Docker, CI/CD, container security for game servers                |
+| [supply-chain-security](skills/supply-chain-security.md)                     | Dependency auditing, cargo-deny, SBOM, reproducible builds        |
+| [`websocket-session-security`](skills/websocket-session-security.md)         | WebSocket session lifecycle security, token rotation, anti-replay |
+| [container-and-deployment](skills/container-and-deployment.md)               | Docker, CI/CD, container security for game servers                |
+| [`github-actions-best-practices`](skills/github-actions-best-practices.md)   | GitHub Actions workflows, Bash/AWK pipelines, CI/CD debugging     |
+| [ci-cd-troubleshooting](skills/ci-cd-troubleshooting.md)                     | Common CI failures, cache errors, configuration mismatches        |
+| [msrv-and-toolchain-management](skills/msrv-and-toolchain-management.md)     | MSRV updates, toolchain consistency, dependency compatibility     |
+| [awk-and-shell-scripting](skills/awk-and-shell-scripting.md)                 | POSIX-compatible AWK/shell scripts, multi-line processing in CI   |
+| [git-hooks-setup](skills/git-hooks-setup.md)                                 | Creating and maintaining git hooks with proper permissions        |
+| [test-fixture-patterns](skills/test-fixture-patterns.md)                     | Test fixtures and data-driven CI configuration testing            |
 
 ### Performance & Feature Skills
 
 | Skill                                                                    | When to Use                                                 |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| [async-rust-best-practices](skills/async-rust-best-practices.md)         | Working with tokio, channels, async code, or concurrency    |
+| [`async-rust-best-practices`](skills/async-rust-best-practices.md)       | Working with tokio, channels, async code, or concurrency    |
 | [observability-and-logging](skills/observability-and-logging.md)         | Adding metrics, tracing spans, and structured logging       |
-| [rust-performance-optimization](skills/rust-performance-optimization.md) | Optimizing hot paths, reducing allocations, and profiling   |
+| [`rust-performance-optimization`](skills/rust-performance-optimization.md) | Optimizing hot paths, reducing allocations, and profiling |
 | [api-design-guidelines](skills/api-design-guidelines.md)                 | Designing public APIs, protocol types, or interfaces        |
 | [dependency-management](skills/dependency-management.md)                 | Adding, auditing, and managing Rust crate dependencies      |
-| [websocket-protocol-patterns](skills/websocket-protocol-patterns.md)     | WebSocket lifecycle, message design, and broadcast patterns |
+| [`websocket-protocol-patterns`](skills/websocket-protocol-patterns.md)   | WebSocket lifecycle, message design, and broadcast patterns |
 
 <!-- END GENERATED SKILLS INDEX -->
 

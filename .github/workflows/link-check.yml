@@ -1,0 +1,87 @@
+# Link Checking Workflow
+#
+# Validates all links in documentation and code to catch broken URLs and link rot.
+# Uses lychee for fast, comprehensive link checking including external URLs, internal
+# links, and anchor references.
+#
+# Configuration:
+#   - .lychee.toml: Link checker configuration and exclusions
+#
+# Runs on:
+#   - Push to main branch (only for relevant file changes)
+#   - Pull requests to main (only for relevant file changes)
+#   - Weekly schedule (Monday at 00:00 UTC) for proactive link rot detection
+#
+# Features:
+#   - Checks external URLs, internal links, and anchors
+#   - Built-in caching to reduce API rate limiting
+#   - Automatic retry logic for transient failures
+#   - GitHub token to avoid rate limiting on GitHub links
+
+name: Link Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.rs'
+      - '**/*.toml'
+      - '.lychee.toml'
+      - '.github/workflows/link-check.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.rs'
+      - '**/*.toml'
+      - '.lychee.toml'
+      - '.github/workflows/link-check.yml'
+  schedule:
+    # Run weekly on Monday at 00:00 UTC to catch link rot
+    - cron: '0 0 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: Check Links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Link Checker
+        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
+        with:
+          # Override default lychee v0.21.0 (bundled with action v2.7.0) to fix
+          # hidden file matcher bug: v0.21.0 scans dotfiles like .lychee.toml
+          # despite --hidden not being set, extracting truncated URLs from regex
+          # patterns in the config. Fixed in v0.22.0 via lycheeverse/lychee#1936.
+          # TODO: Remove lycheeVersion pin once lychee-action bundles v0.22.0+
+          lycheeVersion: v0.22.0
+          # Note: --cache flag enables caching with 7-day max age
+          # Critical: --exclude-path must be on the CLI because the TOML
+          # exclude_path does not apply to glob-expanded paths (known bug).
+          # Keep these in sync with exclude_path in .lychee.toml (defense-in-depth).
+          # The -- separator prevents --exclude-path from consuming positional args.
+          args: >-
+            --verbose --no-progress --cache --max-cache-age 7d
+            --config .lychee.toml
+            --exclude-path tests/
+            --exclude-path target/
+            --exclude-path third_party/
+            --exclude-path '\.github/test-fixtures/'
+            --exclude-path 'test-fixtures/'
+            --exclude-path '\.lychee\.toml'
+            --
+            './**/*.md' './**/*.rs' './**/*.toml'
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}

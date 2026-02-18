@@ -1,6 +1,10 @@
 # Skill: Manage Skills
 
-<!-- trigger: skill, skills, manage, create-skill, edit-skill, split-skill | Creating, editing, and maintaining skill files | Core -->
+<!--
+  trigger: skill, skills, manage, create-skill, edit-skill, split-skill
+  | Creating, editing, and maintaining skill files
+  | Core
+-->
 
 **Trigger**: When creating, editing, splitting, or organizing skill files in `.llm/skills/`.
 
@@ -52,14 +56,18 @@ Every skill file MUST follow this structure:
 
 ## Related Skills
 - [related-skill](./related-skill.md) — Brief description
+
+
 ```
 
 ---
 
 ## Trigger Comment Format
 
-```
+```text
+
 <!-- trigger: keywords | description | category -->
+
 ```
 
 | Field | Purpose | Example |
@@ -119,6 +127,6 @@ Run the size linter: `bash scripts/lint-skill-sizes.sh`
 
 ## Related Skills
 
-- [rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Patterns that skills should reference
+- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Patterns that skills should reference
 - [testing-strategies](./testing-strategies.md) — Testing methodology that all skills reference
 - [clippy-and-linting](./clippy-and-linting.md) — Linting workflow skills must follow

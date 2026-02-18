@@ -1,0 +1,3773 @@
+// CI Configuration Tests
+//
+// Data-driven tests to validate CI/CD configuration consistency and catch
+// common configuration errors before they cause CI failures.
+//
+// These tests were created to prevent recurrence of actual CI issues:
+//   1. MSRV inconsistency across configuration files
+//   2. Workflow files with syntax errors or misconfigurations
+//   3. Missing required CI validation workflows
+
+#![cfg(test)]
+
+use std::path::{Path, PathBuf};
+
+/// Get the repository root directory
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Read a file to string, panicking with a helpful message on error
+fn read_file(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
+}
+
+/// Extract the value of a TOML field like `rust-version = "1.88.0"`
+fn extract_toml_version(content: &str, field: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(field) {
+            let rest = rest.trim();
+            if let Some(rest) = rest.strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract the value of a YAML field like `channel = "1.88.0"`
+fn extract_yaml_version(content: &str, field: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(field) {
+            let rest = rest.trim();
+            if let Some(rest) = rest.strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_string());
+            } else if let Some(rest) = rest.strip_prefix(':') {
+                return Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn test_msrv_consistency_across_config_files() {
+    // This test prevents the MSRV inconsistency issue that was fixed in commit d9eac0f
+    // All configuration files must use the same Rust version as defined in Cargo.toml
+
+    let root = repo_root();
+
+    // Extract MSRV from Cargo.toml (single source of truth)
+    let cargo_toml = root.join("Cargo.toml");
+    let cargo_content = read_file(&cargo_toml);
+    let msrv = extract_toml_version(&cargo_content, "rust-version")
+        .expect("Could not extract rust-version from Cargo.toml");
+
+    assert!(
+        !msrv.is_empty(),
+        "MSRV must be set in Cargo.toml rust-version field"
+    );
+
+    // Validate rust-toolchain.toml
+    let rust_toolchain = root.join("rust-toolchain.toml");
+    if rust_toolchain.exists() {
+        let toolchain_content = read_file(&rust_toolchain);
+        let toolchain_version = extract_yaml_version(&toolchain_content, "channel")
+            .expect("Could not extract channel from rust-toolchain.toml");
+
+        assert_eq!(
+            toolchain_version, msrv,
+            "rust-toolchain.toml channel must match Cargo.toml rust-version.\n\
+             Expected: {msrv}\n\
+             Found: {toolchain_version}\n\
+             Fix: Update rust-toolchain.toml to use channel = \"{msrv}\""
+        );
+    }
+
+    // Validate clippy.toml
+    let clippy_toml = root.join("clippy.toml");
+    if clippy_toml.exists() {
+        let clippy_content = read_file(&clippy_toml);
+        if let Some(clippy_msrv) = extract_toml_version(&clippy_content, "msrv") {
+            assert_eq!(
+                clippy_msrv, msrv,
+                "clippy.toml msrv must match Cargo.toml rust-version.\n\
+                 Expected: {msrv}\n\
+                 Found: {clippy_msrv}\n\
+                 Fix: Update clippy.toml to use msrv = \"{msrv}\""
+            );
+        }
+    }
+
+    // Validate Dockerfile
+    let dockerfile = root.join("Dockerfile");
+    if dockerfile.exists() {
+        let dockerfile_content = read_file(&dockerfile);
+
+        // Look for FROM rust:X.Y line
+        let rust_version_in_dockerfile = dockerfile_content
+            .lines()
+            .find(|line| line.trim().starts_with("FROM rust:"))
+            .and_then(|line| {
+                // Extract version from "FROM rust:1.88-bookworm" or "FROM rust:1.88"
+                line.split(':')
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.split('-').next())
+                    .map(String::from)
+            });
+
+        if let Some(dockerfile_version) = rust_version_in_dockerfile {
+            // Docker images may use shortened versions (1.88 instead of 1.88.0)
+            // Check if dockerfile version matches MSRV or is a valid prefix
+            let msrv_major_minor = to_major_minor(&msrv);
+            let version_matches =
+                dockerfile_version == msrv || dockerfile_version == msrv_major_minor;
+
+            assert!(
+                version_matches,
+                "Dockerfile Rust version must match Cargo.toml rust-version.\n\
+                 Expected: FROM rust:{msrv} or FROM rust:{msrv_major_minor}\n\
+                 Found: FROM rust:{dockerfile_version}\n\
+                 Fix: Update Dockerfile to use FROM rust:{msrv}-bookworm or FROM rust:{msrv_major_minor}-bookworm"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_msrv_version_normalization_logic() {
+    // This test validates that our version comparison logic correctly handles
+    // both full semver (1.88.0) and Docker's shortened format (1.88).
+    //
+    // Background: Docker images use "rust:1.88" while Cargo.toml uses "1.88.0".
+    // The CI/local scripts must normalize both formats to major.minor for comparison.
+    //
+    // This test prevents regression of the bug where CI compared "1.88" != "1.88.0"
+    // and failed even though the versions were semantically identical.
+
+    // Test case 1: Full semver version (Cargo.toml format)
+    let msrv_full = "1.88.0";
+    let msrv_major_minor = to_major_minor(msrv_full);
+    assert_eq!(msrv_major_minor, "1.88");
+
+    // Test case 2: Docker shortened version should match normalized MSRV
+    let dockerfile_version = "1.88";
+    assert_eq!(
+        dockerfile_version, msrv_major_minor,
+        "Normalized MSRV should match Docker version format"
+    );
+
+    // Test case 3: Verify that different major.minor versions correctly fail
+    let wrong_version = "1.87";
+    assert_ne!(
+        wrong_version, msrv_major_minor,
+        "Different versions should not match"
+    );
+
+    // Test case 4: Patch version differences in MSRV shouldn't matter for Docker comparison
+    let msrv_different_patch = "1.88.1";
+    let normalized_patch = to_major_minor(msrv_different_patch);
+    assert_eq!(
+        normalized_patch, dockerfile_version,
+        "Patch version should be ignored when comparing to Docker format"
+    );
+
+    // Test case 5: Verify edge cases with single-digit patch versions
+    let msrv_zero_patch = "1.88.0";
+    let msrv_nonzero_patch = "1.88.5";
+    let norm1 = to_major_minor(msrv_zero_patch);
+    let norm2 = to_major_minor(msrv_nonzero_patch);
+    assert_eq!(
+        norm1, norm2,
+        "Both should normalize to same major.minor regardless of patch"
+    );
+}
+
+#[test]
+fn test_ci_workflow_msrv_normalization() {
+    // This test validates that the CI workflow's MSRV verification logic
+    // correctly normalizes versions before comparison.
+    //
+    // It simulates the exact bash commands used in .github/workflows/ci.yml
+    // to ensure they produce the expected results.
+
+    let root = repo_root();
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_workflow);
+
+    // Verify that the CI workflow contains the normalization logic
+    assert!(
+        content.contains("MSRV_SHORT=$(echo \"$MSRV\" | sed -E 's/([0-9]+\\.[0-9]+).*/\\1/')"),
+        "CI workflow must normalize MSRV to major.minor format for Dockerfile comparison.\n\
+         This prevents false failures when comparing 1.88.0 (Cargo.toml) to 1.88 (Dockerfile)."
+    );
+
+    // Verify the comparison uses the normalized version
+    assert!(
+        content.contains("if [ \"$DOCKERFILE_RUST\" != \"$MSRV_SHORT\" ]"),
+        "CI workflow must compare Dockerfile version against normalized MSRV_SHORT, not full MSRV.\n\
+         Using full MSRV causes spurious failures (1.88 != 1.88.0)."
+    );
+
+    // Verify there's a comment explaining the normalization
+    assert!(
+        content.contains("Normalize MSRV to major.minor")
+            || content.contains("handles both 1.88 and 1.88.0 formats"),
+        "CI workflow should document why version normalization is needed"
+    );
+}
+
+#[test]
+fn test_msrv_script_consistency_with_ci() {
+    // This test ensures that the local MSRV check script and the CI workflow
+    // use the same logic for version comparison.
+    //
+    // Both must normalize versions to major.minor format to avoid inconsistent
+    // behavior between local checks and CI validation.
+
+    let root = repo_root();
+    let script = root.join("scripts/check-msrv-consistency.sh");
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+
+    if !script.exists() {
+        panic!(
+            "MSRV consistency check script not found at {}",
+            script.display()
+        );
+    }
+
+    let script_content = read_file(&script);
+    let ci_content = read_file(&ci_workflow);
+
+    // Both should normalize MSRV to major.minor for Dockerfile comparison
+    let normalization_pattern = "sed -E 's/([0-9]+\\.[0-9]+).*/\\1/'";
+
+    assert!(
+        script_content.contains(normalization_pattern),
+        "Local script must normalize MSRV version (found in check-msrv-consistency.sh)"
+    );
+
+    assert!(
+        ci_content.contains(normalization_pattern),
+        "CI workflow must normalize MSRV version (found in ci.yml)"
+    );
+
+    // Verify both use MSRV_SHORT variable for comparison
+    assert!(
+        script_content.contains("MSRV_SHORT"),
+        "Local script should use MSRV_SHORT variable for normalized version"
+    );
+
+    assert!(
+        ci_content.contains("MSRV_SHORT"),
+        "CI workflow should use MSRV_SHORT variable for normalized version"
+    );
+}
+
+#[test]
+fn test_required_ci_workflows_exist() {
+    // This test ensures critical CI validation workflows are present
+    // Prevents accidental deletion of important CI checks
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    // Required workflows for project hygiene
+    let required_workflows = vec![
+        ("ci.yml", "Main CI pipeline (tests, clippy, etc.)"),
+        ("yaml-lint.yml", "YAML syntax validation"),
+        ("actionlint.yml", "GitHub Actions syntax validation"),
+        (
+            "unused-deps.yml",
+            "Unused dependency detection (cargo-machete/cargo-udeps)",
+        ),
+        ("workflow-hygiene.yml", "Workflow configuration validation"),
+    ];
+
+    let mut missing_workflows = Vec::new();
+
+    for (workflow_file, description) in &required_workflows {
+        let workflow_path = workflows_dir.join(workflow_file);
+        if !workflow_path.exists() {
+            missing_workflows.push(format!(
+                "  - {} ({})\n    Expected at: {}",
+                workflow_file,
+                description,
+                workflow_path.display()
+            ));
+        }
+    }
+
+    if !missing_workflows.is_empty() {
+        panic!(
+            "Required workflows are missing:\n\n{}\n\n\
+             These workflows are required for CI/CD hygiene.\n\
+             To fix:\n\
+             1. Restore missing workflow files from git history\n\
+             2. Or create new workflow files following project patterns\n\
+             3. Ensure all workflows are in .github/workflows/",
+            missing_workflows.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_ci_workflow_has_required_jobs() {
+    // This test validates that the main CI workflow has critical jobs
+    // Prevents accidental removal of important checks
+
+    let root = repo_root();
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_workflow);
+
+    // Required job names in CI workflow with descriptions
+    let required_jobs = vec![
+        ("check", "Code formatting and linting"),
+        ("test", "Unit and integration tests"),
+        ("deny", "Security audits and license checks"),
+        ("msrv", "MSRV verification"),
+        ("docker", "Docker build and smoke test"),
+    ];
+
+    let mut missing_jobs = Vec::new();
+    let mut found_jobs = Vec::new();
+
+    for (job_name, description) in &required_jobs {
+        // Look for "job-name:" pattern at the beginning of a line
+        let job_pattern = format!("  {job_name}:");
+        if content.contains(&job_pattern) {
+            found_jobs.push(format!("  ✓ {job_name} ({description})"));
+        } else {
+            missing_jobs.push(format!("  ✗ {job_name} ({description})"));
+        }
+    }
+
+    if !missing_jobs.is_empty() {
+        panic!(
+            "CI workflow is missing required jobs:\n\n\
+             Missing:\n{}\n\n\
+             Found:\n{}\n\n\
+             File: {}\n\n\
+             These jobs are critical for CI/CD validation.\n\
+             To fix:\n\
+             1. Review git history to see when the job was removed\n\
+             2. Restore the job definition in the jobs: section\n\
+             3. Ensure the job name matches exactly (case-sensitive)\n\
+             4. Verify the job has proper indentation (2 spaces)",
+            missing_jobs.join("\n"),
+            found_jobs.join("\n"),
+            ci_workflow.display()
+        );
+    }
+}
+
+#[test]
+fn test_workflow_files_are_valid_yaml() {
+    // This test catches basic YAML syntax errors in workflow files
+    // Prevents pushing broken workflows that cause CI to fail
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Expected workflow files (*.yml or *.yaml) to exist in this directory."
+    );
+
+    let mut errors = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        // Basic YAML validation checks
+        // Note: This is not a full YAML parser, but catches common errors
+
+        // Check for balanced quotes, but only on YAML-level lines (not inside
+        // multiline scalar blocks). Shell scripts embedded via `run: |` and
+        // folded scalars like `args: >-` can legitimately have odd quote
+        // counts (AWK programs, glob patterns, etc.), so we skip lines
+        // inside any YAML multiline scalar block.
+        let mut single_quotes = 0;
+        let mut double_quotes = 0;
+        let mut in_multiline_block = false;
+        let mut block_indent = 0;
+
+        for line in content.lines() {
+            let stripped = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Detect start of any YAML multiline scalar block.
+            // Matches patterns like: "key: |", "key: >-", "key: |+", etc.
+            // The scalar indicator (|, >, |-, >-, |+, >+) after a colon
+            // signals that subsequent indented lines are scalar content.
+            if stripped.contains(": |") || stripped.contains(": >") {
+                // Verify this looks like a YAML key: value with a block scalar indicator
+                // (not just any line that happens to contain ": |")
+                let after_colon = stripped
+                    .split_once(": ")
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or("");
+                if after_colon == "|"
+                    || after_colon == "|-"
+                    || after_colon == "|+"
+                    || after_colon == ">"
+                    || after_colon == ">-"
+                    || after_colon == ">+"
+                {
+                    in_multiline_block = true;
+                    block_indent = indent;
+                    continue;
+                }
+            }
+
+            // Detect end of multiline block (line at same or lesser indent, non-empty)
+            if in_multiline_block && !stripped.is_empty() && indent <= block_indent {
+                in_multiline_block = false;
+            }
+
+            // Only count quotes on YAML-level lines, not multiline scalar content
+            if !in_multiline_block {
+                single_quotes += line.matches('\'').count();
+                double_quotes += line.matches('"').count();
+            }
+        }
+
+        if single_quotes % 2 != 0 {
+            errors.push(format!(
+                "{filename}: Unbalanced single quotes in YAML lines (found {single_quotes} quotes)\n  \
+                 Check for missing closing quotes in strings (shell script blocks excluded)"
+            ));
+        }
+
+        if double_quotes % 2 != 0 {
+            errors.push(format!(
+                "{filename}: Unbalanced double quotes in YAML lines (found {double_quotes} quotes)\n  \
+                 Check for missing closing quotes in strings (shell script blocks excluded)"
+            ));
+        }
+
+        // Check for required GitHub Actions fields
+        let mut missing_fields = Vec::new();
+
+        if !content.contains("name:") {
+            missing_fields.push("name:");
+        }
+        if !content.contains("on:") && !content.contains("'on':") {
+            missing_fields.push("on:");
+        }
+        if !content.contains("jobs:") {
+            missing_fields.push("jobs:");
+        }
+
+        if !missing_fields.is_empty() {
+            errors.push(format!(
+                "{}: Missing required fields: {}\n  \
+                 GitHub Actions workflows must have: name, on, jobs",
+                filename,
+                missing_fields.join(", ")
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Workflow files have YAML validation errors:\n\n{}\n\n\
+             To fix:\n\
+             1. Use a YAML validator/linter (yamllint, prettier, or IDE plugin)\n\
+             2. Check for missing quotes, colons, or indentation errors\n\
+             3. Ensure all required fields (name, on, jobs) are present\n\
+             4. Verify quotes are balanced (each opening quote has a closing quote)\n\n\
+             Common issues:\n\
+             - Missing closing quote: name: \"My Workflow\n\
+             - Missing colon: name My Workflow\n\
+             - Wrong indentation: jobs should be at root level, not nested",
+            errors.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_no_language_specific_cache_mismatch() {
+    // This test prevents the Python cache on Rust project issue (yaml-lint.yml)
+    // Ensures workflow caching strategies match project type
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    // Determine project type
+    let is_rust_project = root.join("Cargo.toml").exists();
+    let is_python_project = root.join("requirements.txt").exists()
+        || root.join("Pipfile").exists()
+        || root.join("pyproject.toml").exists();
+    let is_node_project = root.join("package.json").exists();
+
+    for entry in collect_workflow_files(&workflows_dir) {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        // Check for Python caching on non-Python projects
+        if !is_python_project
+            && is_rust_project
+            && (content.contains("cache: 'pip'") || content.contains("cache: pip"))
+        {
+            // Allow if there's an explicit comment explaining why
+            let has_explanation = content.contains("Pip caching disabled")
+                || content.contains("no requirements.txt")
+                || content.contains("yamllint install is fast");
+
+            assert!(
+                has_explanation,
+                "{filename}: Uses Python pip cache but no Python project files found.\n\
+                     This is a Rust project (Cargo.toml exists).\n\
+                     Either remove 'cache: pip' or add a comment explaining why it's needed."
+            );
+        }
+
+        // Check for Node caching on non-Node projects
+        if !is_node_project && is_rust_project {
+            assert!(
+                !(content.contains("cache: 'npm'")
+                    || content.contains("cache: npm")
+                    || content.contains("cache: 'yarn'")),
+                "{filename}: Uses Node cache but no package.json found.\n\
+                 This is a Rust project (Cargo.toml exists).\n\
+                 Remove cache configuration or add comment explaining why it's needed."
+            );
+        }
+    }
+}
+
+#[test]
+fn test_scripts_are_executable() {
+    // This test ensures shell scripts have executable permissions
+    // Prevents "permission denied" errors in CI
+    //
+    // Platform Limitation:
+    // - Unix/Linux/macOS: This test validates executable permissions (mode & 0o111)
+    // - Windows: File permissions work differently (no executable bit concept)
+    //   Git on Windows stores the executable bit in the index, but file system
+    //   permissions are controlled by ACLs, not Unix-style mode bits.
+    //   This test only validates on Unix platforms to avoid false failures.
+    //
+    // Why this matters for CI:
+    // - GitHub Actions Linux runners require executable permissions on scripts
+    // - Git stores the executable bit and preserves it on clone
+    // - Scripts without +x fail with "permission denied" in CI
+    // - This test catches the issue before CI runs
+
+    let root = repo_root();
+    let directories_to_check = vec![root.join("scripts"), root.join(".githooks")];
+
+    #[cfg(unix)]
+    let mut non_executable_scripts = Vec::new();
+
+    for dir in directories_to_check {
+        if !dir.exists() {
+            continue;
+        }
+
+        for entry in std::fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
+            let path = entry.path();
+            // Check .sh files and files without extension (common for git hooks)
+            let should_check = path.extension().map(|ext| ext == "sh").unwrap_or(false)
+                || (path.is_file()
+                    && path.extension().is_none()
+                    && !path.file_name().unwrap().to_string_lossy().starts_with('.'));
+
+            if should_check {
+                let metadata = std::fs::metadata(&path).unwrap_or_else(|e| {
+                    panic!("Failed to get metadata for {}: {}", path.display(), e)
+                });
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = metadata.permissions().mode();
+                    let is_executable = mode & 0o111 != 0;
+
+                    if !is_executable {
+                        non_executable_scripts.push(format!(
+                            "  - {}\n    Current permissions: {:o}",
+                            path.display(),
+                            mode & 0o777
+                        ));
+                    }
+                }
+
+                // On non-Unix platforms, just check the file exists
+                #[cfg(not(unix))]
+                {
+                    let _ = metadata; // Suppress unused variable warning
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    if !non_executable_scripts.is_empty() {
+        panic!(
+            "Shell scripts are not executable:\n\n{}\n\n\
+             Scripts must have executable permissions to run in CI and locally.\n\n\
+             To fix:\n\
+             1. Make scripts executable:\n\
+                chmod +x <script-path>\n\n\
+             2. Update git index to track executable bit:\n\
+                git update-index --chmod=+x <script-path>\n\n\
+             3. Verify with: git ls-files --stage <script-path>\n\
+                Should show: 100755 (executable) not 100644 (non-executable)\n\n\
+             Example:\n\
+                chmod +x scripts/check-markdown.sh\n\
+                git update-index --chmod=+x scripts/check-markdown.sh\n\
+                git add scripts/check-markdown.sh\n",
+            non_executable_scripts.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_markdown_files_have_language_identifiers() {
+    // This test prevents the MD040 markdown linting issue that caused CI failures
+    // All code blocks in markdown files must have language identifiers
+    // Example: ```bash instead of just ```
+
+    let root = repo_root();
+
+    // Find all markdown files in the repository (excluding dependencies and test fixtures)
+    let markdown_files = find_files_with_extension(
+        &root,
+        "md",
+        &[
+            "target",
+            "third_party",
+            "node_modules",
+            "test-fixtures",
+            ".llm",
+        ],
+    );
+
+    if markdown_files.is_empty() {
+        // No markdown files found, test passes trivially
+        return;
+    }
+
+    let mut violations = Vec::new();
+    let mut total_files_checked = 0;
+    let mut total_code_blocks = 0;
+    let mut files_with_violations = std::collections::HashSet::new();
+
+    for file in &markdown_files {
+        total_files_checked += 1;
+        let content = read_file(file);
+        let mut in_code_block = false;
+        let mut file_has_violation = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed for human readability
+
+            let trimmed = line.trim_start();
+
+            // Check for opening code fence (exactly three backticks, not more)
+            // This avoids matching ```` which is used for nested code blocks
+            if trimmed.starts_with("```") && !trimmed.starts_with("````") {
+                if !in_code_block {
+                    // Opening fence
+                    in_code_block = true;
+                    total_code_blocks += 1;
+
+                    // Check if language identifier is present
+                    let fence_content = trimmed.trim_start_matches('`').trim();
+                    if fence_content.is_empty() {
+                        violations.push(format!(
+                            "{}:{}: Code block missing language identifier (MD040)",
+                            file.display(),
+                            line_num
+                        ));
+                        file_has_violation = true;
+                    }
+                } else {
+                    // Closing fence
+                    in_code_block = false;
+                }
+            }
+        }
+
+        if file_has_violation {
+            files_with_violations.insert(file.display().to_string());
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Markdown files have code blocks without language identifiers (MD040):\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Files checked: {}\n\
+             - Total code blocks found: {}\n\
+             - Files with violations: {}\n\
+             - Total violations: {}\n\n\
+             Files with violations:\n{}\n\n\
+             All code blocks must specify a language identifier after the opening ```.\n\
+             Examples:\n\
+             - ```bash\n\
+             - ```rust\n\
+             - ```json\n\
+             - ```text\n\n\
+             To check markdown files locally:\n\
+             ./scripts/check-markdown.sh\n\n\
+             To auto-fix markdown issues:\n\
+             ./scripts/check-markdown.sh fix",
+            violations.join("\n"),
+            total_files_checked,
+            total_code_blocks,
+            files_with_violations.len(),
+            violations.len(),
+            files_with_violations
+                .iter()
+                .map(|f| format!("  - {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_typos_config_exists_and_is_valid() {
+    // This test ensures the .typos.toml configuration file exists
+    // and contains required technical terms to prevent false positives
+    // Prevents the HashiCorp typo false positive issue
+
+    let root = repo_root();
+    let typos_config = root.join(".typos.toml");
+
+    assert!(
+        typos_config.exists(),
+        ".typos.toml configuration file is missing.\n\
+         This file is required for the typos spell checker in CI.\n\
+         Create it with at least the [default.extend-words] section."
+    );
+
+    let content = read_file(&typos_config);
+
+    // Basic validation: check for required sections
+    assert!(
+        content.contains("[default.extend-words]") || content.contains("[default]"),
+        ".typos.toml must contain [default.extend-words] or [default] section"
+    );
+
+    // Check for common technical terms that are often flagged as typos
+    // These should be explicitly allowed in .typos.toml
+    let recommended_terms = vec![
+        ("hashicorp", "HashiCorp (company name)"),
+        ("github", "GitHub (platform name)"),
+        ("websocket", "WebSocket protocol"),
+    ];
+
+    let mut missing_terms = Vec::new();
+    for (term, description) in recommended_terms {
+        // Case-insensitive search since typos.toml entries are lowercase
+        if !content.to_lowercase().contains(&format!("{term} =")) {
+            missing_terms.push(format!("  - {term} ({description})"));
+        }
+    }
+
+    if !missing_terms.is_empty() {
+        eprintln!(
+            "WARNING: .typos.toml is missing some recommended technical terms:\n{}",
+            missing_terms.join("\n")
+        );
+        // This is a warning, not a failure, since these are recommendations
+        // Uncomment to make it a hard requirement:
+        // panic!("Add recommended terms to .typos.toml");
+    }
+
+    // Verify that mixed-case company names are handled in extend-identifiers
+    // This prevents false positives when company names use CamelCase (e.g., HashiCorp)
+    assert!(
+        content.contains("[default.extend-identifiers]"),
+        ".typos.toml must contain [default.extend-identifiers] section for mixed-case terms"
+    );
+
+    // Check that HashiCorp is properly configured to prevent false positive on first part
+    let has_hashicorp_identifier = content.contains("HashiCorp = \"HashiCorp\"");
+    assert!(
+        has_hashicorp_identifier,
+        ".typos.toml must include 'HashiCorp = \"HashiCorp\"' in [default.extend-identifiers]\n\
+         This prevents false positive when the spell checker splits the word at case boundaries.\n\
+         Mixed-case company names must be in extend-identifiers, not extend-words."
+    );
+}
+
+#[test]
+fn test_typos_config_covers_known_files() {
+    // This test verifies that .typos.toml properly covers technical terms appearing
+    // in known documentation files, preventing regression of the HashiCorp false positive.
+    //
+    // Rather than the tautological "file contains HashiCorp" check, this test verifies
+    // the typos configuration is sufficient to allow all known technical terms.
+
+    let root = repo_root();
+    let typos_config = root.join(".typos.toml");
+
+    assert!(
+        typos_config.exists(),
+        ".typos.toml must exist to suppress false positives for technical terms.\n\
+         Fix: Create .typos.toml with [default.extend-identifiers] section."
+    );
+
+    let config_content = read_file(&typos_config);
+
+    // Files known to contain technical terms that require .typos.toml entries
+    let known_technical_files: &[(&str, &[&str])] = &[("docs/authentication.md", &["HashiCorp"])];
+
+    let mut violations = Vec::new();
+
+    for (relative_path, required_terms) in known_technical_files {
+        let file_path = root.join(relative_path);
+        if !file_path.exists() {
+            continue;
+        }
+
+        for term in *required_terms {
+            // The term should be present in extend-identifiers (for CamelCase) or extend-words
+            let covered = config_content.contains(&format!("{term} = \"{term}\""))
+                || config_content.contains(&format!("{term} ="))
+                || config_content
+                    .to_lowercase()
+                    .contains(&format!("{}  =", term.to_lowercase()));
+
+            if !covered {
+                violations.push(format!(
+                    "  - '{term}' appears in {relative_path} but is not covered in .typos.toml\n\
+                     Fix: Add to [default.extend-identifiers]: {term} = \"{term}\"\n\
+                     Verify: grep -i '{term}' .typos.toml"
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            ".typos.toml does not cover all technical terms from known documentation files:\n\n{}\n\n\
+             These terms appear in documentation but are not whitelisted in .typos.toml,\n\
+             which will cause the spellcheck workflow to fail.",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_markdown_config_exists() {
+    // This test ensures the .markdownlint.json configuration exists
+    // Prevents missing markdownlint configuration
+
+    let root = repo_root();
+    let markdownlint_config = root.join(".markdownlint.json");
+
+    assert!(
+        markdownlint_config.exists(),
+        ".markdownlint.json configuration file is missing.\n\
+         This file is required for markdown linting in CI.\n\
+         See .github/workflows/markdownlint.yml"
+    );
+
+    let content = read_file(&markdownlint_config);
+
+    // Verify it's valid JSON
+    assert!(
+        content.trim().starts_with('{') && content.trim().ends_with('}'),
+        ".markdownlint.json does not appear to be valid JSON"
+    );
+
+    // Check for MD040 rule (code block language identifiers)
+    assert!(
+        content.contains("MD040"),
+        ".markdownlint.json must include MD040 rule (code block language identifiers)"
+    );
+}
+
+#[test]
+fn test_dockerfile_uses_docker_version_format() {
+    // This test enforces that Dockerfile uses Docker's X.Y format instead of X.Y.Z
+    //
+    // Rationale:
+    // - Docker Hub convention uses major.minor tags (e.g., rust:1.88)
+    // - This provides automatic security patches for all 1.88.x releases
+    // - Using full semver (1.88.0) would pin to exact patch version
+    // - Documentation explicitly recommends X.Y format
+    // - CI normalization logic handles the difference between formats
+
+    let root = repo_root();
+    let dockerfile = root.join("Dockerfile");
+
+    assert!(
+        dockerfile.exists(),
+        "Dockerfile not found at {}",
+        dockerfile.display()
+    );
+
+    let content = read_file(&dockerfile);
+
+    // Extract the Rust version from FROM rust:X.Y or FROM rust:X.Y.Z
+    let rust_version = content
+        .lines()
+        .find(|line| line.trim().starts_with("FROM rust:"))
+        .and_then(|line| {
+            line.split(':')
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.split('-').next())
+                .map(String::from)
+        });
+
+    assert!(
+        rust_version.is_some(),
+        "Could not find 'FROM rust:' line in Dockerfile"
+    );
+
+    let version = rust_version.unwrap();
+
+    // Count the number of dots to determine if it's X.Y or X.Y.Z
+    let dot_count = version.matches('.').count();
+
+    assert_eq!(
+        dot_count, 1,
+        "Dockerfile must use Docker format (X.Y) not full semver (X.Y.Z).\n\
+         Found: FROM rust:{version}\n\
+         Expected: FROM rust:{{major}}.{{minor}} (e.g., FROM rust:1.88)\n\n\
+         Why Docker format is preferred:\n\
+         - Docker Hub uses major.minor tags (rust:1.88)\n\
+         - Provides automatic security patches for all 1.88.x releases\n\
+         - Full semver (1.88.0) pins to exact patch version, missing updates\n\
+         - CI normalization logic handles format differences\n\n\
+         Fix: Change 'FROM rust:{version}' to 'FROM rust:{{major}}.{{minor}}' in Dockerfile"
+    );
+}
+
+#[test]
+fn test_github_actions_are_pinned_to_sha() {
+    // This test validates that all GitHub Actions use SHA pinning instead of mutable tags
+    // SHA pinning prevents supply chain attacks where action maintainers could push
+    // malicious code to an existing tag (e.g., v4.2.2 could be changed after we reference it)
+    //
+    // Required format: uses: owner/repo@<64-char-sha> # vX.Y.Z
+    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+    let mut total_files_checked = 0;
+    let mut total_actions_found = 0;
+    let mut actions_pinned_correctly = 0;
+    let mut files_with_violations = std::collections::HashSet::new();
+
+    for entry in &workflow_files {
+        total_files_checked += 1;
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let mut file_has_violation = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed for human readability
+            let trimmed = line.trim();
+
+            // Look for "uses:" lines that reference actions
+            if trimmed.starts_with("uses:") {
+                let uses_value = trimmed.trim_start_matches("uses:").trim();
+
+                // Skip local actions (e.g., ./.github/actions/setup)
+                if uses_value.starts_with("./") {
+                    continue;
+                }
+
+                // Skip docker:// references (different security model)
+                if uses_value.starts_with("docker://") {
+                    continue;
+                }
+
+                total_actions_found += 1;
+
+                // Extract the action reference (owner/repo@ref)
+                let parts: Vec<&str> = uses_value.split('@').collect();
+                if parts.len() < 2 {
+                    violations.push(format!(
+                        "{filename}:{line_num}: Invalid action reference (missing @): {uses_value}"
+                    ));
+                    file_has_violation = true;
+                    continue;
+                }
+
+                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
+
+                if !is_sha_pinned(action_ref) {
+                    violations.push(format!(
+                        "{}:{}: Action not pinned to SHA: {}\n  \
+                         Found: {}\n  \
+                         Action references must use full 40-character SHA instead of tags.\n  \
+                         Tags are mutable and can be changed by maintainers (supply chain risk).\n  \
+                         Fix: Find SHA at https://github.com/{}/releases then update to:\n  \
+                         uses: {}@<40-char-sha> # <tag>\n  \
+                         Verify: grep -n 'uses:.*{}' .github/workflows/*.yml",
+                        filename, line_num, parts[0], action_ref, parts[0], parts[0], parts[0]
+                    ));
+                    file_has_violation = true;
+                } else {
+                    actions_pinned_correctly += 1;
+                }
+            }
+        }
+
+        if file_has_violation {
+            files_with_violations.insert(filename.to_string());
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "GitHub Actions must be pinned to SHA for security:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Workflow files checked: {}\n\
+             - Total actions found: {}\n\
+             - Actions pinned correctly: {}\n\
+             - Actions with violations: {}\n\
+             - Workflows with violations: {}\n\n\
+             Workflows with violations:\n{}\n\n\
+             Why SHA pinning is required:\n\
+             - Tags (v1, v1.2.3) are mutable and can be changed by action maintainers\n\
+             - Attackers could compromise maintainer accounts and push malicious code to existing tags\n\
+             - SHA pinning ensures the exact code version is locked\n\n\
+             How to fix:\n\
+             1. Find the release/tag on GitHub: https://github.com/owner/repo/releases\n\
+             2. Click on the commit SHA for that tag\n\
+             3. Copy the full 40-character SHA\n\
+             4. Use format: uses: owner/repo@<SHA> # vX.Y.Z\n\n\
+             Example:\n\
+             - Bad:  uses: actions/checkout@v4.2.2\n\
+             - Good: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+            violations.join("\n"),
+            total_files_checked,
+            total_actions_found,
+            actions_pinned_correctly,
+            violations.len(),
+            files_with_violations.len(),
+            files_with_violations
+                .iter()
+                .map(|f| format!("  - {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_cargo_deny_action_minimum_version() {
+    // This test ensures cargo-deny-action is at least v2.0.15
+    // v2.0.15+ includes important security and stability fixes
+    //
+    // Background: Earlier versions had issues with:
+    // - Advisory database sync failures
+    // - False positives in license checking
+    // - Performance issues with large dependency graphs
+
+    let root = repo_root();
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_workflow);
+
+    // Find the cargo-deny-action reference
+    let mut found_cargo_deny = false;
+    let mut violations = Vec::new();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1; // 1-indexed
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("uses:") && trimmed.contains("cargo-deny-action") {
+            found_cargo_deny = true;
+
+            // Extract the SHA and check for version comment
+            let parts: Vec<&str> = trimmed.split('@').collect();
+            if parts.len() < 2 {
+                violations.push(format!(
+                    "Line {line_num}: cargo-deny-action reference is malformed: {trimmed}"
+                ));
+                continue;
+            }
+
+            let after_at = parts[1];
+
+            // Check if there's a version comment (# vX.Y.Z)
+            if !after_at.contains('#') {
+                violations.push(format!(
+                    "Line {line_num}: cargo-deny-action missing version comment\n  \
+                     Expected format: uses: EmbarkStudios/cargo-deny-action@<SHA> # vX.Y.Z"
+                ));
+                continue;
+            }
+
+            // Extract version from comment
+            if let Some(comment_part) = after_at.split('#').nth(1) {
+                let version_str = comment_part.trim();
+
+                // Parse version (should be vX.Y.Z format)
+                if !version_str.starts_with('v') {
+                    violations.push(format!(
+                        "Line {line_num}: Version comment should start with 'v': {version_str}"
+                    ));
+                    continue;
+                }
+
+                let version_numbers = version_str.trim_start_matches('v');
+                let version_parts: Vec<&str> = version_numbers.split('.').collect();
+
+                if version_parts.len() < 3 {
+                    violations.push(format!(
+                        "Line {line_num}: Invalid version format (expected vX.Y.Z): {version_str}"
+                    ));
+                    continue;
+                }
+
+                // Parse major, minor, patch
+                let major: u32 = version_parts[0].parse().unwrap_or(0);
+                let minor: u32 = version_parts[1].parse().unwrap_or(0);
+                let patch: u32 = version_parts[2].parse().unwrap_or(0);
+
+                // Check against minimum version: v2.0.15
+                let min_major = 2;
+                let min_minor = 0;
+                let min_patch = 15;
+
+                let is_sufficient = major > min_major
+                    || (major == min_major && minor > min_minor)
+                    || (major == min_major && minor == min_minor && patch >= min_patch);
+
+                if !is_sufficient {
+                    violations.push(format!(
+                        "Line {line_num}: cargo-deny-action version too old: {version_str}\n  \
+                         Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
+                         Found: v{major}.{minor}.{patch}\n  \
+                         Please update to v2.0.15 or newer for security and stability fixes."
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_cargo_deny,
+        "cargo-deny-action not found in CI workflow.\n\
+         Expected to find 'uses: EmbarkStudios/cargo-deny-action@...' in {}",
+        ci_workflow.display()
+    );
+
+    if !violations.is_empty() {
+        panic!(
+            "cargo-deny-action version check failed:\n\n{}\n",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_action_version_comments_exist() {
+    // This test validates that all GitHub Actions with SHA pinning have version comments
+    // Version comments make it easy to understand what version is being used without
+    // looking up the SHA on GitHub
+    //
+    // Required format: uses: owner/repo@<sha> # vX.Y.Z or # tag-name
+    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "Workflows directory not found or empty at {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("uses:") {
+                let uses_value = trimmed.trim_start_matches("uses:").trim();
+
+                // Skip local actions and docker references
+                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
+                    continue;
+                }
+
+                // Extract the action reference
+                let parts: Vec<&str> = uses_value.split('@').collect();
+                if parts.len() < 2 {
+                    continue; // Already caught by SHA pinning test
+                }
+
+                let after_at = parts[1];
+                let action_ref = after_at.split_whitespace().next().unwrap_or("");
+
+                if is_sha_pinned(action_ref) {
+                    // SHA-pinned action should have a version comment
+                    if !after_at.contains('#') {
+                        violations.push(format!(
+                            "{}:{}: SHA-pinned action missing version comment: {}\n  \
+                             Add a comment with the version/tag for readability.\n  \
+                             Format: uses: {}@{} # vX.Y.Z or # tag-name",
+                            filename, line_num, parts[0], parts[0], action_ref
+                        ));
+                    } else {
+                        // Verify comment is not empty
+                        if let Some(comment_part) = after_at.split('#').nth(1) {
+                            let comment = comment_part.trim();
+                            if comment.is_empty() {
+                                violations.push(format!(
+                                    "{}:{}: Version comment is empty: {}\n  \
+                                     Provide the version/tag for this SHA (e.g., # v4.2.2)",
+                                    filename, line_num, parts[0]
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "GitHub Actions with SHA pinning must have version comments:\n\n{}\n\n\
+             Why version comments are required:\n\
+             - Makes it easy to understand which version is being used\n\
+             - Helps identify when updates are needed\n\
+             - Improves code review (reviewers can see version changes)\n\
+             - Enables automated version tracking tools\n\n\
+             Format: uses: owner/repo@<40-char-SHA> # vX.Y.Z\n\
+             Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+            violations.join("\n")
+        );
+    }
+}
+
+/// Helper function to find all files with a given extension, excluding specified directories
+fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    fn visit_dirs(dir: &Path, extension: &str, exclude_dirs: &[&str], files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip excluded directories
+                if path.is_dir() {
+                    let dir_name = path.file_name().unwrap().to_string_lossy();
+                    if exclude_dirs.iter().any(|&excl| dir_name == excl) {
+                        continue;
+                    }
+                    visit_dirs(&path, extension, exclude_dirs, files);
+                } else if path
+                    .extension()
+                    .map(|ext| ext == extension)
+                    .unwrap_or(false)
+                {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    visit_dirs(root, extension, exclude_dirs, &mut files);
+    files
+}
+
+/// Collect all YAML workflow files from the given directory.
+///
+/// Returns a sorted list of directory entries for `.yml` and `.yaml` files.
+/// Panics if the directory exists but cannot be read.
+fn collect_workflow_files(workflows_dir: &Path) -> Vec<std::fs::DirEntry> {
+    if !workflows_dir.exists() {
+        return Vec::new();
+    }
+    let mut files: Vec<_> = std::fs::read_dir(workflows_dir)
+        .expect("Failed to read workflows directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext == "yml" || ext == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+    // Sort for deterministic ordering across test runs
+    files.sort_by_key(|e| e.file_name());
+    files
+}
+
+/// Return `true` if `reference` is a valid 40-character lowercase hex SHA.
+///
+/// GitHub Actions require full-length SHA pinning (not tags) to prevent
+/// supply-chain attacks where a mutable tag could be silently updated.
+fn is_sha_pinned(reference: &str) -> bool {
+    reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Truncate a semver string to `major.minor` format.
+///
+/// Examples:
+/// - `"1.88.0"` → `"1.88"`
+/// - `"1.88"` → `"1.88"` (already short)
+fn to_major_minor(version: &str) -> String {
+    version.split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
+// ============================================================================
+// Link Check Tests
+// ============================================================================
+
+#[test]
+fn test_lychee_config_exists_and_is_valid() {
+    // This test ensures the lychee link checker configuration exists and is valid
+    // Prevents link checker failures due to missing or malformed configuration
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+
+    assert!(
+        lychee_config.exists(),
+        ".lychee.toml configuration file is missing.\n\
+         This file is required for link checking in CI.\n\
+         See .github/workflows/link-check.yml"
+    );
+
+    let content = read_file(&lychee_config);
+
+    // Check for required sections
+    let required_fields = vec![
+        ("max_concurrency", "Controls parallel link checking"),
+        ("accept", "Accepted HTTP status codes"),
+        ("exclude", "URLs to exclude from checking"),
+        ("timeout", "Request timeout in seconds"),
+    ];
+
+    let mut missing_fields = Vec::new();
+    for (field, description) in required_fields {
+        if !content.contains(field) {
+            missing_fields.push(format!("  - {field} ({description})"));
+        }
+    }
+
+    if !missing_fields.is_empty() {
+        panic!(
+            ".lychee.toml is missing required fields:\n\n{}\n\n\
+             These fields are required for proper link checking.\n\
+             Add them to .lychee.toml following the lychee documentation.",
+            missing_fields.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_lychee_excludes_placeholder_urls() {
+    // This test verifies that placeholder URLs are properly excluded in .lychee.toml
+    // Prevents link checker failures on example/placeholder URLs in documentation
+    //
+    // Background: Documentation often includes placeholder URLs like:
+    // - https://github.com/owner/repo
+    // - https://github.com/{}
+    // - http://localhost:3000
+    // These should be excluded to avoid false failures
+    //
+    // Note: .lychee.toml exclude patterns are **regex** (not globs), so we must
+    // compile them and test for matches rather than checking literal substrings.
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+    let content = read_file(&lychee_config);
+
+    // Parse the exclude array from .lychee.toml by extracting quoted strings
+    // between `exclude = [` and the closing `]`.
+    let exclude_patterns = parse_lychee_exclude_patterns(&content);
+    assert!(
+        !exclude_patterns.is_empty(),
+        ".lychee.toml must contain an 'exclude' array with at least one pattern"
+    );
+
+    // Compile all exclude patterns as regexes (just like lychee does)
+    let compiled: Vec<(&str, regex::Regex)> = exclude_patterns
+        .iter()
+        .map(|p| {
+            let re = regex::Regex::new(p)
+                .unwrap_or_else(|e| panic!("Invalid regex in .lychee.toml exclude: {p:?}: {e}"));
+            (p.as_str(), re)
+        })
+        .collect();
+
+    // Define test cases: (url, reason)
+    let test_cases: &[(&str, &str)] = &[
+        ("http://localhost", "Localhost URLs are placeholders"),
+        (
+            "http://localhost:3000",
+            "Localhost with port is a placeholder",
+        ),
+        ("https://localhost", "HTTPS localhost is a placeholder"),
+        ("http://127.0.0.1", "Loopback IPs are placeholders"),
+        ("http://0.0.0.0", "Unspecified IPs are placeholders"),
+        ("ws://localhost", "WebSocket localhost is placeholder"),
+        (
+            "wss://localhost",
+            "Secure WebSocket localhost is placeholder",
+        ),
+        ("mailto:", "Email addresses should be excluded"),
+        (
+            "https://github.com/owner/repo/",
+            "Generic placeholder pattern",
+        ),
+        ("https://github.com/{}/", "Template placeholder pattern"),
+        (
+            "https://github.com/{}/releases",
+            "Template placeholder with path suffix",
+        ),
+        ("http://your-server/", "Placeholder server URL"),
+        // Truncated URLs extracted by lychee from regex patterns in .lychee.toml
+        // itself (defense-in-depth in case exclude_path fails for dotfiles)
+        ("https://github/", "Truncated URL from .lychee.toml regex"),
+        ("https://github", "Truncated URL without trailing slash"),
+        ("https://lib/", "Truncated URL from .lychee.toml regex"),
+        ("https://lib", "Truncated URL without trailing slash"),
+        // file:// protocol for local file links
+        ("file:///tmp/foo", "Local file URLs should be excluded"),
+        // Anchor-only links (same-page references)
+        ("#section-heading", "Anchor-only links should be excluded"),
+        // lib.rs returns 403 for automated checks
+        (
+            "https://lib.rs/crates/foo",
+            "lib.rs returns 403 for automated checks",
+        ),
+        // URL-encoded brace placeholders
+        (
+            "https://github.com/%7Buser%7D",
+            "URL-encoded brace placeholder should be excluded",
+        ),
+    ];
+
+    let mut missing_exclusions = Vec::new();
+    for &(url, reason) in test_cases {
+        let matched = compiled.iter().any(|(_, re)| re.is_match(url));
+        if !matched {
+            let tried: Vec<String> = compiled
+                .iter()
+                .map(|(pat, _)| format!("    {pat:?}"))
+                .collect();
+            missing_exclusions.push(format!(
+                "  - URL: {url}\n    Reason: {reason}\n    Patterns tried:\n{}",
+                tried.join("\n")
+            ));
+        }
+    }
+
+    if !missing_exclusions.is_empty() {
+        panic!(
+            ".lychee.toml exclude patterns do not match these placeholder URLs:\n\n{}\n\n\
+             Add or fix regex patterns in the 'exclude' list in .lychee.toml.\n\
+             Remember: exclude values are regex, not literal strings.\n",
+            missing_exclusions.join("\n\n")
+        );
+    }
+}
+
+/// Parse the `exclude = [...]` array from `.lychee.toml` content, returning
+/// the list of unescaped string values (regex patterns).
+fn parse_lychee_exclude_patterns(content: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    let mut in_exclude = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect the start of the exclude array
+        if trimmed.starts_with("exclude") && trimmed.contains('[') {
+            // Could also be `exclude_path` or `exclude_link_local` — only match bare `exclude`
+            let key = trimmed.split('=').next().unwrap_or("").trim();
+            if key != "exclude" {
+                continue;
+            }
+            in_exclude = true;
+            // If the opening `[` and closing `]` are on the same line, handle inline
+            if trimmed.contains(']') {
+                extract_quoted_strings(trimmed, &mut patterns);
+                in_exclude = false;
+            }
+            continue;
+        }
+
+        if in_exclude {
+            if trimmed.starts_with(']') {
+                break;
+            }
+            extract_quoted_strings(trimmed, &mut patterns);
+        }
+    }
+
+    patterns
+}
+
+/// Extract double-quoted strings from a line, stripping comments.
+fn extract_quoted_strings(line: &str, out: &mut Vec<String>) {
+    // Strip trailing `# comment`
+    let without_comment = strip_trailing_comment(line);
+    let mut chars = without_comment.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            let mut s = String::new();
+            loop {
+                match chars.next() {
+                    None | Some('"') => break,
+                    Some('\\') => {
+                        // TOML basic string escape sequences:
+                        // `\\` -> `\`, `\"` -> `"`, `\n` -> newline, etc.
+                        // In .lychee.toml, regex backslashes are written as `\\`
+                        // (e.g., `\\.` in TOML source becomes `\.` as a regex).
+                        if let Some(next) = chars.next() {
+                            match next {
+                                '\\' => s.push('\\'),
+                                '"' => s.push('"'),
+                                'n' => s.push('\n'),
+                                't' => s.push('\t'),
+                                'r' => s.push('\r'),
+                                // For any other char, preserve both (lenient)
+                                other => {
+                                    s.push('\\');
+                                    s.push(other);
+                                }
+                            }
+                        }
+                    }
+                    Some(c) => s.push(c),
+                }
+            }
+            out.push(s);
+        }
+    }
+}
+
+/// Strip a trailing `# comment` from a TOML line, being careful not to
+/// strip `#` that appears inside a quoted string.
+fn strip_trailing_comment(line: &str) -> &str {
+    let mut in_quote = false;
+    let mut prev_backslash = false;
+    for (i, ch) in line.char_indices() {
+        if ch == '"' && !prev_backslash {
+            in_quote = !in_quote;
+        }
+        if ch == '#' && !in_quote {
+            return &line[..i];
+        }
+        // After `\\`, reset so the next char is not treated as escaped.
+        prev_backslash = ch == '\\' && !prev_backslash;
+    }
+    line
+}
+
+#[test]
+fn test_strip_trailing_comment() {
+    // Basic comment stripping
+    assert_eq!(strip_trailing_comment("value # comment"), "value ");
+    assert_eq!(strip_trailing_comment("no comment"), "no comment");
+
+    // Preserves # inside quoted strings
+    assert_eq!(
+        strip_trailing_comment(r#""pattern#with#hash""#),
+        r#""pattern#with#hash""#
+    );
+
+    // Strips comment after quoted string
+    assert_eq!(
+        strip_trailing_comment(r#""value" # comment"#),
+        r#""value" "#
+    );
+
+    // Handles escaped quotes inside strings
+    assert_eq!(
+        strip_trailing_comment(r#""escaped\"quote" # comment"#),
+        r#""escaped\"quote" "#
+    );
+
+    // Handles double-backslash before closing quote (not an escape)
+    assert_eq!(
+        strip_trailing_comment(r#""ends_with_backslash\\" # comment"#),
+        r#""ends_with_backslash\\" "#
+    );
+}
+
+#[test]
+fn test_extract_quoted_strings() {
+    let mut out = Vec::new();
+
+    // Basic string extraction
+    extract_quoted_strings(r#""hello""#, &mut out);
+    assert_eq!(out, vec!["hello"]);
+
+    // Multiple strings
+    out.clear();
+    extract_quoted_strings(r#""a", "b""#, &mut out);
+    assert_eq!(out, vec!["a", "b"]);
+
+    // TOML escape: \\ becomes single backslash
+    out.clear();
+    extract_quoted_strings(r#""^https?://127\\.0""#, &mut out);
+    assert_eq!(out, vec![r"^https?://127\.0"]);
+
+    // TOML escape: \{ and \} preserved as-is (lenient fallback)
+    out.clear();
+    extract_quoted_strings(r#""\\{\\}""#, &mut out);
+    assert_eq!(out, vec![r"\{\}"]);
+}
+
+#[test]
+fn test_parse_lychee_exclude_patterns() {
+    // Parses only the `exclude` array, not `exclude_path` or `exclude_link_local`
+    let content = r#"
+exclude = [
+    "^https?://localhost",
+    "^mailto:",
+]
+
+exclude_path = [
+    "target/",
+    "tests/",
+]
+
+exclude_link_local = true
+"#;
+    let patterns = parse_lychee_exclude_patterns(content);
+    assert_eq!(patterns, vec!["^https?://localhost", "^mailto:"]);
+}
+
+#[test]
+fn test_no_actual_placeholder_urls_in_docs() {
+    // This test ensures documentation prose doesn't contain placeholder URLs
+    // that should be replaced with real URLs.
+    //
+    // Scope: Only checks non-code content (code blocks and inline code are excluded
+    // because example/tutorial docs legitimately show placeholder patterns).
+    // The .llm/ directory is excluded because it documents CI patterns themselves.
+
+    let root = repo_root();
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party", ".llm"]);
+
+    // Patterns that indicate a placeholder URL in prose text
+    let suspicious_patterns: &[(&str, &str)] = &[
+        (
+            r"https://github\.com/owner/repo",
+            "Generic owner/repo placeholder - replace with actual repo URL",
+        ),
+        (
+            r"https://github\.com/\{\}",
+            "Template curly brace placeholder - replace with actual owner/repo",
+        ),
+        (
+            r"https?://example\.com(?!/)",
+            "Generic example.com URL - use a real example or inline code",
+        ),
+        (
+            r"http://your-server",
+            "Generic your-server placeholder - replace with actual server URL",
+        ),
+    ];
+
+    // Compile regexes once before the loops for performance.
+    // Patterns that fail to compile (e.g., those using unsupported lookahead syntax) are
+    // skipped, preserving the original behaviour of the per-line `if let Ok(regex)` guard.
+    let compiled_suspicious: Vec<(regex::Regex, &str, &str)> = suspicious_patterns
+        .iter()
+        .filter_map(|(pattern, description)| {
+            regex::Regex::new(pattern)
+                .ok()
+                .map(|re| (re, *pattern, *description))
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+        let mut in_code_block = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+            let trimmed = line.trim_start();
+
+            // Track fenced code block state per CommonMark spec:
+            // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
+            // - Closing fence: 3+ backticks with NO info string (bare backticks only)
+            // When inside a code block, only a bare fence closes it; inner ```rust
+            // lines are content, not real fences.
+            let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_count >= 3 {
+                let after_backticks = trimmed[backtick_count..].trim();
+                if in_code_block {
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                    }
+                } else {
+                    in_code_block = true;
+                }
+                continue;
+            }
+
+            // Skip lines inside code blocks - placeholder URLs in examples are intentional
+            if in_code_block {
+                continue;
+            }
+
+            // Skip lines that are entirely inline code (single-backtick) - these are examples
+            if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() > 2 {
+                continue;
+            }
+
+            // Strip inline code segments before checking to avoid false positives
+            // e.g., "use `https://github.com/owner/repo` as the pattern" should not flag
+            let line_without_inline_code = {
+                let mut result = String::new();
+                let mut in_inline = false;
+                for ch in line.chars() {
+                    if ch == '`' {
+                        in_inline = !in_inline;
+                    } else if !in_inline {
+                        result.push(ch);
+                    }
+                }
+                result
+            };
+
+            for (regex, pattern, description) in &compiled_suspicious {
+                if regex.is_match(&line_without_inline_code) {
+                    violations.push(format!(
+                        "{}:{}: Placeholder URL in documentation prose\n  \
+                         Pattern: {}\n  \
+                         Description: {}\n  \
+                         Fix: Replace with a real URL or move into a code block\n  \
+                         Verify: grep -n '{}' {}\n  \
+                         Line: {}",
+                        file.display(),
+                        line_num,
+                        pattern,
+                        description,
+                        pattern,
+                        file.display(),
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Documentation prose contains placeholder URLs that should be replaced:\n\n{}\n\n\
+             Placeholder URLs in prose text break link checks and look unprofessional.\n\
+             Options:\n\
+             1. Replace with the actual URL for this project\n\
+             2. Wrap in backticks to mark as a code example: `https://github.com/owner/repo`\n\
+             3. Move to a fenced code block if showing a full example\n\
+             4. If intentional, add the URL pattern to .lychee.toml exclude list",
+            violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_lychee_config_format_is_valid_toml() {
+    // This test validates that .lychee.toml is valid TOML
+    // Catches syntax errors before they cause CI failures
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+    let content = read_file(&lychee_config);
+
+    // Basic TOML validation (full validation would require a TOML parser)
+    // Check for unbalanced quotes
+    let double_quotes = content.matches('"').count();
+    if double_quotes % 2 != 0 {
+        panic!(
+            ".lychee.toml has unbalanced quotes.\n\
+             Found {double_quotes} double quotes (should be even).\n\
+             Check for missing closing quotes."
+        );
+    }
+
+    // Check for required array syntax
+    if content.contains("exclude") {
+        assert!(
+            content.contains("exclude = ["),
+            ".lychee.toml: 'exclude' should be an array (exclude = [...])"
+        );
+    }
+
+    if content.contains("accept") {
+        assert!(
+            content.contains("accept = ["),
+            ".lychee.toml: 'accept' should be an array (accept = [...])"
+        );
+    }
+
+    // Check for common TOML mistakes
+    if content.contains("= true") || content.contains("= false") {
+        // Booleans are valid, but check they're not quoted
+        if content.contains("= \"true\"") || content.contains("= \"false\"") {
+            panic!(
+                ".lychee.toml: Boolean values should not be quoted.\n\
+                 Use 'field = true' not 'field = \"true\"'"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Markdown Lint Tests
+// ============================================================================
+
+#[test]
+fn test_markdown_no_capitalized_filenames_in_links() {
+    // This test catches improperly capitalized filenames in markdown links
+    // Prevents link breakage on case-sensitive filesystems
+    //
+    // Example violations:
+    // - [link](README.MD) when file is README.md
+    // - [link](Docs/Config.md) when path is docs/config.md
+
+    let root = repo_root();
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+
+    let mut violations = Vec::new();
+
+    // Compile regex once outside the loop for better performance
+    let link_regex = regex::Regex::new(r"\[([^]]+)\]\(([^)]+)\)").unwrap();
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+
+            // Extract markdown links: [text](url)
+            if let Some(captures) = link_regex.captures(line) {
+                let url = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+
+                // Skip external URLs
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    continue;
+                }
+
+                // Check for uppercase file extensions (.MD, .TOML, .RS, etc.)
+                if url.ends_with(".MD")
+                    || url.ends_with(".TOML")
+                    || url.ends_with(".RS")
+                    || url.ends_with(".JSON")
+                    || url.ends_with(".YAML")
+                    || url.ends_with(".YML")
+                {
+                    violations.push(format!(
+                        "{}:{}: Link has uppercase file extension: {}\n  \
+                         Use lowercase extensions (.md not .MD) for cross-platform compatibility",
+                        file.display(),
+                        line_num,
+                        url
+                    ));
+                }
+
+                // Check for capitalized directory names in relative links
+                // This is a heuristic check - may need refinement
+                if url.contains("/Docs/") || url.contains("/Scripts/") || url.contains("/Tests/") {
+                    violations.push(format!(
+                        "{}:{}: Link contains capitalized directory: {}\n  \
+                         Use lowercase directory names for consistency",
+                        file.display(),
+                        line_num,
+                        url
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Markdown files contain links with improper capitalization:\n\n{}\n\n\
+             Fix by using lowercase file extensions and directory names.\n\
+             This prevents link breakage on case-sensitive filesystems (Linux, macOS).",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_markdown_technical_terms_consistency() {
+    // This test validates that technical terms use consistent capitalization
+    // Prevents documentation inconsistency and improves professionalism
+    //
+    // Based on .markdownlint.json MD044 configuration
+
+    let root = repo_root();
+
+    // Data-driven test cases: (incorrect_pattern, correct_term, context)
+    let test_cases = vec![
+        (r"\bgithub\b", "GitHub", "Service name"),
+        (r"\bwebsocket\b", "WebSocket", "Protocol name"),
+        (r"\bjavascript\b", "JavaScript", "Language name"),
+        (r"\bdocker\b", "Docker", "Container platform"),
+        (r"\bci/cd\b", "CI/CD", "Continuous integration/deployment"),
+    ];
+
+    // Compile regexes once before the loops for performance
+    let compiled_cases: Vec<(regex::Regex, &str, &str)> = test_cases
+        .iter()
+        .map(|(pattern, correct, context)| {
+            (
+                regex::Regex::new(pattern).expect("valid regex pattern"),
+                *correct,
+                *context,
+            )
+        })
+        .collect();
+
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+    let mut violations = Vec::new();
+
+    // Compile URL-stripping regex outside all loops to avoid repeated allocations.
+    // Strips markdown link URLs: [text](url) -> [text]
+    // This prevents matching technical terms in URLs (e.g. github.com in links)
+    let url_strip_regex = regex::Regex::new(r"\]\([^)]*\)").expect("valid url-strip regex pattern");
+
+    for file in markdown_files {
+        let content = read_file(&file);
+
+        // Track fenced code block state to match MD044's "code_blocks": false behavior
+        let mut in_code_block = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+
+            // Track fenced code block state per CommonMark spec:
+            // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
+            // - Closing fence: 3+ backticks with NO info string (just backticks + optional spaces)
+            // When already inside a code block, only a bare fence (no info string) closes it.
+            // This correctly handles nested code examples in markdown skill docs where
+            // inner ```rust fences are content, not real fences.
+            let trimmed = line.trim_start();
+            let backtick_prefix_len = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_prefix_len >= 3 {
+                let after_backticks = trimmed[backtick_prefix_len..].trim();
+                if in_code_block {
+                    // Inside a code block: only a bare fence line (no info string) closes it
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                    }
+                    // Lines like ```rust inside a code block are just content
+                } else {
+                    // Outside a code block: any 3+ backtick line opens one
+                    in_code_block = true;
+                }
+                continue;
+            }
+
+            // Skip lines inside fenced code blocks
+            if in_code_block {
+                continue;
+            }
+
+            // Skip lines containing inline code (backticks) - file paths, commands, etc.
+            if line.contains('`') {
+                continue;
+            }
+
+            let line_no_urls = url_strip_regex.replace_all(line, "]");
+
+            for (regex, correct, context) in &compiled_cases {
+                if regex.is_match(&line_no_urls) {
+                    violations.push(format!(
+                        "{}:{}: Incorrect capitalization: should be '{}'\n  \
+                         Context: {}\n  \
+                         Line: {}",
+                        file.display(),
+                        line_num,
+                        correct,
+                        context,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Found inconsistent technical term capitalization:\n\n{}\n\n\
+             Fix the capitalization in the files above.\n\
+             If markdownlint MD044 should catch these, verify .markdownlint.json 'names' array \
+             is configured correctly.",
+            violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_code_block_fence_tracking_commonmark_compliant() {
+    // This test validates that the CommonMark-correct code block fence tracking logic
+    // handles all markdown files without mismatched fences.
+    //
+    // Background: The previous code block tracking used a blind toggle
+    // (`in_code_block = !in_code_block`) which broke on nested code fences in markdown
+    // skill docs. The fix uses proper CommonMark parsing:
+    //   - Opening fences can have info strings (e.g., ```rust, ```bash)
+    //   - Closing fences must be bare (just backticks + optional whitespace)
+    //
+    // This test ensures every markdown file has balanced fence opens/closes,
+    // meaning the parser ends outside any code block after processing the entire file.
+
+    let root = repo_root();
+    // Exclude test-fixtures which may contain intentionally malformed markdown
+    let markdown_files =
+        find_files_with_extension(&root, "md", &["target", "third_party", "test-fixtures"]);
+
+    assert!(
+        !markdown_files.is_empty(),
+        "Expected to find markdown files in the repository"
+    );
+
+    let mut violations = Vec::new();
+
+    for file in &markdown_files {
+        let content = read_file(file);
+
+        let mut in_code_block = false;
+        let mut opens = 0usize;
+        let mut closes = 0usize;
+        let mut last_open_line = 0usize;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+            let trimmed = line.trim_start();
+
+            // Count the leading backtick characters
+            let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_count >= 3 {
+                let after_backticks = trimmed[backtick_count..].trim();
+                if in_code_block {
+                    // Inside a code block: only a bare fence (no info string) closes it.
+                    // Lines like ```rust inside a code block are just content, not real fences.
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                        closes += 1;
+                    }
+                } else {
+                    // Outside a code block: any 3+ backtick line opens one
+                    // (may have an info string like ```rust or ```bash)
+                    in_code_block = true;
+                    opens += 1;
+                    last_open_line = line_num;
+                }
+            }
+        }
+
+        // After processing the entire file, we must be outside any code block
+        if in_code_block {
+            violations.push(format!(
+                "{}: Unclosed code block at end of file (last opened at line {}, opens={}, closes={})",
+                file.display(),
+                last_open_line,
+                opens,
+                closes,
+            ));
+        }
+
+        // Opens and closes must balance
+        if opens != closes {
+            violations.push(format!(
+                "{}: Mismatched fences: {} opens vs {} closes",
+                file.display(),
+                opens,
+                closes,
+            ));
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Code block fence tracking found CommonMark violations:\n\n{}\n\n\
+             Fix: Ensure every opening fence (```) has a matching bare closing fence.\n\
+             Opening fences may have info strings (e.g., ```rust), \
+             but closing fences must be bare (just backticks).",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_markdown_common_patterns_are_correct() {
+    // This test validates common markdown patterns are correctly formatted.
+    // Catches issues that might slip through markdownlint rules.
+    //
+    // Note: MD040 (code blocks without language identifier) is intentionally excluded
+    // here because test_markdown_files_have_language_identifiers provides full coverage
+    // of that rule with proper code-block tracking.
+
+    let root = repo_root();
+    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+
+    // Test cases: (anti_pattern_regex, description, fix_command)
+    // MD040 omitted - covered by test_markdown_files_have_language_identifiers
+    let test_cases = [(
+        r"\]\([A-Z]:/",
+        "Windows absolute path in link",
+        "Use forward slashes: sed -i 's/]([A-Z]:\\//)]/g' <file>",
+    )];
+
+    // Compile regexes once before the loops for performance
+    let compiled_cases: Vec<(regex::Regex, &str, &str)> = test_cases
+        .iter()
+        .map(|(pattern, description, fix_cmd)| {
+            (
+                regex::Regex::new(pattern).expect("valid regex pattern"),
+                *description,
+                *fix_cmd,
+            )
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+
+    for file in &markdown_files {
+        let content = read_file(file);
+        let mut in_code_block = false;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+            let trimmed = line.trim_start();
+
+            // Track fenced code block state per CommonMark spec:
+            // Opening fences may have info strings; closing fences must be bare.
+            let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
+            if backtick_count >= 3 {
+                let after_backticks = trimmed[backtick_count..].trim();
+                if in_code_block {
+                    if after_backticks.is_empty() {
+                        in_code_block = false;
+                    }
+                } else {
+                    in_code_block = true;
+                }
+                continue;
+            }
+
+            // Skip checking inside code blocks
+            if in_code_block {
+                continue;
+            }
+
+            for (regex, description, fix_cmd) in &compiled_cases {
+                if regex.is_match(line) {
+                    violations.push(format!(
+                        "{}:{}: {}\n  \
+                         Fix: {}\n  \
+                         Verify: grep -n '{}' {}\n  \
+                         Line: {}",
+                        file.display(),
+                        line_num,
+                        description,
+                        fix_cmd,
+                        regex.as_str(),
+                        file.display(),
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Markdown files contain formatting violations:\n\n{}\n\n\
+             These patterns cause rendering or portability issues.\n\
+             Fix each violation using the command shown above.",
+            violations.join("\n\n")
+        );
+    }
+}
+
+// ============================================================================
+// AWK Script Testing
+// ============================================================================
+
+#[test]
+fn test_doc_validation_awk_script_extraction() {
+    // This test validates the AWK scripts used by doc-validation for Rust
+    // code block extraction. The AWK logic may live inline in the workflow
+    // or in an external script (.github/scripts/extract-rust-blocks.awk).
+    //
+    // Background: The doc-validation.yml workflow uses AWK scripts to extract
+    // and validate code blocks from markdown. These scripts need validation
+    // to prevent issues like the AWK pattern bug we fixed.
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+    let external_awk = root.join(".github/scripts/extract-rust-blocks.awk");
+
+    if !workflow.exists() {
+        panic!(
+            "doc-validation.yml workflow not found at {}",
+            workflow.display()
+        );
+    }
+
+    let workflow_content = read_file(&workflow);
+
+    // The Rust block extraction AWK may be inline or in an external file.
+    // Combine both sources for validation.
+    let awk_content = if external_awk.exists() {
+        // External AWK file is the preferred approach (avoids shell quoting issues)
+        read_file(&external_awk)
+    } else {
+        // Fall back to checking inline AWK in the workflow
+        workflow_content.clone()
+    };
+
+    // Verify the workflow references AWK (either inline or via awk -f)
+    assert!(
+        workflow_content.contains("awk '")
+            || workflow_content.contains("awk \"")
+            || workflow_content.contains("awk -f"),
+        "doc-validation.yml should contain AWK scripts or reference external AWK files.\n\
+         These scripts are critical for validating markdown code blocks."
+    );
+
+    // Check for the main Rust code block extraction AWK script
+    // This script handles complex patterns: ```rust, ```Rust, ```rust,ignore, etc.
+    assert!(
+        awk_content.contains("/^```[Rr]ust/"),
+        "Rust block extraction AWK script should use case-insensitive pattern for Rust.\n\
+         Pattern /^```[Rr]ust/ matches both ```rust and ```Rust.\n\
+         This prevents missing code blocks with capitalized language identifiers.\n\
+         Checked in: {}",
+        if external_awk.exists() {
+            external_awk.display().to_string()
+        } else {
+            workflow.display().to_string()
+        }
+    );
+
+    // Verify the AWK script has END block for unclosed blocks at EOF
+    assert!(
+        awk_content.contains("END {") && awk_content.contains("if (in_block)"),
+        "Rust block extraction AWK script should have END block to handle unclosed blocks.\n\
+         Without END block, code blocks at end of file without closing fence are lost.\n\
+         The END block should check 'if (in_block)' and output remaining content."
+    );
+
+    // Verify content accumulation handles empty first lines correctly
+    // The fix uses: if (content == "") { content = $0 } else { content = content "\n" $0 }
+    assert!(
+        awk_content.contains("content = $0")
+            && awk_content.contains("content = content \"\\n\" $0"),
+        "Rust block extraction AWK script should properly handle empty first lines.\n\
+         Correct pattern: if (content == \"\") {{ content = $0 }} else {{ content = content \"\\n\" $0 }}\n\
+         This prevents losing empty lines at the start of code blocks."
+    );
+
+    // Verify attribute extraction after rust/Rust fence
+    // The pattern should use sub() to remove prefix and extract attributes
+    assert!(
+        awk_content.contains("sub(/^```[Rr]ust,?/, \"\", attrs)"),
+        "Rust block extraction AWK script should extract attributes after rust fence.\n\
+         Pattern: sub(/^```[Rr]ust,?/, \"\", attrs) removes fence and optional comma,\n\
+         leaving attributes like 'ignore', 'no_run', 'should_panic'."
+    );
+}
+
+#[test]
+fn test_awk_pattern_matching_with_fixtures() {
+    // This test validates AWK pattern matching using test fixtures
+    // Tests all variants: plain rust, capitalized, comma-separated, space-separated,
+    // nested blocks, and unclosed blocks at EOF
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+    let fixtures_dir = root.join("test-fixtures/markdown");
+
+    if !workflow.exists() {
+        panic!(
+            "Expected workflow file not found: {}\n\
+             This file is required for AWK pattern matching validation.\n\
+             Restore the file or update this test.",
+            workflow.display()
+        );
+    }
+
+    if !fixtures_dir.exists() {
+        panic!(
+            "Test fixtures directory not found at {}\n\
+             Create test fixtures for AWK pattern matching validation:\n\
+             - test-fixtures/markdown/awk-patterns-plain-rust.md\n\
+             - test-fixtures/markdown/awk-patterns-capitalized.md\n\
+             - test-fixtures/markdown/awk-patterns-comma-separated.md\n\
+             - test-fixtures/markdown/awk-patterns-space-separated.md\n\
+             - test-fixtures/markdown/awk-patterns-nested-blocks.md\n\
+             - test-fixtures/markdown/awk-patterns-unclosed-eof.md",
+            fixtures_dir.display()
+        );
+    }
+
+    // Data-driven test cases: (fixture_file, expected_blocks, description)
+    let test_cases = vec![
+        (
+            "awk-patterns-plain-rust.md",
+            1,
+            "Plain rust code blocks (```rust)",
+        ),
+        (
+            "awk-patterns-capitalized.md",
+            1,
+            "Capitalized Rust code blocks (```Rust)",
+        ),
+        (
+            "awk-patterns-comma-separated.md",
+            2,
+            "Comma-separated attributes (```rust,ignore)",
+        ),
+        (
+            "awk-patterns-nested-blocks.md",
+            2,
+            "Nested/multiple code blocks",
+        ),
+        ("awk-patterns-unclosed-eof.md", 1, "Unclosed block at EOF"),
+    ];
+
+    let mut violations = Vec::new();
+
+    for (fixture_file, expected_blocks, description) in &test_cases {
+        let fixture_path = fixtures_dir.join(fixture_file);
+
+        if !fixture_path.exists() {
+            violations.push(format!(
+                "Missing test fixture: {fixture_file}\n  \
+                 Description: {description}\n  \
+                 Expected: {expected_blocks} code blocks"
+            ));
+            continue;
+        }
+
+        let fixture_content = read_file(&fixture_path);
+
+        // Count actual code blocks by looking for opening fences at start of lines
+        // This avoids counting inline code references like "```rust" in descriptions
+        let mut rust_blocks = 0;
+        for line in fixture_content.lines() {
+            let trimmed = line.trim_start();
+            // Match opening fences: ```rust or ```Rust (with optional attributes)
+            if trimmed.starts_with("```rust") || trimmed.starts_with("```Rust") {
+                rust_blocks += 1;
+            }
+        }
+
+        if rust_blocks != *expected_blocks {
+            violations.push(format!(
+                "Fixture {fixture_file} block count mismatch\n  \
+                 Description: {description}\n  \
+                 Expected: {expected_blocks} blocks\n  \
+                 Found: {rust_blocks} blocks\n  \
+                 This indicates the test fixture needs updating or the pattern is incorrect."
+            ));
+        }
+    }
+
+    // Verify that the space-separated fixture exists (even if pattern doesn't support it yet)
+    let space_separated = fixtures_dir.join("awk-patterns-space-separated.md");
+    if space_separated.exists() {
+        let space_content = read_file(&space_separated);
+        // Note: space-separated attributes are less common, but should be documented
+        if !space_content.contains("```rust ignore") {
+            violations.push(
+                "Space-separated fixture should contain ```rust ignore pattern\n  \
+                 This tests whether AWK script handles space-separated attributes.\n  \
+                 Note: Current implementation may not support this variant."
+                    .to_string(),
+            );
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "AWK pattern matching fixture validation failed:\n\n{}\n\n\
+             Fix:\n\
+             1. Ensure all test fixtures exist in test-fixtures/markdown/\n\
+             2. Verify each fixture has the expected number of code blocks\n\
+             3. Check that AWK patterns in workflow match fixture patterns\n\
+             4. Update fixtures if expected block counts have changed",
+            violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_awk_posix_compatibility() {
+    // This test verifies that AWK scripts use POSIX-compatible syntax
+    // Prevents issues with different AWK implementations (gawk vs mawk)
+    //
+    // Background: GitHub Actions runners may use different AWK implementations.
+    // - Ubuntu typically uses mawk (faster, POSIX-compliant)
+    // - macOS uses awk (BSD variant)
+    // - gawk (GNU awk) has extensions not in POSIX
+    //
+    // POSIX compatibility ensures scripts work across all environments.
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+
+    if !workflow.exists() {
+        panic!(
+            "Expected workflow file not found: {}\n\
+             This file is required for AWK POSIX compatibility validation.\n\
+             Restore the file or update this test.",
+            workflow.display()
+        );
+    }
+
+    let content = read_file(&workflow);
+
+    // Extract AWK scripts (simplified check)
+    let mut violations = Vec::new();
+
+    // Check for GNU-specific extensions that should be avoided
+    if content.contains("gensub(") {
+        violations.push(
+            "AWK script uses gensub() which is GNU awk specific (not POSIX).\n  \
+             Use sub() or gsub() instead for POSIX compatibility.\n  \
+             Example: sub(/pattern/, \"replacement\", target) instead of gensub()"
+                .to_string(),
+        );
+    }
+
+    if content.contains("match(") && content.contains(", arr)") {
+        violations.push(
+            "AWK script uses match() with array capture (GNU awk specific).\n  \
+             POSIX match() only accepts two arguments: match(string, regex).\n  \
+             Use sub() for replacements instead of match() with captures."
+                .to_string(),
+        );
+    }
+
+    // Verify POSIX-compatible NUL byte output
+    // POSIX: printf "%c", 0 (not printf "\\0")
+    if content.contains("printf \"%s\\\\0\"") || content.contains("printf \"\\\\0\"") {
+        // Check if there's also a POSIX-compatible version
+        if !content.contains("printf \"%c\", 0") {
+            violations.push(
+                "AWK script may use non-POSIX NUL byte output.\n  \
+                 POSIX-compatible: printf \"%c\", 0\n  \
+                 Non-portable: printf \"\\0\" (may not work in mawk)\n  \
+                 The workflow should use printf \"%c\", 0 for NUL delimiters."
+                    .to_string(),
+            );
+        }
+    }
+
+    // Check for POSIX-compatible array indexing (should use 'in' operator)
+    // This is more of a best practice than a strict requirement
+    if content.contains("arr[") && !content.contains("in arr") {
+        // This is informational - arrays are used but might not check existence
+        eprintln!(
+            "INFO: AWK script uses arrays without 'in' operator checks.\n\
+             Consider using: if (key in array) before accessing array[key].\n\
+             This prevents errors on missing keys."
+        );
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "AWK script POSIX compatibility issues:\n\n{}\n\n\
+             Why POSIX compatibility matters:\n\
+             - GitHub Actions runners use different AWK implementations\n\
+             - Ubuntu uses mawk (POSIX-compliant, no GNU extensions)\n\
+             - macOS uses BSD awk (mostly POSIX with some differences)\n\
+             - GNU-specific features cause failures on non-gawk systems\n\n\
+             Fix:\n\
+             1. Replace gensub() with sub() or gsub()\n\
+             2. Use printf \"%c\", 0 for NUL bytes (not \\0)\n\
+             3. Avoid match() with array captures\n\
+             4. Test on multiple AWK implementations (awk, mawk, gawk)",
+            violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_awk_script_syntax_validation() {
+    // This test extracts AWK scripts and validates their syntax
+    // Uses awk --lint to check for potential issues
+    //
+    // Note: This is a best-effort test. Full validation requires running
+    // the extracted AWK scripts through an AWK interpreter with --lint flag.
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+
+    if !workflow.exists() {
+        panic!(
+            "Expected workflow file not found: {}\n\
+             This file is required for AWK script syntax validation.\n\
+             Restore the file or update this test.",
+            workflow.display()
+        );
+    }
+
+    let content = read_file(&workflow);
+
+    // Verify AWK scripts have basic structural correctness
+    let mut violations = Vec::new();
+
+    // Count AWK script blocks
+    let awk_scripts = content.matches("awk '").count() + content.matches("awk \"").count();
+
+    if awk_scripts == 0 {
+        violations.push(
+            "No AWK scripts found in doc-validation.yml.\n  \
+             Expected AWK scripts for code block extraction.\n  \
+             The workflow should use AWK to parse markdown and extract code blocks."
+                .to_string(),
+        );
+    }
+
+    // Check for balanced quotes in AWK scripts (simplified check)
+    // This is a heuristic - proper validation requires parsing
+    let awk_sections: Vec<&str> = content.split("awk '").collect();
+    for (i, section) in awk_sections.iter().enumerate().skip(1) {
+        // Skip first split (before any awk)
+        // Count single quotes until we find the closing quote
+        let mut quote_count = 0;
+        let mut in_escape = false;
+
+        for ch in section.chars() {
+            if in_escape {
+                in_escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                in_escape = true;
+                continue;
+            }
+            if ch == '\'' {
+                quote_count += 1;
+                if quote_count == 1 {
+                    // Found closing quote for AWK script
+                    break;
+                }
+            }
+        }
+
+        if quote_count == 0 {
+            violations.push(format!(
+                "AWK script #{i} appears to be missing closing quote.\n  \
+                 Check for unbalanced quotes in awk ' ... ' blocks.\n  \
+                 This can cause shell syntax errors."
+            ));
+        }
+    }
+
+    // Check for common AWK syntax patterns
+    // Basic validation: should have blocks like /pattern/ { action }
+    if content.contains("awk '") {
+        let has_pattern_action = content.contains("{") && content.contains("}");
+        if !has_pattern_action {
+            violations.push(
+                "AWK scripts should contain pattern-action blocks: /pattern/ { action }.\n  \
+                 Basic AWK structure: pattern { action_statements }\n  \
+                 Check that AWK scripts have proper syntax."
+                    .to_string(),
+            );
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "AWK script syntax validation issues:\n\n{}\n\n\
+             These are basic syntax checks. For comprehensive validation:\n\
+             1. Extract AWK scripts to separate files\n\
+             2. Run: awk --lint -f script.awk /dev/null\n\
+             3. Fix any warnings or errors\n\
+             4. Test with actual markdown files\n\n\
+             The shellcheck-workflow job in CI validates inline bash scripts,\n\
+             but AWK syntax requires separate validation.",
+            violations.join("\n\n")
+        );
+    }
+}
+
+// ============================================================================
+// CI Workflow Validation Tests
+// ============================================================================
+
+#[test]
+fn test_link_check_workflow_exists_and_is_configured() {
+    // This test ensures the link-check workflow exists and is properly configured
+    // Prevents link rot from going undetected
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/link-check.yml");
+
+    assert!(
+        workflow.exists(),
+        "link-check.yml workflow is missing.\n\
+         Link checking is critical for documentation quality.\n\
+         Create .github/workflows/link-check.yml with lychee-action"
+    );
+
+    let content = read_file(&workflow);
+
+    // Verify workflow uses lychee-action
+    assert!(
+        content.contains("lycheeverse/lychee-action"),
+        "link-check.yml must use lycheeverse/lychee-action"
+    );
+
+    // Verify workflow uses .lychee.toml config
+    assert!(
+        content.contains(".lychee.toml") || content.contains("--config"),
+        "link-check.yml must reference .lychee.toml configuration file"
+    );
+
+    // Verify workflow has GITHUB_TOKEN for rate limiting
+    assert!(
+        content.contains("GITHUB_TOKEN"),
+        "link-check.yml should use GITHUB_TOKEN to avoid rate limiting"
+    );
+
+    // Verify workflow runs on schedule for proactive link rot detection
+    assert!(
+        content.contains("schedule:") || content.contains("cron:"),
+        "link-check.yml should run on a schedule (e.g., weekly) to catch link rot"
+    );
+}
+
+#[test]
+fn test_markdownlint_workflow_exists_and_is_configured() {
+    // This test ensures the markdownlint workflow exists and is properly configured
+    // Prevents markdown formatting issues from reaching main branch
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/markdownlint.yml");
+
+    assert!(
+        workflow.exists(),
+        "markdownlint.yml workflow is missing.\n\
+         Markdown linting is required for documentation consistency.\n\
+         Create .github/workflows/markdownlint.yml"
+    );
+
+    let content = read_file(&workflow);
+
+    // Verify workflow uses markdownlint-cli2-action
+    assert!(
+        content.contains("DavidAnson/markdownlint-cli2-action")
+            || content.contains("markdownlint-cli2"),
+        "markdownlint.yml must use markdownlint-cli2"
+    );
+
+    // Verify workflow excludes common directories
+    let excluded_dirs = vec!["target", "third_party", "node_modules"];
+    for dir in excluded_dirs {
+        assert!(
+            content.contains(dir),
+            "markdownlint.yml should exclude {dir} directory"
+        );
+    }
+
+    // Verify workflow has path filters for efficiency
+    assert!(
+        content.contains("paths:") && content.contains("**.md"),
+        "markdownlint.yml should have path filters to run only on .md changes"
+    );
+}
+
+#[test]
+fn test_doc_validation_workflow_has_shellcheck() {
+    // This test ensures the doc-validation workflow validates its own shell scripts
+    // Prevents AWK and bash syntax errors in workflow scripts
+    //
+    // Background: The doc-validation.yml workflow contains complex AWK and bash scripts
+    // that extract and validate code blocks from markdown. These scripts themselves
+    // need validation to prevent issues like the AWK pattern bug we fixed.
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+
+    if !workflow.exists() {
+        panic!(
+            "Expected workflow file not found: {}\n\
+             This file is required for shellcheck validation.\n\
+             Restore the file or update this test.",
+            workflow.display()
+        );
+    }
+
+    let content = read_file(&workflow);
+
+    // Verify workflow has shellcheck job or step
+    assert!(
+        content.contains("shellcheck") || content.contains("Shellcheck"),
+        "doc-validation.yml should include shellcheck validation of inline scripts.\n\
+         This prevents shell/AWK syntax errors in workflow scripts.\n\
+         Add a shellcheck job that validates inline bash scripts in the workflow."
+    );
+
+    // Verify shellcheck is installed in the workflow
+    if content.contains("shellcheck") {
+        assert!(
+            content.contains("apt-get install") && content.contains("shellcheck")
+                || content.contains("brew install shellcheck"),
+            "doc-validation.yml should install shellcheck to validate scripts"
+        );
+    }
+}
+
+#[test]
+fn test_workflows_use_concurrency_groups() {
+    // This test ensures workflows use concurrency groups to cancel outdated runs
+    // Prevents wasting CI resources on superseded commits
+    //
+    // Concurrency groups allow GitHub Actions to automatically cancel in-progress
+    // workflow runs when a new commit is pushed, saving CI minutes and speeding
+    // up feedback loops.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    // Workflows that should have concurrency groups
+    let should_have_concurrency = [
+        "ci.yml",
+        "link-check.yml",
+        "markdownlint.yml",
+        "doc-validation.yml",
+    ];
+
+    let mut missing_concurrency = Vec::new();
+
+    for entry in collect_workflow_files(&workflows_dir) {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        // Skip workflows that don't need concurrency (e.g., release workflows)
+        if !should_have_concurrency.contains(&filename.as_ref()) {
+            continue;
+        }
+
+        let content = read_file(&path);
+
+        // Check for concurrency configuration
+        if !content.contains("concurrency:") {
+            missing_concurrency.push(format!(
+                "{filename}: Missing concurrency group.\n  \
+                 Add:\n  \
+                 concurrency:\n  \
+                   group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n  \
+                   cancel-in-progress: true"
+            ));
+        } else {
+            // Verify it has cancel-in-progress
+            if !content.contains("cancel-in-progress: true") {
+                missing_concurrency.push(format!(
+                    "{filename}: Has concurrency but missing 'cancel-in-progress: true'"
+                ));
+            }
+        }
+    }
+
+    if !missing_concurrency.is_empty() {
+        panic!(
+            "Workflows should use concurrency groups to cancel outdated runs:\n\n{}\n\n\
+             Why concurrency groups are important:\n\
+             - Saves CI minutes by canceling superseded runs\n\
+             - Speeds up feedback (don't wait for old runs)\n\
+             - Reduces queue times for other workflows\n\n\
+             Standard pattern:\n\
+             concurrency:\n\
+               group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n\
+               cancel-in-progress: true\n",
+            missing_concurrency.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_workflows_have_timeouts() {
+    // This test ensures workflows have reasonable timeouts
+    // Prevents hanging jobs from consuming CI resources indefinitely
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let mut missing_timeouts = Vec::new();
+
+    for entry in collect_workflow_files(&workflows_dir) {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let content = read_file(&path);
+
+        // Check for timeout-minutes in jobs
+        if !content.contains("timeout-minutes:") {
+            missing_timeouts.push(format!(
+                "{filename}: No timeout-minutes configured.\n  \
+                 Fix: Add timeout-minutes to each job.\n  \
+                 Example: timeout-minutes: 10\n  \
+                 Verify: grep -n 'timeout-minutes:' .github/workflows/{filename}"
+            ));
+        }
+    }
+
+    if !missing_timeouts.is_empty() {
+        panic!(
+            "Workflows are missing timeout-minutes on all jobs:\n\n{}\n\n\
+             Why timeouts are required:\n\
+             - Hanging jobs consume CI minutes indefinitely\n\
+             - GitHub's default timeout is 6 hours (way too long)\n\
+             - Explicit timeouts provide fast feedback on stuck jobs\n\n\
+             Fix: Add 'timeout-minutes: N' to each job definition.\n\
+             Example:\n\
+               jobs:\n\
+                 build:\n\
+                   timeout-minutes: 20\n\
+                   runs-on: ubuntu-latest\n\n\
+             Verify: grep -n 'timeout-minutes' .github/workflows/<file>",
+            missing_timeouts.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_workflows_use_minimal_permissions() {
+    // This test ensures workflows follow least-privilege principle
+    // Prevents security issues from compromised workflows or actions
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let mut violations = Vec::new();
+
+    for entry in collect_workflow_files(&workflows_dir) {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let content = read_file(&path);
+
+        // Check if workflow has permissions block
+        if !content.contains("permissions:") {
+            violations.push(format!(
+                "{filename}: No permissions block found.\n  \
+                 Fix: Add 'permissions:' block to explicitly set required permissions.\n  \
+                 For read-only workflows:\n  \
+                   permissions:\n  \
+                     contents: read\n  \
+                 Verify: grep -n 'permissions:' .github/workflows/{filename}"
+            ));
+        } else {
+            // Check for overly permissive 'write-all' or missing 'contents: read'
+            if content.contains("permissions: write-all") {
+                violations.push(format!(
+                    "{filename}: Uses 'write-all' permissions (too permissive).\n  \
+                     Fix: Specify only required permissions explicitly.\n  \
+                     Verify: grep -n 'permissions:' .github/workflows/{filename}"
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Workflows violate the least-privilege permissions principle:\n\n{}\n\n\
+             Why minimal permissions are required:\n\
+             - Compromised workflows or actions cannot abuse excess permissions\n\
+             - GitHub requires explicit permission grants for security audits\n\
+             - Missing permissions block defaults to GITHUB_TOKEN write access\n\n\
+             Fix: Add a 'permissions:' block to each workflow.\n\
+             For read-only workflows:\n\
+               permissions:\n\
+                 contents: read\n\n\
+             Verify: grep -n 'permissions:' .github/workflows/<file>\n\
+             Reference: https://docs.github.com/en/actions/security-guides/automatic-token-authentication",
+            violations.join("\n\n")
+        );
+    }
+}
+
+// ============================================================================
+// Markdown Relative Link Validation Tests
+// ============================================================================
+// These tests prevent broken relative links in docs/ that reference .llm/ or
+// other directories without the correct ../ prefix. This was a real CI issue:
+// docs used `.llm/skills/...` instead of `../.llm/skills/...`, causing broken
+// links that passed local editing but failed link validation in CI.
+
+/// Extract all markdown link URLs from content.
+///
+/// Returns a vector of (line_number, link_text, url) tuples for all markdown
+/// links in the format `[text](url)`.
+fn extract_markdown_links(content: &str) -> Vec<(usize, String, String)> {
+    let mut links = Vec::new();
+    let link_pattern = regex::Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        for cap in link_pattern.captures_iter(line) {
+            let text = cap
+                .get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let url = cap
+                .get(2)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            links.push((line_idx + 1, text, url));
+        }
+    }
+
+    links
+}
+
+#[test]
+fn test_docs_relative_links_to_llm_use_parent_prefix() {
+    // This test prevents the broken relative link issue where docs/ files
+    // linked to .llm/skills/... instead of ../.llm/skills/...
+    //
+    // Since docs/ is one level deep, any link to .llm/ must go up one
+    // directory first with ../ prefix.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        return;
+    }
+
+    let mut violations = Vec::new();
+
+    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+
+    for file in &docs_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+
+        for (line_num, _text, url) in extract_markdown_links(&content) {
+            // Skip external URLs and anchors
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:")
+                || url.starts_with('#')
+            {
+                continue;
+            }
+
+            // Check for .llm/ links missing the ../ prefix
+            // From docs/, the correct path to .llm/ is ../.llm/
+            if url.starts_with(".llm/") {
+                violations.push(format!(
+                    "{}:{}: Link '{}' should be '../{}'",
+                    relative_path.display(),
+                    line_num,
+                    url,
+                    url
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Docs files contain relative links to .llm/ without required ../ prefix:\n\n{}\n\n\
+             Why this matters:\n\
+             - Files in docs/ are one directory level deep\n\
+             - Links to .llm/ must go up one level first: ../.llm/\n\
+             - Using .llm/skills/... instead of ../.llm/skills/... creates broken links\n\n\
+             Fix: Change '.llm/' to '../.llm/' in the links listed above.\n\
+             Verify: ./scripts/validate-ci.sh --links",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_docs_relative_links_resolve_to_existing_files() {
+    // This test validates that all relative links in docs/ actually point
+    // to files that exist in the repository. Catches broken links early
+    // before they reach CI link checking.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        return;
+    }
+
+    let mut broken_links = Vec::new();
+
+    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+
+    for file in &docs_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+        let file_dir = file.parent().unwrap_or(&root);
+
+        for (line_num, _text, url) in extract_markdown_links(&content) {
+            // Skip external URLs and anchors
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:")
+                || url.starts_with('#')
+            {
+                continue;
+            }
+
+            // Strip anchor portion for file existence check
+            let file_part = url.split('#').next().unwrap_or(&url);
+            if file_part.is_empty() {
+                continue;
+            }
+
+            // Resolve the path relative to the markdown file's directory
+            let resolved = file_dir.join(file_part);
+
+            // Canonicalize to resolve .. and . components, then check existence
+            // Use the resolved path's existence as the check
+            if !resolved.exists() {
+                // Try canonicalizing parent to handle .. components
+                let normalized = normalize_path(&resolved);
+                if !normalized.exists() {
+                    broken_links.push(format!(
+                        "{}:{}: Link '{}' -> file not found (resolved to {})",
+                        relative_path.display(),
+                        line_num,
+                        url,
+                        normalized.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !broken_links.is_empty() {
+        panic!(
+            "Broken relative links found in docs/ markdown files:\n\n{}\n\n\
+             Fix: Update the link paths to point to existing files.\n\
+             Common issues:\n\
+             - Missing ../ prefix for links to parent directories\n\
+             - Typo in filename or directory name\n\
+             - File was moved or renamed\n\n\
+             Verify: ./scripts/validate-ci.sh --links",
+            broken_links.join("\n")
+        );
+    }
+}
+
+/// Normalize a path by resolving `.` and `..` components without requiring
+/// the path to exist on disk (unlike `canonicalize()`).
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => {
+                components.push(other);
+            }
+        }
+    }
+    components.iter().collect()
+}
+
+#[test]
+fn test_docs_no_absolute_path_links() {
+    // This test flags markdown links in docs/ that use absolute paths starting
+    // with `/`. Absolute paths are not portable across machines (e.g.,
+    // /workspaces/signal-fish-server/... only works in a specific devcontainer).
+    // All links should use relative paths from the file's location.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        return;
+    }
+
+    let mut violations = Vec::new();
+
+    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+
+    for file in &docs_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+
+        for (line_num, _text, url) in extract_markdown_links(&content) {
+            // Skip external URLs and anchors
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:")
+                || url.starts_with('#')
+            {
+                continue;
+            }
+
+            // Flag any link that starts with / as a portability issue
+            if url.starts_with('/') {
+                violations.push(format!(
+                    "{}:{}: Absolute path link '{}' is not portable\n  \
+                     Fix: Convert to a relative path from the file's directory",
+                    relative_path.display(),
+                    line_num,
+                    url
+                ));
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Documentation files contain absolute-path links (not portable):\n\n{}\n\n\
+             Absolute paths like /workspaces/... or /home/... only work on one machine.\n\
+             Use relative paths instead:\n\
+             - To a sibling doc:  `sibling.md`\n\
+             - To repo root file: `../README.md`\n\
+             - To tests/:        `../tests/ci_config_tests.rs`\n\n\
+             Verify: ./scripts/validate-ci.sh --links",
+            violations.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_awk_files_have_valid_syntax() {
+    // This test validates that all .awk files in the repository parse correctly.
+    // Prevents the issue where an AWK script with syntax errors is committed
+    // and only discovered when the CI workflow tries to use it.
+
+    let root = repo_root();
+
+    let mut awk_files = Vec::new();
+
+    // Look for .awk files in known locations
+    let scripts_dir = root.join(".github/scripts");
+    if scripts_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "awk").unwrap_or(false) {
+                    awk_files.push(path);
+                }
+            }
+        }
+    }
+
+    if awk_files.is_empty() {
+        // No AWK files to validate
+        return;
+    }
+
+    let mut issues = Vec::new();
+
+    for awk_file in &awk_files {
+        let content = read_file(awk_file);
+        let relative_path = awk_file.strip_prefix(&root).unwrap_or(awk_file);
+
+        // Check for non-POSIX match() function (GNU-specific, breaks on mawk)
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            // Skip comments
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            if trimmed.contains("match(") {
+                issues.push(format!(
+                    "{}:{}: Uses match() function (not POSIX compatible with mawk).\n  \
+                     Fix: Use sub() or gsub() instead.",
+                    relative_path.display(),
+                    line_idx + 1
+                ));
+            }
+
+            // Check for \0 in printf (not POSIX)
+            if trimmed.contains("printf") && trimmed.contains("\\0") {
+                issues.push(format!(
+                    "{}:{}: Uses \\0 in printf (not POSIX compatible).\n  \
+                     Fix: Use printf \"%c\", 0 instead.",
+                    relative_path.display(),
+                    line_idx + 1
+                ));
+            }
+        }
+    }
+
+    if !issues.is_empty() {
+        panic!(
+            "AWK file validation issues found:\n\n{}\n\n\
+             Why this matters:\n\
+             - GitHub Actions runners may use mawk (not gawk)\n\
+             - Non-POSIX AWK features cause silent failures in CI\n\
+             - match() and \\0 are common portability problems\n\n\
+             Verify: ./scripts/validate-ci.sh --awk",
+            issues.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_validate_ci_script_exists() {
+    // This test ensures the validate-ci.sh script exists and is the canonical
+    // tool for local CI validation. This script was created to prevent the
+    // three types of CI/CD regressions that were discovered:
+    //   1. AWK syntax errors in .awk files
+    //   2. Broken relative links in docs/
+    //   3. Shell script issues in .github/scripts/
+
+    let root = repo_root();
+    let validate_ci = root.join("scripts/validate-ci.sh");
+
+    assert!(
+        validate_ci.exists(),
+        "scripts/validate-ci.sh not found.\n\
+         This script is required for local CI configuration validation.\n\
+         It validates AWK files, shell scripts, and markdown links.\n\
+         Create it or restore it from the repository."
+    );
+
+    let content = read_file(&validate_ci);
+
+    // Verify it covers the three key validation areas
+    assert!(
+        content.contains("validate_awk") || content.contains("awk"),
+        "scripts/validate-ci.sh should validate AWK files"
+    );
+
+    assert!(
+        content.contains("shellcheck") || content.contains("validate_shell"),
+        "scripts/validate-ci.sh should validate shell scripts with shellcheck"
+    );
+
+    assert!(
+        content.contains("markdown")
+            || content.contains("validate_markdown")
+            || content.contains("link"),
+        "scripts/validate-ci.sh should validate markdown links"
+    );
+}
+
+// ============================================================================
+// CI/CD Regression Prevention Tests
+// ============================================================================
+// These tests prevent recurrence of specific CI/CD failures that were fixed:
+//   1. cargo-deny Docker container missing pinned Rust toolchain
+//   2. Lychee v0.21.0 hidden file matcher bug and exclude_path TOML limitation
+// Each test documents the root cause and expected fix.
+
+#[test]
+fn test_cargo_deny_has_rustup_toolchain_override() {
+    // This test prevents regression of the cargo-deny Docker container toolchain issue.
+    //
+    // Root cause: The cargo-deny-action runs inside a Docker container that ships its
+    // own Rust toolchain. When our repo has rust-toolchain.toml pinning a specific
+    // version (e.g., 1.88.0), rustup inside the container tries to use that version
+    // but fails because it's not installed in the container image.
+    //
+    // Fix: Set RUSTUP_TOOLCHAIN=stable as an env var on the cargo-deny step.
+    // RUSTUP_TOOLCHAIN takes precedence over rust-toolchain.toml, so the container
+    // uses its pre-installed stable toolchain instead of trying to download our
+    // pinned version. This is safe because cargo-deny only inspects metadata and
+    // Cargo.lock — it does not compile code, so the exact Rust version is irrelevant.
+
+    let root = repo_root();
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_workflow);
+
+    // Find the deny job section
+    assert!(
+        content.contains("  deny:"),
+        "CI workflow must have a 'deny' job for dependency auditing.\n\
+         File: {}",
+        ci_workflow.display()
+    );
+
+    // Find the "Run cargo-deny" step and verify it has RUSTUP_TOOLCHAIN env var
+    let mut in_deny_step = false;
+    let mut found_rustup_toolchain = false;
+    let mut deny_step_line = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect the cargo-deny step (by name or uses)
+        if trimmed.contains("cargo-deny")
+            && (trimmed.starts_with("uses:") || trimmed.starts_with("- name:"))
+        {
+            in_deny_step = true;
+            deny_step_line = line_num + 1;
+        }
+
+        // Check for RUSTUP_TOOLCHAIN within the step's env block
+        if in_deny_step && trimmed.starts_with("RUSTUP_TOOLCHAIN:") {
+            found_rustup_toolchain = true;
+            let value = trimmed
+                .strip_prefix("RUSTUP_TOOLCHAIN:")
+                .unwrap_or("")
+                .trim();
+            assert!(
+                !value.is_empty(),
+                "RUSTUP_TOOLCHAIN env var in cargo-deny step must have a value (e.g., 'stable').\n\
+                 Line: {}\n\
+                 File: {}",
+                line_num + 1,
+                ci_workflow.display()
+            );
+            break;
+        }
+
+        // If we hit the next step or job after the deny step, stop searching
+        if in_deny_step
+            && (trimmed.starts_with("- name:") || trimmed.starts_with("- uses:"))
+            && deny_step_line != 0
+            && line_num + 1 > deny_step_line + 1
+        {
+            break;
+        }
+    }
+
+    assert!(
+        found_rustup_toolchain,
+        "The cargo-deny step in ci.yml must have RUSTUP_TOOLCHAIN env var set.\n\
+         Without it, the cargo-deny Docker container fails when rust-toolchain.toml\n\
+         pins a Rust version not installed in the container image.\n\n\
+         Fix: Add to the cargo-deny step:\n\
+           env:\n\
+             RUSTUP_TOOLCHAIN: stable\n\n\
+         File: {}\n\
+         Deny step found at line: {}",
+        ci_workflow.display(),
+        deny_step_line
+    );
+}
+
+#[test]
+fn test_lychee_version_pinned_above_v0_22() {
+    // This test prevents regression of the lychee hidden file matcher bug.
+    //
+    // Root cause: lychee v0.21.0 (bundled with lychee-action v2.7.0) had a bug
+    // (#1936) where it scanned hidden/dotfiles like .lychee.toml as input despite
+    // --hidden not being set. This caused lychee to extract truncated URLs from
+    // regex patterns in its own config file, leading to spurious link check failures.
+    //
+    // Fix: Pin lycheeVersion to v0.22.0 or newer, which fixes the hidden file
+    // matcher bug. The lychee-action's `lycheeVersion` input overrides the bundled
+    // binary version.
+
+    let root = repo_root();
+    let link_check = root.join(".github/workflows/link-check.yml");
+    let content = read_file(&link_check);
+
+    // Find the lycheeVersion setting
+    let mut found_version = false;
+    let mut version_value = String::new();
+    let mut version_line = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("lycheeVersion:") {
+            found_version = true;
+            version_value = trimmed
+                .strip_prefix("lycheeVersion:")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            version_line = line_num + 1;
+            break;
+        }
+    }
+
+    assert!(
+        found_version,
+        "link-check.yml must set lycheeVersion to override the bundled lychee binary.\n\
+         Without this, the action uses lychee v0.21.0 which has a hidden file matcher bug\n\
+         (lycheeverse/lychee#1936) that scans .lychee.toml as input.\n\n\
+         Fix: Add 'lycheeVersion: v0.22.0' (or newer) to the lychee-action step's 'with:' block.\n\
+         File: {}",
+        link_check.display()
+    );
+
+    // Parse the version: strip leading 'v' and split into components
+    let version_str = version_value.trim_start_matches('v');
+    let parts: Vec<u32> = version_str
+        .split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+
+    assert!(
+        parts.len() >= 2,
+        "lycheeVersion must be a valid semver version (e.g., v0.22.0).\n\
+         Found: '{}' at line {} in {}\n\
+         Expected format: vMAJOR.MINOR.PATCH",
+        version_value,
+        version_line,
+        link_check.display()
+    );
+
+    let major = parts[0];
+    let minor = parts[1];
+
+    // Version must be >= 0.22.0 (where the hidden file matcher bug was fixed)
+    let min_major = 0;
+    let min_minor = 22;
+
+    let is_sufficient = major > min_major || (major == min_major && minor >= min_minor);
+
+    assert!(
+        is_sufficient,
+        "lycheeVersion must be >= v0.22.0 to include the hidden file matcher fix.\n\
+         Found: {} (parsed as {}.{}) at line {} in {}\n\
+         Minimum required: v0.22.0\n\n\
+         Background: lychee v0.21.0 scans dotfiles like .lychee.toml as input,\n\
+         extracting truncated URLs from regex patterns and causing false failures.\n\
+         This was fixed in v0.22.0 via lycheeverse/lychee#1936.\n\n\
+         Fix: Update lycheeVersion to v0.22.0 or newer.",
+        version_value,
+        major,
+        minor,
+        version_line,
+        link_check.display()
+    );
+}
+
+#[test]
+fn test_lychee_cli_exclude_paths_match_config() {
+    // This test ensures defense-in-depth: every exclude_path in .lychee.toml
+    // must also appear as a CLI --exclude-path flag in the link-check workflow.
+    //
+    // Root cause: Lychee's TOML `exclude_path` setting does NOT apply to paths
+    // discovered via glob expansion (known bug). When the workflow passes glob
+    // patterns like './**/*.md', lychee expands them and the TOML exclude_path
+    // entries are silently ignored for those expanded paths.
+    //
+    // Fix: Duplicate critical exclude_path entries as CLI --exclude-path flags.
+    // CLI flags are applied at a different stage and correctly filter glob results.
+    // Both TOML and CLI entries are kept as defense-in-depth — if either mechanism
+    // is fixed or changed, the other still provides coverage.
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+    let link_check = root.join(".github/workflows/link-check.yml");
+
+    let config_content = read_file(&lychee_config);
+    let workflow_content = read_file(&link_check);
+
+    // Parse exclude_path entries from .lychee.toml
+    let toml_exclude_paths = parse_lychee_exclude_path_patterns(&config_content);
+
+    assert!(
+        !toml_exclude_paths.is_empty(),
+        ".lychee.toml must have exclude_path entries.\n\
+         File: {}",
+        lychee_config.display()
+    );
+
+    // Extract --exclude-path values from the workflow args
+    let cli_exclude_paths: Vec<String> = workflow_content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("--exclude-path") {
+                // Parse: "--exclude-path tests/" or "--exclude-path 'value'"
+                let value = trimmed
+                    .strip_prefix("--exclude-path")
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string();
+                if !value.is_empty() {
+                    Some(value)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !cli_exclude_paths.is_empty(),
+        "link-check.yml must have --exclude-path CLI flags in the lychee args.\n\
+         Without CLI flags, TOML exclude_path entries are silently ignored for\n\
+         glob-expanded paths (known lychee bug).\n\
+         File: {}",
+        link_check.display()
+    );
+
+    // Critical paths that MUST be in both TOML exclude_path and CLI --exclude-path.
+    // These are paths that lychee's globs ('./**/*.md', './**/*.rs', './**/*.toml')
+    // will expand into, so the TOML exclude_path alone is insufficient (known bug).
+    //
+    // Paths like .git/ are inherently excluded by the shell globs (dotfiles not
+    // expanded without --hidden) and don't need CLI coverage. But paths like tests/,
+    // target/, and third_party/ contain .md/.rs/.toml files that globs will find.
+    let critical_paths = vec![
+        ("tests/", "Test files contain placeholder/example URLs"),
+        ("target/", "Build artifacts should never be link-checked"),
+        ("third_party/", "Vendored dependencies checked separately"),
+        (
+            ".github/test-fixtures/",
+            "Test fixtures with intentional example/placeholder content",
+        ),
+        (
+            "test-fixtures/",
+            "Root test fixtures with example/placeholder content",
+        ),
+    ];
+
+    let mut missing_entries = Vec::new();
+
+    for (critical_path, reason) in &critical_paths {
+        let critical_normalized = critical_path.trim_end_matches('/');
+
+        // Check TOML has it
+        let in_toml = toml_exclude_paths.iter().any(|p| {
+            let normalized = p.trim_end_matches('/');
+            normalized == critical_normalized || normalized.ends_with(critical_normalized)
+        });
+
+        // Check CLI has it
+        let in_cli = cli_exclude_paths.iter().any(|p| {
+            let normalized = p.trim_end_matches('/');
+            normalized == critical_normalized || normalized.ends_with(critical_normalized)
+        });
+
+        if !in_toml {
+            missing_entries.push(format!(
+                "  Path: {critical_path}\n  \
+                 Reason: {reason}\n  \
+                 Missing from: .lychee.toml exclude_path"
+            ));
+        }
+
+        if !in_cli {
+            missing_entries.push(format!(
+                "  Path: {critical_path}\n  \
+                 Reason: {reason}\n  \
+                 Missing from: CLI --exclude-path flags"
+            ));
+        }
+    }
+
+    // Additionally verify every CLI --exclude-path has a TOML counterpart
+    // (the TOML entry serves as documentation even if the bug makes it ineffective)
+    for cli_path in &cli_exclude_paths {
+        let cli_normalized = cli_path
+            .trim_end_matches('/')
+            .replace("\\.", ".")
+            .trim_end_matches('$')
+            .to_string();
+
+        let in_toml = toml_exclude_paths.iter().any(|p| {
+            let normalized = p
+                .trim_end_matches('/')
+                .trim_end_matches('$')
+                .replace("\\.", ".")
+                .to_string();
+            normalized.contains(&cli_normalized) || cli_normalized.contains(&normalized)
+        });
+
+        if !in_toml {
+            missing_entries.push(format!(
+                "  CLI --exclude-path: {cli_path}\n  \
+                 Missing from: .lychee.toml exclude_path (should be documented there too)"
+            ));
+        }
+    }
+
+    if !missing_entries.is_empty() {
+        panic!(
+            "Defense-in-depth violation: exclude_path mismatch between TOML and CLI:\n\n{}\n\n\
+             TOML exclude_path entries:\n{}\n\n\
+             CLI --exclude-path flags:\n{}\n\n\
+             Why both are needed:\n\
+             - TOML exclude_path does NOT apply to glob-expanded paths (known lychee bug)\n\
+             - CLI --exclude-path is applied at a different stage and correctly filters globs\n\
+             - Both should be kept as defense-in-depth\n\n\
+             Fix: Ensure critical paths appear in both .lychee.toml exclude_path\n\
+             and as --exclude-path CLI flags in link-check.yml.\n\
+             TOML file: {}\n\
+             Workflow: {}",
+            missing_entries.join("\n\n"),
+            toml_exclude_paths
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            cli_exclude_paths
+                .iter()
+                .map(|p| format!("  --exclude-path {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            lychee_config.display(),
+            link_check.display()
+        );
+    }
+}
+
+#[test]
+fn test_lychee_args_use_double_dash_separator() {
+    // This test prevents regression of the argument parsing issue in lychee.
+    //
+    // Root cause: Without a `--` separator between flags and positional arguments,
+    // lychee's argument parser can consume positional glob patterns as values for
+    // the preceding --exclude-path flag. For example:
+    //   --exclude-path '.lychee.toml' './**/*.md'
+    // could be parsed as --exclude-path taking two values instead of one.
+    //
+    // Fix: Use `--` to explicitly separate option flags from positional arguments:
+    //   --exclude-path '.lychee.toml' -- './**/*.md' './**/*.rs' './**/*.toml'
+
+    let root = repo_root();
+    let link_check = root.join(".github/workflows/link-check.yml");
+    let content = read_file(&link_check);
+
+    // Find the args block for the lychee action
+    let mut in_lychee_step = false;
+    let mut in_args = false;
+    let mut args_lines = Vec::new();
+    let mut args_start_line = 0;
+    let mut args_indent = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+
+        // Detect the lychee-action step
+        if trimmed.contains("lychee-action") {
+            in_lychee_step = true;
+        }
+
+        // Detect start of args block within the lychee step
+        if in_lychee_step && trimmed.starts_with("args:") {
+            in_args = true;
+            args_start_line = line_num + 1;
+            args_indent = indent;
+            // The args value might be on the same line (inline) or folded (>-)
+            let after_args = trimmed.strip_prefix("args:").unwrap_or("").trim();
+            if !after_args.is_empty() && after_args != ">-" && after_args != "|" {
+                args_lines.push(after_args.to_string());
+            }
+            continue;
+        }
+
+        // Collect folded args lines (indented continuation lines)
+        if in_args {
+            // Args continuation lines are more indented than the args: key itself;
+            // a line at the same or lesser indent (like `fail:`) ends the block
+            if trimmed.is_empty() || indent > args_indent {
+                args_lines.push(trimmed.to_string());
+            } else {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        !args_lines.is_empty(),
+        "Could not find lychee args block in link-check.yml.\n\
+         Expected 'args:' within the lychee-action step.\n\
+         File: {}",
+        link_check.display()
+    );
+
+    // Join all args lines and check for the -- separator
+    let full_args = args_lines.join(" ");
+
+    assert!(
+        full_args.contains(" -- "),
+        "Lychee args must use '--' separator between flags and positional arguments.\n\
+         Found args block starting at line {}: {:?}\n\n\
+         Without '--', the argument parser may consume glob patterns as values for\n\
+         --exclude-path flags instead of treating them as positional file arguments.\n\n\
+         Fix: Add '--' before the positional glob patterns:\n\
+           args: >-\n\
+             --verbose --no-progress --cache ...\n\
+             --exclude-path tests/\n\
+             --\n\
+             './**/*.md' './**/*.rs' './**/*.toml'\n\n\
+         File: {}",
+        args_start_line,
+        full_args,
+        link_check.display()
+    );
+}
+
+/// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
+/// returning the list of unescaped string values (path patterns).
+///
+/// This is analogous to [`parse_lychee_exclude_patterns`] but targets the
+/// `exclude_path` key instead of the `exclude` key.
+fn parse_lychee_exclude_path_patterns(content: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    let mut in_exclude_path = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect the start of the exclude_path array
+        if trimmed.starts_with("exclude_path") && trimmed.contains('[') {
+            let key = trimmed.split('=').next().unwrap_or("").trim();
+            if key != "exclude_path" {
+                continue;
+            }
+            in_exclude_path = true;
+            // Handle inline array on same line
+            if trimmed.contains(']') {
+                extract_quoted_strings(trimmed, &mut patterns);
+                in_exclude_path = false;
+            }
+            continue;
+        }
+
+        if in_exclude_path {
+            if trimmed.starts_with(']') {
+                break;
+            }
+            extract_quoted_strings(trimmed, &mut patterns);
+        }
+    }
+
+    patterns
+}

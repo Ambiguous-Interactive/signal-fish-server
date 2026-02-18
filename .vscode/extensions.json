@@ -1,0 +1,20 @@
+{
+  "recommendations": [
+    // Rust development
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "serayuzgur.crates",
+
+    // Markdown linting and formatting
+    "davidanson.vscode-markdownlint",
+
+    // YAML validation
+    "redhat.vscode-yaml",
+
+    // Spell checking
+    "streetsidesoftware.code-spell-checker",
+
+    // Git integration
+    "eamodio.gitlens"
+  ]
+}

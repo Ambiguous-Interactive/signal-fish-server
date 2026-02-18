@@ -1,12 +1,18 @@
 # Skill: Agentic Workflow Patterns
 
-<!-- trigger: agent, agentic, workflow, subagent, ai-review, automation, ai-workflow, code-review-automation | Patterns for effective AI agent workflows and subagent dispatch | Core -->
+<!--
+  trigger: agent, agentic, workflow, subagent, ai-review, automation, ai-workflow, code-review-automation
+  | Patterns for effective AI agent workflows and subagent dispatch
+  | Core
+-->
 
-**Trigger**: When planning or executing multi-step AI agent workflows, dispatching subagents, or structuring automated code review.
+**Trigger**: When planning or executing multi-step AI agent workflows, dispatching subagents,
+or structuring automated code review.
 
 ---
 
 ## When to Use
+
 - Planning multi-step implementation tasks
 - Dispatching subagents for review or implementation
 - Structuring automated code review workflows
@@ -16,6 +22,7 @@
 ---
 
 ## When NOT to Use
+
 - Simple single-file changes that don't need orchestration
 - User-interactive workflows (this is for autonomous operation)
 - Manual code review by humans
@@ -36,6 +43,7 @@
 ---
 
 ## TL;DR
+
 - Implement → Verify → Review → Fix → Commit cycle for every change
 - Use subagents for isolated tasks to keep context clean
 - Verification beats inspection — always run cargo check/clippy/test
@@ -44,26 +52,32 @@
 
 ---
 
-## Core Workflow: Implement → Verify → Review → Fix → Commit
+## Core Workflow: Implement → Verify → Review → Fix → Present
 
 Every significant code change follows this cycle:
 
-```
+```text
+
 1. IMPLEMENT — Make the change (one logical change at a time)
 2. VERIFY   — Run cargo check, clippy, test
 3. REVIEW   — Check against code-review-checklist
 4. FIX      — Address any issues found
 5. VERIFY   — Run cargo check, clippy, test again
-6. COMMIT   — Only when all checks pass
+6. PRESENT  — Provide commit instructions to user (NEVER commit yourself)
+
+
 ```
 
 **Never skip verification.** Running `cargo clippy` and `cargo test` catches more issues than visual inspection.
+
+**⛔ CRITICAL:** Step 6 is "PRESENT" not "COMMIT" — you provide instructions, user commits. See [git-safety-protocol](./git-safety-protocol.md).
 
 ---
 
 ## Subagent Dispatch Patterns
 
 ### When to Use Subagents
+
 - Tasks affecting different files/subsystems (parallel-safe)
 - Code review of your own changes (fresh context)
 - Research tasks that require reading many files
@@ -72,6 +86,7 @@ Every significant code change follows this cycle:
 ### Subagent Prompt Structure
 
 Effective subagent prompts are:
+
 1. **Specific** — exact files, exact problem, exact expected output
 2. **Constrained** — what NOT to do is as important as what to do
 3. **Self-contained** — all needed context included, no assumptions
@@ -86,25 +101,30 @@ Fix the error handling in src/server/room_manager.rs:
 4. Run `cargo test --lib` to verify no regressions
 
 Do NOT:
+
 - Change function signatures that are part of the public API
 - Modify error types (use existing ones)
 - Touch files other than room_manager.rs
 
 Return: List of changes made with before/after snippets.
-```
 
 ```markdown
+
 ## Bad Subagent Prompt (too vague)
+
 Fix the error handling in the server code.
 Make it better and more robust.
+
 ```
 
 ### Sequential vs Parallel Dispatch
 
 **Sequential** — when tasks depend on each other:
+
 - Refactor struct → Update all usages → Add tests
 
 **Parallel** — when tasks are independent:
+
 - Fix auth module + Fix relay module + Update docs
 - Default batch: 2-3 independent tasks
 
@@ -117,6 +137,7 @@ For complex tasks requiring multiple agents:
 3. **Reviewer** (subagent) — Reviews integrated result with fresh context
 
 **Handoff protocol:**
+
 - Include: exact files, exact problem, expected output format
 - Exclude: exploration context, previous conversation history
 - Constrain: what NOT to change, what NOT to read
@@ -162,6 +183,7 @@ Estimate context needs before starting:
 | Architecture change | 20+ files | MUST use subagents; split into phases |
 
 Rules:
+
 - If estimated tokens > 30K, use subagents for research
 - Read trait/interface definitions BEFORE implementation files
 - Read test files to understand expected behavior
@@ -186,7 +208,8 @@ For the complete verification command sequence, see [agent-self-review-checklist
 
 ## Quality Gates
 
-Before considering any task "done", walk through the verification checklist in [agent-self-review-checklist](./agent-self-review-checklist.md). All gates must pass before committing.
+Before considering any task "done", walk through the verification checklist in
+[agent-self-review-checklist](./agent-self-review-checklist.md). All gates must pass before committing.
 
 ---
 
@@ -205,6 +228,7 @@ If you've attempted to fix an issue twice and it's still broken:
 
 | Mistake | Fix |
 |---------|-----|
+| **Creating git commits or modifying git config** | **NEVER commit or configure git - provide instructions to user instead** |
 | Fixing symptoms, not root cause | Read the full error trace, find the origin |
 | Over-reading files (context overflow) | Use targeted grep, read specific line ranges |
 | Making multiple changes without verifying | One change → verify → next change |
@@ -224,9 +248,11 @@ If you've attempted to fix an issue twice and it's still broken:
 When acting as a reviewer, use this format:
 
 ```markdown
+
 ## Code Review: [description of changes]
 
 ### Summary
+
 [1-2 sentence overview of what was changed and overall assessment]
 
 ### Findings
@@ -242,15 +268,19 @@ Fix: Suggested improvement
 Confidence: medium
 
 ### Verdict
+
 - [ ] Ready to merge
 - [ ] Needs fixes (list critical items)
 - [ ] Needs rework (fundamental issues)
 
 ### Verification
+
 - [x] cargo check passes
 - [x] cargo clippy clean
 - [x] cargo test passes
 - [ ] New tests added for new behavior
+
+
 ```
 
 ---
@@ -270,9 +300,10 @@ Confidence: medium
 
 ## Related Skills
 
+- [git-safety-protocol](./git-safety-protocol.md) — **CRITICAL** - Never commit or configure git
 - [code-review-checklist](./code-review-checklist.md) — Detailed review criteria
 - [solid-principles-enforcement](./solid-principles-enforcement.md) — SOLID checks during review
-- [rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow
+- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow
 - [testing-strategies](./testing-strategies.md) — Test writing methodology
 - [manage-skills](./manage-skills.md) — How to create and maintain skills
 - [agent-self-review-checklist](./agent-self-review-checklist.md) — Pre-commit verification workflow

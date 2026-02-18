@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+
+# Third-party dependencies
+third_party/
+
+# Node modules (if any)
+node_modules/
+
+# Git internals
+.git/
+
+# Hidden directories (except .github and .llm)
+.*
+!.github
+!.llm
+
+# Test fixtures (contain intentional markdown violations)
+.github/test-fixtures/
+test-fixtures/
+
+# Generated documentation
+docs/generated/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.bak
+
+# OS-specific
+.DS_Store
+Thumbs.db

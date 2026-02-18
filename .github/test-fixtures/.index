@@ -1,0 +1,26 @@
+# Test Fixtures Index
+# Quick reference for all files in this directory
+
+## Start Here
+validate-test-cases.sh          - Run this to verify all bug fixes
+
+## Core Test Files  
+markdown-validation-test-cases.md - 30+ comprehensive test cases
+extract-rust-blocks.py           - Python extractor (portable alternative to AWK)
+
+## Alternative Test Scripts
+simple-test.sh                   - Intermediate test suite
+test-markdown-validation.sh      - Full AWK compatibility suite
+
+## Documentation
+README.md                        - Complete guide (bug fixes, usage, maintenance)
+TESTING.md                       - Quick reference (troubleshooting, CI/CD)
+.index                           - This file
+
+## Bug Fixes Validated
+1. Empty first line handling
+2. Unclosed blocks at EOF
+3. Case-insensitive rust/Rust  
+4. File-based counters
+
+Created: 2026-02-16
