@@ -392,32 +392,50 @@ fn test_workflow_files_are_valid_yaml() {
         // Note: This is not a full YAML parser, but catches common errors
 
         // Check for balanced quotes, but only on YAML-level lines (not inside
-        // inline shell script blocks). Shell scripts embedded via `run: |` can
-        // legitimately have odd quote counts (AWK programs, apostrophes in
-        // comments, etc.), so we skip lines inside multiline run blocks.
+        // multiline scalar blocks). Shell scripts embedded via `run: |` and
+        // folded scalars like `args: >-` can legitimately have odd quote
+        // counts (AWK programs, glob patterns, etc.), so we skip lines
+        // inside any YAML multiline scalar block.
         let mut single_quotes = 0;
         let mut double_quotes = 0;
-        let mut in_run_block = false;
-        let mut run_indent = 0;
+        let mut in_multiline_block = false;
+        let mut block_indent = 0;
 
         for line in content.lines() {
             let stripped = line.trim();
             let indent = line.len() - line.trim_start().len();
 
-            // Detect start of a multiline run block (run: |)
-            if stripped.starts_with("run: |") || stripped.starts_with("run: >") {
-                in_run_block = true;
-                run_indent = indent;
-                continue;
+            // Detect start of any YAML multiline scalar block.
+            // Matches patterns like: "key: |", "key: >-", "key: |+", etc.
+            // The scalar indicator (|, >, |-, >-, |+, >+) after a colon
+            // signals that subsequent indented lines are scalar content.
+            if stripped.contains(": |") || stripped.contains(": >") {
+                // Verify this looks like a YAML key: value with a block scalar indicator
+                // (not just any line that happens to contain ": |")
+                let after_colon = stripped
+                    .split_once(": ")
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or("");
+                if after_colon == "|"
+                    || after_colon == "|-"
+                    || after_colon == "|+"
+                    || after_colon == ">"
+                    || after_colon == ">-"
+                    || after_colon == ">+"
+                {
+                    in_multiline_block = true;
+                    block_indent = indent;
+                    continue;
+                }
             }
 
             // Detect end of multiline block (line at same or lesser indent, non-empty)
-            if in_run_block && !stripped.is_empty() && indent <= run_indent {
-                in_run_block = false;
+            if in_multiline_block && !stripped.is_empty() && indent <= block_indent {
+                in_multiline_block = false;
             }
 
-            // Only count quotes on YAML-level lines, not shell script lines
-            if !in_run_block {
+            // Only count quotes on YAML-level lines, not multiline scalar content
+            if !in_multiline_block {
                 single_quotes += line.matches('\'').count();
                 double_quotes += line.matches('"').count();
             }
@@ -3231,4 +3249,490 @@ fn test_validate_ci_script_exists() {
             || content.contains("link"),
         "scripts/validate-ci.sh should validate markdown links"
     );
+}
+
+// ============================================================================
+// CI/CD Regression Prevention Tests
+// ============================================================================
+// These tests prevent recurrence of specific CI/CD failures that were fixed:
+//   1. cargo-deny Docker container missing pinned Rust toolchain
+//   2. Lychee v0.21.0 hidden file matcher bug and exclude_path TOML limitation
+// Each test documents the root cause and expected fix.
+
+#[test]
+fn test_cargo_deny_has_rustup_toolchain_override() {
+    // This test prevents regression of the cargo-deny Docker container toolchain issue.
+    //
+    // Root cause: The cargo-deny-action runs inside a Docker container that ships its
+    // own Rust toolchain. When our repo has rust-toolchain.toml pinning a specific
+    // version (e.g., 1.88.0), rustup inside the container tries to use that version
+    // but fails because it's not installed in the container image.
+    //
+    // Fix: Set RUSTUP_TOOLCHAIN=stable as an env var on the cargo-deny step.
+    // RUSTUP_TOOLCHAIN takes precedence over rust-toolchain.toml, so the container
+    // uses its pre-installed stable toolchain instead of trying to download our
+    // pinned version. This is safe because cargo-deny only inspects metadata and
+    // Cargo.lock — it does not compile code, so the exact Rust version is irrelevant.
+
+    let root = repo_root();
+    let ci_workflow = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_workflow);
+
+    // Find the deny job section
+    assert!(
+        content.contains("  deny:"),
+        "CI workflow must have a 'deny' job for dependency auditing.\n\
+         File: {}",
+        ci_workflow.display()
+    );
+
+    // Find the "Run cargo-deny" step and verify it has RUSTUP_TOOLCHAIN env var
+    let mut in_deny_step = false;
+    let mut found_rustup_toolchain = false;
+    let mut deny_step_line = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect the cargo-deny step (by name or uses)
+        if trimmed.contains("cargo-deny")
+            && (trimmed.starts_with("uses:") || trimmed.starts_with("- name:"))
+        {
+            in_deny_step = true;
+            deny_step_line = line_num + 1;
+        }
+
+        // Check for RUSTUP_TOOLCHAIN within the step's env block
+        if in_deny_step && trimmed.starts_with("RUSTUP_TOOLCHAIN:") {
+            found_rustup_toolchain = true;
+            let value = trimmed
+                .strip_prefix("RUSTUP_TOOLCHAIN:")
+                .unwrap_or("")
+                .trim();
+            assert!(
+                !value.is_empty(),
+                "RUSTUP_TOOLCHAIN env var in cargo-deny step must have a value (e.g., 'stable').\n\
+                 Line: {}\n\
+                 File: {}",
+                line_num + 1,
+                ci_workflow.display()
+            );
+            break;
+        }
+
+        // If we hit the next step or job after the deny step, stop searching
+        if in_deny_step
+            && (trimmed.starts_with("- name:") || trimmed.starts_with("- uses:"))
+            && deny_step_line != 0
+            && line_num + 1 > deny_step_line + 1
+        {
+            break;
+        }
+    }
+
+    assert!(
+        found_rustup_toolchain,
+        "The cargo-deny step in ci.yml must have RUSTUP_TOOLCHAIN env var set.\n\
+         Without it, the cargo-deny Docker container fails when rust-toolchain.toml\n\
+         pins a Rust version not installed in the container image.\n\n\
+         Fix: Add to the cargo-deny step:\n\
+           env:\n\
+             RUSTUP_TOOLCHAIN: stable\n\n\
+         File: {}\n\
+         Deny step found at line: {}",
+        ci_workflow.display(),
+        deny_step_line
+    );
+}
+
+#[test]
+fn test_lychee_version_pinned_above_v0_22() {
+    // This test prevents regression of the lychee hidden file matcher bug.
+    //
+    // Root cause: lychee v0.21.0 (bundled with lychee-action v2.7.0) had a bug
+    // (#1936) where it scanned hidden/dotfiles like .lychee.toml as input despite
+    // --hidden not being set. This caused lychee to extract truncated URLs from
+    // regex patterns in its own config file, leading to spurious link check failures.
+    //
+    // Fix: Pin lycheeVersion to v0.22.0 or newer, which fixes the hidden file
+    // matcher bug. The lychee-action's `lycheeVersion` input overrides the bundled
+    // binary version.
+
+    let root = repo_root();
+    let link_check = root.join(".github/workflows/link-check.yml");
+    let content = read_file(&link_check);
+
+    // Find the lycheeVersion setting
+    let mut found_version = false;
+    let mut version_value = String::new();
+    let mut version_line = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("lycheeVersion:") {
+            found_version = true;
+            version_value = trimmed
+                .strip_prefix("lycheeVersion:")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            version_line = line_num + 1;
+            break;
+        }
+    }
+
+    assert!(
+        found_version,
+        "link-check.yml must set lycheeVersion to override the bundled lychee binary.\n\
+         Without this, the action uses lychee v0.21.0 which has a hidden file matcher bug\n\
+         (lycheeverse/lychee#1936) that scans .lychee.toml as input.\n\n\
+         Fix: Add 'lycheeVersion: v0.22.0' (or newer) to the lychee-action step's 'with:' block.\n\
+         File: {}",
+        link_check.display()
+    );
+
+    // Parse the version: strip leading 'v' and split into components
+    let version_str = version_value.trim_start_matches('v');
+    let parts: Vec<u32> = version_str
+        .split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+
+    assert!(
+        parts.len() >= 2,
+        "lycheeVersion must be a valid semver version (e.g., v0.22.0).\n\
+         Found: '{}' at line {} in {}\n\
+         Expected format: vMAJOR.MINOR.PATCH",
+        version_value,
+        version_line,
+        link_check.display()
+    );
+
+    let major = parts[0];
+    let minor = parts[1];
+
+    // Version must be >= 0.22.0 (where the hidden file matcher bug was fixed)
+    let min_major = 0;
+    let min_minor = 22;
+
+    let is_sufficient = major > min_major || (major == min_major && minor >= min_minor);
+
+    assert!(
+        is_sufficient,
+        "lycheeVersion must be >= v0.22.0 to include the hidden file matcher fix.\n\
+         Found: {} (parsed as {}.{}) at line {} in {}\n\
+         Minimum required: v0.22.0\n\n\
+         Background: lychee v0.21.0 scans dotfiles like .lychee.toml as input,\n\
+         extracting truncated URLs from regex patterns and causing false failures.\n\
+         This was fixed in v0.22.0 via lycheeverse/lychee#1936.\n\n\
+         Fix: Update lycheeVersion to v0.22.0 or newer.",
+        version_value,
+        major,
+        minor,
+        version_line,
+        link_check.display()
+    );
+}
+
+#[test]
+fn test_lychee_cli_exclude_paths_match_config() {
+    // This test ensures defense-in-depth: every exclude_path in .lychee.toml
+    // must also appear as a CLI --exclude-path flag in the link-check workflow.
+    //
+    // Root cause: Lychee's TOML `exclude_path` setting does NOT apply to paths
+    // discovered via glob expansion (known bug). When the workflow passes glob
+    // patterns like './**/*.md', lychee expands them and the TOML exclude_path
+    // entries are silently ignored for those expanded paths.
+    //
+    // Fix: Duplicate critical exclude_path entries as CLI --exclude-path flags.
+    // CLI flags are applied at a different stage and correctly filter glob results.
+    // Both TOML and CLI entries are kept as defense-in-depth — if either mechanism
+    // is fixed or changed, the other still provides coverage.
+
+    let root = repo_root();
+    let lychee_config = root.join(".lychee.toml");
+    let link_check = root.join(".github/workflows/link-check.yml");
+
+    let config_content = read_file(&lychee_config);
+    let workflow_content = read_file(&link_check);
+
+    // Parse exclude_path entries from .lychee.toml
+    let toml_exclude_paths = parse_lychee_exclude_path_patterns(&config_content);
+
+    assert!(
+        !toml_exclude_paths.is_empty(),
+        ".lychee.toml must have exclude_path entries.\n\
+         File: {}",
+        lychee_config.display()
+    );
+
+    // Extract --exclude-path values from the workflow args
+    let cli_exclude_paths: Vec<String> = workflow_content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("--exclude-path") {
+                // Parse: "--exclude-path tests/" or "--exclude-path 'value'"
+                let value = trimmed
+                    .strip_prefix("--exclude-path")
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string();
+                if !value.is_empty() {
+                    Some(value)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !cli_exclude_paths.is_empty(),
+        "link-check.yml must have --exclude-path CLI flags in the lychee args.\n\
+         Without CLI flags, TOML exclude_path entries are silently ignored for\n\
+         glob-expanded paths (known lychee bug).\n\
+         File: {}",
+        link_check.display()
+    );
+
+    // Critical paths that MUST be in both TOML exclude_path and CLI --exclude-path.
+    // These are paths that lychee's globs ('./**/*.md', './**/*.rs', './**/*.toml')
+    // will expand into, so the TOML exclude_path alone is insufficient (known bug).
+    //
+    // Paths like .git/ are inherently excluded by the shell globs (dotfiles not
+    // expanded without --hidden) and don't need CLI coverage. But paths like tests/,
+    // target/, and third_party/ contain .md/.rs/.toml files that globs will find.
+    let critical_paths = vec![
+        ("tests/", "Test files contain placeholder/example URLs"),
+        ("target/", "Build artifacts should never be link-checked"),
+        ("third_party/", "Vendored dependencies checked separately"),
+        (
+            ".github/test-fixtures/",
+            "Test fixtures with intentional example/placeholder content",
+        ),
+        (
+            "test-fixtures/",
+            "Root test fixtures with example/placeholder content",
+        ),
+    ];
+
+    let mut missing_entries = Vec::new();
+
+    for (critical_path, reason) in &critical_paths {
+        let critical_normalized = critical_path.trim_end_matches('/');
+
+        // Check TOML has it
+        let in_toml = toml_exclude_paths.iter().any(|p| {
+            let normalized = p.trim_end_matches('/');
+            normalized == critical_normalized || normalized.ends_with(critical_normalized)
+        });
+
+        // Check CLI has it
+        let in_cli = cli_exclude_paths.iter().any(|p| {
+            let normalized = p.trim_end_matches('/');
+            normalized == critical_normalized || normalized.ends_with(critical_normalized)
+        });
+
+        if !in_toml {
+            missing_entries.push(format!(
+                "  Path: {critical_path}\n  \
+                 Reason: {reason}\n  \
+                 Missing from: .lychee.toml exclude_path"
+            ));
+        }
+
+        if !in_cli {
+            missing_entries.push(format!(
+                "  Path: {critical_path}\n  \
+                 Reason: {reason}\n  \
+                 Missing from: CLI --exclude-path flags"
+            ));
+        }
+    }
+
+    // Additionally verify every CLI --exclude-path has a TOML counterpart
+    // (the TOML entry serves as documentation even if the bug makes it ineffective)
+    for cli_path in &cli_exclude_paths {
+        let cli_normalized = cli_path
+            .trim_end_matches('/')
+            .replace("\\.", ".")
+            .trim_end_matches('$')
+            .to_string();
+
+        let in_toml = toml_exclude_paths.iter().any(|p| {
+            let normalized = p
+                .trim_end_matches('/')
+                .trim_end_matches('$')
+                .replace("\\.", ".")
+                .to_string();
+            normalized.contains(&cli_normalized) || cli_normalized.contains(&normalized)
+        });
+
+        if !in_toml {
+            missing_entries.push(format!(
+                "  CLI --exclude-path: {cli_path}\n  \
+                 Missing from: .lychee.toml exclude_path (should be documented there too)"
+            ));
+        }
+    }
+
+    if !missing_entries.is_empty() {
+        panic!(
+            "Defense-in-depth violation: exclude_path mismatch between TOML and CLI:\n\n{}\n\n\
+             TOML exclude_path entries:\n{}\n\n\
+             CLI --exclude-path flags:\n{}\n\n\
+             Why both are needed:\n\
+             - TOML exclude_path does NOT apply to glob-expanded paths (known lychee bug)\n\
+             - CLI --exclude-path is applied at a different stage and correctly filters globs\n\
+             - Both should be kept as defense-in-depth\n\n\
+             Fix: Ensure critical paths appear in both .lychee.toml exclude_path\n\
+             and as --exclude-path CLI flags in link-check.yml.\n\
+             TOML file: {}\n\
+             Workflow: {}",
+            missing_entries.join("\n\n"),
+            toml_exclude_paths
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            cli_exclude_paths
+                .iter()
+                .map(|p| format!("  --exclude-path {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            lychee_config.display(),
+            link_check.display()
+        );
+    }
+}
+
+#[test]
+fn test_lychee_args_use_double_dash_separator() {
+    // This test prevents regression of the argument parsing issue in lychee.
+    //
+    // Root cause: Without a `--` separator between flags and positional arguments,
+    // lychee's argument parser can consume positional glob patterns as values for
+    // the preceding --exclude-path flag. For example:
+    //   --exclude-path '.lychee.toml' './**/*.md'
+    // could be parsed as --exclude-path taking two values instead of one.
+    //
+    // Fix: Use `--` to explicitly separate option flags from positional arguments:
+    //   --exclude-path '.lychee.toml' -- './**/*.md' './**/*.rs' './**/*.toml'
+
+    let root = repo_root();
+    let link_check = root.join(".github/workflows/link-check.yml");
+    let content = read_file(&link_check);
+
+    // Find the args block for the lychee action
+    let mut in_lychee_step = false;
+    let mut in_args = false;
+    let mut args_lines = Vec::new();
+    let mut args_start_line = 0;
+    let mut args_indent = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+
+        // Detect the lychee-action step
+        if trimmed.contains("lychee-action") {
+            in_lychee_step = true;
+        }
+
+        // Detect start of args block within the lychee step
+        if in_lychee_step && trimmed.starts_with("args:") {
+            in_args = true;
+            args_start_line = line_num + 1;
+            args_indent = indent;
+            // The args value might be on the same line (inline) or folded (>-)
+            let after_args = trimmed.strip_prefix("args:").unwrap_or("").trim();
+            if !after_args.is_empty() && after_args != ">-" && after_args != "|" {
+                args_lines.push(after_args.to_string());
+            }
+            continue;
+        }
+
+        // Collect folded args lines (indented continuation lines)
+        if in_args {
+            // Args continuation lines are more indented than the args: key itself;
+            // a line at the same or lesser indent (like `fail:`) ends the block
+            if trimmed.is_empty() || indent > args_indent {
+                args_lines.push(trimmed.to_string());
+            } else {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        !args_lines.is_empty(),
+        "Could not find lychee args block in link-check.yml.\n\
+         Expected 'args:' within the lychee-action step.\n\
+         File: {}",
+        link_check.display()
+    );
+
+    // Join all args lines and check for the -- separator
+    let full_args = args_lines.join(" ");
+
+    assert!(
+        full_args.contains(" -- "),
+        "Lychee args must use '--' separator between flags and positional arguments.\n\
+         Found args block starting at line {}: {:?}\n\n\
+         Without '--', the argument parser may consume glob patterns as values for\n\
+         --exclude-path flags instead of treating them as positional file arguments.\n\n\
+         Fix: Add '--' before the positional glob patterns:\n\
+           args: >-\n\
+             --verbose --no-progress --cache ...\n\
+             --exclude-path tests/\n\
+             --\n\
+             './**/*.md' './**/*.rs' './**/*.toml'\n\n\
+         File: {}",
+        args_start_line,
+        full_args,
+        link_check.display()
+    );
+}
+
+/// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
+/// returning the list of unescaped string values (path patterns).
+///
+/// This is analogous to [`parse_lychee_exclude_patterns`] but targets the
+/// `exclude_path` key instead of the `exclude` key.
+fn parse_lychee_exclude_path_patterns(content: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    let mut in_exclude_path = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect the start of the exclude_path array
+        if trimmed.starts_with("exclude_path") && trimmed.contains('[') {
+            let key = trimmed.split('=').next().unwrap_or("").trim();
+            if key != "exclude_path" {
+                continue;
+            }
+            in_exclude_path = true;
+            // Handle inline array on same line
+            if trimmed.contains(']') {
+                extract_quoted_strings(trimmed, &mut patterns);
+                in_exclude_path = false;
+            }
+            continue;
+        }
+
+        if in_exclude_path {
+            if trimmed.starts_with(']') {
+                break;
+            }
+            extract_quoted_strings(trimmed, &mut patterns);
+        }
+    }
+
+    patterns
 }

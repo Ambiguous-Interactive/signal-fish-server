@@ -103,6 +103,14 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
         with:
           arguments: --all-features
+        env:
+          # Override rust-toolchain.toml inside the cargo-deny Docker container.
+          # The container ships its own Rust toolchain and does not have our pinned
+          # version (1.88.0) installed. RUSTUP_TOOLCHAIN takes precedence over the
+          # toolchain file, preventing the "uninstalled toolchain" error.
+          # cargo-deny only inspects metadata and Cargo.lock — it does not compile
+          # code, so the exact Rust version is irrelevant.
+          RUSTUP_TOOLCHAIN: stable
 
   msrv:
     name: MSRV Verification

@@ -323,21 +323,24 @@ cargo +nightly udeps --all-targets
 
 **Remove confirmed unused dependencies:**
 
+Before:
+
 ```toml
-# Before:
 [dependencies]
 tokio = "1.49"
 futures = "0.3"           # ← Unused
 async-trait = "0.1"       # ← Unused
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.10"
+```
 
-# After:
+After:
+
+```toml
 [dependencies]
 tokio = "1.49"
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.10"
-
 ```
 
 #### Prevention
@@ -750,6 +753,10 @@ Before committing workflow changes, verify:
 | YAML parse error in markdown file | Non-YAML content in `yaml`-fenced code block | Use `text` for logs, `bash` for shell; split mixed blocks |
 | Lychee reports broken URL from `.lychee.toml` | Lychee scans its own config and extracts partial URLs from regex | Exclude `.lychee.toml` via `--exclude-path` or add truncated URL exclusions |
 | Test assertion fails on config regex pattern | `contains("http://localhost")` vs regex `^https?://localhost` | Test regex behavior (compile + match), not literal substrings |
+| `toolchain 'X.Y.Z' is not installed` in cargo-deny | Docker-based action uses own toolchain; `rust-toolchain.toml` override fails | Set `RUSTUP_TOOLCHAIN: stable` env var on the action step |
+| Lychee scans dotfiles despite config | lychee v0.21.0 bug #1936: hidden file option ignored by file matcher | Pin `lycheeVersion: v0.22.0` or later in the action config |
+| `exclude_path` in `.lychee.toml` has no effect on glob-expanded files | `exclude_path` TOML entries do not apply to glob-expanded paths (confirmed bug) | Use `--exclude-path` CLI flags instead; separate flags from globs with `--` |
+| TOML validator fails on "before/after" example block | Single TOML block with duplicate keys (e.g., two `[dependencies]` headers) | Split into separate fenced code blocks (one "before", one "after") |
 
 ---
 
@@ -1692,6 +1699,44 @@ cargo deny check advisories
 # Update to 0.16+ which includes rustsec 0.31+
 ```
 
+### Related Pattern: cargo-deny Docker Container Toolchain Mismatch
+
+**Problem:** `cargo-deny-action` runs in its own Docker container with its own
+Rust toolchain. If `rust-toolchain.toml` pins a specific version (e.g., 1.88.0),
+the container may not have that exact version installed, causing build failures
+or unexpected behavior.
+
+**Symptom:**
+
+```text
+error: toolchain '1.88.0' is not installed
+# OR
+error: override toolchain 1.88.0 is not installed
+```
+
+**Root Cause:** The action's Docker image has a stable Rust toolchain, but
+`rust-toolchain.toml` in the repo forces a different version inside the container.
+
+**Fix:** Set `RUSTUP_TOOLCHAIN: stable` as an environment variable on the
+cargo-deny step. This overrides `rust-toolchain.toml` inside the container.
+This is safe because cargo-deny only inspects metadata and `Cargo.lock` -- it
+does not compile code, so the exact Rust version is irrelevant.
+
+```yaml
+- name: Run cargo-deny
+  uses: EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15
+  env:
+    RUSTUP_TOOLCHAIN: stable  # Override rust-toolchain.toml inside container
+  with:
+    arguments: --all-features
+```
+
+**Key Insight:** Any Docker-based GitHub Action that runs its own Rust toolchain
+may conflict with `rust-toolchain.toml`. Use `RUSTUP_TOOLCHAIN` env var to
+override when the action does not need the project's exact Rust version.
+
+---
+
 ### Related Pattern: Scheduled Security Audits
 
 **Problem:** Security audits only ran on code changes, missing new CVEs published
@@ -1925,14 +1970,18 @@ ERROR: repetition quantifier expects a valid decimal
 
 Common mistakes:
 
+WRONG -- glob syntax where `{}` and `.` are regex metacharacters:
+
 ```toml
-# ❌ WRONG: Glob syntax -- {} and . are regex metacharacters
 exclude = [
     ".github/test-fixtures/{bad-link}.md",
     "https://example.com/*.html",
 ]
+```
 
-# ✅ CORRECT: Regex syntax -- escape metacharacters, anchor patterns
+CORRECT -- regex syntax with escaped metacharacters and anchored patterns:
+
+```toml
 exclude = [
     # Anchored regex with escaped metacharacters
     "^https://example\\.com/.*\\.html$",
@@ -2424,6 +2473,125 @@ for url in test_urls {
   never use `contains()` to check for a literal URL that should be matched
 - Instead, test the **behavior** (does the pattern match the intended URLs?)
 - Document in the test why regex-aware checking is needed
+
+---
+
+## Pattern 19: Lychee Version-Specific Bugs
+
+### Bug A: Hidden File Matcher (lychee v0.21.0, #1936)
+
+**Symptom:** Lychee scans dotfiles like `.lychee.toml` even when the hidden
+file option is disabled. This causes false positives from regex patterns
+extracted from the config file itself (see Pattern 17).
+
+**Root Cause:** Lychee v0.21.0 (bundled with `lychee-action` v2.7.0) has
+bug [#1936](https://github.com/lycheeverse/lychee/issues/1936): the file
+matcher does not respect the hidden file option when using glob patterns
+like `./**/*.toml`.
+
+**Fix:** Pin `lycheeVersion: v0.22.0` or later in the action config:
+
+```yaml
+- name: Link Checker
+  uses: lycheeverse/lychee-action@<SHA> # v2.7.0
+  with:
+    lycheeVersion: v0.22.0  # Fix for hidden file matcher bug #1936
+    args: --verbose --no-progress './**/*.md' './**/*.toml'
+```
+
+### Bug B: `exclude_path` TOML Entries Ignored for Glob-Expanded Files
+
+**Symptom:** Paths listed in `.lychee.toml` `exclude_path` are still scanned
+when lychee receives files via glob expansion (e.g., `./**/*.md`).
+
+**Root Cause:** `exclude_path` entries in `.lychee.toml` do **not** apply to
+glob-expanded file paths. Only the CLI `--exclude-path` flags work correctly
+for both directly specified and glob-expanded paths. This is a confirmed bug
+in lychee v0.23.0 (and likely earlier versions).
+
+**Fix:** Always provide `--exclude-path` on the CLI in addition to (or instead
+of) the TOML config. Use `--` to separate CLI flags from positional glob
+arguments:
+
+```yaml
+- name: Link Checker
+  uses: lycheeverse/lychee-action@<SHA>
+  with:
+    args: >-
+      --verbose --no-progress
+      --exclude-path .lychee.toml
+      --exclude-path target
+      --exclude-path .github/test-fixtures
+      --
+      './**/*.md' './**/*.toml'
+```
+
+**Key Insight:** When excluding paths from lychee, never rely solely on
+`.lychee.toml` `exclude_path`. Always duplicate critical exclusions as CLI
+`--exclude-path` flags to ensure they apply regardless of how files are
+discovered.
+
+---
+
+## Pattern 20: TOML Validation Fails on Before/After Example Blocks
+
+### Symptom
+
+```text
+CI fails with:
+ERROR: TOML parse error in docs/migration.md
+  duplicate key `dependencies` at line 12
+```
+
+### Root Cause
+
+**Documentation that shows "before/after" or "wrong/correct" TOML examples
+in a single fenced code block creates invalid TOML** because the block
+contains duplicate table headers (e.g., two `[dependencies]` sections).
+CI validators that extract and parse `toml`-tagged code blocks will reject
+this as a TOML syntax error.
+
+```markdown
+<!-- WRONG: Single block with duplicate [dependencies] -->
+(triple backticks)toml
+# Before:
+[dependencies]
+tokio = "1.48"
+futures = "0.3"
+
+# After:
+[dependencies]
+tokio = "1.49"
+(triple backticks)
+```
+
+### Solution
+
+**Split into separate fenced code blocks, each containing valid TOML:**
+
+```markdown
+Before:
+
+(triple backticks)toml
+[dependencies]
+tokio = "1.48"
+futures = "0.3"
+(triple backticks)
+
+After:
+
+(triple backticks)toml
+[dependencies]
+tokio = "1.49"
+(triple backticks)
+```
+
+### Prevention
+
+- Every `toml`-tagged code block must be independently valid TOML
+- "Before/after" comparisons must use separate fenced blocks
+- This also applies to `json` and `yaml` blocks -- any language-tagged block
+  is parsed by the corresponding CI validator
 
 ---
 

@@ -189,6 +189,9 @@ These conventions prevent CI failures in documentation validation workflows:
   own config. Use `--exclude-path .lychee.toml` or add exclusions for truncated URLs.
 - **Test config files by behavior, not substrings** -- when a config contains regex patterns
   (e.g., `^https?://localhost`), tests should compile and match the regex, not use `contains("http://localhost")`.
+- **TOML/JSON/YAML "before/after" examples need separate blocks** -- a single `toml`-tagged
+  block with duplicate table headers (e.g., two `[dependencies]`) is invalid TOML and will
+  fail CI validation. Split into separate fenced blocks.
 
 ---
 

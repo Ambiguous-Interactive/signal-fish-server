@@ -2093,6 +2093,45 @@ Extract AWK programs (especially those > 10 lines) to
 
 ---
 
+## 18. Docker-Based Actions and Toolchain Overrides
+
+### The Problem
+
+Some GitHub Actions (e.g., `cargo-deny-action`, `cargo-audit-action`) run
+inside their own Docker container with a pre-installed Rust toolchain. If the
+repository's `rust-toolchain.toml` pins a specific version, rustup inside the
+container tries to install that version -- which may not be available, causing
+the action to fail.
+
+### The Solution: `RUSTUP_TOOLCHAIN` Environment Variable
+
+Override `rust-toolchain.toml` inside the container by setting `RUSTUP_TOOLCHAIN`:
+
+```yaml
+# ✅ CORRECT: Override toolchain for Docker-based actions
+- name: Run cargo-deny
+  uses: EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15
+  env:
+    RUSTUP_TOOLCHAIN: stable  # Use container's stable toolchain
+  with:
+    arguments: --all-features
+```
+
+### When to Use This Pattern
+
+| Action Type | Needs Override? | Rationale |
+|-------------|-----------------|-----------|
+| Metadata-only (cargo-deny, cargo-audit) | Yes | Only reads `Cargo.lock`/`Cargo.toml`, no compilation |
+| Compilation actions (build, test) | No | Needs exact toolchain version for correctness |
+| Linting actions (clippy) | No | Lint results depend on Rust version |
+| Formatting actions (rustfmt) | Depends | Format output may vary by version |
+
+**Key Insight:** Actions that only inspect dependency metadata and lock files
+(not compile code) do not need the project's exact Rust version. Overriding
+with `stable` avoids toolchain installation failures in Docker containers.
+
+---
+
 ## Agent Checklist
 
 ### AWK Best Practices
@@ -2127,6 +2166,7 @@ Extract AWK programs (especially those > 10 lines) to
 - [ ] Timeout values documented with comments explaining duration
 - [ ] Security audits run on schedule (daily), not just on code changes
 - [ ] Scheduled workflows have clear comments explaining frequency choice
+- [ ] Docker-based actions that only inspect metadata use `RUSTUP_TOOLCHAIN: stable` env override
 
 ---
 
