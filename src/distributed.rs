@@ -116,12 +116,14 @@ impl DistributedLock for InMemoryDistributedLock {
     }
 
     async fn try_acquire(&self, key: &str, ttl: Duration) -> Result<Option<LockHandle>> {
-        self.cleanup_expired().await;
-
         let handle = LockHandle::new(key.to_string(), ttl);
         let expires_at = handle.acquired_at + chrono::Duration::from_std(ttl)?;
 
+        // Single write lock acquisition: cleanup expired entries and check/insert atomically
+        // to prevent TOCTOU race where another task acquires the same lock between cleanup and insert
         let mut locks = self.locks.write().await;
+        let now = chrono::Utc::now();
+        locks.retain(|_, entry| entry.expires_at > now);
 
         if locks.contains_key(key) {
             return Ok(None);
@@ -140,10 +142,12 @@ impl DistributedLock for InMemoryDistributedLock {
     }
 
     async fn extend(&self, handle: &LockHandle, ttl: Duration) -> Result<bool> {
-        self.cleanup_expired().await;
-
         let new_expires_at = chrono::Utc::now() + chrono::Duration::from_std(ttl)?;
+
+        // Single write lock acquisition: cleanup and extend atomically
         let mut locks = self.locks.write().await;
+        let now = chrono::Utc::now();
+        locks.retain(|_, entry| entry.expires_at > now);
 
         if let Some(entry) = locks.get_mut(&handle.key) {
             if entry.token == handle.token {
@@ -169,9 +173,11 @@ impl DistributedLock for InMemoryDistributedLock {
     }
 
     async fn is_locked(&self, key: &str) -> Result<bool> {
-        self.cleanup_expired().await;
+        // Read lock is sufficient: check if key exists and is not expired.
+        // Stale expired entries are cleaned up lazily by try_acquire/extend.
         let locks = self.locks.read().await;
-        Ok(locks.contains_key(key))
+        let now = chrono::Utc::now();
+        Ok(locks.get(key).is_some_and(|entry| entry.expires_at > now))
     }
 
     async fn cleanup_expired_locks(&self) -> Result<usize> {
@@ -221,23 +227,31 @@ pub enum CircuitState {
     HalfOpen,
 }
 
+/// Consolidated mutable state for the circuit breaker, protected by a single mutex
+/// to prevent deadlocks and ensure atomic state transitions.
+struct CircuitBreakerInner {
+    state: CircuitState,
+    failure_count: u32,
+    last_failure_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Circuit breaker for cross-instance operations
 pub struct CircuitBreaker {
-    state: Arc<Mutex<CircuitState>>,
-    failure_count: Arc<Mutex<u32>>,
+    inner: Arc<Mutex<CircuitBreakerInner>>,
     failure_threshold: u32,
     timeout: Duration,
-    last_failure_time: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
 
 impl CircuitBreaker {
     pub fn new(failure_threshold: u32, timeout: Duration) -> Self {
         Self {
-            state: Arc::new(Mutex::new(CircuitState::Closed)),
-            failure_count: Arc::new(Mutex::new(0)),
+            inner: Arc::new(Mutex::new(CircuitBreakerInner {
+                state: CircuitState::Closed,
+                failure_count: 0,
+                last_failure_time: None,
+            })),
             failure_threshold,
             timeout,
-            last_failure_time: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -246,14 +260,12 @@ impl CircuitBreaker {
         F: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Debug + From<anyhow::Error>,
     {
-        // Check circuit state
+        // Check circuit state (single lock acquisition for all state reads/transitions)
         {
-            let state = self.state.lock().await;
-            match *state {
+            let mut inner = self.inner.lock().await;
+            match inner.state {
                 CircuitState::Open => {
-                    // Check if timeout has passed
-                    let last_failure = self.last_failure_time.lock().await;
-                    if let Some(last_failure_time) = *last_failure {
+                    if let Some(last_failure_time) = inner.last_failure_time {
                         let elapsed = chrono::Utc::now()
                             .signed_duration_since(last_failure_time)
                             .to_std()
@@ -263,9 +275,8 @@ impl CircuitBreaker {
                             return Err(E::from(anyhow::anyhow!("Circuit breaker is open")));
                         }
                     }
-                    // Transition to half-open
-                    drop(state);
-                    *self.state.lock().await = CircuitState::HalfOpen;
+                    // Transition to half-open atomically
+                    inner.state = CircuitState::HalfOpen;
                 }
                 CircuitState::HalfOpen | CircuitState::Closed => {
                     // Allow limited calls through / Normal operation
@@ -273,25 +284,23 @@ impl CircuitBreaker {
             }
         }
 
-        // Execute operation
+        // Execute operation (lock is NOT held during the operation itself)
         match operation.await {
             Ok(result) => {
-                // Success - reset failure count if we were in half-open state
-                let mut state = self.state.lock().await;
-                if *state == CircuitState::HalfOpen {
-                    *state = CircuitState::Closed;
-                    *self.failure_count.lock().await = 0;
+                let mut inner = self.inner.lock().await;
+                if inner.state == CircuitState::HalfOpen {
+                    inner.state = CircuitState::Closed;
+                    inner.failure_count = 0;
                 }
                 Ok(result)
             }
             Err(error) => {
-                // Failure - increment count and potentially open circuit
-                let mut failure_count = self.failure_count.lock().await;
-                *failure_count += 1;
+                let mut inner = self.inner.lock().await;
+                inner.failure_count += 1;
 
-                if *failure_count >= self.failure_threshold {
-                    *self.state.lock().await = CircuitState::Open;
-                    *self.last_failure_time.lock().await = Some(chrono::Utc::now());
+                if inner.failure_count >= self.failure_threshold {
+                    inner.state = CircuitState::Open;
+                    inner.last_failure_time = Some(chrono::Utc::now());
                 }
 
                 Err(error)
@@ -300,12 +309,13 @@ impl CircuitBreaker {
     }
 
     pub async fn get_state(&self) -> CircuitState {
-        self.state.lock().await.clone()
+        self.inner.lock().await.state.clone()
     }
 
     pub async fn reset(&self) {
-        *self.state.lock().await = CircuitState::Closed;
-        *self.failure_count.lock().await = 0;
-        *self.last_failure_time.lock().await = None;
+        let mut inner = self.inner.lock().await;
+        inner.state = CircuitState::Closed;
+        inner.failure_count = 0;
+        inner.last_failure_time = None;
     }
 }

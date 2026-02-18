@@ -574,29 +574,37 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: Option<RoomId>,
         sender: mpsc::Sender<Arc<ServerMessage>>,
     ) -> anyhow::Result<()> {
-        let mut clients = self.local_clients.write().await;
-        clients.insert(player_id, sender);
-
+        // Lock ordering: room_players first, then local_clients
+        // (consistent with broadcast_to_room / broadcast_to_room_except read paths
+        //  to prevent ABBA deadlocks)
         if let Some(room_id) = room_id {
             let mut room_players = self.room_players.write().await;
             room_players
                 .entry(room_id)
                 .or_insert_with(HashSet::new)
                 .insert(player_id);
+            let mut clients = self.local_clients.write().await;
+            clients.insert(player_id, sender);
+        } else {
+            // No room_players lock needed when room_id is None
+            let mut clients = self.local_clients.write().await;
+            clients.insert(player_id, sender);
         }
         Ok(())
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
-        let mut clients = self.local_clients.write().await;
-        clients.remove(player_id);
-
-        // Remove from all rooms
+        // Lock ordering: room_players first, then local_clients
+        // (consistent with broadcast_to_room / broadcast_to_room_except read paths
+        //  to prevent ABBA deadlocks)
         let mut room_players = self.room_players.write().await;
         room_players.retain(|_, players| {
             players.remove(player_id);
             !players.is_empty()
         });
+
+        let mut clients = self.local_clients.write().await;
+        clients.remove(player_id);
 
         Ok(())
     }
