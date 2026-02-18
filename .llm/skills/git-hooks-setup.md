@@ -661,11 +661,13 @@ echo "  git commit --no-verify"
 
 **Hooks should match CI validation:**
 
-```yaml
+```bash
 # Pre-commit hook
 cargo fmt --check
 cargo clippy
+```
 
+```yaml
 # CI workflow (.github/workflows/ci.yml)
 - run: cargo fmt --check
 - run: cargo clippy

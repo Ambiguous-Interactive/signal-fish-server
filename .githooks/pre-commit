@@ -16,6 +16,7 @@
 #   8. Markdown relative link validation (if docs/ markdown modified)
 #   9. Markdown linting (if markdown files modified)
 #  10. Link checking (if markdown files modified)
+#  11. Markdown code block validation (if markdown files modified)
 
 set -e
 
@@ -35,7 +36,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=10
+TOTAL_CHECKS=11
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -302,6 +303,211 @@ if [ -n "$STAGED_MD_FILES" ]; then
     fi
 else
     check_skip "Link checking" "no markdown files changed"
+fi
+
+# Check 11: Markdown code block validation (only if markdown files changed)
+# Validates JSON (jq), YAML (yq), TOML (taplo), and Bash (bash -n) code blocks
+# extracted from staged markdown files, matching the CI doc-validation.yml workflow.
+echo "${BLUE}[11/${TOTAL_CHECKS}]${NC} Validating code blocks in markdown files..."
+
+if [ -n "$STAGED_MD_FILES" ]; then
+    # Filter out test fixture directories from staged markdown files
+    CB_MD_FILES=$(echo "$STAGED_MD_FILES" | grep -vE '^(\.github/test-fixtures/|test-fixtures/)' || true)
+
+    if [ -n "$CB_MD_FILES" ]; then
+        CB_TEMP_DIR=$(mktemp -d)
+        # Use file-based counters to avoid subshell scope issues
+        CB_COUNTER_FILE="$CB_TEMP_DIR/counters"
+        # Counter file format: 2 space-separated integers (total failed)
+        echo "0 0" > "$CB_COUNTER_FILE"
+
+        # AWK program that extracts code blocks and writes each to a file.
+        # This matches the fence tracking pattern used in doc-validation.yml:
+        #   - Outer fences (4+ backticks) skip nested 3-backtick examples
+        #   - Closing fences allow trailing spaces/tabs per CommonMark spec
+        #
+        # AWK writes each block to OUTDIR/block_NNN.EXT and emits
+        # "line_number<TAB>filename" to stdout for the shell to process.
+        # This avoids NUL-delimited reads (read -d is a bashism, not POSIX sh).
+        #
+        # Parameters (via -v):
+        #   LANG_PATTERN  - regex to match opening fence tags
+        #   OUTDIR        - directory to write extracted block files
+        #   EXT           - file extension for extracted blocks
+        EXTRACT_BLOCKS_AWK='
+          # Skip content inside outer fences (4+ backticks) which may contain
+          # nested 3-backtick examples (e.g., documentation about code blocks).
+          /^````/ {
+            if (!outer_fence) {
+              n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+              outer_fence = n
+            } else {
+              n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
+              if (n >= outer_fence && s ~ /^[ \t]*$/) outer_fence = 0
+            }
+            next
+          }
+          outer_fence { next }
+          # Match opening fence for target language code blocks
+          $0 ~ LANG_PATTERN {
+            in_block = 1
+            block_start = NR
+            block_num++
+            content = ""
+            next
+          }
+          # Match closing fence only if in a block
+          # CommonMark: closing fences may have trailing spaces/tabs
+          /^```[ \t]*$/ && in_block {
+            if (content != "") {
+              outfile = OUTDIR "/block_" block_num "." EXT
+              printf "%s", content > outfile
+              close(outfile)
+              print block_start "\t" outfile
+            }
+            in_block = 0
+            next
+          }
+          # Accumulate content while in block
+          in_block {
+            content = content $0 "\n"
+          }
+          # Handle unclosed blocks at end of file
+          END {
+            if (in_block && content != "") {
+              outfile = OUTDIR "/block_" block_num "." EXT
+              printf "%s", content > outfile
+              close(outfile)
+              print block_start "\t" outfile
+            }
+          }
+        '
+
+        # Check which validation tools are available
+        HAS_JQ=0
+        HAS_YQ=0
+        HAS_TAPLO=0
+
+        if command -v jq >/dev/null 2>&1; then HAS_JQ=1; fi
+        if command -v yq >/dev/null 2>&1; then HAS_YQ=1; fi
+        if command -v taplo >/dev/null 2>&1; then HAS_TAPLO=1; fi
+
+        # --- Validate JSON code blocks ---
+        if [ "$HAS_JQ" -eq 1 ]; then
+            for md_file in $CB_MD_FILES; do
+                [ -f "$md_file" ] || continue
+                awk -v LANG_PATTERN='^```json$' \
+                    -v OUTDIR="$CB_TEMP_DIR" \
+                    -v EXT="json" \
+                    "$EXTRACT_BLOCKS_AWK" "$md_file" | while IFS='	' read -r line_num outfile; do
+                    [ -z "$outfile" ] && continue
+                    read -r cb_total cb_failed < "$CB_COUNTER_FILE"
+                    cb_total=$((cb_total + 1))
+
+                    if ! jq empty "$outfile" 2>/dev/null; then
+                        echo "${RED}  Invalid JSON in $md_file at line $line_num${NC}"
+                        cb_failed=$((cb_failed + 1))
+                    fi
+
+                    echo "$cb_total $cb_failed" > "$CB_COUNTER_FILE"
+                done
+            done
+        fi
+
+        # --- Validate YAML code blocks ---
+        if [ "$HAS_YQ" -eq 1 ]; then
+            for md_file in $CB_MD_FILES; do
+                [ -f "$md_file" ] || continue
+                awk -v LANG_PATTERN='^```(yaml|yml)$' \
+                    -v OUTDIR="$CB_TEMP_DIR" \
+                    -v EXT="yaml" \
+                    "$EXTRACT_BLOCKS_AWK" "$md_file" | while IFS='	' read -r line_num outfile; do
+                    [ -z "$outfile" ] && continue
+                    read -r cb_total cb_failed < "$CB_COUNTER_FILE"
+                    cb_total=$((cb_total + 1))
+
+                    if ! yq eval . "$outfile" >/dev/null 2>&1; then
+                        echo "${RED}  Invalid YAML in $md_file at line $line_num${NC}"
+                        cb_failed=$((cb_failed + 1))
+                    fi
+
+                    echo "$cb_total $cb_failed" > "$CB_COUNTER_FILE"
+                done
+            done
+        fi
+
+        # --- Validate TOML code blocks (skip if taplo not available) ---
+        if [ "$HAS_TAPLO" -eq 1 ]; then
+            for md_file in $CB_MD_FILES; do
+                [ -f "$md_file" ] || continue
+                awk -v LANG_PATTERN='^```toml$' \
+                    -v OUTDIR="$CB_TEMP_DIR" \
+                    -v EXT="toml" \
+                    "$EXTRACT_BLOCKS_AWK" "$md_file" | while IFS='	' read -r line_num outfile; do
+                    [ -z "$outfile" ] && continue
+                    read -r cb_total cb_failed < "$CB_COUNTER_FILE"
+                    cb_total=$((cb_total + 1))
+
+                    if ! taplo check "$outfile" 2>/dev/null; then
+                        echo "${RED}  Invalid TOML in $md_file at line $line_num${NC}"
+                        cb_failed=$((cb_failed + 1))
+                    fi
+
+                    echo "$cb_total $cb_failed" > "$CB_COUNTER_FILE"
+                done
+            done
+        fi
+
+        # --- Validate Bash code blocks (bash -n syntax check, always available) ---
+        for md_file in $CB_MD_FILES; do
+            [ -f "$md_file" ] || continue
+            awk -v LANG_PATTERN='^```(bash|sh|shell)$' \
+                -v OUTDIR="$CB_TEMP_DIR" \
+                -v EXT="sh" \
+                "$EXTRACT_BLOCKS_AWK" "$md_file" | while IFS='	' read -r line_num outfile; do
+                [ -z "$outfile" ] && continue
+                # Skip placeholder/example-only blocks
+                if grep -qE '^#.*example|^# Note:|^\.\.\.$' "$outfile"; then
+                    continue
+                fi
+                read -r cb_total cb_failed < "$CB_COUNTER_FILE"
+                cb_total=$((cb_total + 1))
+
+                if ! bash -n "$outfile" 2>/dev/null; then
+                    echo "${RED}  Invalid Bash syntax in $md_file at line $line_num${NC}"
+                    cb_failed=$((cb_failed + 1))
+                fi
+
+                echo "$cb_total $cb_failed" > "$CB_COUNTER_FILE"
+            done
+        done
+
+        # Read final counters
+        read -r cb_total cb_failed < "$CB_COUNTER_FILE"
+        rm -rf "$CB_TEMP_DIR"
+
+        # Build a summary of which validators ran
+        CB_TOOLS_USED=""
+        if [ "$HAS_JQ" -eq 1 ]; then CB_TOOLS_USED="${CB_TOOLS_USED}JSON "; fi
+        if [ "$HAS_YQ" -eq 1 ]; then CB_TOOLS_USED="${CB_TOOLS_USED}YAML "; fi
+        if [ "$HAS_TAPLO" -eq 1 ]; then CB_TOOLS_USED="${CB_TOOLS_USED}TOML "; fi
+        CB_TOOLS_USED="${CB_TOOLS_USED}Bash"
+
+        if [ "$cb_failed" -gt 0 ]; then
+            check_fail "Code block validation" "$cb_failed/$cb_total blocks invalid (checked: $CB_TOOLS_USED)"
+            echo ""
+        else
+            if [ "$cb_total" -gt 0 ]; then
+                check_pass "Code block validation ($cb_total blocks: $CB_TOOLS_USED)"
+            else
+                check_pass "Code block validation (no blocks found)"
+            fi
+        fi
+    else
+        check_skip "Code block validation" "only test fixture markdown files staged"
+    fi
+else
+    check_skip "Code block validation" "no markdown files changed"
 fi
 
 # Summary

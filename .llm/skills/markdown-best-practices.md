@@ -857,7 +857,41 @@ placeholder with valid JSON.
 ```
 ````
 
-### Pitfall 12: Bash Code Block Validation
+### Pitfall 12: Mixed-Content Blocks Must Be Split
+
+A single code block must contain only one language. When documentation shows a
+sequence that spans multiple languages (e.g., shell commands that produce YAML
+output, or a setup guide mixing bash and YAML), split the content into separate
+fenced blocks with the correct tag for each.
+
+**Why:** CI validators parse blocks according to their language tag. A
+`` ```yaml `` block containing shell commands fails YAML parsing; a
+`` ```bash `` block containing YAML fragments may fail `bash -n` syntax checks.
+
+`````markdown
+<!-- markdownlint-disable MD046 -->
+#### Keep hooks in sync with CI
+
+Run the same checks locally:
+
+```bash
+cargo fmt --check
+cargo clippy
+```
+
+CI workflow equivalent:
+
+```yaml
+- run: cargo fmt --check
+- run: cargo clippy
+```
+<!-- markdownlint-enable MD046 -->
+`````
+
+**Rule of thumb:** If content switches languages mid-block, add a closing fence
+and open a new block with the correct tag.
+
+### Pitfall 13: Bash Code Block Validation
 
 Content tagged with `` ```bash `` may be validated as bash syntax. Only use the
 `bash` fence tag for content that is actually valid shell script.
