@@ -1,7 +1,7 @@
 # Signal Fish Server — Development Container
 # https://github.com/Ambiguous-Interactive/signal-fish-server
 
-FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
+FROM mcr.microsoft.com/devcontainers/rust:2-bookworm
 # Project MSRV: 1.88.0 — this image must provide >= 1.88
 
 # System dependencies for building with mold linker and TLS
