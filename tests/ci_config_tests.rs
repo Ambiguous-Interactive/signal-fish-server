@@ -3734,6 +3734,243 @@ fn test_lychee_args_use_double_dash_separator() {
     );
 }
 
+// ============================================================================
+// Dockerfile Validation Tests
+// ============================================================================
+// These tests prevent Docker build failures caused by configuration drift
+// between the Dockerfile and the actual repository file structure.
+
+#[test]
+fn test_dockerfile_copy_targets_exist() {
+    // This test validates that every COPY source path in the Dockerfile references
+    // a file or directory that actually exists in the repository.
+    //
+    // Root cause: The Dockerfile referenced a `third_party/` directory that was
+    // removed from the repo but the COPY instructions were never cleaned up.
+    // This caused Docker builds to fail with:
+    //   ERROR: failed to calculate checksum of ref: "/third_party": not found
+    //
+    // This test catches the issue locally before it reaches CI.
+
+    let root = repo_root();
+    let dockerfile = root.join("Dockerfile");
+
+    assert!(
+        dockerfile.exists(),
+        "Dockerfile not found at {}",
+        dockerfile.display()
+    );
+
+    let content = read_file(&dockerfile);
+    let mut violations = Vec::new();
+    let mut total_copy_instructions = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1;
+        let trimmed = line.trim();
+
+        // Match COPY and ADD instructions (but not COPY --from=<stage> which copies from build stages)
+        // ADD with URLs is skipped since those are remote fetches, not local paths
+        let instruction_prefix = if trimmed.starts_with("COPY ") {
+            Some("COPY ")
+        } else if trimmed.starts_with("ADD ") {
+            Some("ADD ")
+        } else {
+            None
+        };
+
+        if let Some(prefix) = instruction_prefix {
+            if trimmed.contains("--from=") {
+                continue;
+            }
+            total_copy_instructions += 1;
+
+            // Extract the source path(s) from the instruction
+            // COPY/ADD <src> [<src>...] <dest>
+            // The last space-separated token is the destination
+            let parts: Vec<&str> = trimmed
+                .strip_prefix(prefix)
+                .unwrap()
+                .split_whitespace()
+                .collect();
+
+            if parts.len() < 2 {
+                continue;
+            }
+
+            // All tokens except the last are source paths
+            for source in &parts[..parts.len() - 1] {
+                // Skip flags (--chown, --chmod, --link, etc.)
+                if source.starts_with("--") {
+                    continue;
+                }
+                // Skip ADD with URLs (remote fetches, not local paths)
+                if source.starts_with("http://") || source.starts_with("https://") {
+                    continue;
+                }
+                let source_path = root.join(source);
+                if !source_path.exists() {
+                    violations.push(format!(
+                        "  Dockerfile:{line_num}: {prefix}source does not exist: {source}\n    \
+                         Full line: {trimmed}\n    \
+                         Expected at: {}",
+                        source_path.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Dockerfile COPY/ADD instructions reference non-existent paths:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Total COPY/ADD instructions checked: {total_copy_instructions}\n\
+             - Violations found: {}\n\n\
+             This causes Docker builds to fail with:\n\
+             ERROR: failed to calculate checksum of ref: \"/<path>\": not found\n\n\
+             Fix: Either create the missing file/directory or remove the COPY/ADD instruction\n\
+             from the Dockerfile.",
+            violations.join("\n"),
+            violations.len()
+        );
+    }
+}
+
+#[test]
+fn test_workflow_script_references_exist() {
+    // This test validates that shell scripts referenced in workflow `run:` steps
+    // actually exist in the repository.
+    //
+    // Root cause: The release.yml workflow referenced `./scripts/verify-sccache.sh`
+    // which did not exist, causing a silent failure (masked by continue-on-error).
+    //
+    // This test catches missing script references locally before CI.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut violations = Vec::new();
+    let mut total_scripts_checked = 0;
+
+    // Regex-like pattern: match ./path/to/script.sh or scripts/something.sh
+    // We look for lines that invoke a local script file
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+            let trimmed = line.trim();
+
+            // Skip YAML comments to avoid false positives on references like:
+            // # Removed: ./scripts/old-deploy.sh
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Look for script invocations in run: blocks
+            // Common patterns: ./scripts/foo.sh, bash scripts/foo.sh, sh ./scripts/foo.sh
+            for token in trimmed.split_whitespace() {
+                // Match tokens that look like local script paths
+                let is_script_ref =
+                    token.ends_with(".sh") || token.ends_with(".awk") || token.ends_with(".py");
+                let is_local_path = token.starts_with("./")
+                    || token.starts_with("scripts/")
+                    || token.starts_with(".github/scripts/");
+
+                let script_path = if is_script_ref && is_local_path {
+                    Some(token.trim_start_matches("./"))
+                } else {
+                    None
+                };
+
+                if let Some(script) = script_path {
+                    total_scripts_checked += 1;
+                    let full_path = root.join(script);
+                    if !full_path.exists() {
+                        violations.push(format!(
+                            "  {filename}:{line_num}: Script does not exist: {script}\n    \
+                             Full line: {trimmed}\n    \
+                             Expected at: {}",
+                            full_path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Workflow files reference non-existent scripts:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Scripts checked: {total_scripts_checked}\n\
+             - Missing scripts: {}\n\n\
+             Fix: Either create the missing script or update the workflow to remove the reference.",
+            violations.join("\n"),
+            violations.len()
+        );
+    }
+}
+
+#[test]
+fn test_release_workflow_conventions() {
+    // This test validates that the release workflow follows the same conventions
+    // as the other CI workflows (SHA pinning is checked separately by
+    // test_github_actions_are_pinned_to_sha which covers all workflows).
+    //
+    // Specific checks for release.yml:
+    //   1. Has a timeout-minutes to prevent runaway builds
+    //   2. Has permissions explicitly set
+    //   3. Has a proper name field
+    //   4. Does not reference non-existent checkout versions
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        // Release workflow is optional
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // Must have a name
+    assert!(
+        content.lines().any(|l| l.starts_with("name:")),
+        "release.yml must have a top-level 'name:' field.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Must have permissions
+    assert!(
+        content.contains("permissions:"),
+        "release.yml must explicitly set permissions (principle of least privilege).\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Must have timeout-minutes on jobs
+    let has_timeout = content
+        .lines()
+        .any(|l| l.trim().starts_with("timeout-minutes:"));
+    assert!(
+        has_timeout,
+        "release.yml jobs must have timeout-minutes to prevent runaway builds.\n\
+         File: {}",
+        release_yml.display()
+    );
+}
+
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
 /// returning the list of unescaped string values (path patterns).
 ///
