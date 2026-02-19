@@ -505,9 +505,20 @@ fn test_no_language_specific_cache_mismatch() {
 
     // Determine project type
     let is_rust_project = root.join("Cargo.toml").exists();
+    // Also detect requirements-*.txt variants (e.g., requirements-docs.txt for MkDocs)
+    let has_any_requirements_txt = root
+        .read_dir()
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("requirements") && name.ends_with(".txt")
+            })
+        })
+        .unwrap_or(false);
     let is_python_project = root.join("requirements.txt").exists()
         || root.join("Pipfile").exists()
-        || root.join("pyproject.toml").exists();
+        || root.join("pyproject.toml").exists()
+        || has_any_requirements_txt;
     let is_node_project = root.join("package.json").exists();
 
     for entry in collect_workflow_files(&workflows_dir) {
@@ -525,11 +536,30 @@ fn test_no_language_specific_cache_mismatch() {
                 || content.contains("no requirements.txt")
                 || content.contains("yamllint install is fast");
 
+            let cache_line = content
+                .lines()
+                .find(|line| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with("cache:") && trimmed.contains("pip")
+                })
+                .unwrap_or("<not found>")
+                .trim();
+
             assert!(
                 has_explanation,
                 "{filename}: Uses Python pip cache but no Python project files found.\n\
-                     This is a Rust project (Cargo.toml exists).\n\
-                     Either remove 'cache: pip' or add a comment explaining why it's needed."
+                 This is a Rust project (Cargo.toml exists).\n\
+                 Either remove 'cache: pip' or add a comment explaining why it's needed.\n\
+                 Cache line: `{cache_line}`\n\
+                 Python indicators checked:\n\
+                 - requirements.txt: {req_exists}\n\
+                 - requirements-*.txt (glob): {glob_exists}\n\
+                 - Pipfile: {pipfile_exists}\n\
+                 - pyproject.toml: {pyproject_exists}",
+                req_exists = root.join("requirements.txt").exists(),
+                glob_exists = has_any_requirements_txt,
+                pipfile_exists = root.join("Pipfile").exists(),
+                pyproject_exists = root.join("pyproject.toml").exists(),
             );
         }
 
@@ -545,6 +575,52 @@ fn test_no_language_specific_cache_mismatch() {
             );
         }
     }
+}
+
+#[test]
+fn test_docs_deploy_requirements_file_exists() {
+    // This test prevents the case where someone deletes requirements-docs.txt
+    // but leaves the docs-deploy workflow referencing it, which would cause
+    // the CI build to fail with a missing file error.
+
+    let root = repo_root();
+    let docs_deploy = root.join(".github/workflows/docs-deploy.yml");
+
+    if !docs_deploy.exists() {
+        // No docs-deploy workflow, nothing to check
+        return;
+    }
+
+    let content = read_file(&docs_deploy);
+
+    // Collect all references to requirements-docs.txt in the workflow
+    let references: Vec<(usize, String)> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("requirements-docs.txt"))
+        .map(|(i, line)| (i + 1, line.trim().to_string()))
+        .collect();
+
+    if references.is_empty() {
+        // Workflow does not reference requirements-docs.txt, nothing to check
+        return;
+    }
+
+    let requirements_file = root.join("requirements-docs.txt");
+    let reference_lines: Vec<String> = references
+        .iter()
+        .map(|(num, line)| format!("  line {num}: {line}"))
+        .collect();
+
+    assert!(
+        requirements_file.exists(),
+        "docs-deploy.yml references requirements-docs.txt but the file does not exist.\n\
+         Workflow: {}\n\
+         References found:\n{}\n\
+         Either create requirements-docs.txt or update the workflow to remove references to it.",
+        docs_deploy.display(),
+        reference_lines.join("\n"),
+    );
 }
 
 #[test]
@@ -737,6 +813,103 @@ fn test_markdown_files_have_language_identifiers() {
                 .join("\n")
         );
     }
+}
+
+#[test]
+fn test_mkdocs_material_tabs_have_lint_suppression() {
+    // MkDocs Material tab syntax (`=== "Tab Title"`) creates 4-space indented
+    // content blocks that markdownlint MD046 flags as inconsistent indentation.
+    // Any markdown file using this syntax must wrap the tabbed section with
+    // `<!-- markdownlint-disable MD046 -->` and `<!-- markdownlint-enable MD046 -->`.
+    //
+    // This test was added after a CI failure in docs/quickstart.md where the
+    // MkDocs tab syntax caused MD046 lint errors.
+
+    let root = repo_root();
+    let docs_dir = root.join("docs");
+
+    if !docs_dir.exists() {
+        // No docs directory, nothing to check
+        return;
+    }
+
+    let markdown_files = find_files_with_extension(
+        &docs_dir,
+        "md",
+        &["target", "node_modules", "test-fixtures"],
+    );
+
+    let mut violations = Vec::new();
+
+    for file in &markdown_files {
+        let content = read_file(file);
+
+        // Check if the file uses MkDocs Material tab syntax outside fenced code blocks.
+        // We track fences by width (CommonMark spec) to avoid false positives from
+        // tab syntax appearing inside fenced code examples.
+        let mut fence_width: usize = 0;
+        let mut has_tab_syntax_outside_fence = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                let fence_char = trimmed.chars().next().unwrap();
+                let width = trimmed.chars().take_while(|&c| c == fence_char).count();
+                if fence_width == 0 {
+                    // Opening fence
+                    fence_width = width;
+                } else if width >= fence_width {
+                    // Check closing fence: rest after backticks must be blank
+                    let rest = &trimmed[width..];
+                    if rest.trim().is_empty() {
+                        fence_width = 0;
+                    }
+                }
+                continue;
+            }
+            if fence_width == 0 && trimmed.starts_with("=== \"") {
+                has_tab_syntax_outside_fence = true;
+                break;
+            }
+        }
+
+        if !has_tab_syntax_outside_fence {
+            continue;
+        }
+
+        let has_disable = content.contains("<!-- markdownlint-disable MD046 -->");
+        let has_enable = content.contains("<!-- markdownlint-enable MD046 -->");
+
+        if !has_disable || !has_enable {
+            let mut missing = Vec::new();
+            if !has_disable {
+                missing.push("<!-- markdownlint-disable MD046 -->");
+            }
+            if !has_enable {
+                missing.push("<!-- markdownlint-enable MD046 -->");
+            }
+            violations.push(format!(
+                "{}: Uses MkDocs Material tab syntax (=== \"...\") but missing lint suppression.\n\
+                 Missing comments: {}",
+                file.display(),
+                missing.join(", "),
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Markdown files with MkDocs Material tabs must have MD046 lint suppression:\n\n{}\n\n\
+         MkDocs Material tab syntax creates 4-space indented blocks that trigger MD046.\n\
+         Wrap tabbed sections with:\n\
+         <!-- markdownlint-disable MD046 -->\n\
+         === \"Tab 1\"\n\
+             content...\n\
+         === \"Tab 2\"\n\
+             content...\n\
+         <!-- markdownlint-enable MD046 -->",
+        violations.join("\n\n"),
+    );
 }
 
 #[test]

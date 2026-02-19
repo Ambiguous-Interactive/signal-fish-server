@@ -1658,13 +1658,32 @@ fn test_required_ci_workflows_exist() {
 
 #[test]
 fn test_no_language_specific_cache_mismatch() {
-    let is_rust_project = Path::new("Cargo.toml").exists();
+    let root = repo_root();
+    let is_rust_project = root.join("Cargo.toml").exists();
+
+    // Detect requirements-*.txt variants (e.g., requirements-docs.txt for MkDocs)
+    let has_any_requirements_txt = root
+        .read_dir()
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("requirements") && name.ends_with(".txt")
+            })
+        })
+        .unwrap_or(false);
+    let is_python_project = root.join("requirements.txt").exists()
+        || root.join("Pipfile").exists()
+        || root.join("pyproject.toml").exists()
+        || has_any_requirements_txt;
 
     for workflow_file in workflow_files {
         let content = read_file(&workflow_file);
 
-        // Check for Python caching on Rust projects
-        if is_rust_project && content.contains("cache: 'pip'") {
+        // Check for Python caching on non-Python Rust projects
+        if !is_python_project
+            && is_rust_project
+            && (content.contains("cache: 'pip'") || content.contains("cache: pip"))
+        {
             panic!("Python pip cache found in Rust project workflow");
         }
     }

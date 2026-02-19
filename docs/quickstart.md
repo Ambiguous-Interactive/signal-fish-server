@@ -11,6 +11,8 @@ You need one of the following:
 
 ## Step 1: Start the Server
 
+<!-- markdownlint-disable MD046 -->
+
 === "Docker"
 
     Pull and run the container image. No configuration needed.
@@ -28,6 +30,8 @@ You need one of the following:
     cd signal-fish-server
     cargo run
     ```
+
+<!-- markdownlint-enable MD046 -->
 
 The server starts on port 3536 by default. Verify it is running:
 

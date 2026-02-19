@@ -133,6 +133,14 @@ grep -r "cargo\|Cargo\.toml\|rust" .          # Rust patterns (should be present
 
 ```
 
+#### Caveat: Mixed-Language Projects
+
+Mixed-language projects are legitimate. A Rust project may use Python tooling
+for documentation (e.g., MkDocs with `pip` caching). When detecting language
+mismatches, check for `requirements*.txt` variants (not just `requirements.txt`)
+as project indicators. For example, `docs-deploy.yml` legitimately uses
+`cache: pip` with `cache-dependency-path: requirements-docs.txt` for MkDocs.
+
 ---
 
 ### Pattern 2: Cache Corruption / Deserialization Failures
