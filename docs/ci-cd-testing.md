@@ -66,7 +66,7 @@ Tests that validate markdown formatting and consistency:
 |------|---------|-----------------|
 | `test_markdown_files_have_language_identifiers` | Ensures code blocks have language identifiers | MD040 violations (missing language on code blocks) |
 | `test_markdown_no_capitalized_filenames_in_links` | Catches capitalization issues in links | Link breakage on case-sensitive filesystems |
-| `test_markdown_technical_terms_consistency` | Validates technical term capitalization | Inconsistent documentation (GitHub vs `github`) |
+| `test_markdown_technical_terms_consistency` | Validates technical term capitalization (strips URLs/HTML before checking) | Inconsistent documentation (GitHub vs `github`) |
 | `test_markdown_common_patterns_are_correct` | Data-driven pattern validation | Common formatting mistakes |
 | `test_markdown_config_exists` | Validates `.markdownlint.json` exists | Missing markdownlint configuration |
 

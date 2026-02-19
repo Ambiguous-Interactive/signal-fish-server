@@ -405,7 +405,7 @@ fn test_github_actions_security() {
 1. `test_markdown_files_have_language_identifiers` - MD040 validation
 2. `test_markdown_config_exists` - Validates .markdownlint.json exists
 3. `test_markdown_no_capitalized_filenames_in_links` - Link case validation
-4. `test_markdown_technical_terms_consistency` - MD044 validation
+4. `test_markdown_technical_terms_consistency` - MD044 validation (strips URLs/HTML before checking)
 5. `test_markdown_common_patterns_are_correct` - Pattern validation
 6. `test_lychee_excludes_placeholder_urls` - Link checker config
 7. `test_no_actual_placeholder_urls_in_docs` - Placeholder detection

@@ -666,6 +666,28 @@ cargo clippy --all-targets --all-features -- -D warnings
 The `--all-targets` flag ensures test code, benchmarks, and examples are all
 compiled and linted — matching what CI does.
 
+### Pattern 8: MD044 Technical Terms in URLs
+
+**Symptom:** `test_markdown_technical_terms_consistency` fails on a line containing HTML
+tags or URLs with domain names like `github.io`, `docker.com`.
+
+**Root Cause:** URLs contain domain names that are correctly lowercase. The test's
+URL-stripping logic may not cover the URL scheme or format.
+
+**Solution:**
+
+<!-- markdownlint-disable MD044 -->
+
+1. Verify the line contains a URL (not bare text like `"use github"`)
+2. Check `RAW_URL_STRIP_PATTERN` in `tests/ci_config_tests.rs` covers the URL scheme
+3. If a new scheme is needed, add it to the pattern: `(?:https?|wss?|ftp|newscheme)://\S+`
+4. Add a test case to `test_technical_terms_url_stripping_skips_urls()`
+
+**Not a bug if:** The term appears as bare text outside any URL (e.g., `"use github"`
+should be `"use GitHub"`).
+
+<!-- markdownlint-enable MD044 -->
+
 ---
 
 ## Diagnostic Workflow
