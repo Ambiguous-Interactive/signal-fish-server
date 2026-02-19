@@ -622,6 +622,44 @@ DOCKER_BUILDKIT=1 docker build --no-cache -t test .
 
 ---
 
+### Pattern 7: Clippy Lints in Test Code
+
+#### Symptom
+
+```text
+
+CI clippy step fails with:
+error: this `if` statement can be collapsed
+  --> src/room.rs:142:9
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+   = note: `-D clippy::collapsible-if` implied by `-D warnings`
+
+```
+
+#### Root Cause
+
+The CI clippy command uses `--all-targets`, which compiles and lints test code
+(`#[cfg(test)]` modules and integration tests) in addition to production code.
+Lints like `collapsible_if`, `needless_return`, and `single_match` are commonly
+introduced in test code because developers focus on correctness rather than style
+when writing tests.
+
+#### Solution
+
+**Run clippy with `--all-targets` locally before pushing:**
+
+```bash
+
+cargo clippy --all-targets --all-features -- -D warnings
+
+```
+
+The `--all-targets` flag ensures test code, benchmarks, and examples are all
+compiled and linted — matching what CI does.
+
+---
+
 ## Diagnostic Workflow
 
 When CI fails, work through this systematic diagnostic process:

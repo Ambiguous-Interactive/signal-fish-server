@@ -271,6 +271,58 @@ Use `-D warnings` in CI to fail on any lint warning.
 
 ---
 
+## Common CI-Breaking Clippy Lints in Test Code
+
+Test code is compiled and linted when using `--all-targets`, which means clippy lints
+apply to `#[cfg(test)]` modules and integration tests just as they do to production code.
+These lints commonly sneak into test code and break CI:
+
+| Lint               | What it catches                                               |
+| ------------------ | ------------------------------------------------------------- |
+| `collapsible_if`   | Nested `if` statements that can be combined with `&&`         |
+| `needless_return`  | Explicit `return` statements that can be removed              |
+| `single_match`     | `match` with one arm + wildcard that should be `if let`       |
+
+### Example: `collapsible_if`
+
+```rust
+// ❌ Triggers collapsible_if warning
+#[test]
+fn test_room_visibility() {
+    let room = create_room("ABC123").unwrap();
+    if room.is_public() {
+        if room.player_count() > 0 {
+            assert!(room.is_joinable());
+        }
+    }
+}
+
+// ✅ Fix: combine nested if statements with &&
+#[test]
+fn test_room_visibility() {
+    let room = create_room("ABC123").unwrap();
+    if room.is_public() && room.player_count() > 0 {
+        assert!(room.is_joinable());
+    }
+}
+
+```
+
+### Always Lint Test Code Locally
+
+Run clippy with `--all-targets` to include tests, benchmarks, and examples:
+
+```bash
+
+cargo clippy --all-targets --all-features -- -D warnings
+
+```
+
+The `--all-targets` flag is critical — without it, `#[cfg(test)]` modules and
+integration tests are not compiled or linted, and warnings will only surface in CI.
+
+---
+
 ## The `deny(warnings)` Anti-Pattern
 
 Don't use `#![deny(warnings)]` in libraries — new compiler warnings break downstream builds.

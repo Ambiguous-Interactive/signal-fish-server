@@ -447,7 +447,7 @@ mod workflow_tests {
     fn test_required_workflows_exist() { ... }
 
     #[test]
-    fn test_workflows_use_concurrency_groups() { ... }
+    fn test_workflow_hygiene_requirements() { ... }
 }
 
 mod markdown_tests {
@@ -550,13 +550,11 @@ test_markdown_technical_terms_consistency()
 test_markdown_common_patterns_are_correct()
 test_markdown_config_exists()
 
-// 3. CI workflows (6 tests)
+// 3. CI workflows (4 tests)
 test_link_check_workflow_exists_and_is_configured()
 test_markdownlint_workflow_exists_and_is_configured()
 test_doc_validation_workflow_has_shellcheck()
-test_workflows_use_concurrency_groups()
-test_workflows_have_timeouts()
-test_workflows_use_minimal_permissions()
+test_workflow_hygiene_requirements()
 
 // 4. Configuration consistency (15 tests)
 test_msrv_consistency_across_config_files()

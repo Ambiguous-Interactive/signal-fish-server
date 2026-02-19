@@ -103,7 +103,7 @@
 - Easier to add new markdown rules
 - Consistent severity levels (error/warning/info)
 
-### 5. Workflow Best Practices (3 → 1 test) - LOW PRIORITY
+### 5. Workflow Best Practices (3 → 1 test) - ✅ DONE
 
 **Impact:** Cleaner best practices validation
 
@@ -115,13 +115,10 @@
 
 **After:**
 
-- `test_workflow_best_practices` (data-driven best practices)
+- `test_workflow_hygiene_requirements` (data-driven best practices)
 
-**Why:**
-
-- All iterate over workflows checking different patterns
-- Single test with severity levels (error/warning/info)
-- Easier to add new best practices
+**Result:** Consolidated into a single data-driven test using `HygieneRule` struct.
+All three rules preserved with identical checking logic and diagnostic messages.
 
 ## Immediate Actions (Week 1)
 
