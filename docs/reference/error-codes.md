@@ -163,7 +163,7 @@ Error codes are delivered as strings, so clients can match on them
 directly. The following Rust example demonstrates a pattern for
 handling error codes received from the server.
 
-```rust,ignore
+```rust
 /// Represents an error response from Signal Fish Server.
 struct ServerError {
     message: String,

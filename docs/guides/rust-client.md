@@ -31,7 +31,7 @@ url = "2"
 
 Establish a WebSocket connection to the server's v2 endpoint.
 
-```rust,ignore
+```rust
 use tokio_tungstenite::connect_async;
 use url::Url;
 
@@ -66,7 +66,7 @@ representation.
 
 Messages the client sends to the server:
 
-```rust,ignore
+```rust
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -141,7 +141,7 @@ pub enum ClientMessage {
 
 Messages received from the server:
 
-```rust,ignore
+```rust
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -345,7 +345,7 @@ pub enum ServerMessage {
 Send `JoinRoom` without a `room_code` to create a new room. The server responds
 with `RoomJoined` containing the generated room code.
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -395,7 +395,7 @@ players use to join.
 
 To join an existing room, include the `room_code` from the room creator:
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -459,7 +459,7 @@ The `game_name` must match the game name used when the room was created.
 Use a loop over the `SplitStream` to handle incoming server messages. Match on
 the `ServerMessage` variants to react to each event.
 
-```rust,ignore
+```rust
 use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -556,7 +556,7 @@ async fn message_loop(
 For production clients, run the message loop in a separate tokio task so you can
 send messages concurrently:
 
-```rust,ignore
+```rust
 let (write, read) = ws_stream.split();
 let write = std::sync::Arc::new(
     tokio::sync::Mutex::new(write),
@@ -578,7 +578,7 @@ reader_handle.await?;
 The `GameData` message carries an arbitrary JSON payload. Use
 `serde_json::json!` for ad-hoc data or serialize your own game structs.
 
-```rust,ignore
+```rust
 use futures_util::SinkExt;
 use serde_json::json;
 use tokio_tungstenite::tungstenite::Message;
@@ -631,7 +631,7 @@ includes a `from_player` field identifying the sender:
 You can also define typed game data structs and serialize them into the
 `serde_json::Value`:
 
-```rust,ignore
+```rust
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -661,7 +661,7 @@ let msg = ClientMessage::GameData {
 Players signal readiness by sending `PlayerReady`. The lobby transitions
 through three states: `waiting`, `lobby`, and `finalized`.
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -745,7 +745,7 @@ to the player ID and room ID. Store your `player_id` and `room_id` from the
 `RoomJoined` response. The `auth_token` for the `Reconnect` message is
 provided through the reconnection mechanism at disconnect time.
 
-```rust,ignore
+```rust
 use uuid::Uuid;
 
 /// Credentials stored after joining a room, used for
@@ -849,7 +849,7 @@ After the window expires, you must join as a new player.
 Spectators observe a room without participating. They receive all game data
 but cannot mark ready or send game data.
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -954,7 +954,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 To stop spectating, send `LeaveSpectator`:
 
-```rust,ignore
+```rust
 let leave = ClientMessage::LeaveSpectator;
 let json = serde_json::to_string(&leave)?;
 write
@@ -987,7 +987,7 @@ common error codes to provide a good player experience.
 
 ### Handling Errors in Code
 
-```rust,ignore
+```rust
 fn handle_server_message(msg: &ServerMessage) {
     match msg {
         ServerMessage::Error {
@@ -1052,7 +1052,7 @@ fn handle_server_message(msg: &ServerMessage) {
 
 A full client struct that wraps all operations into a reusable API.
 
-```rust,ignore
+```rust
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -1572,7 +1572,7 @@ When the server has `require_websocket_auth` enabled, you must send an
 will close the connection if authentication is not received within the
 configured timeout (default: 10 seconds).
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
