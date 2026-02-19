@@ -1,6 +1,15 @@
 <p align="center">
+  <img src="docs/assets/logo-banner.svg" alt="Signal Fish Server" width="600">
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/signal-fish-server">
+    <img src="https://img.shields.io/crates/v/signal-fish-server?style=for-the-badge"
+         alt="crates.io">
+  </a>
   <a href="https://ambiguous-interactive.github.io/signal-fish-server/">
-    <img src="docs/assets/logo-banner.svg" alt="Signal Fish Server" width="600">
+    <img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue?style=for-the-badge"
+         alt="Documentation">
   </a>
 </p>
 
