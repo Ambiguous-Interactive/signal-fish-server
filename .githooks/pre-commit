@@ -11,12 +11,13 @@
 #   3. Panic-prone patterns
 #   4. MSRV consistency (if Cargo.toml or config files modified)
 #   5. Workflow AWK scripts (if workflow files modified)
-#   6. AWK file syntax (if .awk files modified)
-#   7. Shellcheck for CI scripts (if .github/scripts/ files modified)
-#   8. Markdown relative link validation (if docs/ markdown modified)
-#   9. Markdown linting (if markdown files modified)
-#  10. Link checking (if markdown files modified)
-#  11. Markdown code block validation (if markdown files modified)
+#   6. YAML lint (if workflow files modified)
+#   7. AWK file syntax (if .awk files modified)
+#   8. Shellcheck for CI scripts (if .github/scripts/ files modified)
+#   9. Markdown relative link validation (if docs/ markdown modified)
+#  10. Markdown linting (if markdown files modified)
+#  11. Link checking (if markdown files modified)
+#  12. Markdown code block validation (if markdown files modified)
 
 set -e
 
@@ -36,7 +37,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=11
+TOTAL_CHECKS=12
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -143,8 +144,38 @@ else
     check_skip "AWK validation" "no workflow files changed"
 fi
 
-# Check 6: AWK file syntax (only if .awk files are staged)
-echo "${BLUE}[6/${TOTAL_CHECKS}]${NC} Validating AWK file syntax..."
+# Check 6: YAML lint (only if workflow files changed)
+echo "${BLUE}[6/${TOTAL_CHECKS}]${NC} Running yamllint on workflow files..."
+
+if [ -n "$WORKFLOW_FILES" ]; then
+    if command -v yamllint >/dev/null 2>&1; then
+        YAMLLINT_ERRORS=0
+        for wf_file in $WORKFLOW_FILES; do
+            if [ -f "$wf_file" ]; then
+                YAMLLINT_OUT=$(yamllint -c .yamllint.yml "$wf_file" 2>&1)
+                if echo "$YAMLLINT_OUT" | grep -q "\[error\]"; then
+                    echo "${RED}  YAML lint errors:${NC} $wf_file"
+                    echo "$YAMLLINT_OUT" | grep "\[error\]" || true
+                    YAMLLINT_ERRORS=$((YAMLLINT_ERRORS + 1))
+                fi
+            fi
+        done
+        if [ "$YAMLLINT_ERRORS" -gt 0 ]; then
+            check_fail "YAML lint" "Fix YAML lint errors in workflow files."
+            echo "${YELLOW}Tip:${NC} yamllint -c .yamllint.yml .github/workflows/"
+            echo ""
+        else
+            check_pass "YAML lint"
+        fi
+    else
+        check_skip "YAML lint" "yamllint not installed (pip install yamllint)"
+    fi
+else
+    check_skip "YAML lint" "no workflow files changed"
+fi
+
+# Check 7: AWK file syntax (only if .awk files are staged)
+echo "${BLUE}[7/${TOTAL_CHECKS}]${NC} Validating AWK file syntax..."
 STAGED_AWK_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.awk$' || true)
 
 if [ -n "$STAGED_AWK_FILES" ]; then
@@ -168,8 +199,8 @@ else
     check_skip "AWK file syntax" "no .awk files staged"
 fi
 
-# Check 7: Shellcheck for CI scripts (only if .github/scripts/ files are staged)
-echo "${BLUE}[7/${TOTAL_CHECKS}]${NC} Running shellcheck on CI scripts..."
+# Check 8: Shellcheck for CI scripts (only if .github/scripts/ files are staged)
+echo "${BLUE}[8/${TOTAL_CHECKS}]${NC} Running shellcheck on CI scripts..."
 STAGED_CI_SCRIPTS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.github/scripts/.*\.sh$' || true)
 
 if [ -n "$STAGED_CI_SCRIPTS" ]; then
@@ -197,8 +228,8 @@ else
     check_skip "Shellcheck CI scripts" "no .github/scripts/*.sh files staged"
 fi
 
-# Check 8: Markdown relative link validation (only if docs/ markdown files are staged)
-echo "${BLUE}[8/${TOTAL_CHECKS}]${NC} Validating markdown relative links in docs/..."
+# Check 9: Markdown relative link validation (only if docs/ markdown files are staged)
+echo "${BLUE}[9/${TOTAL_CHECKS}]${NC} Validating markdown relative links in docs/..."
 STAGED_DOCS_MD=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^docs/.*\.md$' || true)
 
 if [ -n "$STAGED_DOCS_MD" ]; then
@@ -256,8 +287,8 @@ else
     check_skip "Docs link validation" "no docs/*.md files staged"
 fi
 
-# Check 9: Markdown linting (only if markdown files changed)
-echo "${BLUE}[9/${TOTAL_CHECKS}]${NC} Checking markdown files..."
+# Check 10: Markdown linting (only if markdown files changed)
+echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking markdown files..."
 STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
 
 if [ -n "$STAGED_MD_FILES" ]; then
@@ -280,8 +311,8 @@ else
     check_skip "Markdown linting" "no markdown files changed"
 fi
 
-# Check 10: Link checking (only if markdown files changed)
-echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking links in markdown files..."
+# Check 11: Link checking (only if markdown files changed)
+echo "${BLUE}[11/${TOTAL_CHECKS}]${NC} Checking links in markdown files..."
 
 if [ -n "$STAGED_MD_FILES" ]; then
     if command -v lychee >/dev/null 2>&1; then
@@ -305,10 +336,10 @@ else
     check_skip "Link checking" "no markdown files changed"
 fi
 
-# Check 11: Markdown code block validation (only if markdown files changed)
+# Check 12: Markdown code block validation (only if markdown files changed)
 # Validates JSON (jq), YAML (yq), TOML (taplo), and Bash (bash -n) code blocks
 # extracted from staged markdown files, matching the CI doc-validation.yml workflow.
-echo "${BLUE}[11/${TOTAL_CHECKS}]${NC} Validating code blocks in markdown files..."
+echo "${BLUE}[12/${TOTAL_CHECKS}]${NC} Validating code blocks in markdown files..."
 
 if [ -n "$STAGED_MD_FILES" ]; then
     # Filter out test fixture directories from staged markdown files

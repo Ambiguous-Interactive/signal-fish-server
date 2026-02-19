@@ -123,9 +123,6 @@ path = "src/lib.rs"
 name = "response_time_tracker"
 harness = false
 
-[patch.crates-io]
-rmp = { path = "third_party/rmp" }
-
 [profile.dev]
 debug = 1
 

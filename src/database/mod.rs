@@ -296,17 +296,10 @@ impl GameDatabase for InMemoryDatabase {
         region_id: String,
         application_id: Option<Uuid>,
     ) -> Result<Room> {
-        let room_id = uuid::Uuid::new_v4();
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
 
-        let mut room_codes = self.room_codes.write().await;
-        let game_room_key = (game_name.clone(), room_code.clone());
-        if room_codes.contains_key(&game_room_key) {
-            anyhow::bail!("Room code {room_code} already exists for game {game_name}");
-        }
-
-        // Create creator player info
+        // Create creator player info before acquiring locks
         let creator_info = PlayerInfo {
             id: creator_id,
             name: "Creator".to_string(), // This will be updated later when we have the actual name
@@ -320,6 +313,32 @@ impl GameDatabase for InMemoryDatabase {
         let mut players = HashMap::new();
         let creator_id_val = creator_info.id;
         players.insert(creator_id_val, creator_info);
+
+        // Lock ordering: rooms first, then room_codes (consistent with delete_room, cleanup_*)
+        // Both locks are held simultaneously to ensure atomicity of the room creation:
+        // no other task can observe a partial state where room_codes has an entry but rooms does not.
+        let mut rooms = self.rooms.write().await;
+        let mut room_codes = self.room_codes.write().await;
+
+        // Check room code uniqueness under the write lock (no TOCTOU gap)
+        let game_room_key = (game_name.clone(), room_code.clone());
+        if room_codes.contains_key(&game_room_key) {
+            anyhow::bail!("Room code {room_code} already exists for game {game_name}");
+        }
+
+        // Generate a unique room ID
+        let room_id = {
+            let mut id = uuid::Uuid::new_v4();
+            let mut attempts = 0u8;
+            while rooms.contains_key(&id) {
+                attempts += 1;
+                if attempts >= 16 {
+                    anyhow::bail!("Failed to generate unique room ID after {attempts} attempts");
+                }
+                id = uuid::Uuid::new_v4();
+            }
+            id
+        };
 
         let now = chrono::Utc::now();
         let room = Room {
@@ -347,20 +366,19 @@ impl GameDatabase for InMemoryDatabase {
             max_spectators: None,
         };
 
-        room_codes.insert(game_room_key, room_id);
-        drop(room_codes);
-
-        let mut rooms = self.rooms.write().await;
+        // Insert into both maps atomically while holding both locks
         rooms.insert(room_id, room.clone());
+        room_codes.insert(game_room_key, room_id);
 
         Ok(room)
     }
 
     async fn get_room(&self, game_name: &str, room_code: &str) -> Result<Option<Room>> {
+        // Lock ordering: rooms first, then room_codes (consistent with write paths)
+        let rooms = self.rooms.read().await;
         let room_codes = self.room_codes.read().await;
         let game_room_key = (game_name.to_string(), room_code.to_string());
         if let Some(room_id) = room_codes.get(&game_room_key) {
-            let rooms = self.rooms.read().await;
             if let Some(room) = rooms.get(room_id) {
                 return Ok(Some(room.clone()));
             }
@@ -895,4 +913,313 @@ fn percentile(sorted_values: &[usize], p: f64) -> f64 {
 
     let index = (p * (sorted_values.len() - 1) as f64).round() as usize;
     sorted_values[index.min(sorted_values.len() - 1)] as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    /// Helper: create a room with the given game name and room code using sensible defaults.
+    async fn create_test_room(
+        db: &InMemoryDatabase,
+        game_name: &str,
+        room_code: &str,
+    ) -> Result<Room> {
+        db.create_room(
+            game_name.to_string(),
+            Some(room_code.to_string()),
+            4,
+            true,
+            Uuid::new_v4(),
+            "relay".to_string(),
+            "us-east-1".to_string(),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_create_room_generates_unique_ids() {
+        let db = InMemoryDatabase::new();
+        let mut ids = HashSet::new();
+        let count = 100;
+
+        for i in 0..count {
+            let room_code = format!("ROOM{i:03}");
+            let room = create_test_room(&db, "uniqueness_game", &room_code)
+                .await
+                .expect("room creation should succeed");
+            ids.insert(room.id);
+        }
+
+        assert_eq!(
+            ids.len(),
+            count,
+            "all {count} room IDs must be distinct, but only {} unique IDs found",
+            ids.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_room_id_is_retrievable_by_id() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "lookup_game", "LOOK01")
+            .await
+            .expect("room creation should succeed");
+
+        let fetched = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("get_room_by_id should not error")
+            .expect("room should exist in the rooms map");
+
+        assert_eq!(fetched.id, room.id);
+        assert_eq!(fetched.code, room.code);
+        assert_eq!(fetched.game_name, room.game_name);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_room_code_collision_rejected() {
+        let db = InMemoryDatabase::new();
+
+        create_test_room(&db, "game1", "TEST01")
+            .await
+            .expect("first room creation should succeed");
+
+        let result = create_test_room(&db, "game1", "TEST01").await;
+        assert!(
+            result.is_err(),
+            "duplicate room code for the same game must be rejected"
+        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already exists"),
+            "error message should contain 'already exists', got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_room_same_code_different_game_allowed() {
+        let db = InMemoryDatabase::new();
+
+        let room1 = create_test_room(&db, "game1", "TEST01")
+            .await
+            .expect("room creation for game1 should succeed");
+
+        let room2 = create_test_room(&db, "game2", "TEST01")
+            .await
+            .expect("room creation for game2 with same code should succeed");
+
+        assert_ne!(
+            room1.id, room2.id,
+            "rooms for different games must have different IDs"
+        );
+        assert_eq!(room1.code, room2.code);
+        assert_ne!(room1.game_name, room2.game_name);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_concurrent_unique_ids() {
+        let db = Arc::new(InMemoryDatabase::new());
+        let task_count = 50;
+        let barrier = Arc::new(tokio::sync::Barrier::new(task_count));
+
+        let mut handles = Vec::with_capacity(task_count);
+        for i in 0..task_count {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let room_code = format!("CONC{i:03}");
+                db.create_room(
+                    "concurrent_game".to_string(),
+                    Some(room_code),
+                    4,
+                    true,
+                    Uuid::new_v4(),
+                    "relay".to_string(),
+                    "us-east-1".to_string(),
+                    None,
+                )
+                .await
+            }));
+        }
+
+        let mut ids = HashSet::new();
+        for handle in handles {
+            let room = handle
+                .await
+                .expect("task should not panic")
+                .expect("room creation should succeed");
+            ids.insert(room.id);
+        }
+
+        assert_eq!(
+            ids.len(),
+            task_count,
+            "all {task_count} concurrently created rooms must have unique IDs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_room_concurrent_same_code_only_one_succeeds() {
+        let db = Arc::new(InMemoryDatabase::new());
+        let task_count = 10;
+        let barrier = Arc::new(tokio::sync::Barrier::new(task_count));
+
+        let mut handles = Vec::with_capacity(task_count);
+        for _ in 0..task_count {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                db.create_room(
+                    "game1".to_string(),
+                    Some("RACE01".to_string()),
+                    4,
+                    true,
+                    Uuid::new_v4(),
+                    "relay".to_string(),
+                    "us-east-1".to_string(),
+                    None,
+                )
+                .await
+            }));
+        }
+
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+        for handle in handles {
+            match handle.await.expect("task should not panic") {
+                Ok(_) => successes += 1,
+                Err(e) => {
+                    assert!(
+                        e.to_string().contains("already exists"),
+                        "failure reason should be 'already exists', got: {e}"
+                    );
+                    failures += 1;
+                }
+            }
+        }
+
+        assert_eq!(successes, 1, "exactly one task should win the race");
+        assert_eq!(
+            failures,
+            task_count - 1,
+            "all other tasks should fail with 'already exists'"
+        );
+
+        // Verify only one room exists in the database for this game+code
+        let room = db
+            .get_room("game1", "RACE01")
+            .await
+            .expect("get_room should not error")
+            .expect("the winning room should be findable");
+        assert_eq!(room.code, "RACE01");
+    }
+
+    #[tokio::test]
+    async fn test_create_room_atomic_consistency() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "atomic_game", "ATOM01")
+            .await
+            .expect("room creation should succeed");
+
+        // Lookup via room ID
+        let by_id = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("get_room_by_id should not error")
+            .expect("room should be in the rooms map");
+
+        // Lookup via game name + room code
+        let by_code = db
+            .get_room("atomic_game", "ATOM01")
+            .await
+            .expect("get_room should not error")
+            .expect("room should be in the room_codes map");
+
+        assert_eq!(by_id.id, room.id);
+        assert_eq!(by_code.id, room.id);
+        assert_eq!(
+            by_id.id, by_code.id,
+            "both lookups must resolve to the same room"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_room_frees_room_code() {
+        let db = InMemoryDatabase::new();
+
+        let room = create_test_room(&db, "reuse_game", "REUSE1")
+            .await
+            .expect("initial room creation should succeed");
+
+        let deleted = db
+            .delete_room(&room.id)
+            .await
+            .expect("delete_room should not error");
+        assert!(
+            deleted,
+            "delete_room should return true for an existing room"
+        );
+
+        // The room code is now free; re-creating with the same code should work.
+        let room2 = create_test_room(&db, "reuse_game", "REUSE1")
+            .await
+            .expect("re-creating room with freed code should succeed");
+
+        assert_ne!(
+            room.id, room2.id,
+            "the new room must have a different ID than the deleted one"
+        );
+        assert_eq!(room2.code, "REUSE1");
+    }
+
+    #[tokio::test]
+    async fn test_create_room_preserves_all_fields() {
+        let db = InMemoryDatabase::new();
+        let creator_id = Uuid::new_v4();
+        let app_id = Uuid::new_v4();
+
+        let room = db
+            .create_room(
+                "my_game".to_string(),
+                Some("FIELD1".to_string()),
+                8,
+                true,
+                creator_id,
+                "webrtc".to_string(),
+                "eu-west-1".to_string(),
+                Some(app_id),
+            )
+            .await
+            .expect("room creation should succeed");
+
+        assert_eq!(room.game_name, "my_game");
+        assert_eq!(room.code, "FIELD1");
+        assert_eq!(room.max_players, 8);
+        assert!(room.supports_authority);
+        assert_eq!(room.relay_type, "webrtc");
+        assert_eq!(room.region_id, "eu-west-1");
+        assert_eq!(room.application_id, Some(app_id));
+
+        // Creator should be in the players map
+        assert!(
+            room.players.contains_key(&creator_id),
+            "creator must appear in the players map"
+        );
+        let creator = &room.players[&creator_id];
+        assert_eq!(creator.id, creator_id);
+        assert!(
+            creator.is_authority,
+            "creator should be marked as authority when supports_authority is true"
+        );
+
+        // Authority player should be set to creator
+        assert_eq!(room.authority_player, Some(creator_id));
+    }
 }

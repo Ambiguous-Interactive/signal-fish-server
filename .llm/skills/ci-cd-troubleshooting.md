@@ -19,6 +19,9 @@
 - Dependency resolution failures in CI
 - Toolchain version mismatches
 - Docker build failures in CI
+- Stale file references in Dockerfiles or workflows after cleanup
+- Supply chain security concerns with GitHub Actions
+- Silent failures masked by `continue-on-error: true`
 
 ---
 
@@ -38,6 +41,8 @@
 - **Check language-project alignment**: Python caching on Rust project = instant failure
 - **Typos configuration**: Mixed-case names (HashiCorp) need `extend-identifiers`, not `extend-words`
 - **Docker versions**: Use X.Y format (1.88) for Docker Hub, not X.Y.Z (1.88.0)
+- **YAML indentation**: All workflow files must use 2-space indentation — 4-space from copied
+  templates is the most common yamllint failure
 
 **Staleness & Maintenance:**
 
@@ -617,6 +622,44 @@ DOCKER_BUILDKIT=1 docker build --no-cache -t test .
 
 ---
 
+### Pattern 7: Clippy Lints in Test Code
+
+#### Symptom
+
+```text
+
+CI clippy step fails with:
+error: this `if` statement can be collapsed
+  --> src/room.rs:142:9
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+   = note: `-D clippy::collapsible-if` implied by `-D warnings`
+
+```
+
+#### Root Cause
+
+The CI clippy command uses `--all-targets`, which compiles and lints test code
+(`#[cfg(test)]` modules and integration tests) in addition to production code.
+Lints like `collapsible_if`, `needless_return`, and `single_match` are commonly
+introduced in test code because developers focus on correctness rather than style
+when writing tests.
+
+#### Solution
+
+**Run clippy with `--all-targets` locally before pushing:**
+
+```bash
+
+cargo clippy --all-targets --all-features -- -D warnings
+
+```
+
+The `--all-targets` flag ensures test code, benchmarks, and examples are all
+compiled and linted — matching what CI does.
+
+---
+
 ## Diagnostic Workflow
 
 When CI fails, work through this systematic diagnostic process:
@@ -631,8 +674,10 @@ CI Failure
     ├─ Test failure ───────► Check env vars, filesystem case, test data
     ├─ Lint failure ───────► Check clippy version, lint configuration
     ├─ Cache error ────────► Check cache keys, action versions
-    ├─ Docker error ───────► Check base image, build context, platform
-    └─ Workflow error ─────► Check syntax, permissions, secrets
+    ├─ Docker error ───────► Check base image, build context, COPY paths
+    ├─ Workflow error ─────► Check syntax, permissions, secrets
+    ├─ Exit code 127 ─────► Check script references exist in repo
+    └─ Supply chain risk ──► Check action SHA pins (not tags)
 
 ```
 
@@ -705,10 +750,17 @@ Before committing workflow changes, verify:
 - [ ] Base images match project MSRV (Docker `FROM rust:X.Y` = Cargo.toml `rust-version`)
 - [ ] No language-specific commands for wrong ecosystem (no `pip install` in Rust project)
 
+### File Reference Integrity
+
+- [ ] Dockerfile `COPY`/`ADD` sources all exist in the repository
+- [ ] Workflow `run:` script references (`.sh` files) all exist in the repository
+- [ ] Steps with `continue-on-error: true` are not masking missing file errors
+
 ### Version Consistency
 
 - [ ] MSRV consistent across: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 - [ ] Pinned nightly toolchains documented with age and update criteria
+- [ ] All action `uses:` references are SHA-pinned (`@<40-char-sha> # vX.Y.Z`), not tag-only
 - [ ] Action SHA pins are recent (<1 year) or have documented reason for age
 - [ ] Docker base images are recent (<6 months) or have documented reason for age
 
@@ -753,6 +805,9 @@ Before committing workflow changes, verify:
 | YAML parse error in markdown file | Non-YAML content in `yaml`-fenced code block | Use `text` for logs, `bash` for shell; split mixed blocks |
 | Lychee reports broken URL from `.lychee.toml` | Lychee scans its own config and extracts partial URLs from regex | Exclude `.lychee.toml` via `--exclude-path` or add truncated URL exclusions |
 | Test assertion fails on config regex pattern | `contains("http://localhost")` vs regex `^https?://localhost` | Test regex behavior (compile + match), not literal substrings |
+| `failed to calculate checksum of ref: "/path": not found` | Dockerfile `COPY` references a path removed from the repo | Remove or update stale `COPY` instructions in Dockerfile |
+| Action behavior changes without workflow edit | `uses:` references a mutable tag (`@v4.2.2`) instead of SHA pin | Pin with `uses: owner/repo@<40-char-sha> # vX.Y.Z` |
+| `No such file or directory` (exit code 127) in workflow | `run:` step calls a script that was deleted or renamed | Remove stale script reference or update path; audit `continue-on-error` steps |
 | `toolchain 'X.Y.Z' is not installed` in cargo-deny | Docker-based action uses own toolchain; `rust-toolchain.toml` override fails | Set `RUSTUP_TOOLCHAIN: stable` env var on the action step |
 | Lychee scans dotfiles despite config | lychee v0.21.0 bug #1936: hidden file option ignored by file matcher | Pin `lycheeVersion: v0.22.0` or later in the action config |
 | `exclude_path` in `.lychee.toml` has no effect on glob-expanded files | `exclude_path` TOML entries do not apply to glob-expanded paths (confirmed bug) | Use `--exclude-path` CLI flags instead; separate flags from globs with `--` |
@@ -2595,6 +2650,379 @@ tokio = "1.49"
 
 ---
 
+## Pattern 21: Dockerfile COPY Targets Referencing Non-Existent Directories
+
+### Symptom
+
+```text
+ERROR: failed to calculate checksum of ref: "/vendor": not found
+ERROR: failed to solve: failed to compute cache key: failed to calculate checksum
+```
+
+Docker build fails immediately at a `COPY` instruction because the source path
+no longer exists in the repository.
+
+### Root Cause
+
+**When path dependencies or vendored directories are removed from the repo,
+the Dockerfile `COPY` instructions that reference those paths are not updated.**
+
+This commonly happens during dependency cleanup or refactoring:
+
+```dockerfile
+# ❌ PROBLEM: /vendor was removed from the repo but Dockerfile still copies it
+COPY vendor/ /app/vendor/
+COPY third_party/custom-lib/ /app/third_party/custom-lib/
+
+# The build fails because Docker resolves COPY sources at build time
+# against the build context -- missing paths are a hard error
+```
+
+**Why this is easy to miss:**
+
+- Dependency removal PRs focus on `Cargo.toml` and source code
+- Dockerfile changes are not flagged by `cargo` commands
+- Local Docker builds may succeed if cached layers hide the missing path
+- CI builds with `--no-cache` expose the failure immediately
+
+### Solution
+
+**Remove or update the stale `COPY` instructions:**
+
+```dockerfile
+# ✅ CORRECT: Only COPY paths that exist in the repository
+COPY Cargo.toml Cargo.lock /app/
+COPY src/ /app/src/
+# Removed: COPY vendor/ /app/vendor/ (vendor directory was deleted)
+```
+
+**Audit all Dockerfile `COPY` and `ADD` instructions after removing files:**
+
+```bash
+# List all COPY/ADD sources referenced in Dockerfiles
+grep -E '^\s*(COPY|ADD)\s' Dockerfile* | awk '{print $2}'
+
+# Cross-reference against actual files in the repo
+for src in $(grep -E '^\s*COPY\s' Dockerfile | awk '{print $2}'); do
+    if [ ! -e "$src" ]; then
+        echo "ERROR: Dockerfile references non-existent path: $src"
+    fi
+done
+```
+
+### Prevention
+
+**Add CI test to validate Dockerfile `COPY` sources exist:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_dockerfile_copy_sources_exist() {
+    let dockerfile = read_file("Dockerfile");
+
+    for (line_num, line) in dockerfile.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("COPY") || trimmed.starts_with("ADD") {
+            // Extract source path (second token, before the destination)
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() >= 3 {
+                let source = tokens[1];
+                // Skip --from= (multi-stage build references)
+                if source.starts_with("--from=") {
+                    continue;
+                }
+                let source_path = Path::new(source);
+                assert!(
+                    source_path.exists(),
+                    "Dockerfile:{}: COPY source does not exist: {}\n\
+                     Was this path removed without updating the Dockerfile?",
+                    line_num + 1,
+                    source
+                );
+            }
+        }
+    }
+}
+```
+
+**Checklist when removing files or directories:**
+
+- [ ] Search Dockerfiles for `COPY` and `ADD` references to the removed path
+- [ ] Search `.dockerignore` for entries that reference the removed path
+- [ ] Run `docker build --no-cache` locally to verify the build still works
+- [ ] Check multi-stage builds -- intermediate stages may also reference the path
+
+---
+
+## Pattern 22: SHA Pinning Stripped from GitHub Actions Workflows
+
+### Symptom
+
+```yaml
+# Workflow uses tag-based references instead of SHA pins
+- uses: actions/checkout@v4.2.2
+- uses: dtolnay/rust-toolchain@stable
+```
+
+No immediate CI failure, but the workflow is now vulnerable to supply chain
+attacks. A compromised or mutable tag could silently change the action code
+that runs in your CI pipeline.
+
+### Root Cause
+
+**When modifying workflow files, SHA pins are accidentally replaced with
+tag-based references.** Tag references like `@v4.2.2` are mutable -- the
+action maintainer (or an attacker who compromises their account) can point
+the tag to different code at any time.
+
+**Why SHA pinning matters:**
+
+- Tags are Git references that can be moved to point to any commit
+- An attacker who gains push access to an action repo can retag a release
+- SHA pins are immutable -- a 40-character commit hash cannot be changed
+- Supply chain attacks on GitHub Actions are a known threat vector
+
+**Common ways SHA pins get stripped:**
+
+1. Copying workflow snippets from documentation (docs use short tags)
+2. Dependabot or Renovate updating to tag-only format
+3. Manual edits that simplify the `uses:` line
+4. IDE auto-completion suggesting tag format
+
+### Solution
+
+**Always use the full SHA pin with a version comment:**
+
+```yaml
+# ❌ WRONG: Mutable tag reference (supply chain risk)
+- uses: actions/checkout@v4.2.2
+- uses: dtolnay/rust-toolchain@stable
+
+# ✅ CORRECT: Immutable SHA pin with version comment
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+- uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174353f47 # stable
+```
+
+**Find the SHA for a given action version:**
+
+```bash
+# Look up the commit SHA for a specific tag
+gh api repos/actions/checkout/git/refs/tags/v4.2.2 --jq '.object.sha'
+
+# Or clone and check locally
+git ls-remote https://github.com/actions/checkout.git refs/tags/v4.2.2
+```
+
+**Audit existing workflows for missing SHA pins:**
+
+```bash
+# Find all action references that use tags instead of SHAs
+grep -rn 'uses: .*@v[0-9]' .github/workflows/
+grep -rn 'uses: .*@stable' .github/workflows/
+grep -rn 'uses: .*@main' .github/workflows/
+grep -rn 'uses: .*@master' .github/workflows/
+
+# Find properly pinned actions (40-char hex SHA)
+grep -rn 'uses: .*@[a-f0-9]\{40\}' .github/workflows/
+```
+
+### Prevention
+
+**Add CI test to enforce SHA pinning:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_workflow_actions_are_sha_pinned() {
+    let workflow_dir = repo_root().join(".github/workflows");
+
+    for entry in std::fs::read_dir(&workflow_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().map(|e| e == "yml" || e == "yaml").unwrap_or(false) {
+            let content = read_file(&path);
+
+            for (line_num, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("uses:") || trimmed.starts_with("- uses:") {
+                    // Extract the action reference after @
+                    if let Some(at_pos) = trimmed.find('@') {
+                        let after_at = &trimmed[at_pos + 1..];
+                        let ref_part = after_at.split_whitespace().next().unwrap_or("");
+
+                        // Must be a 40-char hex SHA
+                        let is_sha = ref_part.len() == 40
+                            && ref_part.chars().all(|c| c.is_ascii_hexdigit());
+
+                        assert!(
+                            is_sha,
+                            "{}:{}: Action not SHA-pinned: {}\n\
+                             Tags are mutable (supply chain risk).\n\
+                             Fix: uses: owner/repo@<40-char-sha> # vX.Y.Z",
+                            path.display(),
+                            line_num + 1,
+                            trimmed
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**Document the SHA pin format in workflow headers:**
+
+```yaml
+# All action references MUST use SHA pins for supply chain security.
+# Format: uses: owner/repo@<40-char-sha> # vX.Y.Z
+# See: .llm/skills/supply-chain-security.md
+```
+
+---
+
+## Pattern 23: Workflow Script References to Non-Existent Files
+
+### Symptom
+
+```text
+# CI step fails (or silently passes with continue-on-error: true)
+/home/runner/work/repo/repo/./scripts/verify-sccache.sh: No such file or directory
+Error: Process completed with exit code 127.
+```
+
+A workflow `run:` step calls a local script that does not exist in the
+repository.
+
+### Root Cause
+
+**When scripts are removed or renamed, workflow files that reference them
+are not updated.** This is especially dangerous when the step has
+`continue-on-error: true`, because the failure is silently ignored and
+the workflow reports success.
+
+```yaml
+# ❌ PROBLEM: Script was deleted but workflow still calls it
+- name: Verify sccache
+  run: ./scripts/verify-sccache.sh
+  continue-on-error: true  # ← Masks the "file not found" error!
+```
+
+**Common scenarios:**
+
+1. Script renamed (e.g., `verify-sccache.sh` to `check-cache.sh`) without updating workflows
+2. Script directory restructured (e.g., `scripts/` to `.github/scripts/`)
+3. Script deleted as part of cleanup but workflow reference remains
+4. Script only exists on a different branch (feature branch merged without the script)
+
+### Solution
+
+**Remove or update the stale script reference:**
+
+```yaml
+# Option A: Remove the step entirely if the script is no longer needed
+# (deleted the verify-sccache step)
+
+# Option B: Update the path to the new script location
+- name: Verify sccache
+  run: ./.github/scripts/verify-sccache.sh
+
+# Option C: Inline the script if it was simple
+- name: Verify sccache
+  run: |
+    if command -v sccache >/dev/null 2>&1; then
+      sccache --show-stats
+    else
+      echo "sccache not installed, skipping"
+    fi
+```
+
+**Audit all workflow script references:**
+
+```bash
+# Find all script references in workflow run: steps
+grep -rn '\.sh\b' .github/workflows/ | grep -v '#' | while read -r line; do
+    # Extract the script path
+    script=$(echo "$line" | grep -oP '\./[^\s;|&"]+\.sh' || true)
+    if [ -n "$script" ] && [ ! -f "$script" ]; then
+        echo "WARNING: $line"
+        echo "  Script not found: $script"
+    fi
+done
+```
+
+### Prevention
+
+**Add CI test to validate workflow script references:**
+
+```rust
+// tests/ci_config_tests.rs
+
+#[test]
+fn test_workflow_script_references_exist() {
+    let workflow_dir = repo_root().join(".github/workflows");
+
+    for entry in std::fs::read_dir(&workflow_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().map(|e| e == "yml" || e == "yaml").unwrap_or(false) {
+            let content = read_file(&path);
+
+            for (line_num, line) in content.lines().enumerate() {
+                // Look for script references in run: steps
+                let trimmed = line.trim();
+                if trimmed.starts_with("run:") || trimmed.starts_with("- run:") {
+                    // Extract .sh file references
+                    for word in trimmed.split_whitespace() {
+                        if word.ends_with(".sh") && word.starts_with("./") {
+                            let script_path = repo_root().join(
+                                word.trim_start_matches("./")
+                            );
+                            assert!(
+                                script_path.exists(),
+                                "{}:{}: References non-existent script: {}\n\
+                                 Was this script removed without updating the workflow?",
+                                path.display(),
+                                line_num + 1,
+                                word
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**Be cautious with `continue-on-error: true`:**
+
+```yaml
+# ❌ DANGEROUS: Silently ignores missing script
+- name: Run validation
+  run: ./scripts/validate.sh
+  continue-on-error: true
+
+# ✅ SAFER: Check script exists before running
+- name: Run validation
+  run: |
+    if [ -f ./scripts/validate.sh ]; then
+      ./scripts/validate.sh
+    else
+      echo "WARNING: ./scripts/validate.sh not found, skipping"
+    fi
+```
+
+**Checklist when deleting or renaming scripts:**
+
+- [ ] Search all workflow files for references to the old script path
+- [ ] Search `Makefile`, `justfile`, and other task runners
+- [ ] Search documentation for references to the script
+- [ ] Update or remove `continue-on-error` steps that called the script
+- [ ] Verify CI passes after the change (not just "green with silent failures")
+
+---
+
 ## Lesson Learned: rustfmt --check on Documentation Code Blocks
 
 `rustfmt --check` returns exit code 1 for **both** parse errors and formatting
@@ -2751,3 +3179,13 @@ Based on recent issues fixed in this project:
 - **Prevention:** Match code fence language tags to actual content; exclude `.lychee.toml`
   from self-scanning; test regex configs by compiling and matching, not substring search
 - **Fix Time:** Minutes (once the mismatch pattern is recognized)
+
+### Category 6: Stale File References and Supply Chain Gaps
+
+- **Example:** Dockerfile `COPY vendor/` after vendor directory deleted; `uses: actions/checkout@v4.2.2`
+  without SHA pin; workflow `run: ./scripts/verify-sccache.sh` after script removed
+- **Detection:** Docker build checksum errors; security audit flagging mutable action refs;
+  exit code 127 in workflow steps (or silent pass with `continue-on-error: true`)
+- **Prevention:** Audit Dockerfiles and workflows when removing files; enforce SHA pinning
+  for all `uses:` references; validate script paths exist; avoid `continue-on-error` masking real failures
+- **Fix Time:** Minutes (update or remove stale references) but Hours (if silent failures went unnoticed)

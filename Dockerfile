@@ -13,7 +13,6 @@ FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
-COPY third_party ./third_party
 COPY build.rs ./
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -33,10 +32,6 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 # Copy the recipe from planner stage
 COPY --from=planner /app/recipe.json recipe.json
 
-# Copy local path dependencies required by cargo chef cook
-# These are referenced in Cargo.toml and must exist for dependency resolution
-COPY third_party ./third_party
-
 # Build dependencies ONLY - this layer is cached until Cargo.toml/Cargo.lock change
 RUN cargo chef cook --release --recipe-path recipe.json
 
@@ -44,7 +39,6 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY benches ./benches
-COPY third_party ./third_party
 
 # Build the application - only recompiles when source changes
 RUN cargo build --release --locked

@@ -2757,171 +2757,214 @@ fn test_doc_validation_workflow_has_shellcheck() {
     }
 }
 
+/// A single hygiene rule applied to workflow files.
+///
+/// - `name`:    Human-readable label for diagnostic output.
+/// - `filter`:  Returns `true` for filenames this rule applies to.
+/// - `check`:   Given `(filename, file_content)`, returns per-file violations.
+/// - `summary`: Fix instructions shown when violations exist.
+struct HygieneRule {
+    name: &'static str,
+    filter: Box<dyn Fn(&str) -> bool>,
+    check: Box<dyn Fn(&str, &str) -> Vec<String>>,
+    summary: &'static str,
+}
+
+/// Data-driven workflow hygiene test.
+///
+/// This single test replaces three separate tests that all followed the same
+/// pattern: iterate workflow files, read each, check for a specific
+/// configuration key, collect violations, and panic with diagnostics. By
+/// expressing each hygiene requirement as a declarative rule, we avoid
+/// duplicating the iteration/collection/reporting boilerplate and make it
+/// trivial to add new checks in the future.
+///
+/// Each rule specifies:
+///   - A human-readable name for diagnostic output.
+///   - A file filter that decides which workflows the rule applies to.
+///   - A check function that returns a `Vec<String>` of per-file violations.
+///   - A summary message (with fix instructions) shown when violations exist.
 #[test]
-fn test_workflows_use_concurrency_groups() {
-    // This test ensures workflows use concurrency groups to cancel outdated runs
-    // Prevents wasting CI resources on superseded commits
+fn test_workflow_hygiene_requirements() {
+    // --- Rule definitions ------------------------------------------------
     //
-    // Concurrency groups allow GitHub Actions to automatically cancel in-progress
-    // workflow runs when a new commit is pushed, saving CI minutes and speeding
-    // up feedback loops.
+    // `filter`:  &str -> bool — receives the filename, returns true if
+    //            the rule applies to that file.
+    // `check`:   (&str, &str) -> Vec<String> — receives (filename, content),
+    //            returns a list of violation descriptions (empty = pass).
 
-    let root = repo_root();
-    let workflows_dir = root.join(".github/workflows");
-
-    // Workflows that should have concurrency groups
-    let should_have_concurrency = [
+    // Workflows that benefit from concurrency groups (excludes one-shot
+    // release workflows that should always run to completion).
+    let concurrency_allowlist: &[&str] = &[
         "ci.yml",
         "link-check.yml",
         "markdownlint.yml",
         "doc-validation.yml",
     ];
 
-    let mut missing_concurrency = Vec::new();
+    let rules: Vec<HygieneRule> = vec![
+        // Rule 1: Concurrency groups -----------------------------------------
+        HygieneRule {
+            name: "concurrency groups",
+            // Only applies to the explicit allowlist (release workflows are excluded).
+            filter: Box::new({
+                let list = concurrency_allowlist.to_vec();
+                move |filename: &str| list.contains(&filename)
+            }),
+            check: Box::new(|filename: &str, content: &str| {
+                let mut violations = Vec::new();
+                if !content.contains("concurrency:") {
+                    violations.push(format!(
+                        "{filename}: Missing concurrency group.\n  \
+                         Add:\n  \
+                         concurrency:\n  \
+                           group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n  \
+                           cancel-in-progress: true"
+                    ));
+                } else if !content.contains("cancel-in-progress: true") {
+                    violations.push(format!(
+                        "{filename}: Has concurrency but missing 'cancel-in-progress: true'"
+                    ));
+                }
+                violations
+            }),
+            summary: "Why concurrency groups are important:\n\
+                      - Saves CI minutes by canceling superseded runs\n\
+                      - Speeds up feedback (don't wait for old runs)\n\
+                      - Reduces queue times for other workflows\n\n\
+                      Standard pattern:\n\
+                      concurrency:\n\
+                        group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}\n\
+                        cancel-in-progress: true",
+        },
+        // Rule 2: Job timeouts ------------------------------------------------
+        HygieneRule {
+            name: "timeout-minutes",
+            // Applies to every workflow file — no job should rely on GitHub's
+            // 6-hour default timeout.
+            filter: Box::new(|_: &str| true),
+            check: Box::new(|filename: &str, content: &str| {
+                let mut violations = Vec::new();
+                if !content.contains("timeout-minutes:") {
+                    violations.push(format!(
+                        "{filename}: No timeout-minutes configured.\n  \
+                         Fix: Add timeout-minutes to each job.\n  \
+                         Example: timeout-minutes: 10\n  \
+                         Verify: grep -n 'timeout-minutes:' .github/workflows/{filename}"
+                    ));
+                }
+                violations
+            }),
+            summary: "Why timeouts are required:\n\
+                      - Hanging jobs consume CI minutes indefinitely\n\
+                      - GitHub's default timeout is 6 hours (way too long)\n\
+                      - Explicit timeouts provide fast feedback on stuck jobs\n\n\
+                      Fix: Add 'timeout-minutes: N' to each job definition.\n\
+                      Example:\n\
+                        jobs:\n\
+                          build:\n\
+                            timeout-minutes: 20\n\
+                            runs-on: ubuntu-latest\n\n\
+                      Verify: grep -n 'timeout-minutes' .github/workflows/<file>",
+        },
+        // Rule 3: Minimal permissions -----------------------------------------
+        HygieneRule {
+            name: "minimal permissions",
+            // Applies to every workflow — the least-privilege principle is
+            // non-negotiable for supply-chain security.
+            filter: Box::new(|_: &str| true),
+            check: Box::new(|filename: &str, content: &str| {
+                let mut violations = Vec::new();
+                if !content.contains("permissions:") {
+                    violations.push(format!(
+                        "{filename}: No permissions block found.\n  \
+                         Fix: Add 'permissions:' block to explicitly set required permissions.\n  \
+                         For read-only workflows:\n  \
+                           permissions:\n  \
+                             contents: read\n  \
+                         Verify: grep -n 'permissions:' .github/workflows/{filename}"
+                    ));
+                } else if content.contains("permissions: write-all") {
+                    violations.push(format!(
+                        "{filename}: Uses 'write-all' permissions (too permissive).\n  \
+                         Fix: Specify only required permissions explicitly.\n  \
+                         Verify: grep -n 'permissions:' .github/workflows/{filename}"
+                    ));
+                }
+                violations
+            }),
+            summary: "Why minimal permissions are required:\n\
+                      - Compromised workflows or actions cannot abuse excess permissions\n\
+                      - GitHub requires explicit permission grants for security audits\n\
+                      - Missing permissions block defaults to GITHUB_TOKEN write access\n\n\
+                      Fix: Add a 'permissions:' block to each workflow.\n\
+                      For read-only workflows:\n\
+                        permissions:\n\
+                          contents: read\n\n\
+                      Verify: grep -n 'permissions:' .github/workflows/<file>\n\
+                      Reference: https://docs.github.com/en/actions/security-guides/automatic-token-authentication",
+        },
+    ];
 
-    for entry in collect_workflow_files(&workflows_dir) {
-        let path = entry.path();
-        let filename = path.file_name().unwrap().to_string_lossy();
-
-        // Skip workflows that don't need concurrency (e.g., release workflows)
-        if !should_have_concurrency.contains(&filename.as_ref()) {
-            continue;
-        }
-
-        let content = read_file(&path);
-
-        // Check for concurrency configuration
-        if !content.contains("concurrency:") {
-            missing_concurrency.push(format!(
-                "{filename}: Missing concurrency group.\n  \
-                 Add:\n  \
-                 concurrency:\n  \
-                   group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n  \
-                   cancel-in-progress: true"
-            ));
-        } else {
-            // Verify it has cancel-in-progress
-            if !content.contains("cancel-in-progress: true") {
-                missing_concurrency.push(format!(
-                    "{filename}: Has concurrency but missing 'cancel-in-progress: true'"
-                ));
-            }
-        }
-    }
-
-    if !missing_concurrency.is_empty() {
-        panic!(
-            "Workflows should use concurrency groups to cancel outdated runs:\n\n{}\n\n\
-             Why concurrency groups are important:\n\
-             - Saves CI minutes by canceling superseded runs\n\
-             - Speeds up feedback (don't wait for old runs)\n\
-             - Reduces queue times for other workflows\n\n\
-             Standard pattern:\n\
-             concurrency:\n\
-               group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n\
-               cancel-in-progress: true\n",
-            missing_concurrency.join("\n\n")
-        );
-    }
-}
-
-#[test]
-fn test_workflows_have_timeouts() {
-    // This test ensures workflows have reasonable timeouts
-    // Prevents hanging jobs from consuming CI resources indefinitely
+    // --- Collect all workflow files once -----------------------------------
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
+    let entries = collect_workflow_files(&workflows_dir);
 
-    let mut missing_timeouts = Vec::new();
+    // Pre-read every file so we only hit the filesystem once.
+    let workflows: Vec<(String, String)> = entries
+        .iter()
+        .map(|entry| {
+            let path = entry.path();
+            let filename = path.file_name().unwrap().to_string_lossy().to_string();
+            let content = read_file(&path);
+            (filename, content)
+        })
+        .collect();
 
-    for entry in collect_workflow_files(&workflows_dir) {
-        let path = entry.path();
-        let filename = path.file_name().unwrap().to_string_lossy();
-        let content = read_file(&path);
+    // --- Evaluate every rule against every applicable workflow -------------
 
-        // Check for timeout-minutes in jobs
-        if !content.contains("timeout-minutes:") {
-            missing_timeouts.push(format!(
-                "{filename}: No timeout-minutes configured.\n  \
-                 Fix: Add timeout-minutes to each job.\n  \
-                 Example: timeout-minutes: 10\n  \
-                 Verify: grep -n 'timeout-minutes:' .github/workflows/{filename}"
-            ));
-        }
-    }
+    // Accumulate violations grouped by rule name so the final report is
+    // structured and easy to act on.
+    let mut all_violations: Vec<(String, Vec<String>, String)> = Vec::new();
 
-    if !missing_timeouts.is_empty() {
-        panic!(
-            "Workflows are missing timeout-minutes on all jobs:\n\n{}\n\n\
-             Why timeouts are required:\n\
-             - Hanging jobs consume CI minutes indefinitely\n\
-             - GitHub's default timeout is 6 hours (way too long)\n\
-             - Explicit timeouts provide fast feedback on stuck jobs\n\n\
-             Fix: Add 'timeout-minutes: N' to each job definition.\n\
-             Example:\n\
-               jobs:\n\
-                 build:\n\
-                   timeout-minutes: 20\n\
-                   runs-on: ubuntu-latest\n\n\
-             Verify: grep -n 'timeout-minutes' .github/workflows/<file>",
-            missing_timeouts.join("\n\n")
-        );
-    }
-}
-
-#[test]
-fn test_workflows_use_minimal_permissions() {
-    // This test ensures workflows follow least-privilege principle
-    // Prevents security issues from compromised workflows or actions
-
-    let root = repo_root();
-    let workflows_dir = root.join(".github/workflows");
-
-    let mut violations = Vec::new();
-
-    for entry in collect_workflow_files(&workflows_dir) {
-        let path = entry.path();
-        let filename = path.file_name().unwrap().to_string_lossy();
-        let content = read_file(&path);
-
-        // Check if workflow has permissions block
-        if !content.contains("permissions:") {
-            violations.push(format!(
-                "{filename}: No permissions block found.\n  \
-                 Fix: Add 'permissions:' block to explicitly set required permissions.\n  \
-                 For read-only workflows:\n  \
-                   permissions:\n  \
-                     contents: read\n  \
-                 Verify: grep -n 'permissions:' .github/workflows/{filename}"
-            ));
-        } else {
-            // Check for overly permissive 'write-all' or missing 'contents: read'
-            if content.contains("permissions: write-all") {
-                violations.push(format!(
-                    "{filename}: Uses 'write-all' permissions (too permissive).\n  \
-                     Fix: Specify only required permissions explicitly.\n  \
-                     Verify: grep -n 'permissions:' .github/workflows/{filename}"
-                ));
+    for rule in &rules {
+        let mut rule_violations = Vec::new();
+        for (filename, content) in &workflows {
+            if !(rule.filter)(filename) {
+                continue;
             }
+            rule_violations.extend((rule.check)(filename, content));
+        }
+        if !rule_violations.is_empty() {
+            all_violations.push((
+                rule.name.to_string(),
+                rule_violations,
+                rule.summary.to_string(),
+            ));
         }
     }
 
-    if !violations.is_empty() {
-        panic!(
-            "Workflows violate the least-privilege permissions principle:\n\n{}\n\n\
-             Why minimal permissions are required:\n\
-             - Compromised workflows or actions cannot abuse excess permissions\n\
-             - GitHub requires explicit permission grants for security audits\n\
-             - Missing permissions block defaults to GITHUB_TOKEN write access\n\n\
-             Fix: Add a 'permissions:' block to each workflow.\n\
-             For read-only workflows:\n\
-               permissions:\n\
-                 contents: read\n\n\
-             Verify: grep -n 'permissions:' .github/workflows/<file>\n\
-             Reference: https://docs.github.com/en/actions/security-guides/automatic-token-authentication",
-            violations.join("\n\n")
+    // --- Report all violations at once ------------------------------------
+
+    if !all_violations.is_empty() {
+        let mut report = String::from(
+            "Workflow hygiene violations detected.\n\
+             ======================================\n",
         );
+
+        for (rule_name, violations, summary) in &all_violations {
+            report.push_str(&format!(
+                "\n--- Rule: {rule_name} ({} violation{}) ---\n\n",
+                violations.len(),
+                if violations.len() == 1 { "" } else { "s" },
+            ));
+            report.push_str(&violations.join("\n\n"));
+            report.push_str(&format!("\n\n{summary}\n"));
+        }
+
+        panic!("{report}");
     }
 }
 
@@ -3732,6 +3775,387 @@ fn test_lychee_args_use_double_dash_separator() {
         full_args,
         link_check.display()
     );
+}
+
+// ============================================================================
+// Dockerfile Validation Tests
+// ============================================================================
+// These tests prevent Docker build failures caused by configuration drift
+// between the Dockerfile and the actual repository file structure.
+
+#[test]
+fn test_dockerfile_copy_targets_exist() {
+    // This test validates that every COPY source path in the Dockerfile references
+    // a file or directory that actually exists in the repository.
+    //
+    // Root cause: The Dockerfile referenced a `third_party/` directory that was
+    // removed from the repo but the COPY instructions were never cleaned up.
+    // This caused Docker builds to fail with:
+    //   ERROR: failed to calculate checksum of ref: "/third_party": not found
+    //
+    // This test catches the issue locally before it reaches CI.
+
+    let root = repo_root();
+    let dockerfile = root.join("Dockerfile");
+
+    assert!(
+        dockerfile.exists(),
+        "Dockerfile not found at {}",
+        dockerfile.display()
+    );
+
+    let content = read_file(&dockerfile);
+    let mut violations = Vec::new();
+    let mut total_copy_instructions = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1;
+        let trimmed = line.trim();
+
+        // Match COPY and ADD instructions (but not COPY --from=<stage> which copies from build stages)
+        // ADD with URLs is skipped since those are remote fetches, not local paths
+        let instruction_prefix = if trimmed.starts_with("COPY ") {
+            Some("COPY ")
+        } else if trimmed.starts_with("ADD ") {
+            Some("ADD ")
+        } else {
+            None
+        };
+
+        if let Some(prefix) = instruction_prefix {
+            if trimmed.contains("--from=") {
+                continue;
+            }
+            total_copy_instructions += 1;
+
+            // Extract the source path(s) from the instruction
+            // COPY/ADD <src> [<src>...] <dest>
+            // The last space-separated token is the destination
+            let parts: Vec<&str> = trimmed
+                .strip_prefix(prefix)
+                .unwrap()
+                .split_whitespace()
+                .collect();
+
+            if parts.len() < 2 {
+                continue;
+            }
+
+            // All tokens except the last are source paths
+            for source in &parts[..parts.len() - 1] {
+                // Skip flags (--chown, --chmod, --link, etc.)
+                if source.starts_with("--") {
+                    continue;
+                }
+                // Skip ADD with URLs (remote fetches, not local paths)
+                if source.starts_with("http://") || source.starts_with("https://") {
+                    continue;
+                }
+                let source_path = root.join(source);
+                if !source_path.exists() {
+                    violations.push(format!(
+                        "  Dockerfile:{line_num}: {prefix}source does not exist: {source}\n    \
+                         Full line: {trimmed}\n    \
+                         Expected at: {}",
+                        source_path.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Dockerfile COPY/ADD instructions reference non-existent paths:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Total COPY/ADD instructions checked: {total_copy_instructions}\n\
+             - Violations found: {}\n\n\
+             This causes Docker builds to fail with:\n\
+             ERROR: failed to calculate checksum of ref: \"/<path>\": not found\n\n\
+             Fix: Either create the missing file/directory or remove the COPY/ADD instruction\n\
+             from the Dockerfile.",
+            violations.join("\n"),
+            violations.len()
+        );
+    }
+}
+
+#[test]
+fn test_workflow_script_references_exist() {
+    // This test validates that shell scripts referenced in workflow `run:` steps
+    // actually exist in the repository.
+    //
+    // Root cause: The release.yml workflow referenced `./scripts/verify-sccache.sh`
+    // which did not exist, causing a silent failure (masked by continue-on-error).
+    //
+    // This test catches missing script references locally before CI.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut violations = Vec::new();
+    let mut total_scripts_checked = 0;
+
+    // Regex-like pattern: match ./path/to/script.sh or scripts/something.sh
+    // We look for lines that invoke a local script file
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1;
+            let trimmed = line.trim();
+
+            // Skip YAML comments to avoid false positives on references like:
+            // # Removed: ./scripts/old-deploy.sh
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Look for script invocations in run: blocks
+            // Common patterns: ./scripts/foo.sh, bash scripts/foo.sh, sh ./scripts/foo.sh
+            for token in trimmed.split_whitespace() {
+                // Match tokens that look like local script paths
+                let is_script_ref =
+                    token.ends_with(".sh") || token.ends_with(".awk") || token.ends_with(".py");
+                let is_local_path = token.starts_with("./")
+                    || token.starts_with("scripts/")
+                    || token.starts_with(".github/scripts/");
+
+                let script_path = if is_script_ref && is_local_path {
+                    Some(token.trim_start_matches("./"))
+                } else {
+                    None
+                };
+
+                if let Some(script) = script_path {
+                    total_scripts_checked += 1;
+                    let full_path = root.join(script);
+                    if !full_path.exists() {
+                        violations.push(format!(
+                            "  {filename}:{line_num}: Script does not exist: {script}\n    \
+                             Full line: {trimmed}\n    \
+                             Expected at: {}",
+                            full_path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Workflow files reference non-existent scripts:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Scripts checked: {total_scripts_checked}\n\
+             - Missing scripts: {}\n\n\
+             Fix: Either create the missing script or update the workflow to remove the reference.",
+            violations.join("\n"),
+            violations.len()
+        );
+    }
+}
+
+#[test]
+fn test_release_workflow_conventions() {
+    // This test validates that the release workflow follows the same conventions
+    // as the other CI workflows (SHA pinning is checked separately by
+    // test_github_actions_are_pinned_to_sha which covers all workflows).
+    //
+    // Specific checks for release.yml:
+    //   1. Has a timeout-minutes to prevent runaway builds
+    //   2. Has permissions explicitly set
+    //   3. Has a proper name field
+    //   4. Does not reference non-existent checkout versions
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        // Release workflow is optional
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // Must have a name
+    assert!(
+        content.lines().any(|l| l.starts_with("name:")),
+        "release.yml must have a top-level 'name:' field.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Must have permissions
+    assert!(
+        content.contains("permissions:"),
+        "release.yml must explicitly set permissions (principle of least privilege).\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Must have timeout-minutes on jobs
+    let has_timeout = content
+        .lines()
+        .any(|l| l.trim().starts_with("timeout-minutes:"));
+    assert!(
+        has_timeout,
+        "release.yml jobs must have timeout-minutes to prevent runaway builds.\n\
+         File: {}",
+        release_yml.display()
+    );
+}
+
+#[test]
+fn test_workflow_files_use_two_space_indentation() {
+    // Validates that all workflow YAML files use 2-space indentation as required
+    // by .yamllint.yml (indentation.spaces: 2). This catches files accidentally
+    // written with 4-space indentation (common when copying from other projects
+    // or when editors default to 4 spaces).
+    //
+    // Two checks are performed:
+    //   1. Odd indentation: lines with an odd number of leading spaces (never valid
+    //      in 2-space YAML)
+    //   2. Minimum indent heuristic: if the smallest non-zero indent across all
+    //      YAML-level lines in a file is 4+ spaces, the file is likely using 4-space
+    //      (or larger) indentation throughout
+    //
+    // Only checks YAML structural lines — content inside multiline scalar blocks
+    // (run: |, args: >-, etc.) is excluded because those are embedded scripts
+    // with their own indentation rules.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut errors = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        let mut in_multiline_block = false;
+        let mut block_indent = 0;
+        let mut odd_indent_lines = Vec::new();
+        let mut min_yaml_indent = usize::MAX;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let stripped = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Skip empty lines and lines with no indentation
+            if stripped.is_empty() || indent == 0 {
+                // A non-empty line at indent 0 exits any multiline block
+                if !stripped.is_empty() {
+                    in_multiline_block = false;
+                }
+                continue;
+            }
+
+            // Detect start of YAML multiline scalar block
+            if !in_multiline_block && (stripped.contains(": |") || stripped.contains(": >")) {
+                let after_colon = stripped
+                    .split_once(": ")
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or("");
+                if after_colon == "|"
+                    || after_colon == "|-"
+                    || after_colon == "|+"
+                    || after_colon == ">"
+                    || after_colon == ">-"
+                    || after_colon == ">+"
+                {
+                    in_multiline_block = true;
+                    block_indent = indent;
+                    // Still check this line's own indentation (it's a YAML key)
+                    if indent % 2 != 0 {
+                        odd_indent_lines.push((line_idx + 1, indent, line.to_string()));
+                    }
+                    continue;
+                }
+            }
+
+            // Detect end of multiline block
+            if in_multiline_block && indent <= block_indent {
+                in_multiline_block = false;
+            }
+
+            // Skip lines inside multiline scalar blocks
+            if in_multiline_block {
+                continue;
+            }
+
+            // Check YAML-level lines for 2-space indentation (even number of spaces)
+            if indent % 2 != 0 {
+                odd_indent_lines.push((line_idx + 1, indent, line.to_string()));
+            }
+
+            // Track minimum indentation for the 4-space heuristic
+            if indent > 0 && indent < min_yaml_indent {
+                min_yaml_indent = indent;
+            }
+        }
+
+        if !odd_indent_lines.is_empty() {
+            let examples: Vec<String> = odd_indent_lines
+                .iter()
+                .take(5)
+                .map(|(line_num, spaces, content)| {
+                    format!("  line {line_num}: {spaces} spaces: {content}")
+                })
+                .collect();
+            let remaining = if odd_indent_lines.len() > 5 {
+                format!("  ... and {} more lines", odd_indent_lines.len() - 5)
+            } else {
+                String::new()
+            };
+            errors.push(format!(
+                "{filename}: {count} line(s) with odd indentation (not a multiple of 2 spaces):\n\
+                 {examples}{remaining}",
+                count = odd_indent_lines.len(),
+                examples = examples.join("\n"),
+            ));
+        }
+
+        // Heuristic: if the minimum YAML-level indent is 4+, the file likely
+        // uses 4-space (or larger) indentation instead of 2-space.
+        if min_yaml_indent != usize::MAX && min_yaml_indent >= 4 {
+            errors.push(format!(
+                "{filename}: minimum YAML indentation is {min_yaml_indent} spaces \
+                 (expected 2).\n  \
+                 This file likely uses {min_yaml_indent}-space indentation instead of 2-space.\n  \
+                 Re-indent the entire file to use 2-space increments."
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Workflow files have indentation errors:\n\n{}\n\n\
+             The project uses 2-space YAML indentation (.yamllint.yml: indentation.spaces: 2).\n\
+             To fix:\n\
+             1. Re-indent the file using 2-space increments\n\
+             2. Run: yamllint -c .yamllint.yml .github/workflows/\n\
+             3. Many editors can convert indentation: search for \"convert indentation to spaces\"\n\n\
+             Common cause: copying workflow templates from projects that use 4-space indentation.",
+            errors.join("\n\n")
+        );
+    }
 }
 
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,

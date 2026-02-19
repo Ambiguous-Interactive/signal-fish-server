@@ -240,19 +240,20 @@ impl ConnectionManager {
         reconnect_player_id: &PlayerId,
         room_id: RoomId,
     ) -> bool {
-        if let Some(current_client) = self.clients.get(current_player_id) {
+        // Atomically remove the old entry (no separate get-then-remove race)
+        if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
             let new_client = ClientConnection {
                 room_id: Some(room_id),
                 last_ping: Instant::now(),
                 last_heartbeat_update: None, // Reset on reconnection, will update immediately
-                sender: current_client.sender.clone(),
-                client_addr: current_client.client_addr,
-                game_data_format: current_client.game_data_format,
-                app_info: current_client.app_info.clone(),
+                sender: old_connection.sender,
+                client_addr: old_connection.client_addr,
+                game_data_format: old_connection.game_data_format,
+                app_info: old_connection.app_info,
             };
-            drop(current_client);
-            self.remove_client(current_player_id);
-            self.increment_ip_slot_unbounded(new_client.client_addr.ip());
+
+            // IP slot is already reserved from the old entry -- no need to
+            // release and re-reserve for the same IP address.
             self.clients.insert(*reconnect_player_id, new_client);
             true
         } else {
@@ -305,23 +306,33 @@ impl ConnectionManager {
     }
 
     fn increment_ip_slot_unbounded(&self, ip: IpAddr) -> usize {
-        if let Some(mut entry) = self.connections_per_ip.get_mut(&ip) {
-            *entry += 1;
-            *entry
-        } else {
-            self.connections_per_ip.insert(ip, 1);
-            1
+        // Use entry API for atomicity: prevents TOCTOU race where two threads
+        // both see the key as absent and both insert 1 instead of 2
+        match self.connections_per_ip.entry(ip) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                *entry.get_mut() += 1;
+                *entry.get()
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(1);
+                1
+            }
         }
     }
 
     fn release_ip_slot(&self, ip: IpAddr) {
-        if let Some(mut entry) = self.connections_per_ip.get_mut(&ip) {
-            if *entry > 1 {
-                *entry -= 1;
-                return;
+        // Use entry API for atomicity: prevents TOCTOU race where the count
+        // is read as 1, the ref is dropped, another thread increments to 2,
+        // then this thread removes the entry (losing the increment)
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
+            self.connections_per_ip.entry(ip)
+        {
+            if *entry.get() > 1 {
+                *entry.get_mut() -= 1;
+            } else {
+                entry.remove();
             }
         }
-        self.connections_per_ip.remove(&ip);
     }
 }
 
@@ -471,5 +482,191 @@ mod tests {
         assert_eq!(registrations.len(), 2);
         assert_eq!(registrations[0], (player_id, None));
         assert_eq!(registrations[1], (player_id, Some(room_id)));
+    }
+
+    // -----------------------------------------------------------------------
+    // D. Thread safety tests for ConnectionManager
+    // -----------------------------------------------------------------------
+
+    /// D17: Many clients from the same IP; verify counter accuracy.
+    ///
+    /// max_connections_per_ip = 5.
+    /// 20 tasks concurrently try to register from the same IP.
+    /// Exactly 5 should succeed.
+    /// After removing all 5, the counter should be back to 0.
+    #[tokio::test]
+    async fn test_concurrent_ip_slot_reservation() {
+        let manager = make_manager(5);
+        let addr: SocketAddr = "10.0.0.1:9000".parse().unwrap();
+
+        let task_count = 20;
+        let barrier = Arc::new(tokio::sync::Barrier::new(task_count));
+        let manager = Arc::new(manager);
+        let mut handles = Vec::with_capacity(task_count);
+
+        for _ in 0..task_count {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let (tx, _rx) = channel();
+                manager.register_client(tx, addr, Uuid::new_v4()).await
+            }));
+        }
+
+        let mut successes = Vec::new();
+        let mut failures = 0usize;
+        for handle in handles {
+            match handle.await.expect("task should not panic") {
+                Ok(player_id) => successes.push(player_id),
+                Err(_) => failures += 1,
+            }
+        }
+
+        assert_eq!(
+            successes.len(),
+            5,
+            "Exactly 5 should succeed, got {}",
+            successes.len()
+        );
+        assert_eq!(failures, 15, "15 should be rejected, got {failures}");
+
+        // Remove all 5 successful clients
+        for pid in &successes {
+            manager.remove_client(pid);
+        }
+
+        // After removal, new registrations should work (counter is back to 0)
+        let (tx, _rx) = channel();
+        let result = manager.register_client(tx, addr, Uuid::new_v4()).await;
+        assert!(
+            result.is_ok(),
+            "Registration should succeed after all clients removed"
+        );
+    }
+
+    /// D18: Reassignment does not leak IP slots.
+    ///
+    /// Register a client, reassign to a new player_id.
+    /// IP count should still be 1 (not 0 or 2).
+    /// Verify by filling up to the per-IP limit, then remove the reassigned
+    /// client and confirm the freed slot allows a new registration.
+    #[tokio::test]
+    async fn test_reassign_connection_preserves_ip_count() {
+        let manager = make_manager(5);
+        let addr: SocketAddr = "10.0.0.2:9000".parse().unwrap();
+
+        let (tx, _rx) = channel();
+        let original_id = manager
+            .register_client(tx, addr, Uuid::new_v4())
+            .await
+            .expect("registration should succeed");
+
+        let room_id = RoomId::new_v4();
+        let new_player_id = Uuid::new_v4();
+
+        let reassigned = manager.reassign_connection(&original_id, &new_player_id, room_id);
+        assert!(reassigned, "Reassignment should succeed");
+
+        // Original player should be gone
+        assert!(
+            !manager.has_client(&original_id),
+            "Original player should no longer exist"
+        );
+        assert!(
+            manager.has_client(&new_player_id),
+            "New player should exist"
+        );
+
+        // IP slot should still be 1 (not 0 or 2)
+        // Verify by trying to register 4 more (max is 5, 1 already used)
+        for i in 0..4 {
+            let (tx, _rx) = channel();
+            let port = 9001 + i;
+            let new_addr: SocketAddr = format!("10.0.0.2:{port}").parse().unwrap();
+            manager
+                .register_client(tx, new_addr, Uuid::new_v4())
+                .await
+                .expect("should succeed within limit");
+        }
+
+        // 5th attempt from same IP should fail (already at limit)
+        let (tx, _rx) = channel();
+        let new_addr: SocketAddr = "10.0.0.2:10000".parse().unwrap();
+        let result = manager.register_client(tx, new_addr, Uuid::new_v4()).await;
+        assert!(
+            result.is_err(),
+            "6th connection from same IP should be rejected"
+        );
+
+        // Remove the reassigned client and verify IP slot is freed
+        manager.remove_client(&new_player_id);
+        assert!(
+            !manager.has_client(&new_player_id),
+            "Client should be removed"
+        );
+
+        // After removing the reassigned client, the slot should be freed.
+        // Verify by registering one more from the same IP (was at limit before removal).
+        let (tx_verify, _rx_verify) = channel();
+        let verify_addr: SocketAddr = "10.0.0.2:10001".parse().unwrap();
+        let result = manager
+            .register_client(tx_verify, verify_addr, Uuid::new_v4())
+            .await;
+        assert!(
+            result.is_ok(),
+            "Registration should succeed after removing the reassigned client"
+        );
+    }
+
+    /// D19: Multiple concurrent releases do not underflow the IP counter.
+    ///
+    /// Register 3 clients from the same IP.
+    /// Concurrently remove all 3.
+    /// After removal, new registrations should work (no underflow).
+    #[tokio::test]
+    async fn test_concurrent_release_ip_slot_no_underflow() {
+        let manager = Arc::new(make_manager(10));
+
+        // Register 3 clients from same IP (different ports for each)
+        let mut player_ids = Vec::new();
+        for i in 0..3u16 {
+            let (tx, _rx) = channel();
+            let port_addr: SocketAddr = format!("10.0.0.3:{}", 9000 + i).parse().unwrap();
+            let pid = manager
+                .register_client(tx, port_addr, Uuid::new_v4())
+                .await
+                .expect("registration should succeed");
+            player_ids.push(pid);
+        }
+
+        // Concurrently remove all 3
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for pid in player_ids {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                manager.remove_client(&pid);
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
+
+        // After all removals, IP should be completely cleared.
+        // Verify by registering up to max_connections_per_ip (10).
+        for i in 0..10u16 {
+            let (tx, _rx) = channel();
+            let port_addr: SocketAddr = format!("10.0.0.3:{}", 8000 + i).parse().unwrap();
+            let result = manager.register_client(tx, port_addr, Uuid::new_v4()).await;
+            assert!(
+                result.is_ok(),
+                "Registration #{} should succeed after complete removal (no underflow)",
+                i + 1
+            );
+        }
     }
 }

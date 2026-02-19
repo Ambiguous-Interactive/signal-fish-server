@@ -761,26 +761,18 @@ fn test_config_files() {
 
 ---
 
-### 7. Workflow Best Practices Tests (3 tests)
+### 7. Workflow Best Practices Tests (1 consolidated test)
 
-**Current Tests:**
+**Current Test:**
 
-1. `test_workflows_use_concurrency_groups` - Validates concurrency configuration
-2. `test_workflows_have_timeouts` - Validates timeout configuration
-3. `test_workflows_use_minimal_permissions` - Validates permissions
+1. `test_workflow_hygiene_requirements` - Data-driven validation of concurrency groups,
+   timeouts, and minimal permissions across all workflow files
 
-**Overlapping Concerns:**
+**Status:** ✅ CONSOLIDATED
 
-- All three tests iterate over workflow files
-- All three validate similar structural patterns
-- All three are best practices checks
-
-**Consolidation Opportunity:** ✅ HIGH
-
-**Recommendation:**
-
-- Merge into a single `test_workflow_best_practices` test
-- **Result:** 3 tests → 1 test
+This was previously 3 separate tests that iterated over workflow files checking different
+structural patterns. They have been merged into a single data-driven test using a
+`HygieneRule` struct with closures for filtering and checking.
 
 **Data-Driven Improvement:**
 
@@ -836,7 +828,7 @@ const WORKFLOW_BEST_PRACTICES: &[WorkflowBestPractice] = &[
 ];
 
 #[test]
-fn test_workflow_best_practices() {
+fn test_workflow_hygiene_requirements() {
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
 
@@ -896,7 +888,7 @@ fn test_workflow_best_practices() {
 
 1. `test_workflow_configurations` - Data-driven workflow spec validation (merges 5 tests)
 2. `test_workflow_yaml_syntax` - YAML syntax validation
-3. `test_workflow_best_practices` - Concurrency, timeouts, permissions (merges 3 tests)
+3. `test_workflow_hygiene_requirements` - Concurrency, timeouts, permissions (✅ DONE)
 
 #### Category: GitHub Actions Security (1 test)
 

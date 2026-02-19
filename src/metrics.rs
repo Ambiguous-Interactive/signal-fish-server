@@ -391,7 +391,16 @@ impl ServerMetrics {
     }
 
     pub fn decrement_active_connections(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        // Use fetch_update for atomic check-then-decrement to prevent underflow
+        let _ =
+            self.active_connections
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    if current > 0 {
+                        Some(current - 1)
+                    } else {
+                        None
+                    }
+                });
         self.disconnections.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -685,11 +694,19 @@ impl ServerMetrics {
     }
 
     pub fn decrement_reconnection_sessions_active(&self) {
-        let current = self.reconnection_sessions_active.load(Ordering::Relaxed);
-        if current > 0 {
-            self.reconnection_sessions_active
-                .fetch_sub(1, Ordering::Relaxed);
-        }
+        // Use fetch_update for atomic check-then-decrement to prevent underflow
+        // when two threads race to decrement the same counter
+        let _ = self.reconnection_sessions_active.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| {
+                if current > 0 {
+                    Some(current - 1)
+                } else {
+                    None
+                }
+            },
+        );
     }
 
     pub fn increment_reconnection_validation_failure(&self) {
@@ -1225,4 +1242,118 @@ pub struct DashboardCacheMetrics {
     pub refresh_errors: u64,
     pub last_refresh_timestamp: u64,
     pub refresh_failures: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // -----------------------------------------------------------------------
+    // E. Metrics atomic tests
+    // -----------------------------------------------------------------------
+
+    /// E20: Decrement from 0 stays at 0, not u64::MAX (underflow prevention).
+    #[tokio::test]
+    async fn test_decrement_active_connections_no_underflow() {
+        let metrics = ServerMetrics::new();
+
+        // Decrement 10 times from 0
+        for _ in 0..10 {
+            metrics.decrement_active_connections();
+        }
+
+        let value = metrics.active_connections.load(Ordering::Relaxed);
+        assert_eq!(
+            value, 0,
+            "active_connections should remain 0 after decrement from 0, got {value}"
+        );
+
+        // The production code always increments disconnections even when the
+        // active_connections decrement is a no-op, so verify the side-effect.
+        assert_eq!(
+            metrics.disconnections.load(Ordering::Relaxed),
+            10,
+            "disconnections should still be incremented 10 times even when active_connections was already 0"
+        );
+    }
+
+    /// E21: Decrement reconnection_sessions_active from 0 stays at 0.
+    #[tokio::test]
+    async fn test_decrement_reconnection_sessions_no_underflow() {
+        let metrics = ServerMetrics::new();
+
+        // Decrement 10 times from 0
+        for _ in 0..10 {
+            metrics.decrement_reconnection_sessions_active();
+        }
+
+        let value = metrics.reconnection_sessions_active.load(Ordering::Relaxed);
+        assert_eq!(
+            value, 0,
+            "reconnection_sessions_active should remain 0 after decrement from 0, got {value}"
+        );
+    }
+
+    /// E22: Sequential phases of concurrent operations yield correct count.
+    ///
+    /// Phase 1: Increment connections 100 times concurrently.
+    /// Phase 2: (after all increments complete) Decrement 50 times concurrently.
+    /// Final active_connections should be 50.
+    ///
+    /// Note: this tests sequential phases of concurrent operations, not
+    /// simultaneous increments and decrements.
+    #[tokio::test]
+    async fn test_concurrent_increment_decrement_active_connections() {
+        let metrics = Arc::new(ServerMetrics::new());
+
+        // Phase 1: 100 concurrent increments
+        let inc_barrier = Arc::new(tokio::sync::Barrier::new(100));
+        let mut handles = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let metrics = Arc::clone(&metrics);
+            let barrier = Arc::clone(&inc_barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                metrics.increment_connections();
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("increment task should not panic");
+        }
+
+        let after_inc = metrics.active_connections.load(Ordering::Relaxed);
+        assert_eq!(
+            after_inc, 100,
+            "After 100 increments, active_connections should be 100, got {after_inc}"
+        );
+
+        // Phase 2: 50 concurrent decrements
+        let dec_barrier = Arc::new(tokio::sync::Barrier::new(50));
+        let mut handles = Vec::with_capacity(50);
+        for _ in 0..50 {
+            let metrics = Arc::clone(&metrics);
+            let barrier = Arc::clone(&dec_barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                metrics.decrement_active_connections();
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("decrement task should not panic");
+        }
+
+        let final_value = metrics.active_connections.load(Ordering::Relaxed);
+        assert_eq!(
+            final_value, 50,
+            "After 100 increments and 50 decrements, active_connections should be 50, got {final_value}"
+        );
+
+        // total_connections is monotonic (only incremented, never decremented)
+        let total = metrics.total_connections.load(Ordering::Relaxed);
+        assert_eq!(
+            total, 100,
+            "total_connections should be 100 (never decremented), got {total}"
+        );
+    }
 }

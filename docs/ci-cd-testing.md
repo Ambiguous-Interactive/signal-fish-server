@@ -96,9 +96,7 @@ Tests that validate CI workflow configuration:
 | `test_link_check_workflow_exists_and_is_configured` | Validates link-check workflow setup | Missing or misconfigured link checking |
 | `test_markdownlint_workflow_exists_and_is_configured` | Validates markdownlint workflow setup | Missing or misconfigured markdown linting |
 | `test_doc_validation_workflow_has_shellcheck` | Ensures doc-validation validates its own scripts | AWK/bash syntax errors in workflows |
-| `test_workflows_use_concurrency_groups` | Validates concurrency configuration | Wasted CI resources on outdated runs |
-| `test_workflows_have_timeouts` | Ensures workflows have reasonable timeouts | Hanging jobs consuming resources |
-| `test_workflows_use_minimal_permissions` | Validates least-privilege principle | Security issues from overly permissive workflows |
+| `test_workflow_hygiene_requirements` | Data-driven validation of concurrency, timeouts, and permissions | Wasted CI resources, hanging jobs, overly permissive workflows |
 
 **Example:** Preventing AWK syntax errors
 
