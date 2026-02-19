@@ -956,6 +956,33 @@ fi
 ```
 ````
 
+### Pitfall 14: MkDocs Material Tab Syntax vs MD046
+
+MkDocs Material content tabs (`=== "Tab Name"`) require 4-space indented blocks
+for the tab body. markdownlint MD046 (code-block-style: fenced) flags these as
+indented code blocks. Wrap tabbed sections with
+`<!-- markdownlint-disable MD046 -->` / `<!-- markdownlint-enable MD046 -->`.
+Always re-enable after the section to avoid suppressing the rule for the rest
+of the file.
+
+````markdown
+<!-- markdownlint-disable MD046 -->
+
+=== "Docker"
+
+    ```bash
+    docker run -p 8080:8080 signal-fish-server
+    ```
+
+=== "Cargo"
+
+    ```bash
+    cargo run --release
+    ```
+
+<!-- markdownlint-enable MD046 -->
+````
+
 ---
 
 ## VS Code Integration

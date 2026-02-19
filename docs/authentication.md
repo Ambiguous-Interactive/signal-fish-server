@@ -53,7 +53,7 @@ ws.onmessage = (event) => {
     // Now you can create/join rooms
   }
 
-  if (message.type === 'Error' && message.data.error_code === 'AUTH_REQUIRED') {
+  if (message.type === 'Error' && message.data.error_code === 'AUTHENTICATION_REQUIRED') {
     console.error('Authentication failed');
   }
 };
@@ -129,10 +129,10 @@ Format: `Bearer <app_id>:<app_secret>`
 
 Common auth-related errors:
 
-- `AUTH_REQUIRED` - Authentication is required but not provided
-- `INVALID_CREDENTIALS` - Invalid app_id or app_secret
-- `AUTH_TIMEOUT` - Client didn't authenticate in time
-- `APP_LIMIT_EXCEEDED` - App has reached its max_rooms limit
+- `AUTHENTICATION_REQUIRED` - Authentication is required but not provided
+- `INVALID_APP_ID` - Invalid app ID
+- `AUTHENTICATION_TIMEOUT` - Client did not authenticate in time
+- `MAX_ROOMS_PER_GAME_EXCEEDED` - App has reached its max rooms limit
 
 ## Example: Multiple Apps
 

@@ -1,0 +1,104 @@
+site_name: Signal Fish Server
+site_url: https://ambiguous-interactive.github.io/signal-fish-server/
+site_description: A lightweight, zero-dependency WebSocket signaling server for peer-to-peer game networking
+repo_url: https://github.com/Ambiguous-Interactive/signal-fish-server
+repo_name: signal-fish-server
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+# Validation settings for strict mode.
+# Internal-only docs (CI guides, hook references, etc.) are intentionally excluded from nav
+# but contain links to files outside docs/ (e.g., .llm/skills/, tests/). These links are
+# valid in the repo context but unresolvable by MkDocs. Downgrade to info to avoid blocking
+# the build while keeping strict mode for our public documentation pages.
+validation:
+  nav:
+    omitted_files: info
+  links:
+    not_found: info
+    unrecognized_links: info
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Quick Start: quickstart.md
+      - Installation & Running: getting-started.md
+  - Concepts:
+      - What is Signal Fish?: concepts/overview.md
+      - Rooms & Lobbies: concepts/rooms-and-lobbies.md
+      - Authority System: concepts/authority.md
+      - Reconnection: concepts/reconnection.md
+      - Spectator Mode: concepts/spectator-mode.md
+  - Guides:
+      - Rust Client: guides/rust-client.md
+  - Configuration:
+      - Server Config: configuration.md
+      - Authentication: authentication.md
+      - Deployment: deployment.md
+  - Reference:
+      - Protocol Messages: protocol.md
+      - Error Codes: reference/error-codes.md
+      - Features: features.md
+      - Architecture: architecture.md

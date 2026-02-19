@@ -1,0 +1,26 @@
+:root {
+  --md-primary-fg-color: #1a237e;
+  --md-primary-fg-color--light: #3949ab;
+  --md-primary-fg-color--dark: #0d1642;
+  --md-accent-fg-color: #00bcd4;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #3949ab;
+  --md-primary-fg-color--light: #5c6bc0;
+  --md-primary-fg-color--dark: #1a237e;
+  --md-accent-fg-color: #26c6da;
+}
+
+code {
+  word-break: normal;
+}
+
+.room-code {
+  font-family: var(--md-code-font-family);
+  font-weight: bold;
+  letter-spacing: 0.1em;
+  padding: 0.1em 0.4em;
+  border-radius: 0.2em;
+  background-color: var(--md-code-bg-color);
+}
