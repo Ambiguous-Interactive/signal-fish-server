@@ -167,7 +167,7 @@ server {
 
 ### Caddy
 
-```caddy
+```text
 
 signal.yourgame.com {
     reverse_proxy /v2/ws localhost:3536 {

@@ -57,7 +57,7 @@ Create a file called `src/main.rs` with the following code. This client
 connects to the server and creates a new room by sending a `JoinRoom`
 message without a `room_code`:
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::connect_async;
@@ -124,7 +124,7 @@ In a separate terminal, create a second Rust project. Use the same
 `Cargo.toml` dependencies as Step 2, then create `src/main.rs` with
 the following code. Replace `A7X2K9` with the room code from Step 2:
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::connect_async;
@@ -193,7 +193,7 @@ the data to all other players in the room.
 
 Add a send-and-receive loop to your client after joining the room:
 
-```rust,ignore
+```rust
 // Send game data to all other players in the room.
 // The outer "data" is the serde content tag; the inner "data"
 // is the GameData variant's field name.
@@ -242,7 +242,7 @@ with peer connection information.
 
 After both clients have joined the room, send the ready signal:
 
-```rust,ignore
+```rust
 // Signal that this player is ready
 let ready_msg = serde_json::json!({
     "type": "PlayerReady"

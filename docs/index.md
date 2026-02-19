@@ -40,7 +40,7 @@ binary -- deploy it anywhere and start matchmaking in seconds.
 Here is a minimal Rust example that connects to the server and creates
 a new room:
 
-```rust,ignore
+```rust
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
