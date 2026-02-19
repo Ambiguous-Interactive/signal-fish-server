@@ -80,6 +80,7 @@ jobs:
             --exclude-path '\.github/test-fixtures/'
             --exclude-path 'test-fixtures/'
             --exclude-path '\.lychee\.toml'
+            --exclude-path site/
             --
             './**/*.md' './**/*.rs' './**/*.toml'
           fail: true

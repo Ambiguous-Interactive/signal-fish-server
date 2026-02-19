@@ -55,3 +55,6 @@ third_party/**/Cargo.toml.orig
 lcov.info
 tarpaulin-report.html
 cobertura.xml
+
+# MkDocs build output
+site/

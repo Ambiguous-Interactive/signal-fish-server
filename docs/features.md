@@ -35,9 +35,17 @@ Response:
     "game_name": "my-game",
     "max_players": 8,
     "supports_authority": true,
-    "current_players": [{"id": "your-player-id", "name": "Player1"}],
+    "current_players": [
+      {
+        "id": "your-player-id",
+        "name": "Player1",
+        "is_authority": false,
+        "is_ready": false,
+        "connected_at": "2025-01-15T10:30:00Z"
+      }
+    ],
     "is_authority": false,
-    "lobby_state": "Waiting",
+    "lobby_state": "waiting",
     "ready_players": [],
     "relay_type": "WebRTC",
     "current_spectators": []
@@ -101,22 +109,22 @@ Rooms transition through three states based on player ready status:
 
 Initial state. Waiting for players to join and mark ready.
 
-### Countdown
+### Lobby
 
-All players are ready. Countdown to game start.
+Room is full and players are coordinating readiness.
 
-### Playing
+### Finalized
 
-Game in progress.
+All players are ready and the game is starting.
 
 ### State Transitions
 
 ```text
 
-Waiting --> Countdown (all players ready)
-Countdown --> Waiting (player unready)
-Countdown --> Playing (countdown complete)
-Playing --> Waiting (manual reset or all players leave)
+Waiting --> Lobby (room full)
+Lobby --> Waiting (player leaves)
+Lobby --> Finalized (all players ready)
+Finalized --> [*] (game started, room cleanup)
 
 ```
 
@@ -127,7 +135,7 @@ Clients are notified of state changes:
 {
   "type": "LobbyStateChanged",
   "data": {
-    "lobby_state": "Playing",
+    "lobby_state": "finalized",
     "ready_players": ["player-id-1", "player-id-2"],
     "all_ready": true
   }
@@ -147,7 +155,7 @@ Players signal their ready state:
 
 ```
 
-When all players are ready, the lobby transitions to Countdown, then Playing.
+When all players are ready, the lobby transitions to Finalized.
 
 ## Authority Management
 
@@ -208,14 +216,15 @@ Spectators:
 
 Token-based reconnection with event replay.
 
-### Initial Join
+### Disconnect and Token Generation
 
-When a player joins a room, the server provides an authentication token in the `RoomJoined` response. This token
-should be stored by the client for reconnection purposes.
+When a player disconnects, the server generates a reconnection token
+bound to their player ID and room ID. The server buffers room events
+during the disconnection window so they can be replayed on reconnect.
 
 ### Reconnecting
 
-If the connection is lost, reconnect using the stored credentials:
+If the connection is lost, reconnect using stored credentials:
 
 ```json
 {

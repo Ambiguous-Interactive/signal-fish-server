@@ -76,7 +76,7 @@ IS_PYTHON_PROJECT=false
 IS_NODE_PROJECT=false
 
 [ -f "Cargo.toml" ] && IS_RUST_PROJECT=true
-[ -f "requirements.txt" ] || [ -f "Pipfile" ] || [ -f "pyproject.toml" ] && IS_PYTHON_PROJECT=true
+[ -f "requirements.txt" ] || [ -f "requirements-docs.txt" ] || [ -f "Pipfile" ] || [ -f "pyproject.toml" ] && IS_PYTHON_PROJECT=true
 [ -f "package.json" ] && IS_NODE_PROJECT=true
 
 info "Project type detection:"
