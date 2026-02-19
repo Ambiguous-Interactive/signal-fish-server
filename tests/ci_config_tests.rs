@@ -2102,6 +2102,20 @@ fn test_markdown_no_capitalized_filenames_in_links() {
     }
 }
 
+// Regex pattern for stripping markdown link URLs: [text](url) -> [text]
+const MD_URL_STRIP_PATTERN: &str = r"\]\([^)]*\)";
+
+// Regex pattern for stripping raw URLs (covers HTML attributes like href="...", src="...",
+// angle-bracket URLs <https://...>, and bare URLs in text). Uses \S+ to intentionally
+// over-strip trailing punctuation/delimiters (e.g., a period after a URL), since the goal
+// is removal for capitalization checking, not precise URL extraction.
+const RAW_URL_STRIP_PATTERN: &str = r"(?:https?|wss?|ftp)://\S+";
+
+// Regex pattern for stripping HTML elements (opening, closing, and self-closing tags)
+// to match .markdownlint.json MD044 "html_elements": false behavior, which skips
+// content within HTML elements when checking proper noun capitalization.
+const HTML_ELEMENT_PATTERN: &str = r"<[^>]+>";
+
 #[test]
 fn test_markdown_technical_terms_consistency() {
     // This test validates that technical terms use consistent capitalization
@@ -2135,10 +2149,14 @@ fn test_markdown_technical_terms_consistency() {
     let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
     let mut violations = Vec::new();
 
-    // Compile URL-stripping regex outside all loops to avoid repeated allocations.
-    // Strips markdown link URLs: [text](url) -> [text]
-    // This prevents matching technical terms in URLs (e.g. github.com in links)
-    let url_strip_regex = regex::Regex::new(r"\]\([^)]*\)").expect("valid url-strip regex pattern");
+    // Compile URL-stripping and HTML-stripping regexes outside all loops to avoid
+    // repeated allocations. See constant definitions for detailed documentation.
+    let url_strip_regex =
+        regex::Regex::new(MD_URL_STRIP_PATTERN).expect("valid url-strip regex pattern");
+    let raw_url_regex =
+        regex::Regex::new(RAW_URL_STRIP_PATTERN).expect("valid raw-url-strip regex pattern");
+    let html_element_regex =
+        regex::Regex::new(HTML_ELEMENT_PATTERN).expect("valid html-element regex pattern");
 
     for file in markdown_files {
         let content = read_file(&file);
@@ -2182,7 +2200,13 @@ fn test_markdown_technical_terms_consistency() {
                 continue;
             }
 
-            let line_no_urls = url_strip_regex.replace_all(line, "]");
+            // Strip content that should not be checked for capitalization:
+            // 1. Markdown link URLs: [text](url) -> [text]
+            // 2. HTML elements: <a href="...">text</a> -> text (MD044 html_elements: false)
+            // 3. Raw URLs: https://github.io/... -> ""
+            let without_md_urls = url_strip_regex.replace_all(line, "]");
+            let without_html = html_element_regex.replace_all(&without_md_urls, "");
+            let line_no_urls = raw_url_regex.replace_all(&without_html, "");
 
             for (regex, correct, context) in &compiled_cases {
                 if regex.is_match(&line_no_urls) {
@@ -2208,6 +2232,74 @@ fn test_markdown_technical_terms_consistency() {
              If markdownlint MD044 should catch these, verify .markdownlint.json 'names' array \
              is configured correctly.",
             violations.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_technical_terms_url_stripping_skips_urls() {
+    // Validates that the URL-stripping and HTML-stripping logic in
+    // test_markdown_technical_terms_consistency correctly removes URLs and HTML elements
+    // before checking for technical term capitalization.
+    // URLs contain domain names (github.io, docker.com) that are correctly lowercase
+    // and must not be flagged as capitalization violations.
+
+    let url_strip_regex =
+        regex::Regex::new(MD_URL_STRIP_PATTERN).expect("valid url-strip regex pattern");
+    let raw_url_regex =
+        regex::Regex::new(RAW_URL_STRIP_PATTERN).expect("valid raw-url-strip regex pattern");
+    let html_element_regex =
+        regex::Regex::new(HTML_ELEMENT_PATTERN).expect("valid html-element regex pattern");
+    let github_regex = regex::Regex::new(r"\bgithub\b").expect("valid regex");
+
+    // Lines that contain "github" only inside URLs or HTML -- must NOT match after stripping
+    let should_not_match = vec![
+        // HTML href attribute
+        r#"<a href="https://ambiguous-interactive.github.io/signal-fish-server/">"#,
+        // HTML src attribute with URL-encoded term
+        r#"<img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue?style=for-the-badge""#,
+        // Markdown link URL
+        "[Documentation](https://ambiguous-interactive.github.io/signal-fish-server/)",
+        // Raw URL in text
+        "Visit https://github.com/owner/repo for details",
+        // Angle-bracket autolink
+        "<https://github.io/some-project>",
+        // Multiple URLs on one line
+        r#"<a href="https://github.io/a"><img src="https://github.io/b"></a>"#,
+        // HTML element with lowercase term in attribute (html_elements: false parity)
+        r#"<a title="github project" href="https://example.com">Link</a>"#,
+        // wss:// URL with term in domain
+        "Connect to wss://github.example.com/ws for live updates",
+        // ftp:// URL with term in path
+        "Download from ftp://files.github.example.com/archive.tar.gz",
+    ];
+
+    for line in &should_not_match {
+        let without_md_urls = url_strip_regex.replace_all(line, "]");
+        let without_html = html_element_regex.replace_all(&without_md_urls, "");
+        let line_no_urls = raw_url_regex.replace_all(&without_html, "");
+        assert!(
+            !github_regex.is_match(&line_no_urls),
+            "URL/HTML stripping should have removed 'github' from line, \
+             but '{line_no_urls}' still matches in: {line}",
+        );
+    }
+
+    // Lines that contain "github" outside URLs -- must still match after stripping
+    let should_still_match = vec![
+        "Please use github for your source hosting",
+        "The github integration is broken",
+        // Mixed content: URL followed by text containing the term
+        "Visit https://github.com/repo. Use github locally.",
+    ];
+
+    for line in &should_still_match {
+        let without_md_urls = url_strip_regex.replace_all(line, "]");
+        let without_html = html_element_regex.replace_all(&without_md_urls, "");
+        let line_no_urls = raw_url_regex.replace_all(&without_html, "");
+        assert!(
+            github_regex.is_match(&line_no_urls),
+            "URL stripping should NOT have removed 'github' from line: {line}",
         );
     }
 }

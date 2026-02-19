@@ -1,10 +1,37 @@
-# Signal Fish Server
+<p align="center">
+  <img src="docs/assets/logo-banner.svg" alt="Signal Fish Server" width="600">
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/signal-fish-server">
+    <img src="https://img.shields.io/crates/v/signal-fish-server?style=for-the-badge"
+         alt="crates.io">
+  </a>
+  <a href="https://ambiguous-interactive.github.io/signal-fish-server/">
+    <img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue?style=for-the-badge"
+         alt="Documentation">
+  </a>
+</p>
 
 A lightweight, zero-dependency WebSocket signaling server for peer-to-peer
 game networking. Run locally with Rust or Docker -- no database, no cloud
 services required.
 
 Built by [Ambiguous Interactive](https://github.com/Ambiguous-Interactive).
+
+---
+
+> **🤖 AI Disclosure**
+>
+> This project was developed with **substantial AI assistance**. The protocol
+> design and core technology concepts were created entirely by humans, but the
+> vast majority of the code, documentation, and tests were written with the
+> help of **Claude Opus 4.6** and **Codex 5.3**. Human oversight covered code
+> review and architectural decisions, but day-to-day implementation was
+> primarily AI-driven. This transparency is provided so users can make informed
+> decisions about using this crate.
+
+---
 
 ## Quick Start
 

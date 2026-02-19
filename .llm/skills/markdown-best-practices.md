@@ -750,26 +750,51 @@ MD044 flags lowercase `rust` as a proper noun violation, but Docker image names
 like `rust:1.88` **must** stay lowercase. Wrap Docker image references in backtick
 inline code (e.g., `` `rust:1.88` ``) to suppress MD044 inside code spans.
 
-### Pitfall 7: Code Block Fence Tracking in Nested Examples
+### Pitfall 7: MD044 and URLs in HTML Attributes
+
+The `.markdownlint.json` has `"html_elements": false` for MD044, meaning content inside
+HTML elements is not checked for proper name capitalization. URLs in HTML attributes
+(`href="..."`, `src="..."`) contain domain names like `github.io` that are correctly
+lowercase.
+
+The custom test `test_markdown_technical_terms_consistency()` mirrors this by stripping:
+
+1. Markdown link URLs: `[text](url)` becomes `[text]`
+2. HTML elements: `<a href="...">` tags are removed entirely
+3. Raw URLs: `https://...`, `wss://...`, `ftp://...` are removed
+
+**Example false positive (now prevented):**
+
+```text
+README.md:10: Incorrect capitalization: should be 'GitHub'
+  Line: <a href="https://ambiguous-interactive.github.io/signal-fish-server/">
+```
+
+The `github` in `github.io` is a domain name and must stay lowercase.
+
+**If adding new URL schemes** (e.g., `ssh://`), update the `RAW_URL_STRIP_PATTERN`
+constant in `tests/ci_config_tests.rs`.
+
+### Pitfall 8: Code Block Fence Tracking in Nested Examples
 
 Opening fences can have info strings (`` ```rust ``), but closing fences must be
 bare (`` ``` ``). A naive toggle (flip `in_block` on every `` ``` `` line) breaks
 when documentation contains nested fence examples. Always match closing fences with
 an exact `/^```$/` pattern.
 
-### Pitfall 8: MD060 and Compact Table Styles
+### Pitfall 9: MD060 and Compact Table Styles
 
 MD060 (no-space-in-code) may fire false positives on compact table styles that omit
 padding around pipe characters. If your project uses compact tables, consider
 disabling MD060 in `.markdownlint.json`.
 
-### Pitfall 9: Lint Test Fixtures
+### Pitfall 10: Lint Test Fixtures
 
 Test fixture markdown files often contain intentional lint violations. Exclude them
 from linting by adding paths to `.markdownlintignore` rather than weakening rules
 project-wide.
 
-### Pitfall 10: `json` vs `jsonc` Code Fence Tags
+### Pitfall 11: `json` vs `jsonc` Code Fence Tags
 
 JSON with Comments (JSONC) uses `//` or `/* */` style comments. Standard JSON does
 **not** allow comments. If a code block contains comments, use `` ```jsonc `` instead
@@ -818,7 +843,7 @@ on comment lines.
 - Using `jsonc` signals to validators and syntax highlighters that the
   content follows relaxed JSON rules
 
-### Pitfall 11: Invalid Placeholders in JSON Code Blocks
+### Pitfall 12: Invalid Placeholders in JSON Code Blocks
 
 Documentation sometimes uses `[...]` or `...` as shorthand for "more items here."
 These are not valid JSON. Either use `jsonc` as the fence tag, or replace the
@@ -857,7 +882,7 @@ placeholder with valid JSON.
 ```
 ````
 
-### Pitfall 12: Mixed-Content Blocks Must Be Split
+### Pitfall 13: Mixed-Content Blocks Must Be Split
 
 A single code block must contain only one language. When documentation shows a
 sequence that spans multiple languages (e.g., shell commands that produce YAML
@@ -891,7 +916,7 @@ CI workflow equivalent:
 **Rule of thumb:** If content switches languages mid-block, add a closing fence
 and open a new block with the correct tag.
 
-### Pitfall 13: Bash Code Block Validation
+### Pitfall 14: Bash Code Block Validation
 
 Content tagged with `` ```bash `` may be validated as bash syntax. Only use the
 `bash` fence tag for content that is actually valid shell script.
@@ -956,7 +981,7 @@ fi
 ```
 ````
 
-### Pitfall 14: MkDocs Material Tab Syntax vs MD046
+### Pitfall 15: MkDocs Material Tab Syntax vs MD046
 
 MkDocs Material content tabs (`=== "Tab Name"`) require 4-space indented blocks
 for the tab body. markdownlint MD046 (code-block-style: fenced) flags these as

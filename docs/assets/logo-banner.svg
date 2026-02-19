@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="200" viewBox="0 0 800 200" role="img" aria-label="Signal Fish Server logo" shape-rendering="geometricPrecision">
+  <title>Signal Fish Server</title>
+  <desc>Logo banner for Signal Fish Server by Ambiguous Interactive. A Rust WebSocket signaling server for peer-to-peer game networking.</desc>
+  <defs>
+    <linearGradient id="fishGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4dd0e1"/>
+      <stop offset="50%" stop-color="#00bcd4"/>
+      <stop offset="100%" stop-color="#00838f"/>
+    </linearGradient>
+    <linearGradient id="signalGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00bcd4"/>
+      <stop offset="100%" stop-color="#4dd0e1"/>
+    </linearGradient>
+    <radialGradient id="haloGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a237e" stop-opacity="0.1"/>
+      <stop offset="60%" stop-color="#1a237e" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#1a237e" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="bannerClip">
+      <rect x="0" y="0" width="800" height="200" rx="8"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background with border (inset by half stroke width) -->
+  <rect x="0.5" y="0.5" width="799" height="199" rx="8" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
+
+  <!-- Bottom water waves (clipped to rounded rect) -->
+  <g clip-path="url(#bannerClip)">
+    <path d="M 0,185 Q 100,178 200,185 Q 300,192 400,185 Q 500,178 600,185 Q 700,192 800,185 L 800,200 L 0,200 Z" fill="#1a237e" fill-opacity="0.1"/>
+    <path d="M 0,178 Q 100,168 200,178 Q 300,188 400,178 Q 500,168 600,178 Q 700,188 800,178 L 800,200 L 0,200 Z" fill="#1a237e" fill-opacity="0.22"/>
+  </g>
+
+  <!-- Halo behind fish -->
+  <circle cx="120" cy="100" r="68" fill="url(#haloGrad)"/>
+
+  <!-- Signal wave arcs - manual glow -->
+  <g transform="translate(120, 100)">
+    <!-- Glow layer (2x crisp width) -->
+    <path d="M 52,-32 A 60,60 0 0,1 52,32" fill="none" stroke="#00bcd4" stroke-width="5.6" stroke-linecap="round" stroke-opacity="0.12"/>
+    <path d="M 66,-44 A 80,80 0 0,1 66,44" fill="none" stroke="#00bcd4" stroke-width="4.4" stroke-linecap="round" stroke-opacity="0.08"/>
+    <path d="M 80,-55 A 98,98 0 0,1 80,55" fill="none" stroke="#00bcd4" stroke-width="3.2" stroke-linecap="round" stroke-opacity="0.05"/>
+    <!-- Crisp layer -->
+    <path d="M 52,-32 A 60,60 0 0,1 52,32" fill="none" stroke="url(#signalGrad)" stroke-width="2.8" stroke-linecap="round" stroke-opacity="0.8"/>
+    <path d="M 66,-44 A 80,80 0 0,1 66,44" fill="none" stroke="url(#signalGrad)" stroke-width="2.2" stroke-linecap="round" stroke-opacity="0.5"/>
+    <path d="M 80,-55 A 98,98 0 0,1 80,55" fill="none" stroke="url(#signalGrad)" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.25"/>
+  </g>
+
+  <!-- Fish body -->
+  <g transform="translate(120, 100)">
+    <!-- Main body - cubic beziers with subtle outline -->
+    <path d="M -45,0 C -32,-36 8,-30 24,-22 C 42,-13 50,-6 52,0 C 50,6 42,13 24,22 C 8,30 -32,36 -45,0 Z" fill="url(#fishGrad)" stroke="#00838f" stroke-width="0.5" stroke-opacity="0.3"/>
+
+    <!-- Body highlight for dimension -->
+    <path d="M -30,-28 C -10,-26 18,-19 36,-10" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.25" stroke-linecap="round"/>
+
+    <!-- Tail fin - symmetric smooth taper -->
+    <path d="M -42,0 C -44,-4 -50,-12 -60,-22 C -56,-8 -50,-2 -46,0 C -50,2 -56,8 -60,22 C -50,12 -44,4 -42,0 Z" fill="url(#fishGrad)"/>
+
+    <!-- Pectoral fin (teardrop) -->
+    <path d="M 20,4 C 28,8 28,16 18,14 C 14,12 16,6 20,4 Z" fill="#00838f" fill-opacity="0.6"/>
+
+    <!-- Eye -->
+    <circle cx="30" cy="-6" r="5.5" fill="#1a237e"/>
+    <circle cx="32" cy="-8.5" r="2.2" fill="#fffbf0"/>
+
+    <!-- Gill line -->
+    <path d="M 18,-14 C 13,-2 13,2 18,14" fill="none" stroke="#00838f" stroke-width="1.5" stroke-opacity="0.5" stroke-linecap="round"/>
+
+    <!-- Scale texture (front and rear) -->
+    <path d="M -5,-10 Q 2,-16 9,-10" fill="none" stroke="#ffffff" stroke-width="0.9" stroke-opacity="0.32"/>
+    <path d="M -18,-6 Q -11,-12 -4,-6" fill="none" stroke="#ffffff" stroke-width="0.9" stroke-opacity="0.32"/>
+    <path d="M -12,6 Q -5,0 2,6" fill="none" stroke="#ffffff" stroke-width="0.9" stroke-opacity="0.28"/>
+    <path d="M -26,2 Q -19,-4 -12,2" fill="none" stroke="#ffffff" stroke-width="0.9" stroke-opacity="0.28"/>
+    <path d="M -35,-4 Q -28,-10 -21,-4" fill="none" stroke="#ffffff" stroke-width="0.8" stroke-opacity="0.22"/>
+    <path d="M -32,8 Q -25,2 -18,8" fill="none" stroke="#ffffff" stroke-width="0.8" stroke-opacity="0.22"/>
+  </g>
+
+  <!-- P2P connection nodes with mesh (wider triangle) -->
+  <g transform="translate(120, 100)" opacity="0.75">
+    <!-- Nodes with center highlights -->
+    <circle cx="95" cy="-38" r="5" fill="#00bcd4"/>
+    <circle cx="95" cy="-38" r="2" fill="#ffffff" fill-opacity="0.8"/>
+    <circle cx="115" cy="5" r="4.5" fill="#00bcd4"/>
+    <circle cx="115" cy="5" r="1.8" fill="#ffffff" fill-opacity="0.8"/>
+    <circle cx="90" cy="45" r="4" fill="#00bcd4"/>
+    <circle cx="90" cy="45" r="1.6" fill="#ffffff" fill-opacity="0.8"/>
+    <!-- Fish-to-node lines (solid, anchored to body surface) -->
+    <line x1="45" y1="-15" x2="90" y2="-35" stroke="#00bcd4" stroke-width="1" stroke-opacity="0.8"/>
+    <line x1="50" y1="0" x2="111" y2="4" stroke="#00bcd4" stroke-width="1" stroke-opacity="0.8"/>
+    <line x1="42" y1="16" x2="86" y2="42" stroke="#00bcd4" stroke-width="1" stroke-opacity="0.8"/>
+    <!-- Inter-node mesh lines (dashed, raised opacity) -->
+    <line x1="95" y1="-33" x2="113" y2="1" stroke="#00bcd4" stroke-width="0.8" stroke-opacity="0.65" stroke-dasharray="5,4"/>
+    <line x1="113" y1="9" x2="90" y2="41" stroke="#00bcd4" stroke-width="0.8" stroke-opacity="0.65" stroke-dasharray="5,4"/>
+    <line x1="92" y1="-34" x2="88" y2="41" stroke="#00bcd4" stroke-width="0.7" stroke-opacity="0.65" stroke-dasharray="5,4"/>
+  </g>
+
+  <!-- Logotype: "Signal Fish" -->
+  <text x="298" y="88" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="50" font-weight="700" fill="#1a237e" text-rendering="optimizeLegibility" textLength="310" lengthAdjust="spacing">Signal Fish</text>
+
+  <!-- Descriptor: "Server" -->
+  <text x="298" y="122" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="30" font-weight="600" fill="#5c6bc0" letter-spacing="0.5" text-rendering="optimizeLegibility">Server</text>
+
+  <!-- Tagline -->
+  <text x="298" y="152" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#5c6bc0" fill-opacity="0.7" letter-spacing="1.2" text-rendering="optimizeLegibility">PEER-TO-PEER WEBSOCKET SIGNALING</text>
+
+  <!-- Rust gear icon (unified color #1a237e) -->
+  <g transform="translate(690, 100)" opacity="0.55">
+    <!-- Gear ring -->
+    <circle cx="0" cy="0" r="38" fill="none" stroke="#1a237e" stroke-width="3"/>
+    <!-- Gear center -->
+    <circle cx="0" cy="0" r="14" fill="#1a237e"/>
+    <!-- Inner cutout (thinner annulus, closer to Rust gear proportions) -->
+    <circle cx="0" cy="0" r="9" fill="#ffffff"/>
+    <!-- Gear teeth (8 teeth, uniform 11px width, bases at r=38, tips at r=53) -->
+    <rect x="-5.5" y="-53" width="11" height="15" rx="2" fill="#1a237e"/>
+    <rect x="-5.5" y="38" width="11" height="15" rx="2" fill="#1a237e"/>
+    <rect x="-53" y="-5.5" width="15" height="11" rx="2" fill="#1a237e"/>
+    <rect x="38" y="-5.5" width="15" height="11" rx="2" fill="#1a237e"/>
+    <rect x="-5.5" y="-53" width="11" height="15" rx="2" fill="#1a237e" transform="rotate(45, 0, 0)"/>
+    <rect x="-5.5" y="38" width="11" height="15" rx="2" fill="#1a237e" transform="rotate(45, 0, 0)"/>
+    <rect x="-53" y="-5.5" width="15" height="11" rx="2" fill="#1a237e" transform="rotate(45, 0, 0)"/>
+    <rect x="38" y="-5.5" width="15" height="11" rx="2" fill="#1a237e" transform="rotate(45, 0, 0)"/>
+    <!-- R overlay -->
+    <text x="0" y="0" font-family="'Segoe UI', Roboto, Arial, sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle" dy="0.35em">R</text>
+  </g>
+</svg>

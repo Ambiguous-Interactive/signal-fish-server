@@ -1,4 +1,6 @@
-# Signal Fish Server
+<p align="center">
+  <img src="assets/logo-banner.svg" alt="Signal Fish Server" width="600">
+</p>
 
 **A lightweight, in-memory WebSocket signaling server for peer-to-peer game networking.**
 
