@@ -1,4 +1,8 @@
-# Signal Fish Server
+<p align="center">
+  <a href="https://ambiguous-interactive.github.io/signal-fish-server/">
+    <img src="docs/assets/logo-banner.svg" alt="Signal Fish Server" width="600">
+  </a>
+</p>
 
 A lightweight, zero-dependency WebSocket signaling server for peer-to-peer
 game networking. Run locally with Rust or Docker -- no database, no cloud
