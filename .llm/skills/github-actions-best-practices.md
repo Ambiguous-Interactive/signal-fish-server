@@ -41,6 +41,7 @@
 - Markdown linting issues (MD040, MD060, MD013)
 - Spell checking issues (technical terms not whitelisted)
 - Git hook permission issues (missing executable bit)
+- YAML indentation inconsistency (4-space vs 2-space)
 
 ---
 
@@ -2167,6 +2168,7 @@ with `stable` avoids toolchain installation failures in Docker containers.
 - [ ] Security audits run on schedule (daily), not just on code changes
 - [ ] Scheduled workflows have clear comments explaining frequency choice
 - [ ] Docker-based actions that only inspect metadata use `RUSTUP_TOOLCHAIN: stable` env override
+- [ ] Workflow YAML files use 2-space indentation (matching `.yamllint.yml`)
 
 ---
 

@@ -3971,6 +3971,152 @@ fn test_release_workflow_conventions() {
     );
 }
 
+#[test]
+fn test_workflow_files_use_two_space_indentation() {
+    // Validates that all workflow YAML files use 2-space indentation as required
+    // by .yamllint.yml (indentation.spaces: 2). This catches files accidentally
+    // written with 4-space indentation (common when copying from other projects
+    // or when editors default to 4 spaces).
+    //
+    // Two checks are performed:
+    //   1. Odd indentation: lines with an odd number of leading spaces (never valid
+    //      in 2-space YAML)
+    //   2. Minimum indent heuristic: if the smallest non-zero indent across all
+    //      YAML-level lines in a file is 4+ spaces, the file is likely using 4-space
+    //      (or larger) indentation throughout
+    //
+    // Only checks YAML structural lines — content inside multiline scalar blocks
+    // (run: |, args: >-, etc.) is excluded because those are embedded scripts
+    // with their own indentation rules.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut errors = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        let mut in_multiline_block = false;
+        let mut block_indent = 0;
+        let mut odd_indent_lines = Vec::new();
+        let mut min_yaml_indent = usize::MAX;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let stripped = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Skip empty lines and lines with no indentation
+            if stripped.is_empty() || indent == 0 {
+                // A non-empty line at indent 0 exits any multiline block
+                if !stripped.is_empty() {
+                    in_multiline_block = false;
+                }
+                continue;
+            }
+
+            // Detect start of YAML multiline scalar block
+            if !in_multiline_block {
+                if stripped.contains(": |") || stripped.contains(": >") {
+                    let after_colon = stripped
+                        .split_once(": ")
+                        .map(|(_, rest)| rest.trim())
+                        .unwrap_or("");
+                    if after_colon == "|"
+                        || after_colon == "|-"
+                        || after_colon == "|+"
+                        || after_colon == ">"
+                        || after_colon == ">-"
+                        || after_colon == ">+"
+                    {
+                        in_multiline_block = true;
+                        block_indent = indent;
+                        // Still check this line's own indentation (it's a YAML key)
+                        if indent % 2 != 0 {
+                            odd_indent_lines.push((line_idx + 1, indent, line.to_string()));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Detect end of multiline block
+            if in_multiline_block && indent <= block_indent {
+                in_multiline_block = false;
+            }
+
+            // Skip lines inside multiline scalar blocks
+            if in_multiline_block {
+                continue;
+            }
+
+            // Check YAML-level lines for 2-space indentation (even number of spaces)
+            if indent % 2 != 0 {
+                odd_indent_lines.push((line_idx + 1, indent, line.to_string()));
+            }
+
+            // Track minimum indentation for the 4-space heuristic
+            if indent > 0 && indent < min_yaml_indent {
+                min_yaml_indent = indent;
+            }
+        }
+
+        if !odd_indent_lines.is_empty() {
+            let examples: Vec<String> = odd_indent_lines
+                .iter()
+                .take(5)
+                .map(|(line_num, spaces, content)| {
+                    format!("  line {line_num}: {spaces} spaces: {content}")
+                })
+                .collect();
+            let remaining = if odd_indent_lines.len() > 5 {
+                format!("  ... and {} more lines", odd_indent_lines.len() - 5)
+            } else {
+                String::new()
+            };
+            errors.push(format!(
+                "{filename}: {count} line(s) with odd indentation (not a multiple of 2 spaces):\n\
+                 {examples}{remaining}",
+                count = odd_indent_lines.len(),
+                examples = examples.join("\n"),
+            ));
+        }
+
+        // Heuristic: if the minimum YAML-level indent is 4+, the file likely
+        // uses 4-space (or larger) indentation instead of 2-space.
+        if min_yaml_indent != usize::MAX && min_yaml_indent >= 4 {
+            errors.push(format!(
+                "{filename}: minimum YAML indentation is {min_yaml_indent} spaces \
+                 (expected 2).\n  \
+                 This file likely uses {min_yaml_indent}-space indentation instead of 2-space.\n  \
+                 Re-indent the entire file to use 2-space increments."
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Workflow files have indentation errors:\n\n{}\n\n\
+             The project uses 2-space YAML indentation (.yamllint.yml: indentation.spaces: 2).\n\
+             To fix:\n\
+             1. Re-indent the file using 2-space increments\n\
+             2. Run: yamllint -c .yamllint.yml .github/workflows/\n\
+             3. Many editors can convert indentation: search for \"convert indentation to spaces\"\n\n\
+             Common cause: copying workflow templates from projects that use 4-space indentation.",
+            errors.join("\n\n")
+        );
+    }
+}
+
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
 /// returning the list of unescaped string values (path patterns).
 ///

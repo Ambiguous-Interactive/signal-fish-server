@@ -41,6 +41,8 @@
 - **Check language-project alignment**: Python caching on Rust project = instant failure
 - **Typos configuration**: Mixed-case names (HashiCorp) need `extend-identifiers`, not `extend-words`
 - **Docker versions**: Use X.Y format (1.88) for Docker Hub, not X.Y.Z (1.88.0)
+- **YAML indentation**: All workflow files must use 2-space indentation — 4-space from copied
+  templates is the most common yamllint failure
 
 **Staleness & Maintenance:**
 
