@@ -1,0 +1,34 @@
+# Nextest Configuration
+#
+# Optimized test execution settings for cargo-nextest.
+# https://nexte.st/docs/configuration/
+#
+# Applied automatically when running `cargo nextest run` in this workspace.
+# CI workflows (ci.yml nextest job) inherit these settings.
+
+[profile.default]
+# Fail-fast: stop on first test failure for faster feedback in CI.
+# Individual OS matrix lanes already provide independent failure reporting
+# (strategy.fail-fast: false in ci.yml), so fail-fast within a single lane
+# gives the fastest signal without losing cross-OS coverage.
+fail-fast = true
+
+# Show test output only on failure — reduces CI log noise while preserving
+# full diagnostic output when something goes wrong.
+failure-output = "immediate-final"
+success-output = "never"
+
+# No automatic retries. Every test failure is treated as a real bug per
+# project policy (see .llm/context.md: "Zero tolerance for flaky tests").
+# If flakes appear in the future, targeted per-test overrides can be added
+# via [[profile.default.overrides]] rather than blanket retries.
+
+# CI-specific profile — reserved for future per-job tuning.
+# Activate with: cargo nextest run --profile ci
+# Inherits all [profile.default] settings and adds CI-tuned overrides.
+[profile.ci]
+fail-fast = true
+failure-output = "immediate-final"
+success-output = "never"
+# Slightly longer per-test timeout for CI runners which may be slower
+slow-timeout = { period = "120s", terminate-after = 2 }

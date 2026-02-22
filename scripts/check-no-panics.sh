@@ -32,7 +32,9 @@ check_clippy() {
         return 0
     fi
 
-    # Run clippy with strict panic-prevention lints
+    # Run clippy with strict panic-prevention lints on library code only.
+    # We use --lib instead of --all-targets to avoid flagging test code,
+    # where .unwrap(), .expect(), and panic!() are acceptable.
     # These lints catch code that could panic at runtime:
     # - clippy::panic: explicit panic!() calls
     # - clippy::unwrap_used: .unwrap() calls
@@ -41,7 +43,7 @@ check_clippy() {
     # - clippy::unimplemented: unimplemented!() macros
     # - clippy::unreachable: unreachable!() macros
     # - clippy::indexing_slicing: unchecked array/slice indexing
-    if cargo clippy --all-targets --all-features -- \
+    if cargo clippy --lib --all-features -- \
         -D clippy::panic \
         -D clippy::unwrap_used \
         -D clippy::expect_used \
@@ -61,32 +63,95 @@ check_clippy() {
 # ============================================================================
 # PATTERN SCANNING - Quick grep-based checks
 # ============================================================================
+
+# filter_test_code - Filters out matches that are inside #[cfg(test)] modules.
+#
+# Reads grep output in the format "file:line:content" and for each match,
+# checks whether the line falls within a #[cfg(test)] module in that file.
+# Since test modules are conventionally placed at the bottom of Rust source
+# files, any line at or after a #[cfg(test)] annotation is considered test code.
+# Also filters out lines inside #[test] functions and files under tests/.
+filter_test_code() {
+    while IFS= read -r match_line; do
+        # Extract file path and line number from grep output (file:line:content)
+        local file line_num
+        file=$(echo "$match_line" | cut -d: -f1)
+        line_num=$(echo "$match_line" | cut -d: -f2)
+
+        # Skip files in tests/ directory and test module files
+        case "$file" in
+            tests/*) continue ;;
+            *_tests.rs|*_test.rs) continue ;;
+        esac
+
+        # Find the line number where #[cfg(test)] appears in this file.
+        # If the match is at or after that line, it's test code — skip it.
+        local cfg_test_line
+        cfg_test_line=$(grep -n '#\[cfg(test)\]' "$file" 2>/dev/null | head -1 | cut -d: -f1)
+        if [ -n "$cfg_test_line" ] && [ "$line_num" -ge "$cfg_test_line" ]; then
+            continue
+        fi
+
+        # Also check if the line is inside a #[test] function by scanning
+        # backwards from the match line for #[test] or #[tokio::test] attributes
+        local in_test_fn
+        in_test_fn=$(head -n "$line_num" "$file" 2>/dev/null | tac | awk '
+            /^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+/ {
+                # We hit a function definition before finding a test attribute
+                print "no"; exit
+            }
+            /^[[:space:]]*#\[test\]/ || /^[[:space:]]*#\[tokio::test/ {
+                print "yes"; exit
+            }
+        ')
+        if [ "$in_test_fn" = "yes" ]; then
+            continue
+        fi
+
+        # This match is in production code — keep it
+        echo "$match_line"
+    done
+}
+
 check_patterns() {
     log "Scanning for panic-prone patterns in src/..."
 
     local issues=0
 
     # Check for explicit panic! macros (excluding tests and comments)
-    PANIC_COUNT=$(grep -rn 'panic!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*panic!' | grep -v '#\[should_panic\]' | grep -v 'test' | wc -l || echo "0")
+    PANIC_MATCHES=$(grep -rn 'panic!' src/ --include="*.rs" 2>/dev/null \
+        | grep -v '//.*panic!' \
+        | grep -v '#\[should_panic\]' \
+        | filter_test_code || true)
+    PANIC_COUNT=$(echo "$PANIC_MATCHES" | grep -c . || echo "0")
+    PANIC_COUNT=$(echo "$PANIC_COUNT" | tr -d '[:space:]')
     if [ "$PANIC_COUNT" -gt 0 ]; then
         warn "Found $PANIC_COUNT panic! macro(s) in production code:"
-        grep -rn 'panic!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*panic!' | grep -v '#\[should_panic\]' | grep -v 'test' | head -10 || true
+        echo "$PANIC_MATCHES" | head -10
         issues=$((issues + 1))
     fi
 
-    # Check for todo! macros
-    TODO_COUNT=$(grep -rn 'todo!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*todo!' | wc -l || echo "0")
+    # Check for todo! macros (excluding test code)
+    TODO_MATCHES=$(grep -rn 'todo!' src/ --include="*.rs" 2>/dev/null \
+        | grep -v '//.*todo!' \
+        | filter_test_code || true)
+    TODO_COUNT=$(echo "$TODO_MATCHES" | grep -c . || echo "0")
+    TODO_COUNT=$(echo "$TODO_COUNT" | tr -d '[:space:]')
     if [ "$TODO_COUNT" -gt 0 ]; then
         error "Found $TODO_COUNT todo! macro(s) in production code (must be completed before merge):"
-        grep -rn 'todo!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*todo!' | head -10 || true
+        echo "$TODO_MATCHES" | head -10
         issues=$((issues + 1))
     fi
 
-    # Check for unimplemented! macros
-    UNIMPL_COUNT=$(grep -rn 'unimplemented!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*unimplemented!' | wc -l || echo "0")
+    # Check for unimplemented! macros (excluding test code)
+    UNIMPL_MATCHES=$(grep -rn 'unimplemented!' src/ --include="*.rs" 2>/dev/null \
+        | grep -v '//.*unimplemented!' \
+        | filter_test_code || true)
+    UNIMPL_COUNT=$(echo "$UNIMPL_MATCHES" | grep -c . || echo "0")
+    UNIMPL_COUNT=$(echo "$UNIMPL_COUNT" | tr -d '[:space:]')
     if [ "$UNIMPL_COUNT" -gt 0 ]; then
         error "Found $UNIMPL_COUNT unimplemented! macro(s) in production code:"
-        grep -rn 'unimplemented!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*unimplemented!' | head -10 || true
+        echo "$UNIMPL_MATCHES" | head -10
         issues=$((issues + 1))
     fi
 

@@ -6,12 +6,28 @@
 #   - Manual workflow dispatch (with version input)
 #   - Tag pushes matching v* pattern
 #
+# Release gating:
+#   A `preflight` job verifies that required CI workflows ("CI" and
+#   "Documentation Validation") have passed on the commit being released
+#   before the `publish` job runs. This prevents publishing a broken crate.
+#
+# Concurrency:
+#   cancel-in-progress is set to false because aborting a half-finished
+#   publish could leave crates.io in an inconsistent state.
+#
+# Pinning philosophy:
+#   All third-party GitHub Actions are SHA-pinned with version comments.
+#   Explicit tool version pins are intentionally omitted where the
+#   SHA-pinned action handles versioning, reducing maintenance burden.
+#
 # Steps:
-#   1. Verify version consistency (tag vs Cargo.toml)
-#   2. Dry-run publish to validate packaging
-#   3. Publish to crates.io
-#   4. Create git tag (for workflow_dispatch)
-#   5. Extract changelog section and create GitHub Release
+#   1. Preflight: verify CI and doc-validation passed on this commit
+#   2. Verify version consistency (tag vs Cargo.toml)
+#   3. Dry-run publish to validate packaging
+#   4. Publish to crates.io
+#   5. Create git tag (for workflow_dispatch)
+#   6. Generate SBOM (CycloneDX JSON) for supply-chain provenance
+#   7. Extract changelog section and create GitHub Release (with SBOM attached)
 
 name: Release - Publish Crate
 
@@ -27,12 +43,88 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required CI checks passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # github.sha resolves to the underlying commit for both tag pushes
+          # and workflow_dispatch events
+          COMMIT_SHA="${{ github.sha }}"
+          echo "Verifying CI status for commit: $COMMIT_SHA"
+
+          # Required workflow runs that must have completed successfully.
+          # These correspond to the REQUIRED_WORKFLOW_NAMES in tests/ci_config_tests.rs.
+          REQUIRED_WORKFLOWS=("CI" "Documentation Validation")
+
+          FAILED=0
+          for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do
+            echo ""
+            echo "Checking workflow: $WORKFLOW_NAME"
+
+            WORKFLOW_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows" \
+              --jq ".workflows[] | select(.name == \"${WORKFLOW_NAME}\") | .id" \
+            )
+
+            if [ -z "$WORKFLOW_ID" ]; then
+              echo "ERROR: Workflow '${WORKFLOW_NAME}' not found in repository"
+              FAILED=1
+              continue
+            fi
+
+            # Get the most recent completed run for this workflow on the commit's branch
+            CONCLUSION=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?head_sha=${COMMIT_SHA}&status=completed&per_page=1" \
+              --jq '.workflow_runs[0].conclusion // empty' \
+            )
+
+            if [ -z "$CONCLUSION" ]; then
+              echo "ERROR: No completed run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}"
+              echo "  Ensure CI has run and completed on this commit before releasing."
+              FAILED=1
+            elif [ "$CONCLUSION" != "success" ]; then
+              echo "ERROR: '${WORKFLOW_NAME}' conclusion is '${CONCLUSION}' (expected 'success')"
+              echo "  Fix the failing checks before releasing."
+              FAILED=1
+            else
+              echo "OK: '${WORKFLOW_NAME}' passed on commit ${COMMIT_SHA}"
+            fi
+          done
+
+          echo ""
+          if [ $FAILED -ne 0 ]; then
+            echo "=========================================="
+            echo "RELEASE BLOCKED: Required CI checks have not passed."
+            echo ""
+            echo "To fix:"
+            echo "  1. Push the release commit to main and wait for CI to complete"
+            echo "  2. Verify all required checks are green"
+            echo "  3. Then trigger the release workflow again"
+            echo "=========================================="
+            exit 1
+          fi
+
+          echo "All required CI checks passed. Proceeding with release."
+
   publish:
+    needs: [preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -66,6 +158,7 @@ jobs:
       - name: Clear sccache env on failure
         if: steps.sccache.outcome != 'success' || steps.sccache-check.outcome != 'success'
         run: |
+          echo "::warning::sccache unavailable (setup=${{ steps.sccache.outcome }}, check=${{ steps.sccache-check.outcome }}), falling back to standard rustc"
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
@@ -138,6 +231,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        with:
+          tool: cargo-sbom
+
+      - name: Generate SBOM (CycloneDX)
+        run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
+        continue-on-error: true
+
       - name: Extract changelog for release
         id: changelog
         run: |
@@ -168,5 +270,6 @@ jobs:
           body_path: release_notes.md
           draft: false
           prerelease: false
+          files: sbom.cdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

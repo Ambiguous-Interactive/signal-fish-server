@@ -387,7 +387,39 @@ sed -i 's/FROM rust:1.87/FROM rust:1.88/' Dockerfile
 
 ```
 
-### Issue 4: Using Features From Newer Rust
+### Issue 4: Nightly Toolchain Incompatible with Dependency Polyfills
+
+**Symptom:**
+
+```text
+
+error[E0599]: no method named `dangling_ptr` found for reference `&std::alloc::Layout`
+  in the current scope
+
+```
+
+**Root Cause:** A dependency (e.g., `rkyv`) uses unstable Rust features through polyfill
+modules. After upgrading the dependency, the pinned nightly toolchain is too old to provide
+the API the polyfill expects.
+
+**Solution:**
+
+1. Identify which dependency introduced the error (check `cargo update` output)
+2. Look up when the dependency version was released
+3. Update the pinned nightly to a date after the dependency's release
+4. Update all workflow files that reference the nightly date
+
+```bash
+# Example: rkyv v0.8.10 released Jan 2026, old nightly was 2025-02-21
+# Update all nightly references
+sed -i 's/nightly-2025-02-21/nightly-2026-02-01/g' .github/workflows/*.yml
+```
+
+**Prevention:** The test `test_pinned_nightly_staleness_warning` catches nightlies older
+than 12 months. For earlier detection, verify nightly compatibility when upgrading
+dependencies that use unstable features.
+
+### Issue 5: Using Features From Newer Rust
 
 **Symptom:**
 
@@ -714,13 +746,15 @@ This project uses nightly Rust **only** for:
 
 | Tool        | Purpose                     | Workflow File                           | Nightly Version    |
 | ----------- | --------------------------- | --------------------------------------- | ------------------ |
-| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml`     | nightly-2026-01-15 |
+| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml`     | nightly-2026-02-01 |
+| Miri         | Undefined behavior detection | `.github/workflows/ci-safety.yml`       | nightly-2026-02-01 |
+| AddressSanitizer | Memory error detection  | `.github/workflows/ci-safety.yml`       | nightly-2026-02-01 |
 
 ### Nightly Version Policy
 
 #### Pinning Strategy
 
-- We pin to a specific nightly date (e.g., `nightly-2026-01-15`)
+- We pin to a specific nightly date (e.g., `nightly-2026-02-01`)
 - We do NOT use rolling `nightly` (always latest)
 - Pinning provides reproducibility and stability
 
@@ -732,6 +766,49 @@ Update the nightly version when:
 2. **Security**: Security advisories affect this version
 3. **Features**: Tool requires newer nightly features
 4. **Availability**: Nightly version becomes unavailable/broken
+
+#### Nightly vs Dependency Compatibility
+
+When upgrading dependencies that use unstable Rust features through polyfills (e.g., `rkyv`),
+the pinned nightly toolchain date may also need updating.
+
+**Symptom:**
+
+```text
+
+error[E0599]: no method named `dangling_ptr` found for reference `&std::alloc::Layout`
+  in the current scope
+
+```
+
+**Root Cause:** The dependency's polyfill code (e.g., `rkyv`'s internal `polyfill` module)
+expects a nightly API that was added after the pinned nightly date. The nightly toolchain
+is too old for the new version of the dependency.
+
+**Fix:** Update the nightly pin date to approximately match when the dependency was released.
+For example, if `rkyv` v0.8.10 was released in January 2026, update the nightly to
+`nightly-2026-01-15` or later.
+
+```yaml
+# ❌ PROBLEM: Nightly from 2025 is incompatible with rkyv v0.8.10 (released Jan 2026)
+toolchain: nightly-2025-02-21
+
+# ✅ CORRECT: Nightly date matches the dependency's release timeframe
+toolchain: nightly-2026-02-01
+
+```
+
+**Prevention:** The test `test_pinned_nightly_staleness_warning` catches nightlies older
+than 12 months. However, dependency upgrades can trigger nightly incompatibility well before
+that threshold. When upgrading dependencies that use unstable features, always verify the
+nightly pin is compatible.
+
+**Dependency upgrade checklist (nightly-sensitive deps):**
+
+- [ ] Check if the dependency uses nightly/unstable features (polyfills, `#![feature(...)]`)
+- [ ] If yes, verify the pinned nightly date is after the dependency's release date
+- [ ] Run `cargo +nightly-YYYY-MM-DD check` locally before pushing
+- [ ] Update all workflow files that reference the nightly date
 
 #### Update Frequency
 
@@ -806,8 +883,8 @@ Every nightly usage **must** be documented in the workflow file:
 # cargo-udeps requires nightly Rust because it uses unstable compiler features
 # to analyze dependency usage at a deeper level than stable tools can provide.
 #
-# Nightly Version: nightly-2026-01-15
-# Last Updated: 2026-02-16
+# Nightly Version: nightly-2026-02-01
+# Last Updated: 2026-02-22
 #
 # Update Criteria (when to update this nightly version):
 #   - If the nightly version is >6 months old
@@ -835,7 +912,7 @@ Production Code (Stable MSRV)
 
 CI Analysis Tools (Nightly)
   ↓
-  nightly-2026-01-15 in workflow files  ← Independent of MSRV
+  nightly-2026-02-01 in workflow files  ← Independent of MSRV
   ↓
   Used for: cargo-udeps, cargo-miri (analysis only, no artifacts)
 
@@ -857,7 +934,7 @@ CI Analysis Tools (Nightly)
 
 ### Future Consideration: Rolling Nightly
 
-**Current Policy:** Pinned nightly (e.g., `nightly-2026-01-15`)
+**Current Policy:** Pinned nightly (e.g., `nightly-2026-02-01`)
 
 **Alternative (Not Currently Used):** Rolling nightly (`nightly`)
 
@@ -886,7 +963,7 @@ CI Analysis Tools (Nightly)
 When asked to update nightly version:
 
 1. **Verify nightly is needed**: Check if tool still requires nightly
-2. **Choose recent nightly**: Within last 30 days (e.g., `nightly-2026-01-15`)
+2. **Choose recent nightly**: Within last 30 days (e.g., `nightly-2026-02-01`)
 3. **Update all occurrences**: Search workflow file for old nightly date
 4. **Update documentation**: Change "Last Updated: YYYY-MM-DD" comment
 5. **Explain in workflow file**: Maintain comprehensive comments

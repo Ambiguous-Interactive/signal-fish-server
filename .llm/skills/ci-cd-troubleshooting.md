@@ -248,7 +248,7 @@ error[E0658]: use of unstable library feature 'foo'
 - uses: dtolnay/rust-toolchain@stable
 
   with:
-    toolchain: nightly-2026-01-15  # ← 32 days old, acceptable
+    toolchain: nightly-2026-02-01  # ← recent, acceptable
 
 ```
 
@@ -271,8 +271,8 @@ See [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) for full
 
 ```yaml
 # Document expected update frequency
-# Nightly Version: nightly-2026-01-15
-# Last Updated: 2026-02-16
+# Nightly Version: nightly-2026-02-01
+# Last Updated: 2026-02-22
 # Review Frequency: Quarterly (every 3 months)
 #
 # Update Criteria:
@@ -707,7 +707,9 @@ CI Failure
     ├─ Docker error ───────► Check base image, build context, COPY paths
     ├─ Workflow error ─────► Check syntax, permissions, secrets
     ├─ Exit code 127 ─────► Check script references exist in repo
-    └─ Supply chain risk ──► Check action SHA pins (not tags)
+    ├─ Supply chain risk ──► Check action SHA pins (not tags)
+    ├─ Action not found ──► SHA pin references deleted commit (force-push/rebase)
+    └─ Docker warning ────► BuildKit false positive on ENV variable names
 
 ```
 
@@ -842,6 +844,8 @@ Before committing workflow changes, verify:
 | Lychee scans dotfiles despite config | lychee v0.21.0 bug #1936: hidden file option ignored by file matcher | Pin `lycheeVersion: v0.22.0` or later in the action config |
 | `exclude_path` in `.lychee.toml` has no effect on glob-expanded files | `exclude_path` TOML entries do not apply to glob-expanded paths (confirmed bug) | Use `--exclude-path` CLI flags instead; separate flags from globs with `--` |
 | TOML validator fails on "before/after" example block | Single TOML block with duplicate keys (e.g., two `[dependencies]` headers) | Split into separate fenced code blocks (one "before", one "after") |
+| `An action could not be found at the URI` | SHA-pinned action references a force-pushed/rebased/deleted commit | Look up current SHA for the version tag: `curl -sL https://api.github.com/repos/OWNER/REPO/git/ref/tags/vX \| jq '.object.sha'` |
+| `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV variable names containing SECURITY, KEY, AUTH, etc. | Add `# check=skip=SecretsUsedInArgOrEnv` as first line of Dockerfile |
 
 ---
 
@@ -3053,6 +3057,157 @@ fn test_workflow_script_references_exist() {
 
 ---
 
+## Pattern 24: Action SHA Not Found / taiki-e/install-action Download Failure
+
+### Symptom
+
+```text
+
+An action could not be found at the URI
+  'https://api.github.com/repos/taiki-e/install-action/tarball/abc123def456...'
+
+# OR
+
+Error: Unable to resolve action `taiki-e/install-action@abc123def456...`
+
+```
+
+The error appears during the "Set up job" step, before any workflow commands run.
+
+### Root Cause
+
+**SHA-pinned action reference points to a commit that no longer exists.** This happens when
+the action maintainer force-pushes, rebases, or deletes the commit that the SHA points to.
+
+```yaml
+# ❌ PROBLEM: SHA references a commit that was force-pushed away
+- uses: taiki-e/install-action@abc123def456789012345678901234567890dead # v2.44.30
+```
+
+**Why this happens:**
+
+- Action maintainers occasionally rebase or force-push their release branches
+- The old commit SHA becomes unreachable (garbage collected by GitHub)
+- SHA-pinned references in your workflow now point to nothing
+- This affects any action, not just `taiki-e/install-action`
+
+### Solution
+
+**Look up the current SHA for the action's version tag:**
+
+```bash
+# Find the current SHA for a specific version tag
+curl -sL https://api.github.com/repos/taiki-e/install-action/git/ref/tags/v2.44.30 \
+  | jq '.object.sha'
+
+# Or use the gh CLI
+gh api repos/taiki-e/install-action/git/refs/tags/v2.44.30 --jq '.object.sha'
+
+```
+
+**Update the workflow with the new SHA:**
+
+```yaml
+# ✅ CORRECT: Updated SHA that matches the current tag
+- uses: taiki-e/install-action@<new-40-char-sha> # v2.44.30
+
+```
+
+### Prevention
+
+**CI tests catch SHA reference issues before they reach production:**
+
+- The test `test_action_sha_references_are_valid_length` validates that every SHA pin
+  is exactly 40 hex characters (catches truncated or malformed SHAs)
+- The test `test_same_action_uses_consistent_sha_across_workflows` ensures all references
+  to the same action use the same SHA (catches partially-updated workflows)
+
+**When updating action SHAs:**
+
+- [ ] Look up the current SHA for the version tag (tags can be re-pointed)
+- [ ] Update ALL workflow files that reference the same action
+- [ ] Verify the SHA is exactly 40 hex characters
+- [ ] Include the version tag as a trailing comment (`# vX.Y.Z`)
+
+---
+
+## Pattern 25: Dockerfile False-Positive Security Warnings (SecretsUsedInArgOrEnv)
+
+### Symptom
+
+```text
+
+WARNING: SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data
+  Dockerfile:15: ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+  Dockerfile:18: ENV SIGNAL_FISH_SECURITY_ENABLED=false
+
+```
+
+Docker build produces `SecretsUsedInArgOrEnv` warnings even though the ENV variables
+contain non-sensitive values.
+
+### Root Cause
+
+**Docker BuildKit flags ENV variables with security-related names even when they contain
+non-sensitive values.** BuildKit uses pattern matching on variable names and triggers on
+keywords like `SECURITY`, `AUTH`, `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, and `CREDENTIAL`.
+
+```dockerfile
+# ❌ TRIGGERS WARNING: BuildKit sees "SECURITY" in the variable name
+ENV SIGNAL_FISH_SECURITY_ENABLED=false
+
+# ❌ TRIGGERS WARNING: BuildKit sees "KEY" in the variable name
+ENV CACHE_KEY_PREFIX=rust-v1
+
+```
+
+**Why this is a false positive:**
+
+- The values are non-sensitive (e.g., `false`, configuration flags, cache prefixes)
+- BuildKit only checks variable **names**, not values
+- The warning is helpful for actual secrets but noisy for configuration variables
+- In CI, these warnings can obscure real issues in build output
+
+### Solution
+
+**Add a BuildKit check skip directive as the first line of the Dockerfile:**
+
+```dockerfile
+# check=skip=SecretsUsedInArgOrEnv
+FROM rust:1.88-bookworm AS chef
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV SIGNAL_FISH_SECURITY_ENABLED=false
+
+```
+
+The `# check=skip=SecretsUsedInArgOrEnv` comment is a BuildKit directive that suppresses
+this specific check. It must appear as the **first line** of the Dockerfile (before any
+`FROM` instruction).
+
+### Prevention
+
+**The test `test_dockerfile_suppresses_false_positive_security_warnings` validates that
+the Dockerfile includes the suppression directive.** This prevents the warning from
+reappearing if the Dockerfile is regenerated or the directive is accidentally removed.
+
+**When to use this suppression:**
+
+| Scenario | Action |
+|----------|--------|
+| ENV with security-related name but non-sensitive value | Suppress with `check=skip` |
+| ENV with actual secret value | Never put secrets in ENV; use BuildKit secrets |
+| ARG with build-time secret | Use `--mount=type=secret` instead |
+| New ENV variable triggers warning | Evaluate if the value is truly sensitive first |
+
+**When NOT to suppress:**
+
+- If the ENV variable contains an actual secret, API key, or credential
+- If you're unsure whether the value is sensitive -- err on the side of caution
+- Use BuildKit secrets (`--mount=type=secret`) for truly sensitive build-time values
+
+---
+
 ## Lesson Learned: rustfmt --check on Documentation Code Blocks
 
 `rustfmt --check` returns exit code 1 for **both** parse errors and formatting
@@ -3128,7 +3283,7 @@ toolchain: nightly-2025-02-21  # 360 days old
 
 ```yaml
 # Updated to recent nightly
-toolchain: nightly-2026-01-15  # 32 days old
+toolchain: nightly-2026-02-01  # recent, acceptable
 
 ```
 
