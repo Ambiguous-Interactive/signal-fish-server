@@ -17,7 +17,7 @@ exclude-files = [
 timeout = 300
 
 # Minimum coverage percentage to require
-# Note: The CI now uses cargo-llvm-cov for coverage gates (see .github/workflows/rust-ci.yml)
+# Note: The CI uses cargo-llvm-cov for coverage gates (see .github/workflows/ci.yml coverage job)
 # This setting is kept for local development convenience
 fail-under = 30
 

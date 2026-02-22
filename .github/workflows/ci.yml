@@ -8,16 +8,20 @@
 #   - Pull requests to main
 #
 # Jobs:
-#   - check: Code formatting (rustfmt) and linting (clippy) with and without features
-#   - test: Unit and integration tests with and without features
+#   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
+#   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
 #   - deny: Security audits, license checks, and dependency validation
 #   - docker: Docker image build and smoke test with health check
+#   - coverage: Linux code coverage gate via cargo-llvm-cov
+#   - panic-policy: Zero-panic production code enforcement
+#   - sbom: Software Bill of Materials generation (CycloneDX JSON)
 #
 # Features:
 #   - Rust toolchain caching for faster builds
 #   - Strict clippy warnings enforced
-#   - Docker health check with retry logic
+#   - Docker health check with exponential backoff retry
 #   - Locked dependency resolution for reproducibility
+#   - Nextest configuration via .config/nextest.toml
 
 name: CI
 
@@ -41,10 +45,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check & Lint
-    runs-on: ubuntu-latest
+  lint:
+    name: Lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -59,18 +67,19 @@ jobs:
         uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
-      - name: Run clippy (default features)
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Run clippy (all features)
+      - name: Run clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
+  nextest:
+    name: Nextest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -82,11 +91,14 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
 
-      - name: Run tests (default features)
-        run: cargo test --locked
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@735e5d9e585d87d0e16ca4ce1d0d248b524b9036 # v2.52.4
+        with:
+          tool: cargo-nextest
 
-      - name: Run tests (all features)
-        run: cargo test --locked --all-features
+      - name: Run nextest
+        # nextest does not support doc-tests; those are validated by doc-validation.yml
+        run: cargo nextest run --locked --all-features
 
   deny:
     name: Dependency Audit
@@ -221,15 +233,10 @@ jobs:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
 
-      - name: Verify build with MSRV
-        run: |
-          cargo check --locked --all-targets
-          echo "✓ Code compiles successfully with MSRV ${{ steps.msrv.outputs.msrv }}"
-
-      - name: Verify tests with MSRV
+      - name: Verify build and tests with MSRV
         run: |
           cargo test --locked --all-features --no-fail-fast
-          echo "✓ All tests pass with MSRV ${{ steps.msrv.outputs.msrv }}"
+          echo "✓ Build and tests successful with MSRV ${{ steps.msrv.outputs.msrv }}"
 
   docker:
     name: Docker Build
@@ -245,17 +252,19 @@ jobs:
       - name: Smoke test
         run: |
           docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
-          # Retry health check with exponential backoff (up to ~30s)
-          for i in $(seq 1 15); do
-            if curl -sf http://localhost:3536/v2/health; then
-              echo ""
-              echo "Health check passed on attempt $i/15"
+          # Exponential backoff health check: 1s, 2s, 4s, 8s, 8s (max 23s total wait)
+          DELAY=1
+          for i in 1 2 3 4 5; do
+            if curl -sf http://localhost:3536/v2/health > /dev/null 2>&1; then
+              echo "Health check passed on attempt $i/5"
               exit 0
             fi
-            echo "Attempt $i/15: server not ready, retrying in 2s..."
-            sleep 2
+            echo "Attempt $i/5: server not ready, retrying in ${DELAY}s..."
+            sleep "$DELAY"
+            DELAY=$((DELAY * 2))
+            [ "$DELAY" -gt 8 ] && DELAY=8
           done
-          echo "ERROR: Server failed to become healthy after 30s"
+          echo "ERROR: Server failed to become healthy"
           echo "=== Docker logs ==="
           docker logs test-server
           exit 1
@@ -263,3 +272,88 @@ jobs:
       - name: Cleanup smoke test
         if: always()
         run: docker stop test-server && docker rm test-server || true
+
+  coverage:
+    name: Coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@735e5d9e585d87d0e16ca4ce1d0d248b524b9036 # v2.52.4
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+
+      - name: Enforce coverage threshold
+        run: cargo llvm-cov report --fail-under-lines 70
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-report
+          path: lcov.info
+          retention-days: 14
+
+  panic-policy:
+    name: Panic Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: Run panic-policy check
+        run: ./scripts/check-no-panics.sh
+
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@735e5d9e585d87d0e16ca4ce1d0d248b524b9036 # v2.52.4
+        with:
+          tool: cargo-sbom
+
+      - name: Generate SBOM (CycloneDX)
+        run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-cyclonedx-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90

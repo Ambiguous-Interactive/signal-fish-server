@@ -53,6 +53,332 @@ fn extract_yaml_version(content: &str, field: &str) -> Option<String> {
     None
 }
 
+/// Extract the display name of a job from workflow YAML content.
+///
+/// Searches for a job key at 2-space indentation (`  job_key:`) and then
+/// looks for the `name:` field at 4-space indentation within that job block.
+/// Returns `None` if the job or its name field is not found.
+fn extract_job_display_name(content: &str, job_key: &str) -> Option<String> {
+    let job_header = format!("  {job_key}:");
+    let mut in_target_job = false;
+
+    for line in content.lines() {
+        if line.starts_with(&job_header) {
+            in_target_job = true;
+            continue;
+        }
+
+        if in_target_job {
+            let trimmed = line.trim();
+
+            // If we hit another job definition (2-space indent, not a sub-key),
+            // we've left the target job block
+            if line.starts_with("  ") && !line.starts_with("    ") && !trimmed.is_empty() {
+                return None;
+            }
+
+            // Look for "    name: Display Name" within the job block
+            if let Some(rest) = line.strip_prefix("    name:") {
+                return Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Validate that a workflow file contains all required jobs with the correct
+/// display names.
+///
+/// Uses `extract_job_display_name()` for scoped name matching within each job
+/// block, preventing false positives where a display name appears elsewhere
+/// in the file (e.g., in comments or unrelated steps).
+///
+/// Panics with a detailed diagnostic message if any required jobs are missing
+/// or have mismatched display names.
+fn validate_workflow_has_required_jobs(
+    workflow_path: &Path,
+    required_jobs: &[(&str, &str, &str)],
+    workflow_description: &str,
+) {
+    let content = read_file(workflow_path);
+
+    let mut missing_jobs = Vec::new();
+    let mut found_jobs = Vec::new();
+
+    for (job_key, display_name, description) in required_jobs {
+        // Look for "job-key:" pattern at 2-space indentation (top-level job definition)
+        let job_pattern = format!("  {job_key}:");
+        if content.contains(&job_pattern) {
+            // Use scoped extraction to verify the display name belongs to this job block
+            let actual_name = extract_job_display_name(&content, job_key);
+            match actual_name {
+                Some(ref name) if name == display_name => {
+                    found_jobs.push(format!(
+                        "  + {job_key} (name: \"{display_name}\", {description})"
+                    ));
+                }
+                Some(ref wrong_name) => {
+                    missing_jobs.push(format!(
+                        "  x {job_key}: job exists but display name \"{wrong_name}\" does not match \
+                         expected \"{display_name}\".\n\
+                         Expected line: `    name: {display_name}`\n\
+                         This will change the GitHub check name, which breaks branch protection.\n\
+                         To fix: Update the job's `name:` field to \"{display_name}\""
+                    ));
+                }
+                None => {
+                    missing_jobs.push(format!(
+                        "  x {job_key}: job exists but has no `name:` field.\n\
+                         Expected line: `    name: {display_name}`\n\
+                         This will change the GitHub check name, which breaks branch protection.\n\
+                         To fix: Add `name: {display_name}` to the job definition"
+                    ));
+                }
+            }
+        } else {
+            missing_jobs.push(format!("  x {job_key} ({display_name} - {description})"));
+        }
+    }
+
+    if !missing_jobs.is_empty() {
+        panic!(
+            "{workflow_description} workflow is missing required jobs or display names:\n\n\
+             Missing:\n{}\n\n\
+             Found:\n{}\n\n\
+             File: {}\n\n\
+             These jobs are critical for CI/CD validation.\n\
+             To fix:\n\
+             1. Review git history to see when the job was removed or renamed\n\
+             2. Restore the job definition in the jobs: section\n\
+             3. Ensure the job key AND name: field match exactly (case-sensitive)\n\
+             4. Update branch protection settings if a rename was intentional",
+            missing_jobs.join("\n"),
+            found_jobs.join("\n"),
+            workflow_path.display()
+        );
+    }
+}
+
+// ============================================================================
+// Required Check Naming Contract
+// ============================================================================
+//
+// These constants define the exact GitHub check names that are required for
+// branch protection on `main`. Workflow and job names are treated as API
+// surface — any rename requires a synchronized update to:
+//   1. The workflow/job definition in .github/workflows/
+//   2. These constants and tests
+//   3. Branch protection settings in GitHub
+//   4. CI/CD documentation (docs/ci-cd-testing.md, docs/ci-cd-testing-summary.md)
+//
+// GitHub constructs check names as: "{workflow name} / {job display name}"
+//
+// Current required checks (Phase 1-2):
+//   - CI / Lint (ubuntu-latest)
+//   - CI / Lint (windows-latest)
+//   - CI / Lint (macos-latest)
+//   - CI / Nextest (ubuntu-latest)
+//   - CI / Nextest (windows-latest)
+//   - CI / Nextest (macos-latest)
+//   - CI / Dependency Audit
+//   - CI / MSRV Verification
+//   - CI / Docker Build
+//   - CI / Coverage (llvm-cov)
+//   - CI / Panic Policy
+//   - CI / SBOM (CycloneDX)
+//   - Documentation Validation / Rustdoc Validation
+//   - Documentation Validation / Documentation Tests
+//   - Documentation Validation / Markdown Code Validation
+//   - Documentation Validation / Documentation Link Check
+
+/// Workflow file -> workflow display name mapping for **branch-protection-relevant**
+/// workflows only.
+///
+/// Unlike `REQUIRED_WORKFLOW_FILES` (which lists all workflows that must exist for
+/// CI hygiene), this constant only covers workflows whose jobs produce GitHub check
+/// names that are configured as required status checks in branch protection rules.
+/// The check name format is `"{workflow display name} / {job display name}"`.
+const REQUIRED_WORKFLOW_NAMES: &[(&str, &str)] = &[
+    ("ci.yml", "CI"),
+    ("doc-validation.yml", "Documentation Validation"),
+];
+
+/// Required CI workflow jobs: (job_key, display_name, description)
+const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
+    (
+        "lint",
+        "Lint (${{ matrix.os }})",
+        "Cross-OS code formatting and linting",
+    ),
+    (
+        "nextest",
+        "Nextest (${{ matrix.os }})",
+        "Cross-OS test execution via cargo-nextest",
+    ),
+    (
+        "deny",
+        "Dependency Audit",
+        "Security audits and license checks",
+    ),
+    (
+        "msrv",
+        "MSRV Verification",
+        "Minimum Supported Rust Version verification",
+    ),
+    (
+        "docker",
+        "Docker Build",
+        "Docker image build and smoke test",
+    ),
+    (
+        "coverage",
+        "Coverage (llvm-cov)",
+        "Linux code coverage gate",
+    ),
+    (
+        "panic-policy",
+        "Panic Policy",
+        "Zero-panic production code enforcement",
+    ),
+    (
+        "sbom",
+        "SBOM (CycloneDX)",
+        "Software Bill of Materials generation",
+    ),
+];
+
+/// Required doc-validation workflow jobs: (job_key, display_name, description)
+///
+/// Note: `doc-validation.yml` defines 6 jobs total, but only these 4 are listed here.
+/// The excluded jobs are:
+///   - `shellcheck-workflow` ("Shellcheck Workflow Scripts") — auxiliary static analysis
+///     of inline shell scripts; not a documentation quality gate
+///   - `inline-code-references` ("Validate Inline Code References") — placeholder job
+///     for future inline code reference validation; not required for branch protection
+///
+/// These auxiliary checks improve workflow quality but are not required for branch
+/// protection on `main`.
+const REQUIRED_DOC_VALIDATION_JOBS: &[(&str, &str, &str)] = &[
+    (
+        "rustdoc",
+        "Rustdoc Validation",
+        "Rustdoc build with strict warnings",
+    ),
+    ("doc-tests", "Documentation Tests", "Cargo doc-tests"),
+    (
+        "markdown-code-samples",
+        "Markdown Code Validation",
+        "Validates code blocks in markdown",
+    ),
+    (
+        "link-check",
+        "Documentation Link Check",
+        "Internal documentation link checking",
+    ),
+];
+
+/// Matrix expression placeholder used in GitHub Actions job display names.
+/// When a job name contains this placeholder, the job produces one check per
+/// matrix value rather than a single check.
+const MATRIX_OS_PLACEHOLDER: &str = "${{ matrix.os }}";
+
+/// OS values that `matrix.os` expands to in ci.yml.
+/// This must match the `strategy.matrix.os` list in the workflow file.
+const MATRIX_OS_VALUES: &[&str] = &["ubuntu-latest", "windows-latest", "macos-latest"];
+
+/// Expand a job display name template that may contain `${{ matrix.os }}` into
+/// concrete check names. If the template contains the placeholder, one name is
+/// produced per OS value; otherwise the original name is returned as-is.
+fn expand_matrix_display_name(workflow_name: &str, display_name: &str) -> Vec<String> {
+    if display_name.contains(MATRIX_OS_PLACEHOLDER) {
+        MATRIX_OS_VALUES
+            .iter()
+            .map(|os| {
+                let expanded = display_name.replace(MATRIX_OS_PLACEHOLDER, os);
+                format!("{workflow_name} / {expanded}")
+            })
+            .collect()
+    } else {
+        vec![format!("{workflow_name} / {display_name}")]
+    }
+}
+
+/// Check whether a concrete job display name (e.g. `Lint (ubuntu-latest)`)
+/// matches a template display name that may contain matrix placeholders
+/// (e.g. `Lint (${{ matrix.os }})`).
+fn display_name_matches_template(concrete: &str, template: &str) -> bool {
+    if !template.contains(MATRIX_OS_PLACEHOLDER) {
+        return concrete == template;
+    }
+    MATRIX_OS_VALUES.iter().any(|os| {
+        let expanded = template.replace(MATRIX_OS_PLACEHOLDER, os);
+        concrete == expanded
+    })
+}
+
+/// All required GitHub check names for branch protection.
+/// Format: "{workflow_name} / {job_display_name}"
+const REQUIRED_CHECK_NAMES: &[&str] = &[
+    "CI / Lint (ubuntu-latest)",
+    "CI / Lint (windows-latest)",
+    "CI / Lint (macos-latest)",
+    "CI / Nextest (ubuntu-latest)",
+    "CI / Nextest (windows-latest)",
+    "CI / Nextest (macos-latest)",
+    "CI / Dependency Audit",
+    "CI / MSRV Verification",
+    "CI / Docker Build",
+    "CI / Coverage (llvm-cov)",
+    "CI / Panic Policy",
+    "CI / SBOM (CycloneDX)",
+    "Documentation Validation / Rustdoc Validation",
+    "Documentation Validation / Documentation Tests",
+    "Documentation Validation / Markdown Code Validation",
+    "Documentation Validation / Documentation Link Check",
+];
+
+/// All workflow files that must exist for CI hygiene.
+///
+/// Unlike `REQUIRED_WORKFLOW_NAMES` (which only lists workflows whose jobs feed
+/// branch protection checks), this constant lists **every** workflow file that
+/// the repository depends on for quality assurance.
+///
+/// Note: `docs-deploy.yml` exists in `.github/workflows/` but is intentionally
+/// excluded here because it is a deployment workflow (GitHub Pages publishing),
+/// not a quality gate. Its presence is validated indirectly by
+/// `test_docs_deploy_requirements_file_exists`.
+///
+/// (filename, description)
+const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
+    (
+        "ci.yml",
+        "Main CI pipeline (lint, nextest, deny, MSRV, Docker, coverage, panic-policy, SBOM)",
+    ),
+    (
+        "doc-validation.yml",
+        "Documentation validation (rustdoc, doc-tests, markdown, links)",
+    ),
+    ("yaml-lint.yml", "YAML syntax validation"),
+    ("actionlint.yml", "GitHub Actions syntax validation"),
+    (
+        "unused-deps.yml",
+        "Unused dependency detection (cargo-machete/cargo-udeps)",
+    ),
+    ("workflow-hygiene.yml", "Workflow configuration validation"),
+    ("markdownlint.yml", "Markdown formatting validation"),
+    ("spellcheck.yml", "Spell checking (typos)"),
+    ("link-check.yml", "External link validation (lychee)"),
+    (
+        "release.yml",
+        "Release automation (crates.io + GitHub release)",
+    ),
+    (
+        "ci-safety.yml",
+        "Advanced safety analysis (Miri, AddressSanitizer — staged)",
+    ),
+];
+
 #[test]
 fn test_msrv_consistency_across_config_files() {
     // This test prevents the MSRV inconsistency issue that was fixed in commit d9eac0f
@@ -276,21 +602,9 @@ fn test_required_ci_workflows_exist() {
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
 
-    // Required workflows for project hygiene
-    let required_workflows = vec![
-        ("ci.yml", "Main CI pipeline (tests, clippy, etc.)"),
-        ("yaml-lint.yml", "YAML syntax validation"),
-        ("actionlint.yml", "GitHub Actions syntax validation"),
-        (
-            "unused-deps.yml",
-            "Unused dependency detection (cargo-machete/cargo-udeps)",
-        ),
-        ("workflow-hygiene.yml", "Workflow configuration validation"),
-    ];
-
     let mut missing_workflows = Vec::new();
 
-    for (workflow_file, description) in &required_workflows {
+    for (workflow_file, description) in REQUIRED_WORKFLOW_FILES {
         let workflow_path = workflows_dir.join(workflow_file);
         if !workflow_path.exists() {
             missing_workflows.push(format!(
@@ -322,47 +636,188 @@ fn test_ci_workflow_has_required_jobs() {
 
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
-    let content = read_file(&ci_workflow);
+    validate_workflow_has_required_jobs(&ci_workflow, REQUIRED_CI_JOBS, "CI");
+}
 
-    // Required job names in CI workflow with descriptions
-    let required_jobs = vec![
-        ("check", "Code formatting and linting"),
-        ("test", "Unit and integration tests"),
-        ("deny", "Security audits and license checks"),
-        ("msrv", "MSRV verification"),
-        ("docker", "Docker build and smoke test"),
-    ];
+#[test]
+fn test_ci_workflow_matrix_os_values_match_constant() {
+    // Validates that the MATRIX_OS_VALUES constant matches the actual
+    // strategy.matrix.os lists in ci.yml. If these drift apart, the
+    // bidirectional consistency test will silently produce wrong check names.
+    //
+    // Multiple jobs (lint, nextest) use matrix.os, so we validate ALL
+    // `os:` lines at 8-space indent to ensure consistency across jobs.
 
-    let mut missing_jobs = Vec::new();
-    let mut found_jobs = Vec::new();
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    for (job_name, description) in &required_jobs {
-        // Look for "job-name:" pattern at the beginning of a line
-        let job_pattern = format!("  {job_name}:");
-        if content.contains(&job_pattern) {
-            found_jobs.push(format!("  ✓ {job_name} ({description})"));
-        } else {
-            missing_jobs.push(format!("  ✗ {job_name} ({description})"));
+    // Collect ALL "os: [...]" lines from matrix sections (8-space indent).
+    // Multiple jobs (lint, nextest) each have their own matrix.os list.
+    let os_lines: Vec<&str> = ci_content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("os:") && line.starts_with("        ")
+        })
+        .collect();
+
+    assert!(
+        !os_lines.is_empty(),
+        "Could not find any matrix os: lines in ci.yml.\n\
+         Expected lines like '        os: [ubuntu-latest, windows-latest, macos-latest]'"
+    );
+
+    for (i, os_line) in os_lines.iter().enumerate() {
+        // Parse the OS values from the YAML list: "os: [a, b, c]"
+        let list_str = os_line
+            .trim()
+            .strip_prefix("os:")
+            .expect("os: prefix missing")
+            .trim();
+        let inner = list_str
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not parse matrix os list #{} from ci.yml.\n\
+                     Found: {os_line}\n\
+                     Expected format: os: [ubuntu-latest, windows-latest, macos-latest]",
+                    i + 1
+                )
+            });
+
+        let yaml_os_values: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+
+        assert_eq!(
+            yaml_os_values.len(),
+            MATRIX_OS_VALUES.len(),
+            "MATRIX_OS_VALUES has {} entries but ci.yml matrix.os line #{} has {} entries.\n\
+             MATRIX_OS_VALUES: {:?}\n\
+             ci.yml matrix.os: {:?}\n\
+             To fix: Update MATRIX_OS_VALUES or the matrix in ci.yml so they match.",
+            MATRIX_OS_VALUES.len(),
+            i + 1,
+            yaml_os_values.len(),
+            MATRIX_OS_VALUES,
+            yaml_os_values
+        );
+
+        for os in &yaml_os_values {
+            assert!(
+                MATRIX_OS_VALUES.contains(os),
+                "ci.yml matrix.os line #{} contains \"{os}\" but MATRIX_OS_VALUES does not.\n\
+                 To fix: Add \"{os}\" to MATRIX_OS_VALUES.",
+                i + 1
+            );
+        }
+
+        for os in MATRIX_OS_VALUES {
+            assert!(
+                yaml_os_values.contains(os),
+                "MATRIX_OS_VALUES contains \"{os}\" but ci.yml matrix.os line #{} does not.\n\
+                 To fix: Either add \"{os}\" to the matrix in ci.yml or remove it from MATRIX_OS_VALUES.",
+                i + 1
+            );
         }
     }
+}
 
-    if !missing_jobs.is_empty() {
-        panic!(
-            "CI workflow is missing required jobs:\n\n\
-             Missing:\n{}\n\n\
-             Found:\n{}\n\n\
-             File: {}\n\n\
-             These jobs are critical for CI/CD validation.\n\
-             To fix:\n\
-             1. Review git history to see when the job was removed\n\
-             2. Restore the job definition in the jobs: section\n\
-             3. Ensure the job name matches exactly (case-sensitive)\n\
-             4. Verify the job has proper indentation (2 spaces)",
-            missing_jobs.join("\n"),
-            found_jobs.join("\n"),
-            ci_workflow.display()
+// ---------------------------------------------------------------------------
+// Unit tests for expand_matrix_display_name and display_name_matches_template
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_expand_matrix_display_name_with_matrix_placeholder() {
+    let results = expand_matrix_display_name("CI", "Lint (${{ matrix.os }})");
+    assert_eq!(
+        results.len(),
+        MATRIX_OS_VALUES.len(),
+        "expand_matrix_display_name should produce one entry per MATRIX_OS_VALUES element.\n\
+         Expected {} entries, got {}.",
+        MATRIX_OS_VALUES.len(),
+        results.len()
+    );
+    for os in MATRIX_OS_VALUES {
+        let expected = format!("CI / Lint ({os})");
+        assert!(
+            results.contains(&expected),
+            "Expected expanded names to contain \"{expected}\" but got: {results:?}"
         );
     }
+}
+
+#[test]
+fn test_expand_matrix_display_name_without_placeholder() {
+    let results = expand_matrix_display_name("CI", "Test");
+    assert_eq!(
+        results,
+        vec!["CI / Test"],
+        "When the display name has no matrix placeholder, expand_matrix_display_name \
+         should return a single entry with the format '{{workflow}} / {{display_name}}'."
+    );
+}
+
+#[test]
+fn test_expand_matrix_display_name_uses_matrix_os_values() {
+    let results = expand_matrix_display_name("W", "${{ matrix.os }}");
+    let expected: Vec<String> = MATRIX_OS_VALUES
+        .iter()
+        .map(|os| format!("W / {os}"))
+        .collect();
+    assert_eq!(
+        results, expected,
+        "expand_matrix_display_name should use exactly the OS values from MATRIX_OS_VALUES.\n\
+         Expected: {expected:?}\n\
+         Got:      {results:?}"
+    );
+}
+
+#[test]
+fn test_display_name_matches_template_ubuntu() {
+    assert!(
+        display_name_matches_template("Lint (ubuntu-latest)", "Lint (${{ matrix.os }})"),
+        "\"Lint (ubuntu-latest)\" should match template \"Lint (${{{{ matrix.os }}}})\""
+    );
+}
+
+#[test]
+fn test_display_name_matches_template_windows() {
+    assert!(
+        display_name_matches_template("Lint (windows-latest)", "Lint (${{ matrix.os }})"),
+        "\"Lint (windows-latest)\" should match template \"Lint (${{{{ matrix.os }}}})\""
+    );
+}
+
+#[test]
+fn test_display_name_matches_template_macos() {
+    assert!(
+        display_name_matches_template("Lint (macos-latest)", "Lint (${{ matrix.os }})"),
+        "\"Lint (macos-latest)\" should match template \"Lint (${{{{ matrix.os }}}})\""
+    );
+}
+
+#[test]
+fn test_display_name_matches_template_no_match_different_prefix() {
+    assert!(
+        !display_name_matches_template("Check & Lint", "Lint (${{ matrix.os }})"),
+        "\"Check & Lint\" should NOT match template \"Lint (${{{{ matrix.os }}}})\""
+    );
+}
+
+#[test]
+fn test_display_name_matches_template_non_matrix_exact_match() {
+    assert!(
+        display_name_matches_template("Test", "Test"),
+        "A non-matrix template should match itself exactly"
+    );
+}
+
+#[test]
+fn test_display_name_matches_template_non_matrix_no_match() {
+    assert!(
+        !display_name_matches_template("Test", "Lint (${{ matrix.os }})"),
+        "\"Test\" should NOT match template \"Lint (${{{{ matrix.os }}}})\""
+    );
 }
 
 #[test]
@@ -1445,6 +1900,668 @@ fn test_action_version_comments_exist() {
              Format: uses: owner/repo@<40-char-SHA> # vX.Y.Z\n\
              Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
             violations.join("\n")
+        );
+    }
+}
+
+// ============================================================================
+// Required Check Naming Contract Tests
+// ============================================================================
+//
+// These tests enforce the naming contract defined by the constants above.
+// They ensure that workflow files, job keys, display names, and GitHub check
+// names remain consistent across all configuration surfaces.
+
+#[test]
+fn test_doc_validation_workflow_has_required_jobs() {
+    // This test validates that the doc-validation workflow has all required jobs
+    // with the correct display names. Prevents accidental removal or renaming of
+    // documentation validation jobs, which would silently break branch protection
+    // rules that reference the GitHub check name "{workflow_name} / {job_display_name}".
+
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/doc-validation.yml");
+    validate_workflow_has_required_jobs(
+        &workflow,
+        REQUIRED_DOC_VALIDATION_JOBS,
+        "Documentation Validation",
+    );
+}
+
+#[test]
+fn test_doc_validation_path_filters_cover_critical_paths() {
+    // This test validates that doc-validation.yml has path filters that include
+    // all critical documentation-related paths. Path filters control when the
+    // workflow triggers — if a critical path is missing, the workflow will
+    // silently skip important changes (e.g., a Cargo.toml change that breaks
+    // doc builds would go unvalidated).
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/doc-validation.yml");
+    let content = read_file(&workflow_path);
+
+    // Critical paths that doc-validation must trigger on.
+    // These ensure documentation changes are always validated.
+    const REQUIRED_DOC_PATHS: &[(&str, &str)] = &[
+        ("'**/*.md'", "Markdown documentation files"),
+        ("'**/*.rs'", "Rust source files (contain doc-comments)"),
+        ("'Cargo.toml'", "Dependency changes affect doc builds"),
+        ("'Cargo.lock'", "Lockfile changes affect doc builds"),
+        (
+            "'.github/workflows/doc-validation.yml'",
+            "Self-referential trigger for workflow changes",
+        ),
+        ("'.github/scripts/**'", "Scripts used by the workflow"),
+    ];
+
+    let mut missing_paths = Vec::new();
+
+    for (path_pattern, description) in REQUIRED_DOC_PATHS {
+        if !content.contains(path_pattern) {
+            missing_paths.push(format!("  - {path_pattern} ({description})"));
+        }
+    }
+
+    if !missing_paths.is_empty() {
+        panic!(
+            "doc-validation.yml is missing critical path filters:\n\n{}\n\n\
+             The doc-validation workflow uses path filters to trigger only on relevant\n\
+             file changes. These paths are required to ensure documentation validation\n\
+             runs whenever documentation-related files change.\n\n\
+             File: {}\n\n\
+             To fix: Add the missing paths to both 'push.paths' and 'pull_request.paths'\n\
+             sections in the workflow file.",
+            missing_paths.join("\n"),
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_doc_validation_strict_rustdocflags() {
+    // This test ensures the doc-validation workflow enforces strict rustdoc
+    // validation via the RUSTDOCFLAGS environment variable. Without these flags,
+    // broken documentation links and invalid code block attributes would pass
+    // silently, degrading documentation quality over time.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/doc-validation.yml");
+    let content = read_file(&workflow_path);
+
+    // Required RUSTDOCFLAGS for strict documentation validation.
+    // Each flag maps to a specific documentation quality gate.
+    const REQUIRED_RUSTDOC_FLAGS: &[(&str, &str)] = &[
+        ("-D warnings", "Deny all rustdoc warnings"),
+        (
+            "-D rustdoc::broken_intra_doc_links",
+            "Deny broken intra-doc links",
+        ),
+        (
+            "-D rustdoc::private_intra_doc_links",
+            "Deny links to private items",
+        ),
+        (
+            "-D rustdoc::invalid_codeblock_attributes",
+            "Deny invalid code block attributes",
+        ),
+    ];
+
+    // Check that RUSTDOCFLAGS is set in the workflow
+    assert!(
+        content.contains("RUSTDOCFLAGS"),
+        "doc-validation.yml must set RUSTDOCFLAGS environment variable for strict validation.\n\
+         File: {}\n\
+         To fix: Add RUSTDOCFLAGS to the env: section with strict deny flags.",
+        workflow_path.display()
+    );
+
+    let mut missing_flags = Vec::new();
+
+    for (flag, description) in REQUIRED_RUSTDOC_FLAGS {
+        if !content.contains(flag) {
+            missing_flags.push(format!("  - {flag} ({description})"));
+        }
+    }
+
+    if !missing_flags.is_empty() {
+        panic!(
+            "doc-validation.yml RUSTDOCFLAGS is missing required strict flags:\n\n{}\n\n\
+             These flags are required to enforce documentation quality:\n\
+             - Broken links in doc-comments are caught at build time\n\
+             - Invalid code block attributes are flagged before merge\n\
+             - Links to private items are detected (API documentation accuracy)\n\n\
+             File: {}\n\n\
+             To fix: Add the missing flags to the RUSTDOCFLAGS environment variable.",
+            missing_flags.join("\n"),
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_doc_validation_job_timeout_budgets() {
+    // This test validates that all required doc-validation jobs have explicit
+    // timeout-minutes settings within a reasonable range. Timeouts prevent
+    // hung jobs from consuming CI minutes and blocking the merge queue.
+    //
+    // Budget: 5-30 minutes per job. Below 5 is too aggressive for documentation
+    // builds; above 30 suggests the job needs optimization or splitting.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/doc-validation.yml");
+    let content = read_file(&workflow_path);
+
+    let mut errors = Vec::new();
+
+    for (job_key, display_name, _description) in REQUIRED_DOC_VALIDATION_JOBS {
+        // Find the job block
+        let job_header = format!("  {job_key}:");
+        let mut in_target_job = false;
+        let mut found_timeout = false;
+
+        for line in content.lines() {
+            if line.starts_with(&job_header) {
+                in_target_job = true;
+                continue;
+            }
+
+            if in_target_job {
+                let trimmed = line.trim();
+
+                // If we hit another job definition, we've left the target job block
+                if line.starts_with("  ") && !line.starts_with("    ") && !trimmed.is_empty() {
+                    break;
+                }
+
+                // Look for timeout-minutes at job level (4-space indent)
+                if let Some(rest) = line.strip_prefix("    timeout-minutes:") {
+                    found_timeout = true;
+                    let timeout_str = rest.trim();
+
+                    // Strip inline comments (e.g., "15  # Generous timeout...")
+                    let timeout_value = timeout_str.split('#').next().unwrap_or(timeout_str).trim();
+
+                    if let Ok(timeout) = timeout_value.parse::<u32>() {
+                        if timeout < 5 {
+                            errors.push(format!(
+                                "  {job_key} ({display_name}): timeout-minutes={timeout} is too \
+                                 aggressive (minimum 5 for documentation builds)"
+                            ));
+                        } else if timeout > 30 {
+                            errors.push(format!(
+                                "  {job_key} ({display_name}): timeout-minutes={timeout} exceeds \
+                                 budget (maximum 30; consider optimizing or splitting the job)"
+                            ));
+                        }
+                    } else {
+                        errors.push(format!(
+                            "  {job_key} ({display_name}): timeout-minutes value \
+                             \"{timeout_value}\" is not a valid integer"
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+
+        if in_target_job && !found_timeout {
+            errors.push(format!(
+                "  {job_key} ({display_name}): missing timeout-minutes setting.\n\
+                 Jobs without timeouts can hang indefinitely, wasting CI minutes.\n\
+                 To fix: Add 'timeout-minutes: N' to the job definition (5-30 range)."
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "doc-validation.yml job timeout budget violations:\n\n{}\n\n\
+             All required doc-validation jobs must have explicit timeout-minutes\n\
+             settings within the 5-30 minute budget.\n\n\
+             File: {}",
+            errors.join("\n"),
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_required_check_names_match_workflow_definitions() {
+    // This is the key naming contract test. It validates that every entry in
+    // REQUIRED_CHECK_NAMES matches the actual workflow file contents, and that
+    // every required job's constructed check name appears in REQUIRED_CHECK_NAMES.
+    //
+    // GitHub constructs check names as: "{workflow name} / {job display name}"
+    // If either the workflow name or job display name changes, the GitHub check
+    // name changes too, silently breaking branch protection rules.
+    //
+    // This test prevents that by:
+    //   1. Reading the workflow `name:` field from each required workflow file
+    //   2. Reading each required job's `name:` field
+    //   3. Constructing the expected GitHub check name
+    //   4. Validating bidirectional consistency with REQUIRED_CHECK_NAMES
+
+    let root = repo_root();
+    let mut constructed_check_names: Vec<String> = Vec::new();
+    let mut errors = Vec::new();
+
+    // Process each required workflow and its jobs
+    let workflow_job_sets: &[(&str, &[(&str, &str, &str)])] = &[
+        ("ci.yml", REQUIRED_CI_JOBS),
+        ("doc-validation.yml", REQUIRED_DOC_VALIDATION_JOBS),
+    ];
+
+    for (workflow_file, required_jobs) in workflow_job_sets {
+        let workflow_path = root.join(".github/workflows").join(workflow_file);
+        let content = read_file(&workflow_path);
+
+        // Extract the workflow name: field (top-level, before any jobs)
+        let workflow_name = content
+            .lines()
+            .find(|line| line.starts_with("name:"))
+            .and_then(|line| {
+                line.strip_prefix("name:")
+                    .map(|s| s.trim().trim_matches('"').to_string())
+            });
+
+        let workflow_name = match workflow_name {
+            Some(name) => name,
+            None => {
+                errors.push(format!(
+                    "{workflow_file}: Could not extract top-level 'name:' field.\n\
+                     Every workflow must have a 'name:' field at the top level."
+                ));
+                continue;
+            }
+        };
+
+        for (job_key, expected_display_name, _description) in *required_jobs {
+            // Look for the job's name: field
+            // We search for "  job_key:" then look for "    name:" on the next non-empty line
+            let job_display_name = extract_job_display_name(&content, job_key);
+
+            match job_display_name {
+                Some(ref actual_name) => {
+                    if actual_name != expected_display_name {
+                        errors.push(format!(
+                            "{workflow_file}: Job '{job_key}' has name \"{actual_name}\" \
+                             but contract expects \"{expected_display_name}\".\n\
+                             This changes the GitHub check name from \
+                             \"{workflow_name} / {expected_display_name}\" to \
+                             \"{workflow_name} / {actual_name}\".\n\
+                             To fix: Update the job's name: field or update the contract constants."
+                        ));
+                    }
+
+                    // Matrix jobs expand to multiple check names (one per OS value).
+                    // Non-matrix jobs produce a single check name.
+                    let expanded = expand_matrix_display_name(&workflow_name, actual_name);
+                    constructed_check_names.extend(expanded);
+                }
+                None => {
+                    errors.push(format!(
+                        "{workflow_file}: Could not find 'name:' field for job '{job_key}'.\n\
+                         Expected: `    name: {expected_display_name}`"
+                    ));
+                    // Use the expected name to construct the check name anyway
+                    let expanded =
+                        expand_matrix_display_name(&workflow_name, expected_display_name);
+                    constructed_check_names.extend(expanded);
+                }
+            }
+        }
+    }
+
+    // Forward check: every entry in REQUIRED_CHECK_NAMES must match a constructed name
+    for required_name in REQUIRED_CHECK_NAMES {
+        if !constructed_check_names.iter().any(|c| c == required_name) {
+            errors.push(format!(
+                "REQUIRED_CHECK_NAMES contains \"{required_name}\" but this check name \
+                 was not constructed from any workflow file.\n\
+                 To fix: Either update the workflow to produce this check name, \
+                 or remove it from REQUIRED_CHECK_NAMES."
+            ));
+        }
+    }
+
+    // Reverse check: every constructed name must appear in REQUIRED_CHECK_NAMES
+    for constructed in &constructed_check_names {
+        if !REQUIRED_CHECK_NAMES.contains(&constructed.as_str()) {
+            errors.push(format!(
+                "Workflow files produce check name \"{constructed}\" but it is not in \
+                 REQUIRED_CHECK_NAMES.\n\
+                 To fix: Either add \"{constructed}\" to REQUIRED_CHECK_NAMES, \
+                 or update the workflow job name to match an existing entry."
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Required check naming contract violations:\n\n{}\n\n\
+             Constructed check names from workflow files:\n{}\n\n\
+             Expected check names from REQUIRED_CHECK_NAMES:\n{}\n\n\
+             GitHub constructs check names as: \"{{workflow name}} / {{job display name}}\"\n\
+             Any mismatch between these constants and the actual workflow files will cause\n\
+             branch protection rules to silently stop matching.",
+            errors.join("\n\n"),
+            constructed_check_names
+                .iter()
+                .map(|c| format!("  - {c}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            REQUIRED_CHECK_NAMES
+                .iter()
+                .map(|c| format!("  - {c}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+}
+
+#[test]
+fn test_required_workflow_triggers() {
+    // This test validates that required workflows have the correct triggers
+    // (push to main, pull_request to main). Without these triggers, the
+    // workflows would not run on the events that matter for branch protection.
+    //
+    // Both ci.yml and doc-validation.yml must trigger on:
+    //   - pull_request with branches: [main]
+    //   - push with branches: [main]
+    //
+    // Note: doc-validation.yml also has path filters, which are acceptable
+    // as long as the branch triggers are present.
+
+    let root = repo_root();
+    let mut errors = Vec::new();
+
+    for (workflow_file, _workflow_name) in REQUIRED_WORKFLOW_NAMES {
+        let workflow_path = root.join(".github/workflows").join(workflow_file);
+        let content = read_file(&workflow_path);
+
+        // Check for pull_request trigger with main branch
+        let has_pull_request = content.contains("pull_request:");
+        let has_push = content.contains("push:");
+
+        if !has_pull_request {
+            errors.push(format!(
+                "{workflow_file}: Missing 'pull_request:' trigger.\n\
+                 Required workflows must trigger on pull requests to main.\n\
+                 To fix: Add pull_request trigger:\n\
+                   on:\n\
+                     pull_request:\n\
+                       branches: [main]"
+            ));
+        }
+
+        if !has_push {
+            errors.push(format!(
+                "{workflow_file}: Missing 'push:' trigger.\n\
+                 Required workflows must trigger on push to main.\n\
+                 To fix: Add push trigger:\n\
+                   on:\n\
+                     push:\n\
+                       branches: [main]"
+            ));
+        }
+
+        // Validate that both push and pull_request sections have `branches: [main]`.
+        // We extract the text between each trigger keyword and the next top-level key
+        // to scope the check, avoiding false positives from `branches: [main]` appearing
+        // in unrelated parts of the file (e.g., comments or step names).
+        let trigger_sections = ["push:", "pull_request:"];
+        for trigger in &trigger_sections {
+            if let Some(trigger_start) = content.find(trigger) {
+                // Find the content from the trigger keyword to the next top-level key.
+                // Top-level keys in YAML start at column 0 with a letter (no leading space).
+                let after_trigger = &content[trigger_start + trigger.len()..];
+                let section_end = after_trigger
+                    .find("\n")
+                    .and_then(|first_newline| {
+                        after_trigger[first_newline..]
+                            .lines()
+                            .skip(1) // skip the rest of the trigger line
+                            .position(|line| {
+                                !line.is_empty() && !line.starts_with(' ') && !line.starts_with('#')
+                            })
+                            .map(|pos| {
+                                // Calculate the byte offset within after_trigger
+                                let mut offset = first_newline;
+                                for (i, line) in
+                                    after_trigger[first_newline..].lines().skip(1).enumerate()
+                                {
+                                    if i == pos {
+                                        break;
+                                    }
+                                    offset += line.len() + 1; // +1 for newline
+                                }
+                                offset
+                            })
+                    })
+                    .unwrap_or(after_trigger.len());
+
+                let section_content = &after_trigger[..section_end];
+                if !section_content.contains("branches: [main]") {
+                    errors.push(format!(
+                        "{workflow_file}: '{trigger}' section does not contain 'branches: [main]'.\n\
+                         Required workflows must filter to the main branch under each trigger.\n\
+                         To fix: Add 'branches: [main]' under the {trigger} trigger:\n\
+                           {trigger}\n\
+                             branches: [main]"
+                    ));
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Required workflow trigger validation failed:\n\n{}\n\n\
+             Required workflows must trigger on both push and pull_request events\n\
+             targeting the main branch. Without these triggers, branch protection\n\
+             checks will not run and PRs cannot be validated.",
+            errors.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_workflow_display_names_match_contract() {
+    // This test validates that the `name:` field at the top of each required
+    // workflow file matches the expected name from REQUIRED_WORKFLOW_NAMES.
+    //
+    // The workflow display name is the first component of a GitHub check name.
+    // If it changes, all check names produced by that workflow change too,
+    // silently breaking branch protection rules.
+
+    let root = repo_root();
+    let mut errors = Vec::new();
+
+    for (workflow_file, expected_name) in REQUIRED_WORKFLOW_NAMES {
+        let workflow_path = root.join(".github/workflows").join(workflow_file);
+
+        if !workflow_path.exists() {
+            errors.push(format!(
+                "{workflow_file}: Workflow file does not exist.\n\
+                 Expected at: {}\n\
+                 To fix: Restore the workflow file from git history.",
+                workflow_path.display()
+            ));
+            continue;
+        }
+
+        let content = read_file(&workflow_path);
+
+        // Extract the top-level name: field
+        let actual_name = content
+            .lines()
+            .find(|line| line.starts_with("name:"))
+            .and_then(|line| {
+                line.strip_prefix("name:")
+                    .map(|s| s.trim().trim_matches('"').to_string())
+            });
+
+        match actual_name {
+            Some(actual) => {
+                if actual != *expected_name {
+                    errors.push(format!(
+                        "{workflow_file}: Workflow display name mismatch.\n\
+                         Expected: \"{expected_name}\"\n\
+                         Found:    \"{actual}\"\n\
+                         This changes ALL GitHub check names produced by this workflow.\n\
+                         To fix: Either restore the name to \"{expected_name}\" or update\n\
+                         REQUIRED_WORKFLOW_NAMES and REQUIRED_CHECK_NAMES constants,\n\
+                         then update branch protection settings in GitHub."
+                    ));
+                }
+            }
+            None => {
+                errors.push(format!(
+                    "{workflow_file}: Could not find top-level 'name:' field.\n\
+                     Expected: name: {expected_name}\n\
+                     To fix: Add 'name: {expected_name}' at the top of the workflow file."
+                ));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Workflow display name contract violations:\n\n{}\n\n\
+             Workflow display names are the first component of GitHub check names.\n\
+             Changing a workflow name from \"CI\" to \"Build\" would change check names\n\
+             from \"CI / Test\" to \"Build / Test\", breaking branch protection.\n\n\
+             If a rename is intentional, update ALL of:\n\
+             1. The workflow file's name: field\n\
+             2. REQUIRED_WORKFLOW_NAMES constant\n\
+             3. REQUIRED_CHECK_NAMES constant\n\
+             4. Branch protection settings in GitHub\n\
+             5. Documentation references",
+            errors.join("\n\n")
+        );
+    }
+}
+
+#[test]
+fn test_required_check_names_are_consistent() {
+    // This is a self-consistency test that validates REQUIRED_CHECK_NAMES
+    // can be decomposed into valid "{workflow_name} / {job_display_name}" pairs
+    // where the workflow name and job display name are found in the other
+    // constant arrays (REQUIRED_WORKFLOW_NAMES, REQUIRED_CI_JOBS, REQUIRED_DOC_VALIDATION_JOBS).
+    //
+    // This catches drift between the constants without requiring file I/O,
+    // making it fast and always runnable even if workflow files are temporarily missing.
+
+    let mut errors = Vec::new();
+
+    // Build a set of valid workflow display names from REQUIRED_WORKFLOW_NAMES
+    let valid_workflow_names: Vec<&str> = REQUIRED_WORKFLOW_NAMES
+        .iter()
+        .map(|(_, name)| *name)
+        .collect();
+
+    // Build a set of valid job display names from both job arrays
+    let valid_job_names: Vec<&str> = REQUIRED_CI_JOBS
+        .iter()
+        .map(|(_, name, _)| *name)
+        .chain(
+            REQUIRED_DOC_VALIDATION_JOBS
+                .iter()
+                .map(|(_, name, _)| *name),
+        )
+        .collect();
+
+    for check_name in REQUIRED_CHECK_NAMES {
+        // Parse the check name into workflow_name and job_name
+        let parts: Vec<&str> = check_name.splitn(2, " / ").collect();
+        if parts.len() != 2 {
+            errors.push(format!(
+                "REQUIRED_CHECK_NAMES entry \"{check_name}\" is not in the expected format.\n\
+                 Expected: \"{{workflow_name}} / {{job_display_name}}\"\n\
+                 The \" / \" separator must be present exactly once."
+            ));
+            continue;
+        }
+
+        let workflow_part = parts[0];
+        let job_part = parts[1];
+
+        // Validate the workflow name exists in REQUIRED_WORKFLOW_NAMES
+        if !valid_workflow_names.contains(&workflow_part) {
+            errors.push(format!(
+                "REQUIRED_CHECK_NAMES entry \"{check_name}\" references workflow \
+                 \"{workflow_part}\" which is not in REQUIRED_WORKFLOW_NAMES.\n\
+                 Known workflow names: {}\n\
+                 To fix: Add (\"{{}}.yml\", \"{workflow_part}\") to REQUIRED_WORKFLOW_NAMES \
+                 or fix the check name.",
+                valid_workflow_names
+                    .iter()
+                    .map(|n| format!("\"{n}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        // Validate the job display name exists in the corresponding job array.
+        // For matrix jobs, the check name contains an expanded OS value (e.g.
+        // "Lint (ubuntu-latest)") while the job array stores the template
+        // (e.g. "Lint (${{ matrix.os }})"), so we use template matching.
+        let job_matches = valid_job_names
+            .iter()
+            .any(|template| display_name_matches_template(job_part, template));
+        if !job_matches {
+            errors.push(format!(
+                "REQUIRED_CHECK_NAMES entry \"{check_name}\" references job display name \
+                 \"{job_part}\" which is not in REQUIRED_CI_JOBS or REQUIRED_DOC_VALIDATION_JOBS.\n\
+                 Known job display names: {}\n\
+                 To fix: Add the job to the appropriate REQUIRED_*_JOBS constant \
+                 or fix the check name.",
+                valid_job_names
+                    .iter()
+                    .map(|n| format!("\"{n}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    // Reverse check: every job in REQUIRED_CI_JOBS and REQUIRED_DOC_VALIDATION_JOBS
+    // should have a corresponding entry in REQUIRED_CHECK_NAMES
+    for (workflow_file, expected_workflow_name) in REQUIRED_WORKFLOW_NAMES {
+        let jobs: &[(&str, &str, &str)] = if *workflow_file == "ci.yml" {
+            REQUIRED_CI_JOBS
+        } else if *workflow_file == "doc-validation.yml" {
+            REQUIRED_DOC_VALIDATION_JOBS
+        } else {
+            continue;
+        };
+
+        for (_job_key, display_name, _description) in jobs {
+            // Matrix jobs expand to multiple check names; non-matrix jobs
+            // produce exactly one.
+            let expected_check_names =
+                expand_matrix_display_name(expected_workflow_name, display_name);
+            for expected_check_name in &expected_check_names {
+                if !REQUIRED_CHECK_NAMES.contains(&expected_check_name.as_str()) {
+                    errors.push(format!(
+                        "Job \"{display_name}\" in {workflow_file} \
+                         (workflow \"{expected_workflow_name}\") would produce check name \
+                         \"{expected_check_name}\" but it is not in REQUIRED_CHECK_NAMES.\n\
+                         To fix: Add \"{expected_check_name}\" to REQUIRED_CHECK_NAMES."
+                    ));
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "Required check naming contract self-consistency check failed:\n\n{}\n\n\
+             The REQUIRED_CHECK_NAMES constant must be decomposable into valid\n\
+             \"{{workflow_name}} / {{job_display_name}}\" pairs where both components\n\
+             exist in the corresponding constant arrays.\n\n\
+             This test catches drift between constants without requiring file I/O.",
+            errors.join("\n\n")
         );
     }
 }
@@ -3058,20 +4175,29 @@ fn test_workflow_hygiene_requirements() {
     // `check`:   (&str, &str) -> Vec<String> — receives (filename, content),
     //            returns a list of violation descriptions (empty = pass).
 
-    // Workflows that benefit from concurrency groups (excludes one-shot
-    // release workflows that should always run to completion).
+    // Workflows that must have concurrency groups. All workflows except
+    // docs-deploy.yml (which uses a special `pages` concurrency group that
+    // is intentionally different from the standard pattern).
     let concurrency_allowlist: &[&str] = &[
+        "actionlint.yml",
         "ci.yml",
+        "ci-safety.yml",
+        "doc-validation.yml",
         "link-check.yml",
         "markdownlint.yml",
-        "doc-validation.yml",
+        "release.yml",
+        "spellcheck.yml",
+        "unused-deps.yml",
+        "workflow-hygiene.yml",
+        "yaml-lint.yml",
     ];
 
     let rules: Vec<HygieneRule> = vec![
         // Rule 1: Concurrency groups -----------------------------------------
         HygieneRule {
             name: "concurrency groups",
-            // Only applies to the explicit allowlist (release workflows are excluded).
+            // Applies to the explicit allowlist (docs-deploy.yml is excluded
+            // because it uses a special `pages` concurrency group).
             filter: Box::new({
                 let list = concurrency_allowlist.to_vec();
                 move |filename: &str| list.contains(&filename)
@@ -3086,9 +4212,9 @@ fn test_workflow_hygiene_requirements() {
                            group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n  \
                            cancel-in-progress: true"
                     ));
-                } else if !content.contains("cancel-in-progress: true") {
+                } else if !content.contains("cancel-in-progress:") {
                     violations.push(format!(
-                        "{filename}: Has concurrency but missing 'cancel-in-progress: true'"
+                        "{filename}: Has concurrency but missing 'cancel-in-progress' setting"
                     ));
                 }
                 violations
@@ -3100,7 +4226,9 @@ fn test_workflow_hygiene_requirements() {
                       Standard pattern:\n\
                       concurrency:\n\
                         group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}\n\
-                        cancel-in-progress: true",
+                        cancel-in-progress: true\n\n\
+                      Exception: release.yml uses cancel-in-progress: false to prevent\n\
+                      aborting in-progress releases (which could leave crates.io half-published).",
         },
         // Rule 2: Job timeouts ------------------------------------------------
         HygieneRule {
@@ -4240,6 +5368,7 @@ fn test_release_workflow_conventions() {
     //   2. Has permissions explicitly set
     //   3. Has a proper name field
     //   4. Does not reference non-existent checkout versions
+    //   5. Has a concurrency group with cancel-in-progress: false
 
     let root = repo_root();
     let release_yml = root.join(".github/workflows/release.yml");
@@ -4277,6 +5406,82 @@ fn test_release_workflow_conventions() {
          File: {}",
         release_yml.display()
     );
+
+    // Must have a concurrency group (releases should never run concurrently)
+    assert!(
+        content.contains("concurrency:"),
+        "release.yml must have a concurrency group to prevent concurrent releases.\n\
+         Add:\n\
+         concurrency:\n\
+           group: ${{{{ github.workflow }}}}-${{{{ github.ref }}}}\n\
+           cancel-in-progress: false\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Must use cancel-in-progress: false (never abort a release mid-publish)
+    assert!(
+        content.contains("cancel-in-progress: false"),
+        "release.yml must use 'cancel-in-progress: false' to prevent aborting \
+         in-progress releases (which could leave crates.io in a half-published state).\n\
+         File: {}",
+        release_yml.display()
+    );
+}
+
+#[test]
+fn test_release_workflow_requires_preflight() {
+    // This test validates that the release workflow gates publishing behind a
+    // preflight job that verifies required CI checks have passed. This prevents
+    // publishing a broken crate.
+    //
+    // Checks:
+    //   1. release.yml has a `preflight` job
+    //   2. The `publish` job depends on `preflight` via `needs:`
+    //   3. The preflight job references the required workflow names
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        // Release workflow is optional
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // Must have a preflight job
+    assert!(
+        content.contains("preflight:"),
+        "release.yml must have a 'preflight' job that verifies CI checks passed \
+         before publishing.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // The publish job must depend on preflight
+    // Look for `needs:` containing `preflight` in the publish job context
+    assert!(
+        content.contains("needs: [preflight]") || content.contains("needs: preflight"),
+        "release.yml 'publish' job must depend on 'preflight' via needs.\n\
+         Add 'needs: [preflight]' to the publish job.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Preflight must reference the required workflow names from REQUIRED_WORKFLOW_NAMES.
+    // These are the workflows that must pass before a release can proceed.
+    for (_workflow_file, workflow_name) in REQUIRED_WORKFLOW_NAMES {
+        assert!(
+            content.contains(workflow_name),
+            "release.yml preflight job must reference required workflow '{workflow_name}' \
+             (from REQUIRED_WORKFLOW_NAMES).\n\
+             The preflight job should verify that '{workflow_name}' has passed on the \
+             commit being released.\n\
+             File: {}",
+            release_yml.display()
+        );
+    }
 }
 
 #[test]
@@ -4423,6 +5628,354 @@ fn test_workflow_files_use_two_space_indentation() {
     }
 }
 
+// ============================================================================
+// Advanced Safety Workflow (ci-safety.yml) Tests
+// ============================================================================
+
+/// Required jobs in ci-safety.yml: (job_key, display_name, description)
+///
+/// These jobs are **staged (non-blocking)** — they use `continue-on-error: true`
+/// and are NOT listed in `REQUIRED_WORKFLOW_NAMES` or `REQUIRED_CHECK_NAMES`.
+/// They will be promoted to required checks once stability criteria are met
+/// (see PLAN.md Phase 3, Promotion Policy).
+const STAGED_SAFETY_JOBS: &[(&str, &str, &str)] = &[
+    (
+        "miri",
+        "Miri",
+        "Undefined behavior detection via Miri interpreter",
+    ),
+    (
+        "asan",
+        "AddressSanitizer",
+        "Memory error detection via AddressSanitizer",
+    ),
+];
+
+#[test]
+fn test_ci_safety_workflow_has_required_jobs() {
+    // Validates that the advanced safety workflow has all staged safety jobs
+    // with correct job keys AND display names. Uses the shared helper
+    // `validate_workflow_has_required_jobs` for consistency with ci.yml and
+    // doc-validation.yml validation tests.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+
+    assert!(
+        workflow_path.exists(),
+        "ci-safety.yml must exist.\n\
+         This workflow provides advanced safety analysis (Miri, AddressSanitizer).\n\
+         See PLAN.md Phase 3 / Ticket G for details."
+    );
+
+    validate_workflow_has_required_jobs(&workflow_path, STAGED_SAFETY_JOBS, "Advanced Safety");
+}
+
+#[test]
+fn test_ci_safety_workflow_jobs_are_staged() {
+    // Validates that all advanced safety jobs use continue-on-error: true.
+    // This is critical because these checks run on nightly Rust and may
+    // break due to toolchain instability. They must not block merges until
+    // promoted to required status.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for (job_key, display_name, _description) in STAGED_SAFETY_JOBS {
+        // Find the job section and check for continue-on-error.
+        // A job key in YAML appears as a line starting with exactly 2 spaces
+        // followed by the key name and a colon (e.g., "  miri:").
+        let job_key_pattern = format!("\n  {job_key}:");
+        let job_start = content.find(&job_key_pattern).unwrap_or_else(|| {
+            panic!(
+                "Job '{job_key}' not found in ci-safety.yml.\n\
+                 Expected YAML key: '  {job_key}:'"
+            )
+        });
+
+        // Extract the job section: from this job key to the next top-level
+        // job key (a line matching "\n  <word>:") or end of file.
+        let after_key = &content[job_start + job_key_pattern.len()..];
+        let next_job_offset = after_key
+            .lines()
+            .skip(1) // skip the rest of the current key's line
+            .position(|line| {
+                // A top-level job key: exactly 2 leading spaces, then a word char
+                line.len() > 2
+                    && line.starts_with("  ")
+                    && !line.starts_with("   ")
+                    && line.as_bytes()[2] != b' '
+                    && line.as_bytes()[2] != b'#'
+            });
+
+        let job_text = match next_job_offset {
+            Some(pos) => {
+                // Calculate byte offset for the matched line
+                let mut byte_offset = 0;
+                for (i, line) in after_key.lines().skip(1).enumerate() {
+                    if i == pos {
+                        break;
+                    }
+                    byte_offset += line.len() + 1; // +1 for newline
+                }
+                &content[job_start..job_start + job_key_pattern.len() + byte_offset]
+            }
+            None => &content[job_start..],
+        };
+
+        assert!(
+            job_text.contains("continue-on-error: true"),
+            "Job '{job_key}' (\"{display_name}\") must have 'continue-on-error: true'.\n\
+             Advanced safety jobs are staged and must not block merges.\n\
+             See PLAN.md Phase 3, Promotion Policy for when to change this."
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_workflow_uses_pinned_nightly() {
+    // Validates that ci-safety.yml uses a pinned nightly toolchain, not
+    // rolling "nightly". Pinned nightlies ensure reproducible CI results.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    // Must contain a pinned nightly version (e.g., "nightly-2026-01-15")
+    let has_pinned_nightly = content.contains("nightly-20");
+    assert!(
+        has_pinned_nightly,
+        "ci-safety.yml must use a pinned nightly toolchain (e.g., nightly-2026-01-15).\n\
+         Rolling 'nightly' causes unpredictable CI breakage.\n\
+         See the Nightly Toolchain Strategy section in the workflow header."
+    );
+
+    // Must NOT contain bare "toolchain: nightly" (without date pin)
+    let has_bare_nightly = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == "toolchain: nightly" || trimmed == "toolchain: \"nightly\""
+    });
+    assert!(
+        !has_bare_nightly,
+        "ci-safety.yml must NOT use bare 'toolchain: nightly'.\n\
+         Use a date-pinned nightly instead (e.g., nightly-2026-01-15)."
+    );
+}
+
+#[test]
+fn test_ci_safety_workflow_has_required_triggers() {
+    // Validates that ci-safety.yml has all required triggers:
+    // push to main, pull_request to main, schedule, and workflow_dispatch.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    let required_triggers = [
+        ("push:", "push to main"),
+        ("pull_request:", "pull requests to main"),
+        ("schedule:", "weekly scheduled runs"),
+        ("workflow_dispatch:", "manual trigger for diagnostics"),
+    ];
+
+    let mut missing = Vec::new();
+    for (trigger, description) in &required_triggers {
+        if !content.contains(trigger) {
+            missing.push(format!("  - {trigger} ({description})"));
+        }
+    }
+
+    if !missing.is_empty() {
+        panic!(
+            "ci-safety.yml is missing required triggers:\n\n{}\n\n\
+             Advanced safety workflows need all four triggers:\n\
+             - push/pull_request: run on code changes\n\
+             - schedule: weekly heavy analysis\n\
+             - workflow_dispatch: manual diagnostics",
+            missing.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_workflow_uploads_artifacts() {
+    // Validates that both safety jobs upload their output as artifacts.
+    // Artifacts are critical for diagnosing safety findings even when
+    // the job passes (continue-on-error: true may mask real issues).
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    let expected_artifacts = [
+        ("miri-output", "Miri analysis output"),
+        ("asan-output", "AddressSanitizer analysis output"),
+    ];
+
+    let mut missing = Vec::new();
+    for (artifact_name, description) in &expected_artifacts {
+        if !content.contains(artifact_name) {
+            missing.push(format!("  - {artifact_name} ({description})"));
+        }
+    }
+
+    if !missing.is_empty() {
+        panic!(
+            "ci-safety.yml is missing required artifact uploads:\n\n{}\n\n\
+             Safety job outputs must be uploaded as artifacts for diagnosis.\n\
+             Use 'if: always()' on upload steps to capture output even on failure.",
+            missing.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_jobs_not_in_required_check_names() {
+    // Validates that ci-safety.yml jobs are NOT in the required check names.
+    // These are staged checks and must not be listed as branch-protection
+    // required checks until promoted. This test ensures the staging contract.
+
+    let safety_workflow_name = "Advanced Safety";
+
+    for check_name in REQUIRED_CHECK_NAMES {
+        assert!(
+            !check_name.starts_with(&format!("{safety_workflow_name} /")),
+            "Found '{check_name}' in REQUIRED_CHECK_NAMES, but ci-safety.yml \
+             jobs are staged (non-blocking) and must NOT be required checks.\n\
+             Remove from REQUIRED_CHECK_NAMES until promotion criteria are met.\n\
+             See PLAN.md Phase 3, Promotion Policy."
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_workflow_artifact_uploads_always_run() {
+    // Validates that artifact upload steps use `if: always()` so that
+    // diagnostic output is captured even when the analysis step fails.
+    // Without this, failures in continue-on-error jobs would lose their
+    // output, making triage impossible.
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    // Find each upload-artifact action reference and verify its enclosing
+    // step has `if: always()`. We search for "upload-artifact@" to locate
+    // the action, then look backward for the enclosing `- name:` line.
+    let mut search_from = 0;
+    let mut missing_always = Vec::new();
+    let mut upload_count = 0;
+
+    while let Some(pos) = content[search_from..].find("upload-artifact@") {
+        upload_count += 1;
+        let abs_pos = search_from + pos;
+        let before = &content[..abs_pos];
+
+        let step_start = before.rfind("- name:").unwrap_or_else(|| {
+            panic!(
+                "Could not find step containing upload-artifact action.\n\
+                 Expected a '- name:' line before the action reference."
+            )
+        });
+
+        let step_text = &content[step_start..abs_pos];
+        if !step_text.contains("if: always()") {
+            let step_name_line = content[step_start..].lines().next().unwrap_or("(unknown)");
+            missing_always.push(format!("  - {step_name_line}"));
+        }
+
+        search_from = abs_pos + 1;
+    }
+
+    assert!(
+        upload_count >= 2,
+        "Expected at least 2 upload-artifact steps in ci-safety.yml \
+         (miri-output and asan-output), found {upload_count}."
+    );
+
+    if !missing_always.is_empty() {
+        panic!(
+            "ci-safety.yml upload-artifact steps missing 'if: always()':\n\n\
+             {}\n\n\
+             Without 'if: always()', artifact output is lost when the \
+             analysis step fails, making triage impossible.\n\
+             To fix: Add 'if: always()' to each upload-artifact step.",
+            missing_always.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_nightly_version_consistency_across_workflows() {
+    // Validates that all workflows using a pinned nightly toolchain use
+    // the same nightly version. If someone updates one workflow's nightly
+    // pin without updating others, they silently diverge, causing
+    // inconsistent CI results and confusion about which nightly to update.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    // Workflows known to use pinned nightly toolchains
+    let nightly_workflows = ["ci-safety.yml", "unused-deps.yml"];
+
+    let mut nightly_versions: Vec<(String, String)> = Vec::new();
+
+    for workflow_file in &nightly_workflows {
+        let workflow_path = workflows_dir.join(workflow_file);
+        if !workflow_path.exists() {
+            continue;
+        }
+        let content = read_file(&workflow_path);
+
+        // Extract all pinned nightly versions (e.g., "nightly-2026-01-15")
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Match lines like "toolchain: nightly-YYYY-MM-DD" or
+            // "cargo +nightly-YYYY-MM-DD ..."
+            if let Some(pos) = trimmed.find("nightly-20") {
+                let version_start = pos;
+                // Extract the nightly-YYYY-MM-DD portion
+                let rest = &trimmed[version_start..];
+                let version_end = rest
+                    .find(|c: char| c != '-' && !c.is_ascii_alphanumeric())
+                    .unwrap_or(rest.len());
+                let version = &rest[..version_end];
+
+                // Only record if it looks like a valid pinned nightly
+                if version.len() >= "nightly-2026-01-15".len() {
+                    nightly_versions.push((workflow_file.to_string(), version.to_string()));
+                    break; // One version per workflow is enough
+                }
+            }
+        }
+    }
+
+    // All extracted versions should be the same
+    if nightly_versions.len() > 1 {
+        let first_version = &nightly_versions[0].1;
+        let mut mismatches = Vec::new();
+
+        for (file, version) in &nightly_versions[1..] {
+            if version != first_version {
+                mismatches.push(format!("  - {file}: {version} (expected {first_version})"));
+            }
+        }
+
+        if !mismatches.is_empty() {
+            panic!(
+                "Nightly toolchain versions are inconsistent across workflows:\n\n\
+                 Baseline: {} uses {first_version}\n{}\n\n\
+                 All workflows using pinned nightly must use the same version.\n\
+                 To fix: Update all nightly pins to the same version.\n\
+                 See the Nightly Toolchain Strategy in each workflow's header.",
+                nightly_versions[0].0,
+                mismatches.join("\n")
+            );
+        }
+    }
+}
+
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
 /// returning the list of unescaped string values (path patterns).
 ///
@@ -4459,4 +6012,548 @@ fn parse_lychee_exclude_path_patterns(content: &str) -> Vec<String> {
     }
 
     patterns
+}
+
+// ============================================================================
+// SBOM (Software Bill of Materials) Tests
+// ============================================================================
+//
+// These tests validate SBOM generation configuration in the CI and release
+// workflows, ensuring supply-chain metadata is properly generated, uploaded
+// as artifacts, and attached to GitHub releases.
+
+#[test]
+fn test_sbom_job_generates_cyclonedx_json() {
+    // Validates that the SBOM job in ci.yml generates a CycloneDX JSON SBOM.
+    // CycloneDX v1.5 is the latest spec and provides comprehensive supply-chain
+    // metadata including component dependencies, licenses, and vulnerabilities.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        ci_content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
+        "CI SBOM job must generate CycloneDX v1.5 JSON format.\n\
+         Expected command: cargo sbom --output-format cyclone_dx_json_1_5\n\
+         This ensures a standardized, machine-readable SBOM is produced."
+    );
+
+    assert!(
+        ci_content.contains("sbom.cdx.json"),
+        "CI SBOM job must output to sbom.cdx.json.\n\
+         The .cdx.json extension is the CycloneDX convention for JSON SBOMs."
+    );
+}
+
+#[test]
+fn test_sbom_job_uploads_artifact() {
+    // Validates that the SBOM artifact is uploaded with appropriate retention.
+    // The artifact should be available for 90 days for audit and compliance purposes.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    // Find the SBOM artifact upload section
+    assert!(
+        ci_content.contains("sbom-cyclonedx-"),
+        "CI SBOM job must upload an artifact with 'sbom-cyclonedx-' prefix.\n\
+         This makes SBOM artifacts easily identifiable in the GitHub Actions UI."
+    );
+
+    assert!(
+        ci_content.contains("retention-days: 90"),
+        "CI SBOM artifact must have 90-day retention for audit compliance.\n\
+         Shorter retention risks losing supply-chain metadata before audits complete."
+    );
+}
+
+#[test]
+fn test_sbom_job_upload_runs_on_success() {
+    // Validates that the SBOM upload step uses `if: success()` so that an
+    // empty or invalid sbom.cdx.json is not uploaded when generation fails.
+    // Unlike the coverage job (which always uploads for debugging), the SBOM
+    // artifact should only be uploaded when generation succeeds.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    // The SBOM job should have an upload step with if: success()
+    // We verify this by checking that within the sbom job context,
+    // the upload-artifact action is preceded by an `if: success()` condition.
+    let sbom_section: String = ci_content
+        .lines()
+        .skip_while(|line| !line.starts_with("  sbom:"))
+        .take_while(|line| {
+            line.starts_with("  sbom:")
+                || line.starts_with("    ")
+                || line.trim().is_empty()
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    assert!(
+        !sbom_section.is_empty(),
+        "Could not find 'sbom:' job section in ci.yml"
+    );
+
+    assert!(
+        sbom_section.contains("if: success()"),
+        "SBOM upload step must use 'if: success()' to avoid uploading an \
+         empty or invalid SBOM artifact when generation fails.\n\
+         Unlike the coverage upload (which uses 'if: always()' for debugging), \
+         the SBOM should only be uploaded on successful generation."
+    );
+}
+
+#[test]
+fn test_sbom_job_installs_cargo_sbom() {
+    // Validates that the SBOM job installs cargo-sbom via taiki-e/install-action,
+    // consistent with how other tools (cargo-nextest, cargo-llvm-cov) are installed.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    let sbom_section: String = ci_content
+        .lines()
+        .skip_while(|line| !line.starts_with("  sbom:"))
+        .take_while(|line| {
+            line.starts_with("  sbom:")
+                || line.starts_with("    ")
+                || line.trim().is_empty()
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    assert!(
+        sbom_section.contains("tool: cargo-sbom"),
+        "SBOM job must install cargo-sbom via taiki-e/install-action.\n\
+         Expected: tool: cargo-sbom\n\
+         This is consistent with how cargo-nextest and cargo-llvm-cov are installed."
+    );
+}
+
+#[test]
+fn test_sbom_job_has_reasonable_timeout() {
+    // SBOM generation only reads Cargo.lock/Cargo.toml metadata and should
+    // complete quickly. A 10-minute timeout is generous but prevents hangs.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    let sbom_section: String = ci_content
+        .lines()
+        .skip_while(|line| !line.starts_with("  sbom:"))
+        .take_while(|line| {
+            line.starts_with("  sbom:")
+                || line.starts_with("    ")
+                || line.trim().is_empty()
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    assert!(
+        sbom_section.contains("timeout-minutes: 10"),
+        "SBOM job should have a 10-minute timeout.\n\
+         SBOM generation is metadata-only and should complete in under a minute.\n\
+         A 10-minute budget provides margin without wasting CI resources on hangs."
+    );
+}
+
+#[test]
+fn test_release_workflow_generates_sbom() {
+    // Validates that the release workflow generates an SBOM and attaches it
+    // to the GitHub release, providing supply-chain metadata with every release.
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    assert!(
+        content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
+        "release.yml must generate a CycloneDX v1.5 JSON SBOM.\n\
+         This provides supply-chain provenance metadata with every release.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    assert!(
+        content.contains("tool: cargo-sbom"),
+        "release.yml must install cargo-sbom for SBOM generation.\n\
+         File: {}",
+        release_yml.display()
+    );
+}
+
+#[test]
+fn test_release_workflow_attaches_sbom_to_release() {
+    // Validates that the SBOM file is included in the GitHub release assets.
+    // This ensures consumers can download the SBOM alongside the release.
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // The action-gh-release `files:` field should include the SBOM
+    assert!(
+        content.contains("files: sbom.cdx.json"),
+        "release.yml must attach sbom.cdx.json to the GitHub release.\n\
+         Add 'files: sbom.cdx.json' to the softprops/action-gh-release step.\n\
+         This allows release consumers to download the SBOM for audit purposes.\n\
+         File: {}",
+        release_yml.display()
+    );
+}
+
+#[test]
+fn test_release_sbom_has_continue_on_error() {
+    // Regression guard: the SBOM generation step in the release workflow MUST
+    // have `continue-on-error: true`. Without this, a transient cargo-sbom
+    // failure would block the entire release AFTER the crate has already been
+    // published to crates.io, leaving a published crate without a corresponding
+    // GitHub Release. SBOM is supply-chain metadata — important but never worth
+    // blocking a release that has already been published.
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // Extract the SBOM generation step block. We look for the step name and
+    // then verify that `continue-on-error: true` appears within the same
+    // step (before the next `- name:` line).
+    let lines: Vec<&str> = content.lines().collect();
+    let sbom_step_start = lines
+        .iter()
+        .position(|line| line.contains("name: Generate SBOM"));
+
+    assert!(
+        sbom_step_start.is_some(),
+        "release.yml must have a step named 'Generate SBOM'.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    let start = sbom_step_start.expect("checked above");
+    let sbom_step_block: String = lines[start..]
+        .iter()
+        .take(1) // take the name line
+        .chain(
+            lines[start + 1..]
+                .iter()
+                .take_while(|line| !line.trim().starts_with("- name:")),
+        )
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    assert!(
+        sbom_step_block.contains("continue-on-error: true"),
+        "The 'Generate SBOM (CycloneDX)' step in release.yml MUST have \
+         `continue-on-error: true`.\n\
+         Without this, a transient SBOM generation failure would block the \
+         GitHub Release after the crate has already been published to crates.io.\n\
+         SBOM failure must not block releases after crates.io publish.\n\
+         Step block:\n{}\n\
+         File: {}",
+        sbom_step_block,
+        release_yml.display()
+    );
+}
+
+// ============================================================================
+// CI Runtime/Flake Optimization Tests (Ticket J)
+// ============================================================================
+
+#[test]
+fn test_nextest_config_exists_and_is_valid() {
+    // Validates that .config/nextest.toml exists and contains essential settings
+    // for optimized test execution. Without this file, nextest uses defaults
+    // that may not be tuned for CI performance.
+
+    let root = repo_root();
+    let nextest_config = root.join(".config/nextest.toml");
+
+    assert!(
+        nextest_config.exists(),
+        "Nextest configuration file .config/nextest.toml is missing.\n\
+         This file configures optimized test execution for cargo-nextest.\n\
+         Create it with at minimum a [profile.default] section.\n\
+         See: https://nexte.st/docs/configuration/"
+    );
+
+    let content = read_file(&nextest_config);
+
+    // Must have a default profile
+    assert!(
+        content.contains("[profile.default]"),
+        ".config/nextest.toml must contain a [profile.default] section.\n\
+         This section configures the baseline test execution settings.\n\
+         File: {}",
+        nextest_config.display()
+    );
+
+    // Must configure fail-fast for quick feedback
+    assert!(
+        content.contains("fail-fast"),
+        ".config/nextest.toml should configure fail-fast behavior.\n\
+         Recommended: fail-fast = true (for fast CI feedback)\n\
+         File: {}",
+        nextest_config.display()
+    );
+
+    // Must configure failure output for reduced log noise
+    assert!(
+        content.contains("failure-output"),
+        ".config/nextest.toml should configure failure-output.\n\
+         Recommended: failure-output = \"immediate-final\"\n\
+         File: {}",
+        nextest_config.display()
+    );
+}
+
+#[test]
+fn test_nextest_config_no_retries_by_default() {
+    // Project policy: zero tolerance for flaky tests (see .llm/context.md).
+    // The nextest config must NOT enable blanket retries, which would mask
+    // real test failures as flakes.
+
+    let root = repo_root();
+    let nextest_config = root.join(".config/nextest.toml");
+
+    if !nextest_config.exists() {
+        // test_nextest_config_exists_and_is_valid will catch this
+        return;
+    }
+
+    let content = read_file(&nextest_config);
+
+    // Check that there are no retries enabled in the default profile.
+    // Look for patterns like "retries = 3" or "retries = { count = 3 }" but NOT
+    // "retries" appearing in a comment explaining why retries are disabled.
+    // We do this by checking non-comment lines only.
+    let has_nonzero_retries = content.lines().any(|line| {
+        let trimmed = line.trim();
+        // Skip comments
+        if trimmed.starts_with('#') {
+            return false;
+        }
+        // Check for retries with a non-zero value
+        if trimmed.starts_with("retries") {
+            // "retries = 0" is fine (explicitly disabled)
+            // "retries = { count = 0 }" is fine
+            // Any other retries value is suspicious
+            return !trimmed.contains("= 0")
+                && !trimmed.contains("count = 0")
+                && !trimmed.contains("total = 0");
+        }
+        false
+    });
+
+    assert!(
+        !has_nonzero_retries,
+        ".config/nextest.toml must not enable blanket test retries.\n\
+         Project policy: Zero tolerance for flaky tests — every failure is a real bug.\n\
+         If specific tests need retries, use [[profile.default.overrides]] with a \n\
+         targeted filter instead of blanket retries.\n\
+         File: {}",
+        nextest_config.display()
+    );
+}
+
+#[test]
+fn test_ci_safety_shared_nightly_cache_prefix() {
+    // The Miri and ASan jobs in ci-safety.yml should share a cache prefix so
+    // that compiled nightly artifacts can be reused between the two jobs,
+    // reducing redundant compilation.
+
+    let root = repo_root();
+    let ci_safety = root.join(".github/workflows/ci-safety.yml");
+
+    if !ci_safety.exists() {
+        return;
+    }
+
+    let content = read_file(&ci_safety);
+
+    // Both jobs should use the same cache prefix
+    let cache_prefix_lines: Vec<&str> = content
+        .lines()
+        .filter(|line| line.contains("prefix-key:"))
+        .collect();
+
+    assert!(
+        !cache_prefix_lines.is_empty(),
+        "ci-safety.yml should have cache prefix-key configurations.\n\
+         File: {}",
+        ci_safety.display()
+    );
+
+    // All prefix-key values should be the same (shared cache)
+    let unique_prefixes: std::collections::HashSet<String> = cache_prefix_lines
+        .iter()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches("prefix-key:")
+                .trim()
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect();
+
+    assert_eq!(
+        unique_prefixes.len(),
+        1,
+        "ci-safety.yml Miri and ASan jobs should share the same cache prefix-key \
+         to allow nightly artifact reuse between jobs.\n\
+         Found different prefixes: {:?}\n\
+         Expected: All jobs use the same prefix (e.g., \"ci-safety-nightly\")\n\
+         File: {}",
+        unique_prefixes,
+        ci_safety.display()
+    );
+}
+
+#[test]
+fn test_msrv_job_uses_single_verification_step() {
+    // The MSRV job should combine build verification and test execution in a
+    // single step to avoid redundant compilation. `cargo test` implicitly
+    // compiles all targets, making a separate `cargo check` unnecessary.
+
+    let root = repo_root();
+    let ci_yml = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_yml);
+
+    // Extract the MSRV job block
+    let lines: Vec<&str> = content.lines().collect();
+    let msrv_start = lines.iter().position(|line| line.starts_with("  msrv:"));
+
+    assert!(
+        msrv_start.is_some(),
+        "ci.yml must have an msrv job.\nFile: {}",
+        ci_yml.display()
+    );
+
+    let start = msrv_start.expect("checked above");
+    let msrv_block: String = lines[start..]
+        .iter()
+        .skip(1)
+        // Capture lines belonging to this job block. A job block consists of
+        // 4+-space-indented lines (job properties and steps) and blank lines.
+        // Stop when we hit a line at 2-space indentation that is NOT a sub-key
+        // (i.e., the start of the next top-level job definition).
+        .take_while(|line| {
+            !line.starts_with("  ") || line.starts_with("    ") || line.trim().is_empty()
+        })
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    // Should NOT have separate cargo check and cargo test steps
+    let has_cargo_check = msrv_block.contains("cargo check");
+    let has_cargo_test = msrv_block.contains("cargo test");
+
+    assert!(
+        !has_cargo_check,
+        "MSRV job should not have a separate 'cargo check' step.\n\
+         'cargo test' implicitly compiles all targets, making 'cargo check' redundant.\n\
+         Combine into a single step to save ~2-3 minutes of redundant compilation.\n\
+         File: {}",
+        ci_yml.display()
+    );
+
+    assert!(
+        has_cargo_test,
+        "MSRV job must run 'cargo test' to verify tests pass with MSRV.\n\
+         File: {}",
+        ci_yml.display()
+    );
+}
+
+#[test]
+fn test_docker_health_check_uses_exponential_backoff() {
+    // The Docker smoke test should use exponential backoff rather than fixed-
+    // interval retries. This provides faster feedback when the server starts
+    // quickly and reduces unnecessary waiting.
+
+    let root = repo_root();
+    let ci_yml = root.join(".github/workflows/ci.yml");
+    let content = read_file(&ci_yml);
+
+    // The Docker smoke test step should have exponential backoff logic
+    assert!(
+        content.contains("DELAY=$((DELAY * 2") || content.contains("DELAY=$((DELAY*2"),
+        "Docker smoke test health check should use exponential backoff.\n\
+         Replace fixed 'sleep 2' retry loop with exponential backoff pattern:\n\
+         DELAY=1; DELAY=$((DELAY * 2)); [ $DELAY -gt 8 ] && DELAY=8\n\
+         File: {}",
+        ci_yml.display()
+    );
+}
+
+#[test]
+fn test_release_sccache_failure_emits_warning() {
+    // When sccache fails in the release workflow, the fallback should emit a
+    // GitHub Actions warning annotation so the failure is visible in the PR/run
+    // summary, rather than silently degrading to uncached compilation.
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // Verify the ::warning:: annotation is in the sccache fallback step specifically,
+    // not just anywhere in the file. Look for it after the sccache check condition.
+    let lines: Vec<&str> = content.lines().collect();
+    let sccache_fallback_start = lines
+        .iter()
+        .position(|line| line.contains("Clear sccache env on failure"));
+
+    assert!(
+        sccache_fallback_start.is_some(),
+        "release.yml must have a 'Clear sccache env on failure' step.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    let start = sccache_fallback_start.expect("checked above");
+    let fallback_block: String = lines[start..]
+        .iter()
+        .take(1)
+        .chain(
+            lines[start + 1..]
+                .iter()
+                .take_while(|line| !line.trim().starts_with("- name:")),
+        )
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    assert!(
+        fallback_block.contains("::warning::"),
+        "The sccache fallback step in release.yml must emit a GitHub Actions \
+         warning annotation (::warning::) when sccache is unavailable.\n\
+         This makes sccache failures visible in the workflow run summary.\n\
+         Step block:\n{}\n\
+         File: {}",
+        fallback_block,
+        release_yml.display()
+    );
 }

@@ -1,0 +1,170 @@
+# Advanced Safety Workflow
+#
+# Advanced safety analysis using Miri and AddressSanitizer to detect undefined
+# behavior, memory errors, and other safety violations that standard tests and
+# lints cannot catch.
+#
+# Runs on:
+#   - Push to main branch
+#   - Pull requests to main
+#   - Weekly schedule (Sunday at 02:00 UTC) for heavy analysis jobs
+#   - Manual workflow_dispatch for diagnostics and debugging
+#
+# Staged / Non-Required Status:
+#   Both jobs use continue-on-error: true and are NOT branch-protection required
+#   checks. They produce actionable diagnostics (uploaded as artifacts) but do
+#   not block merges until promoted. This lets us observe failure patterns and
+#   toolchain stability before gating PRs on these heavyweight analyses.
+#
+# Jobs:
+#   - miri: Interprets test code to detect undefined behavior (UB), uninitialised
+#     reads, data races, and other safety violations unreachable by native tests
+#   - asan: Runs the full test suite under AddressSanitizer to detect memory
+#     errors such as use-after-free, buffer overflows, and memory leaks
+#
+# Nightly Toolchain Strategy:
+#   Miri and AddressSanitizer require nightly Rust because they depend on
+#   unstable compiler internals and runtime instrumentation that are not
+#   available on the stable channel.
+#
+#   Nightly Version: nightly-2026-01-15
+#   Last Updated: 2026-02-16
+#
+#   Update Criteria (when to update this nightly version):
+#     - If the nightly version is >6 months old
+#     - If security advisories affect this version
+#     - If Miri or sanitizer support requires newer nightly features
+#     - If the nightly version becomes unavailable or broken
+#
+#   Why We Pin Nightly (instead of using rolling "nightly"):
+#     - Reproducibility: Same nightly = consistent CI results over time
+#     - Stability: Prevents sudden breakage from nightly compiler changes
+#     - Predictability: We control when nightly updates happen
+#
+#   Trade-offs:
+#     - Pinned nightly becomes stale over time (requires periodic updates)
+#     - Rolling "nightly" always has latest features but may break unexpectedly
+#     - For CI-only tools like Miri and sanitizers, pinning is preferred for stability
+#
+#   Policy:
+#     - Production code MUST use stable MSRV (see Cargo.toml rust-version)
+#     - CI-only analysis tools MAY use nightly if required by the tool
+#     - Nightly is NEVER used for building production artifacts
+#
+#   See also: .llm/skills/msrv-and-toolchain-management.md (Nightly-Only CI Tools section)
+#
+# Promotion Criteria:
+#   These staged checks should be promoted to required branch-protection checks when:
+#     - Failure rate < 2% over a 2-4 week observation window
+#     - No nightly toolchain incidents (breakage, unavailability) during that window
+#     - Median runtime stays within the timeout budget (45 min Miri, 30 min ASan)
+#   Until promotion, failures are informational and should be triaged weekly.
+
+name: Advanced Safety
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly on Sunday at 02:00 UTC — heavy analysis jobs
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    # Manual trigger for diagnostics and debugging
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    # Miri interprets code rather than compiling it natively, which is
+    # significantly slower — 10-50x depending on the test suite size.
+    timeout-minutes: 45
+    # Staged: non-blocking until promoted to a required check
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust nightly toolchain with Miri
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: nightly-2026-01-15
+          components: miri, rust-src
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        with:
+          prefix-key: "ci-safety-nightly"
+
+      - name: Setup Miri
+        run: cargo +nightly-2026-01-15 miri setup
+
+      - name: Run Miri on library tests
+        run: |
+          set -euo pipefail
+          echo "Running Miri on library unit tests..."
+          echo "Note: Integration tests are excluded because they use networking,"
+          echo "async runtimes, and OS-level I/O that Miri cannot interpret."
+          cargo +nightly-2026-01-15 miri test --lib --no-fail-fast 2>&1 | tee miri-output.txt
+          echo "Miri analysis complete."
+
+      - name: Upload Miri output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: miri-output
+          path: miri-output.txt
+          retention-days: 14
+
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Staged: non-blocking until promoted to a required check
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: nightly-2026-01-15
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        with:
+          prefix-key: "ci-safety-nightly"
+
+      - name: Run tests with AddressSanitizer
+        run: |
+          set -euo pipefail
+          echo "Running tests with AddressSanitizer enabled..."
+          echo "AddressSanitizer detects memory errors: use-after-free, buffer overflow,"
+          echo "stack buffer overflow, and memory leaks."
+          RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly-2026-01-15 test --target x86_64-unknown-linux-gnu \
+            --all-features --no-fail-fast 2>&1 | tee asan-output.txt
+          echo "AddressSanitizer analysis complete."
+        env:
+          # AddressSanitizer needs these environment variables
+          ASAN_OPTIONS: "detect_odr_violation=0"
+
+      - name: Upload AddressSanitizer output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: asan-output
+          path: asan-output.txt
+          retention-days: 14
