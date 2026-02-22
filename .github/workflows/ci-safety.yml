@@ -17,7 +17,7 @@
 #   toolchain stability before gating PRs on these heavyweight analyses.
 #
 # Jobs:
-#   - miri: Interprets test code to detect undefined behavior (UB), uninitialised
+#   - miri: Interprets test code to detect undefined behavior (UB), uninitialized
 #     reads, data races, and other safety violations unreachable by native tests
 #   - asan: Runs the full test suite under AddressSanitizer to detect memory
 #     errors such as use-after-free, buffer overflows, and memory leaks

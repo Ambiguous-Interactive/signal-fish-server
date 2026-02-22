@@ -79,7 +79,7 @@ pub fn load() -> Config {
         }
     };
 
-    // Security validation for sensitive fields — intentional warn-only behaviour;
+    // Security validation for sensitive fields — intentional warn-only behavior;
     // main.rs calls validate_config_security() again and propagates errors properly.
     if let Err(e) = validate_config_security(&config) {
         eprintln!("Configuration validation error: {e}");

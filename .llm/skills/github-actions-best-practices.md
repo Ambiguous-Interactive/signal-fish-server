@@ -2029,6 +2029,67 @@ jobs:
 5. **Test scheduled logic** - Ensure workflow behaves correctly for cron triggers
 6. **Stagger schedules** - Don't run everything at midnight UTC (spread load)
 7. **Configure notifications** - Alert on failures for scheduled runs
+8. **Guard non-scheduled jobs** - Add `if:` guards to jobs that should not
+   run on schedule (see below)
+
+### Job-Level `if:` Guards for Schedule Triggers
+
+**The Problem:** Adding a `schedule` trigger to a workflow causes ALL jobs
+in that workflow to run on the cron schedule, not just the intended one.
+
+```yaml
+# ci.yml with schedule trigger:
+on:
+  push:
+    branches: [main]
+  schedule:
+
+    - cron: '0 12 * * *'  # Daily security audit
+
+jobs:
+  deny:    # <-- This is the only job we want on schedule
+    ...
+  lint:    # <-- This will ALSO run on schedule without a guard!
+    ...
+  nextest: # <-- This too!
+    ...
+
+```
+
+**The Solution:** Add `if: github.event_name != 'schedule'` to every job
+that should NOT run on schedule. Only the intended job (e.g., `deny`)
+should omit this guard.
+
+```yaml
+jobs:
+  deny:
+    name: Dependency Audit
+    # No `if:` guard — this job runs on ALL triggers including schedule
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<SHA>
+      - uses: EmbarkStudios/cargo-deny-action@<SHA>
+
+  lint:
+    name: Lint
+    if: github.event_name != 'schedule'  # Skip on daily cron
+    runs-on: ubuntu-latest
+    ...
+
+  nextest:
+    name: Tests
+    if: github.event_name != 'schedule'  # Skip on daily cron
+    runs-on: ubuntu-latest
+    ...
+
+```
+
+**Validated By:** The test `test_ci_schedule_only_runs_audit` in
+`tests/ci_config_tests.rs` ensures:
+
+1. Every non-audit job in `ci.yml` has an `if:` condition that excludes
+   `schedule` events
+2. The `deny` job does NOT have a schedule exclusion (so it runs daily)
 
 ### Testing Scheduled Workflow Logic
 
@@ -2152,6 +2213,90 @@ with `stable` avoids toolchain installation failures in Docker containers.
 
 ---
 
+## 19. Release Gating with Path-Filtered Workflows
+
+### The Problem: Path-Filtered Workflows May Not Run on Every Commit
+
+When a required workflow uses `paths:` filters, it only runs when the commit
+touches files matching those patterns. A release preflight gate that checks for
+successful runs of all required workflows will fail if a path-filtered workflow
+was legitimately skipped because the commit did not touch relevant paths.
+
+```yaml
+# doc-validation.yml only runs when documentation changes:
+on:
+  pull_request:
+    paths:
+
+      - '**/*.md'
+      - '**/*.rs'
+      - '.github/workflows/doc-validation.yml'
+
+```
+
+If a release commit only changes `Cargo.toml`, the Documentation Validation
+workflow will not run. A naive preflight check would see "no completed run"
+and block the release.
+
+### The Solution: Register Path-Filtered Workflows in the Preflight Gate
+
+The release workflow declares a `PATH_FILTERED_WORKFLOWS` associative array
+that maps workflow names to their path patterns. When no completed run is found
+for a workflow in this list, the preflight job checks whether the commit
+actually touched any matching paths before treating the absence as an error.
+
+From `.github/workflows/release.yml`:
+
+```bash
+# Declare path-filtered workflows and their trigger patterns.
+# Keep in sync with the `paths:` block in each workflow file.
+declare -A PATH_FILTERED_WORKFLOWS
+PATH_FILTERED_WORKFLOWS["Documentation Validation"]=\
+  "*.md *.rs Cargo.toml Cargo.lock .github/workflows/doc-validation.yml .github/scripts/"
+
+# When no completed run is found for a workflow:
+if [[ -v "PATH_FILTERED_WORKFLOWS[$WORKFLOW_NAME]" ]]; then
+  # Check if the commit touched any of the workflow's path filters
+  CHANGED_FILES=$(gh api "repos/${REPO}/commits/${COMMIT_SHA}" \
+    --jq '.files[].filename')
+
+  PATHS_MATCH=0
+  for pattern in ${PATH_FILTERED_WORKFLOWS[$WORKFLOW_NAME]}; do
+    # ... match changed files against patterns ...
+  done
+
+  if [ "$PATHS_MATCH" -eq 0 ]; then
+    echo "OK: commit did not touch relevant paths"
+  else
+    echo "ERROR: should have triggered this workflow"
+    FAILED=1
+  fi
+fi
+
+```
+
+### Adding a New Path-Filtered Required Workflow
+
+When adding a new workflow with `paths:` filters to the required list:
+
+1. Add the workflow name and its path patterns to `PATH_FILTERED_WORKFLOWS`
+   in `release.yml`
+2. Keep the patterns in sync with the `paths:` block in the workflow file
+3. Add the workflow to `REQUIRED_WORKFLOW_NAMES` in `tests/ci_config_tests.rs`
+
+### Validated By
+
+The test `test_release_workflow_handles_path_filtered_workflows` in
+`tests/ci_config_tests.rs` validates that:
+
+1. `release.yml` declares a `PATH_FILTERED_WORKFLOWS` associative array
+2. Every workflow in `REQUIRED_WORKFLOW_NAMES` that has `paths:` filters
+   appears in `PATH_FILTERED_WORKFLOWS`
+3. The preflight logic checks changed files before treating a missing run
+   as an error
+
+---
+
 ## Agent Checklist
 
 ### AWK Best Practices
@@ -2188,6 +2333,9 @@ with `stable` avoids toolchain installation failures in Docker containers.
 - [ ] Scheduled workflows have clear comments explaining frequency choice
 - [ ] Docker-based actions that only inspect metadata use `RUSTUP_TOOLCHAIN: stable` env override
 - [ ] Workflow YAML files use 2-space indentation (matching `.yamllint.yml`)
+- [ ] Path-filtered required workflows registered in release preflight `PATH_FILTERED_WORKFLOWS`
+- [ ] Schedule-triggered workflows have job-level `if:` guards for non-audit jobs
+- [ ] All text uses American English spellings (see [documentation-standards](./documentation-standards.md))
 
 ---
 

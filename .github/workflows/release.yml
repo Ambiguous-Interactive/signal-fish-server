@@ -59,6 +59,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Verify required CI checks passed
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -67,11 +68,29 @@ jobs:
           # github.sha resolves to the underlying commit for both tag pushes
           # and workflow_dispatch events
           COMMIT_SHA="${{ github.sha }}"
+          REPO="${{ github.repository }}"
           echo "Verifying CI status for commit: $COMMIT_SHA"
 
           # Required workflow runs that must have completed successfully.
           # These correspond to the REQUIRED_WORKFLOW_NAMES in tests/ci_config_tests.rs.
           REQUIRED_WORKFLOWS=("CI" "Documentation Validation")
+
+          # Path-filtered workflows and their trigger paths.
+          # These workflows only run when specific files change. If a commit
+          # does not touch any of the listed paths, the workflow is legitimately
+          # skipped and should not block the release.
+          #
+          # NOTE: The path patterns below are simplified equivalents for shell
+          # pattern matching, not literal copies of GitHub Actions glob syntax.
+          # For example, GitHub's "**/*.md" becomes "*.md" here because the
+          # shell case/[[ matching handles it differently.
+          #
+          # The path patterns here must match the `paths:` filters in the
+          # corresponding workflow file. Keep in sync with the `paths:` block
+          # in doc-validation.yml and with REQUIRED_DOC_PATHS in
+          # tests/ci_config_tests.rs.
+          declare -A PATH_FILTERED_WORKFLOWS
+          PATH_FILTERED_WORKFLOWS["Documentation Validation"]="*.md *.rs Cargo.toml Cargo.lock .github/workflows/doc-validation.yml .github/scripts/"
 
           FAILED=0
           for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do
@@ -79,7 +98,7 @@ jobs:
             echo "Checking workflow: $WORKFLOW_NAME"
 
             WORKFLOW_ID=$(gh api \
-              "repos/${{ github.repository }}/actions/workflows" \
+              "repos/${REPO}/actions/workflows" \
               --jq ".workflows[] | select(.name == \"${WORKFLOW_NAME}\") | .id" \
             )
 
@@ -91,14 +110,92 @@ jobs:
 
             # Get the most recent completed run for this workflow on the commit's branch
             CONCLUSION=$(gh api \
-              "repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?head_sha=${COMMIT_SHA}&status=completed&per_page=1" \
+              "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?head_sha=${COMMIT_SHA}&status=completed&per_page=1" \
               --jq '.workflow_runs[0].conclusion // empty' \
             )
 
             if [ -z "$CONCLUSION" ]; then
-              echo "ERROR: No completed run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}"
-              echo "  Ensure CI has run and completed on this commit before releasing."
-              FAILED=1
+              # No completed run found. For path-filtered workflows this may be
+              # legitimate — the commit may not have touched any of the paths
+              # that trigger the workflow.
+              if [[ -v "PATH_FILTERED_WORKFLOWS[$WORKFLOW_NAME]" ]]; then
+                echo "  No completed run found. Checking if commit touched relevant paths..."
+
+                # Get list of files changed in this commit
+                CHANGED_FILES=$(gh api "repos/${REPO}/commits/${COMMIT_SHA}" \
+                  --jq '.files[].filename' 2>/dev/null || echo "")
+
+                if [ -z "$CHANGED_FILES" ]; then
+                  echo "  WARNING: Could not retrieve changed files for commit ${COMMIT_SHA}"
+                  echo "  Treating path-filtered workflow as skipped (no files to match)."
+                  echo "WARNING: '${WORKFLOW_NAME}' assumed skipped (could not retrieve changed files)"
+                  continue
+                fi
+
+                # Check if any changed file matches the workflow's path filters
+                PATHS_MATCH=0
+                for pattern in ${PATH_FILTERED_WORKFLOWS[$WORKFLOW_NAME]}; do
+                  while IFS= read -r changed_file; do
+                    [ -z "$changed_file" ] && continue
+                    case "$pattern" in
+                      # Glob patterns with leading ** (e.g., "*.md" matches any .md file)
+                      *\*.md)
+                        if [[ "$changed_file" == *.md ]]; then
+                          PATHS_MATCH=1
+                          echo "  Matched: $changed_file (pattern: $pattern)"
+                        fi
+                        ;;
+                      *\*.rs)
+                        if [[ "$changed_file" == *.rs ]]; then
+                          PATHS_MATCH=1
+                          echo "  Matched: $changed_file (pattern: $pattern)"
+                        fi
+                        ;;
+                      # Exact file match for known filenames — listed explicitly
+                      # for clarity, even though the *) catch-all also does exact
+                      # matching. Separating them documents that these patterns
+                      # use a different matching strategy (literal equality) than
+                      # the extension/directory cases above.
+                      Cargo.toml|Cargo.lock)
+                        if [ "$changed_file" = "$pattern" ]; then
+                          PATHS_MATCH=1
+                          echo "  Matched: $changed_file (pattern: $pattern)"
+                        fi
+                        ;;
+                      # Directory prefix match (e.g., ".github/scripts/")
+                      */)
+                        if [[ "$changed_file" == ${pattern}* ]]; then
+                          PATHS_MATCH=1
+                          echo "  Matched: $changed_file (pattern: $pattern)"
+                        fi
+                        ;;
+                      # Exact file match for anything else
+                      *)
+                        if [ "$changed_file" = "$pattern" ]; then
+                          PATHS_MATCH=1
+                          echo "  Matched: $changed_file (pattern: $pattern)"
+                        fi
+                        ;;
+                    esac
+                    # Break early once we find a match
+                    [ "$PATHS_MATCH" -eq 1 ] && break
+                  done <<< "$CHANGED_FILES"
+                  [ "$PATHS_MATCH" -eq 1 ] && break
+                done
+
+                if [ "$PATHS_MATCH" -eq 0 ]; then
+                  echo "OK: '${WORKFLOW_NAME}' was not triggered (commit did not touch relevant paths)"
+                else
+                  echo "ERROR: No completed run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}"
+                  echo "  The commit touched files that should have triggered this workflow."
+                  echo "  Ensure CI has run and completed on this commit before releasing."
+                  FAILED=1
+                fi
+              else
+                echo "ERROR: No completed run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}"
+                echo "  Ensure CI has run and completed on this commit before releasing."
+                FAILED=1
+              fi
             elif [ "$CONCLUSION" != "success" ]; then
               echo "ERROR: '${WORKFLOW_NAME}' conclusion is '${CONCLUSION}' (expected 'success')"
               echo "  Fix the failing checks before releasing."

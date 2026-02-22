@@ -277,6 +277,49 @@ websocket = "websocket"
 
 ---
 
+## Spelling Consistency: American English
+
+This project uses **American English** consistently across all source
+files, CI workflows, and documentation. Do not use British English
+spellings.
+
+### Common British vs American Pairs
+
+| British (do NOT use) | American (use this) |
+|----------------------|---------------------|
+| behaviour            | behavior            |
+| colour               | color               |
+| favour               | favor               |
+| honour               | honor               |
+| initialise           | initialize          |
+| organise             | organize            |
+| recognise            | recognize           |
+| serialise            | serialize           |
+| uninitialised        | uninitialized       |
+
+### Enforcement
+
+Two layers enforce this standard:
+
+1. **`.typos.toml`** - The typos spell checker automatically catches
+   British spellings and suggests the American equivalent. The
+   `[default.extend-words]` section maps British forms to American
+   forms (e.g., `behaviour = "behavior"`).
+
+2. **`test_no_british_english_spellings`** in `tests/ci_config_tests.rs` -
+   Scans all `.rs`, `.yml`, and `.md` files for common British spellings
+   and fails with the file path, line number, and suggested replacement.
+
+### Exclusions
+
+- Lines containing URLs (`http://`, `https://`) are excluded from the
+  spelling scan because they may reference external content with British
+  spellings that cannot be changed.
+- The test file itself (`ci_config_tests.rs`) is excluded because it
+  contains British spellings as test data.
+
+---
+
 ## Documentation Checklist
 
 After every feature/bugfix:
@@ -290,3 +333,4 @@ After every feature/bugfix:
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)
 - [ ] All code blocks have language identifiers
 - [ ] Technical terms added to `.typos.toml` if needed
+- [ ] All text uses American English spellings (not British)

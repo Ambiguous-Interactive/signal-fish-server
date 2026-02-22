@@ -53,6 +53,40 @@ fn extract_yaml_version(content: &str, field: &str) -> Option<String> {
     None
 }
 
+/// Extract the `if:` condition of a job from workflow YAML content.
+///
+/// Searches for a job key at 2-space indentation (`  job_key:`) and then
+/// looks for the `if:` field at 4-space indentation within that job block.
+/// Returns `None` if the job or its `if:` field is not found.
+fn extract_job_if_condition(content: &str, job_key: &str) -> Option<String> {
+    let job_header = format!("  {job_key}:");
+    let mut in_target_job = false;
+
+    for line in content.lines() {
+        if line.starts_with(&job_header) {
+            in_target_job = true;
+            continue;
+        }
+
+        if in_target_job {
+            let trimmed = line.trim();
+
+            // If we hit another job definition (2-space indent, not a sub-key),
+            // we've left the target job block
+            if line.starts_with("  ") && !line.starts_with("    ") && !trimmed.is_empty() {
+                return None;
+            }
+
+            // Look for "    if: <condition>" within the job block
+            if let Some(rest) = line.strip_prefix("    if:") {
+                return Some(rest.trim().to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Extract the display name of a job from workflow YAML content.
 ///
 /// Searches for a job key at 2-space indentation (`  job_key:`) and then
@@ -3010,7 +3044,7 @@ fn test_no_actual_placeholder_urls_in_docs() {
 
     // Compile regexes once before the loops for performance.
     // Patterns that fail to compile (e.g., those using unsupported lookahead syntax) are
-    // skipped, preserving the original behaviour of the per-line `if let Ok(regex)` guard.
+    // skipped, preserving the original behavior of the per-line `if let Ok(regex)` guard.
     let compiled_suspicious: Vec<(regex::Regex, &str, &str)> = suspicious_patterns
         .iter()
         .filter_map(|(pattern, description)| {
@@ -5500,6 +5534,99 @@ fn test_release_workflow_requires_preflight() {
 }
 
 #[test]
+fn test_release_workflow_handles_path_filtered_workflows() {
+    // This test validates that the release workflow's preflight job handles
+    // path-filtered workflows (like Documentation Validation) that may be
+    // legitimately skipped when the commit does not touch relevant paths.
+    //
+    // Without this handling, releases would be blocked whenever the release
+    // commit did not touch documentation paths, because the preflight job
+    // would find no completed run for "Documentation Validation" and treat
+    // that as an error.
+    //
+    // Checks:
+    //   1. The release.yml contains a PATH_FILTERED_WORKFLOWS declaration
+    //   2. The path-filtered workflow list references each workflow that has
+    //      path filters in REQUIRED_WORKFLOW_NAMES
+    //   3. The preflight logic checks changed files when no run is found
+
+    let root = repo_root();
+    let release_yml = root.join(".github/workflows/release.yml");
+
+    if !release_yml.exists() {
+        // Release workflow is optional
+        return;
+    }
+
+    let content = read_file(&release_yml);
+
+    // Must declare the PATH_FILTERED_WORKFLOWS associative array
+    assert!(
+        content.contains("PATH_FILTERED_WORKFLOWS"),
+        "release.yml preflight job must declare PATH_FILTERED_WORKFLOWS to handle \
+         workflows that use path filters and may be legitimately skipped.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // The PATH_FILTERED_WORKFLOWS map must reference "Documentation Validation"
+    // since doc-validation.yml uses path filters.
+    assert!(
+        content.contains("PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]"),
+        "release.yml PATH_FILTERED_WORKFLOWS must include 'Documentation Validation' \
+         because doc-validation.yml uses path filters.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Verify the preflight logic checks changed files for path-filtered workflows
+    assert!(
+        content.contains("commit did not touch relevant paths"),
+        "release.yml preflight job must check whether the commit touched relevant \
+         paths before treating a missing workflow run as an error.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Verify that path-filtered workflows with matching paths still error
+    assert!(
+        content.contains("should have triggered this workflow"),
+        "release.yml preflight job must still error when a path-filtered workflow \
+         has no run but the commit DID touch relevant paths.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Cross-check: every workflow in REQUIRED_WORKFLOW_NAMES that has path
+    // filters in its workflow file should appear in PATH_FILTERED_WORKFLOWS.
+    for (workflow_file, workflow_name) in REQUIRED_WORKFLOW_NAMES {
+        let workflow_path = root.join(".github/workflows").join(workflow_file);
+        if !workflow_path.exists() {
+            continue;
+        }
+        let workflow_content = read_file(&workflow_path);
+
+        // Check if this workflow uses path filters (has a `paths:` key)
+        let has_path_filters = workflow_content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == "paths:" || trimmed.starts_with("paths:")
+        });
+
+        if has_path_filters {
+            let expected = format!("PATH_FILTERED_WORKFLOWS[\"{workflow_name}\"]");
+            assert!(
+                content.contains(&expected),
+                "Workflow '{workflow_name}' ({workflow_file}) uses path filters but is not \
+                 listed in PATH_FILTERED_WORKFLOWS in release.yml.\n\
+                 Add: {expected}=\"<path patterns>\"\n\
+                 File: {}",
+                release_yml.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn test_workflow_files_use_two_space_indentation() {
     // Validates that all workflow YAML files use 2-space indentation as required
     // by .yamllint.yml (indentation.spaces: 2). This catches files accidentally
@@ -7063,5 +7190,223 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
         security_patterns.join(", "),
         safe_values.join(", "),
         dockerfile.display()
+    );
+}
+
+/// The schedule guard condition that non-audit CI jobs must use.
+/// This ensures only the `deny` (security audit) job runs on the daily schedule trigger,
+/// preventing unnecessary CI resource consumption for scheduled runs.
+const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
+
+/// CI jobs that must be excluded from scheduled runs via an `if:` guard.
+/// The `deny` job is intentionally absent — it is the only job that should
+/// run on the daily schedule trigger (for CVE detection).
+const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
+    "lint",
+    "nextest",
+    "msrv",
+    "docker",
+    "coverage",
+    "panic-policy",
+    "sbom",
+];
+
+#[test]
+fn test_ci_schedule_only_runs_audit() {
+    // Validates that the daily scheduled trigger only runs the security audit
+    // (deny) job, and all other CI jobs are excluded from schedule runs.
+    //
+    // The ci.yml workflow has a daily cron schedule for catching new CVEs.
+    // Only the `deny` job should run on schedule — all other jobs waste CI
+    // resources when triggered by the cron schedule since they only need to
+    // run on push/PR events.
+    //
+    // This test ensures:
+    //   1. Every non-audit job has `if: github.event_name != 'schedule'`
+    //   2. The `deny` job does NOT have a schedule exclusion guard
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    // Verify the deny job does NOT have a schedule exclusion guard
+    let deny_condition = extract_job_if_condition(&ci_content, "deny");
+    if let Some(ref condition) = deny_condition {
+        assert!(
+            !condition.contains("schedule"),
+            "The `deny` job must NOT exclude schedule runs.\n\
+             Found `if: {condition}` on the deny job, which would prevent the \
+             daily security audit from running.\n\n\
+             The deny job is the ONLY job that should run on the daily schedule \
+             trigger to catch new CVEs.\n\n\
+             To fix: Remove the `if:` guard from the deny job in ci.yml."
+        );
+    }
+    // deny_condition being None is fine — no `if:` means it runs on all triggers
+
+    // Verify all non-audit jobs HAVE the schedule exclusion guard
+    let mut missing_guard = Vec::new();
+    let mut wrong_guard = Vec::new();
+
+    for job_key in SCHEDULE_EXCLUDED_CI_JOBS {
+        let condition = extract_job_if_condition(&ci_content, job_key);
+        match condition {
+            None => {
+                missing_guard.push(format!(
+                    "  x {job_key}: no `if:` guard found.\n\
+                     Expected: `if: {SCHEDULE_EXCLUSION_GUARD}`"
+                ));
+            }
+            Some(ref cond) if !cond.contains("schedule") => {
+                wrong_guard.push(format!(
+                    "  x {job_key}: has `if: {cond}` but it does not exclude schedule runs.\n\
+                     Expected the condition to include a schedule exclusion."
+                ));
+            }
+            Some(_) => {
+                // Has a condition that mentions schedule — this is correct
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    errors.extend(missing_guard);
+    errors.extend(wrong_guard);
+
+    assert!(
+        errors.is_empty(),
+        "CI jobs are missing schedule exclusion guards.\n\n\
+         The daily schedule trigger should only run the `deny` (security audit) job.\n\
+         All other jobs must have `if: {SCHEDULE_EXCLUSION_GUARD}` to avoid wasting \
+         CI resources on scheduled runs.\n\n\
+         Issues:\n{}\n\n\
+         To fix: Add `if: {SCHEDULE_EXCLUSION_GUARD}` to each listed job in ci.yml.\n\n\
+         File: {}",
+        errors.join("\n"),
+        root.join(".github/workflows/ci.yml").display()
+    );
+}
+
+/// British English spellings that should be replaced with American English equivalents.
+///
+/// Each entry is (british_pattern, american_replacement). The patterns are
+/// case-insensitive substrings so "uninitialised" also catches "Uninitialised".
+const BRITISH_AMERICAN_PAIRS: &[(&str, &str)] = &[
+    ("uninitialised", "uninitialized"),
+    ("behaviour", "behavior"),
+    ("colour", "color"),
+    ("favour", "favor"),
+    ("honour", "honor"),
+    ("initialise", "initialize"),
+    ("organise", "organize"),
+    ("recognise", "recognize"),
+    ("serialise", "serialize"),
+];
+
+/// Directories and file extensions to scan for British spelling consistency.
+///
+/// Each entry is (directory_relative_to_repo_root, file_extension).
+const SPELLING_SCAN_TARGETS: &[(&str, &str)] = &[
+    ("src", "rs"),
+    ("tests", "rs"),
+    (".github/workflows", "yml"),
+    (".llm", "md"),
+    ("docs", "md"),
+];
+
+/// Substrings that, when present on a line, indicate the line should be excluded
+/// from British spelling checks (URLs, external references, etc.).
+const SPELLING_EXCLUSION_MARKERS: &[&str] = &["http://", "https://"];
+
+/// Files that contain British spellings as reference data (e.g., comparison tables
+/// or test data). These files are excluded from the scan to avoid false positives.
+const SPELLING_EXCLUSION_FILES: &[&str] = &["ci_config_tests.rs", "documentation-standards.md"];
+
+#[test]
+fn test_no_british_english_spellings() {
+    // This project uses American English consistently. This test scans source
+    // files, CI workflows, and documentation for common British English spellings
+    // and flags them with the file path, line number, and suggested replacement.
+    //
+    // Exclusions:
+    //   - This test file itself (contains British spellings as test data)
+    //   - Lines containing URLs (may reference external content)
+    //   - Files in target/, .git/, or other vendored/generated directories
+
+    let root = repo_root();
+    let mut violations = Vec::new();
+
+    for &(dir_relative, extension) in SPELLING_SCAN_TARGETS {
+        let dir = root.join(dir_relative);
+        if !dir.exists() {
+            continue;
+        }
+
+        let files = find_files_with_extension(&dir, extension, &["target", ".git", "third_party"]);
+
+        for file_path in &files {
+            // Skip files that contain British spellings as reference data
+            // (e.g., test data, comparison tables in documentation).
+            if file_path
+                .file_name()
+                .map(|name| {
+                    let name_str = name.to_string_lossy();
+                    SPELLING_EXCLUSION_FILES
+                        .iter()
+                        .any(|excluded| name_str == *excluded)
+                })
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let relative_path = file_path
+                .strip_prefix(&root)
+                .unwrap_or(file_path)
+                .display()
+                .to_string();
+
+            for (line_number, line) in content.lines().enumerate() {
+                let line_lower = line.to_lowercase();
+
+                // Skip lines that match any exclusion marker
+                if SPELLING_EXCLUSION_MARKERS
+                    .iter()
+                    .any(|marker| line.contains(marker))
+                {
+                    continue;
+                }
+
+                for &(british_pattern, american_replacement) in BRITISH_AMERICAN_PAIRS {
+                    let british_lower = british_pattern.to_lowercase();
+                    if line_lower.contains(&british_lower) {
+                        violations.push(format!(
+                            "  {relative_path}:{line_num}: found \"{british_pattern}\" \
+                             (British) -> use \"{american_replacement}\" (American)\n\
+                             \x20   Line: {line_trimmed}",
+                            line_num = line_number + 1,
+                            line_trimmed = line.trim(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Found British English spellings that should use American English:\n\n\
+         {violations}\n\n\
+         This project uses American English consistently. Replace each British\n\
+         spelling with its American equivalent.\n\n\
+         If the spelling is inside a URL or external reference that cannot be\n\
+         changed, add an exclusion marker to SPELLING_EXCLUSION_MARKERS in\n\
+         tests/ci_config_tests.rs.\n\n\
+         See also: .typos.toml for automated spell-check rules.",
+        violations = violations.join("\n"),
     );
 }
