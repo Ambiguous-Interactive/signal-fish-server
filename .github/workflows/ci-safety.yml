@@ -117,7 +117,7 @@ jobs:
           echo "Running Miri on library unit tests..."
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
-          cargo +nightly-2026-02-01 miri test --lib --no-fail-fast 2>&1 | tee miri-output.txt
+          cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
       - name: Upload Miri output
@@ -155,7 +155,7 @@ jobs:
           echo "AddressSanitizer detects memory errors: use-after-free, buffer overflow,"
           echo "stack buffer overflow, and memory leaks."
           RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly-2026-02-01 test --target x86_64-unknown-linux-gnu \
+            cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu \
             --all-features --no-fail-fast 2>&1 | tee asan-output.txt
           echo "AddressSanitizer analysis complete."
         env:

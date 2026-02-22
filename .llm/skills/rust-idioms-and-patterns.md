@@ -269,10 +269,10 @@ let sorted_players = {
 
 ---
 
-## `#[must_use]` and `#[non_exhaustive]`
+## `#[must_use]` and Exhaustive Enums
 
 Use `#[must_use]` on Result-returning functions, guards, and important return values.
-Use `#[non_exhaustive]` on public enums and structs to allow adding variants/fields without semver breaks.
+Use explicit, exhaustive enum variants in protocol and domain types so new variants fail to compile until handled.
 
 See [api-design-guidelines](./api-design-guidelines.md) for detailed future-proofing patterns.
 
@@ -344,7 +344,7 @@ buffer = new_data.clone();  // Allocates new, drops old
 - [ ] Enums instead of booleans for function parameters
 - [ ] Builder for 3+ optional fields
 - [ ] `#[must_use]` on Result-returning functions, guards, and important values
-- [ ] `#[non_exhaustive]` on public enums and structs
+- [ ] Explicit exhaustive enum matches in protocol/domain code (no wildcard catch-all)
 - [ ] No wildcard `_` catch-all on owned enums
 - [ ] Destructure structs in trait impls to catch new fields
 - [ ] Return `impl Iterator` instead of `Vec` where possible

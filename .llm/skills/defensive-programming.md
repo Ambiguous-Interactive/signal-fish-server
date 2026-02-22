@@ -96,7 +96,7 @@ let config = ServerConfig {
 match transport {
     Transport::WebSocket => handle_ws(),
     Transport::Quic => handle_quic(),
-    _ => handle_default(),  // New transport types silently fall through
+    Transport::Tcp => handle_default(),  // New transport types are easy to miss if behavior is collapsed
 }
 
 // ✅ Explicit matching — compiler error on new variants
@@ -305,7 +305,8 @@ debug_assert!(!players.is_empty(), "expected non-empty player list");
 // ❌ Don't use unreachable!() as a substitute for proper error handling
 match user_input.parse::<u8>() {
     Ok(v) if v < 10 => process(v),
-    _ => unreachable!(),  // WRONG: user input CAN be anything
+    Ok(_) => unreachable!(),   // WRONG: user input CAN be anything
+    Err(_) => unreachable!(),  // WRONG: parsing can fail
 }
 
 ```
@@ -346,7 +347,7 @@ See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the full typesta
 - [ ] No direct indexing (`vec[i]`) without prior bounds check — use `.get()`, `.first()`, `.last()`
 - [ ] No raw `+`, `-`, `*`, `/` on user-controlled values — use `checked_`/`saturating_`
 - [ ] No `as` casts — use `TryFrom`
-- [ ] No wildcard `_` catch-all on owned enums; `#[non_exhaustive]` on public enums
+- [ ] No wildcard `_` catch-all on owned enums; use explicit exhaustive enum matches
 - [ ] Private fields with constructor validation; destructured in trait impls
 - [ ] No `..Default::default()` in production code
 - [ ] UTF-8 validation on untrusted input; no byte-index slicing without validation

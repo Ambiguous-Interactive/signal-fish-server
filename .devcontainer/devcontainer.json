@@ -150,6 +150,7 @@
                 "GitHub.copilot",
                 "GitHub.copilot-chat",
                 "anthropic.claude-code",
+                "openai.chatgpt",
                 // GitHub integration
                 "GitHub.vscode-github-actions",
                 "GitHub.vscode-pull-request-github",

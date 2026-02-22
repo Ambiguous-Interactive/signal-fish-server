@@ -346,7 +346,7 @@ jobs:
 
       - name: Generate SBOM (CycloneDX)
         id: sbom
-        run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
+        run: cargo sbom --locked --output-format cyclone_dx_json_1_5 > sbom.cdx.json
         continue-on-error: true
 
       - name: Extract changelog for release

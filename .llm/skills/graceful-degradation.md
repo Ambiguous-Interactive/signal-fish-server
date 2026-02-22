@@ -69,7 +69,8 @@ impl ServerHealth {
             r if r < 0.70 => ServiceLevel::Full,
             r if r < 0.85 => ServiceLevel::Degraded,
             r if r < 0.95 => ServiceLevel::Critical,
-            _             => ServiceLevel::Overloaded,
+            r if r >= 0.95 => ServiceLevel::Overloaded,
+            r if r.is_nan() => ServiceLevel::Overloaded,
         };
         self.level.store(level as u8, Ordering::Relaxed);
     }
@@ -251,7 +252,7 @@ async fn handle_socket(mut socket: WebSocket, mut shutdown_rx: watch::Receiver<b
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(msg)) => handle_message(msg).await,
-                _ => break,
+                Some(Err(_)) | None => break,
             },
             _ = shutdown_rx.changed() => {
                 // CloseFrame from axum::extract::ws::{CloseFrame, Message}
@@ -364,7 +365,7 @@ async fn handle_bounded_connection(
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(msg)) => handle_message(msg, &state).await,
-                _ => break,
+                Some(Err(_)) | None => break,
             },
             _ = shutdown_rx.changed() => {
                 let _ = socket.send(Message::Close(None)).await; break;

@@ -373,7 +373,7 @@ cargo clippy --all-targets --all-features
 
 **Solution:**
 
-```bash
+```text
 # Update all MSRV references
 # 1. Edit rust-toolchain.toml
 channel = "1.88.0"

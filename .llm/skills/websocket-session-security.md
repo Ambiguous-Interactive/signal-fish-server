@@ -438,7 +438,10 @@ async fn handle_signal(
             }
             state.rooms.transfer_authority(&session.player_id, to).await
         }
-        _ => Ok(()),
+        SignalingMessage::CreateRoom { room, nonce, seq } => {
+            state.nonces.check_and_consume(nonce)?;
+            state.rooms.create_room_for_player(&session.player_id, room).await
+        }
     }
 }
 

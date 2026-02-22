@@ -418,7 +418,7 @@ The `typos` tool splits identifiers on case boundaries:
 
 **Example:**
 
-```bash
+```text
 # CI error:
 # ERROR: Typo found: HashiCorp (did you mean: Hashicorp?)
 

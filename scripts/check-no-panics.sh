@@ -68,8 +68,10 @@ check_clippy() {
 #
 # Reads grep output in the format "file:line:content" and for each match,
 # checks whether the line falls within a #[cfg(test)] module in that file.
-# Since test modules are conventionally placed at the bottom of Rust source
-# files, any line at or after a #[cfg(test)] annotation is considered test code.
+# Handles both external module declarations (`mod foo;`) and inline module
+# blocks (`mod foo { ... }`) correctly. External declarations only span the
+# #[cfg(test)] and `mod foo;` lines themselves. Inline blocks are tracked
+# via brace-depth scanning so only lines within the block are excluded.
 # Also filters out lines inside #[test] functions and files under tests/.
 filter_test_code() {
     while IFS= read -r match_line; do
@@ -84,30 +86,99 @@ filter_test_code() {
             *_tests.rs|*_test.rs) continue ;;
         esac
 
-        # Find the line number where a #[cfg(test)] MODULE begins.
-        # We only skip code inside test modules (not standalone #[cfg(test)]
-        # attributes on individual items like helper methods).
-        # A test module is #[cfg(test)] followed by a `mod` declaration.
-        local cfg_test_mod_line
-        cfg_test_mod_line=$(awk '
+        # Build test-code line ranges for #[cfg(test)] modules.
+        # Handles two cases:
+        #   1. External module declarations: `#[cfg(test)] mod foo;`
+        #      Only the cfg(test) line and the mod line are test code.
+        #   2. Inline module blocks: `#[cfg(test)] mod foo { ... }`
+        #      The entire block from cfg(test) to the closing brace is test code.
+        #
+        # Note: Brace-depth tracking counts all { and } characters, including
+        # those inside string literals and comments. This is safe in practice
+        # because Rust string braces are nearly always balanced, but could
+        # theoretically miscount with raw strings containing unbalanced braces.
+        #
+        # Returns "yes" if target line is in test code, "no" otherwise.
+        local in_test_module
+        in_test_module=$(awk -v target="$line_num" '
+            BEGIN { candidate = 0; in_range = 0; found = 0 }
+            found { next }
             /^[[:space:]]*#\[cfg\(test\)\]/ {
                 candidate = NR
                 next
             }
-            candidate && /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]/ {
-                print candidate
-                exit
-            }
             candidate && /^[[:space:]]*$/ {
                 # Allow blank lines between #[cfg(test)] and mod
+                next
+            }
+            candidate && /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]/ {
+                # Found a mod declaration after #[cfg(test)]
+                if (/;[[:space:]]*$/) {
+                    # External module declaration (mod foo;) — only these lines are test code
+                    if (target >= candidate && target <= NR) {
+                        found = 1
+                    }
+                } else {
+                    # Inline module block — track braces to find the end
+                    start = candidate
+                    depth = 0
+                    # Count braces on the mod line itself
+                    line = $0
+                    for (i = 1; i <= length(line); i++) {
+                        c = substr(line, i, 1)
+                        if (c == "{") depth++
+                        if (c == "}") depth--
+                    }
+                    if (depth > 0) {
+                        # Opening brace found, need to find closing brace
+                        in_range = 1
+                    } else if (depth == 0 && index(line, "{") > 0) {
+                        # Braces opened and closed on same line
+                        if (target >= start && target <= NR) {
+                            found = 1
+                        }
+                    }
+                }
+                candidate = 0
                 next
             }
             candidate {
                 # Non-blank, non-mod line means this #[cfg(test)] is not a module
                 candidate = 0
             }
+            in_range {
+                # Track brace depth for inline module blocks
+                line = $0
+                for (i = 1; i <= length(line); i++) {
+                    c = substr(line, i, 1)
+                    if (c == "{") depth++
+                    if (c == "}") depth--
+                }
+                if (depth <= 0) {
+                    # End of inline module block
+                    if (target >= start && target <= NR) {
+                        found = 1
+                    }
+                    in_range = 0
+                }
+            }
+            END {
+                if (found) {
+                    print "yes"
+                } else if (in_range && target >= start) {
+                    # Target is inside an inline block that extends to EOF
+                    print "yes"
+                } else {
+                    print "no"
+                }
+            }
         ' "$file" 2>/dev/null)
-        if [ -n "$cfg_test_mod_line" ] && [ "$line_num" -ge "$cfg_test_mod_line" ]; then
+
+        # Default to "no" if AWK produced no output
+        if [ -z "$in_test_module" ]; then
+            in_test_module="no"
+        fi
+        if [ "$in_test_module" = "yes" ]; then
             continue
         fi
 

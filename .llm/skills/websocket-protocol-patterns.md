@@ -88,7 +88,10 @@ async fn authenticate(
                 .map_err(|_| AuthError::InvalidMessage)?;
             server.verify_token(&auth.token).await
         }
-        _ => Err(AuthError::InvalidMessage),
+        Message::Binary(_) => Err(AuthError::InvalidMessage),
+        Message::Ping(_) => Err(AuthError::InvalidMessage),
+        Message::Pong(_) => Err(AuthError::InvalidMessage),
+        Message::Close(_) => Err(AuthError::InvalidMessage),
     }
 }
 
@@ -159,7 +162,6 @@ Dispatch on `WireFormat` to encode/decode with `serde_json` or `rmp_serde`.
 // ✅ Internally tagged — each message carries its type as a field
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ClientMessage {
     JoinRoom { code: String },
     LeaveRoom,
@@ -170,7 +172,6 @@ pub enum ClientMessage {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ServerMessage {
     Welcome { player_id: PlayerId },
     PeerJoined { peer_id: PlayerId },

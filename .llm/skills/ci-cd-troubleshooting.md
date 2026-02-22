@@ -63,6 +63,9 @@
 - **Miri clock_gettime failure**: Add `#[cfg_attr(miri, ignore)]` to tests that call
   `chrono::Utc::now()` or any wall-clock API; add a comment explaining the reason and
   track a future `Clock` trait abstraction to make the tests Miri-compatible
+- **Miri getcwd failure (proptest)**: Add `#[cfg_attr(miri, ignore)]` to all tests inside
+  `proptest!` blocks; proptest's failure-persistence layer calls `std::env::current_dir()`
+  which Miri blocks
 
 **Shell & Release Safety:**
 
@@ -706,6 +709,257 @@ URL-stripping logic may not cover the URL scheme or format.
 should be `"use GitHub"`).
 
 <!-- markdownlint-enable MD044 -->
+
+---
+
+### Pattern 9: Missing `--locked` in CI Cargo Commands
+
+#### Symptom
+
+```text
+CI produces different results than local builds because dependency resolution
+drifted from the checked-in Cargo.lock. Or worse: CI silently uses newer
+dependency versions than what was tested locally.
+```
+
+#### Root Cause
+
+**Cargo commands in CI workflows missing the `--locked` flag:**
+
+```yaml
+# WRONG: Allows Cargo to update Cargo.lock silently
+- run: cargo test --all-features
+
+# WRONG: SBOM generated against different dependency versions
+- run: cargo sbom --output-format cyclone_dx_json_1_5
+
+# WRONG: Miri analyzes with potentially different dependencies
+- run: cargo +nightly miri test --lib
+```
+
+When `--locked` is omitted, Cargo may resolve dependencies differently than
+what is recorded in `Cargo.lock`, leading to:
+
+- Non-reproducible CI results
+- Security analysis (Miri, ASan, SBOM) against wrong dependency versions
+- Silent dependency updates that bypass review
+
+#### Solution
+
+**Add `--locked` to all Cargo commands that resolve dependencies:**
+
+```yaml
+# CORRECT: Pinned to exact Cargo.lock versions
+- run: cargo test --locked --all-features
+- run: cargo sbom --locked --output-format cyclone_dx_json_1_5
+- run: cargo +nightly miri test --locked --lib
+- run: cargo +nightly udeps --locked --all-targets
+- run: cargo llvm-cov report --locked --all-features --workspace --fail-under-lines 70
+```
+
+**Commands that do NOT need `--locked`:**
+
+| Command | Reason |
+|---------|--------|
+| `cargo fmt` | Formatter only, does not resolve dependencies |
+| `cargo publish` | Intentionally resolves from registry for crates.io |
+| `cargo install ... --locked` | Already has `--locked` for tool installation |
+| `cargo miri setup` | Tool setup, not a project build |
+| `cargo machete` | Static analysis of Cargo.toml, does not compile |
+
+#### Prevention
+
+1. **Automated check**: `scripts/check-workflow-hygiene.sh` section 8 scans
+   all workflow files for cargo commands missing `--locked`
+2. **Review checklist**: When adding new cargo commands to workflows, always
+   include `--locked` unless the command is exempt (see table above)
+3. **Consistent flags**: When multiple cargo commands work together (e.g.,
+   `cargo llvm-cov` + `cargo llvm-cov report`), ensure both use identical
+   feature flags (`--all-features --workspace`) for consistent results
+
+---
+
+### Pattern 10: Incorrect Test Code Filtering (False Negatives)
+
+#### Symptom
+
+```text
+Panic policy check passes but production code contains panic!() or todo!()
+macros that should have been caught. The check-no-panics.sh script silently
+skips production code.
+```
+
+#### Root Cause
+
+**`filter_test_code` in `check-no-panics.sh` incorrectly identifies production
+code as test code.** This happens when `#[cfg(test)] mod foo;` (external module
+declarations) appear near the top of a file, before production code.
+
+```rust
+// src/server.rs — external test module declarations BEFORE production code
+mod message_router;
+#[cfg(test)]
+mod message_router_tests;    // Line 34 — external module (separate file)
+mod messaging;
+// ... more modules ...
+
+pub struct EnhancedGameServer {  // Line 55 — PRODUCTION CODE
+    // Old filter_test_code would skip this because line 55 >= 34
+}
+```
+
+The old logic found the first `#[cfg(test)] mod` and treated everything from
+that line onward as test code, regardless of whether it was an external module
+declaration (`mod foo;`) or an inline block (`mod foo { ... }`).
+
+#### Solution
+
+**Distinguish between external and inline test modules:**
+
+1. **`#[cfg(test)] mod foo;`** (semicolon) — External module declaration. Only
+   the `#[cfg(test)]` line and the `mod foo;` line are test code. The actual
+   test code lives in a separate file.
+
+2. **`#[cfg(test)] mod tests { ... }`** (braces) — Inline module block. Track
+   brace depth to find the closing `}`. Only lines within the braces are test
+   code.
+
+The fix uses AWK brace-depth scanning to correctly determine module boundaries
+instead of assuming everything after `#[cfg(test)]` is test code.
+
+#### Prevention
+
+- When writing scripts that parse Rust module structure, always distinguish
+  between `mod foo;` (external) and `mod foo { ... }` (inline)
+- External module declarations contribute zero lines of test code to the
+  current file — the test code is in a separate file
+- Inline modules require brace-depth tracking to find boundaries
+- Test with files that have `#[cfg(test)] mod` near the top (like `src/server.rs`)
+
+---
+
+### Pattern 11: Inconsistent Coverage Flags
+
+#### Symptom
+
+```text
+Coverage threshold passes but the gate was enforced against a different build
+configuration than what generated the coverage report. Or: coverage report
+shows different numbers than the threshold check.
+```
+
+#### Root Cause
+
+**Separate `cargo llvm-cov` and `cargo llvm-cov report` commands using
+different flags:**
+
+```yaml
+# Generates report with --all-features --workspace
+- run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
+
+# Enforces threshold WITHOUT --all-features --workspace (different config!)
+- run: cargo llvm-cov report --locked --fail-under-lines 70
+```
+
+#### Solution
+
+**Ensure both commands use identical flags:**
+
+```yaml
+- run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
+- run: cargo llvm-cov report --locked --all-features --workspace --fail-under-lines 70
+```
+
+#### Prevention
+
+- When multiple cargo commands work together, always review flag consistency
+- The `report` subcommand reads from profraw data (does not re-run tests) but
+  needs matching flags to report against the same configuration
+
+---
+
+### Pattern 12: Proptest Tests Fail Under Miri
+
+#### Symptom
+
+```text
+error: unsupported operation: `getcwd` not available when isolation is enabled
+```
+
+#### Root Cause
+
+Proptest's failure-persistence layer calls `std::env::current_dir()` to absolutize
+source file paths. Miri blocks `getcwd` in isolation mode, causing the entire test
+binary to abort.
+
+#### Solution
+
+1. Add `#[cfg_attr(miri, ignore)]` above each `#[test]` inside `proptest!` blocks
+2. Add an explanatory block comment above the `proptest!` macro
+
+```rust
+// NOTE: All proptest tests are excluded from Miri runs via
+// `#[cfg_attr(miri, ignore)]`. Proptest's failure-persistence layer calls
+// `std::env::current_dir()` (getcwd), which is blocked by Miri isolation
+// and aborts the entire test binary.
+proptest! {
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn my_property_test(input in any::<u32>()) {
+        // ...
+    }
+}
+```
+
+#### Prevention
+
+- CI config test `proptest_tests_ignored_under_miri` enforces this automatically
+
+---
+
+### Pattern 13: Bash Code Block Validation Fails on Non-Bash Syntax
+
+#### Symptom
+
+```text
+SC2283 (error): Remove spaces around = to assign
+```
+
+or `bash -n` syntax errors in documentation code blocks.
+
+#### Root Cause
+
+A markdown code block tagged as `bash` contains non-bash syntax (TOML,
+Dockerfile, YAML, etc.). The CI doc-validation workflow validates bash blocks
+with `bash -n` and `shellcheck`.
+
+#### Solution
+
+Change the code block language tag to `text` for mixed-syntax examples, or split
+into separate correctly-tagged blocks.
+
+```text
+Before (causes failure):
+  ```bash
+  [dependencies]
+  tokio = "1.49"
+
+After (correct):
+  ```text
+  [dependencies]
+  tokio = "1.49"
+
+Or split into separate blocks with correct tags:
+  ```toml
+  [dependencies]
+  tokio = "1.49"
+```
+
+#### Prevention
+
+- CI config test `bash_code_blocks_contain_bash_syntax` validates bash blocks
+  don't contain obvious non-bash syntax
+- Use `text` for mixed-syntax examples showing multiple file edits
 
 ---
 

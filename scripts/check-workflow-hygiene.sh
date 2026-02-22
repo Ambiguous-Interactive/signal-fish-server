@@ -335,6 +335,72 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# 8. Check for cargo commands missing --locked
+# ---------------------------------------------------------------------------
+info "Checking for cargo commands missing --locked..."
+
+# Commands that are exempt from the --locked requirement:
+#   - cargo fmt: Formatter only, does not resolve dependencies
+#   - cargo publish: Intentionally resolves from registry for crates.io compatibility
+#   - cargo install: Installing tools, not building the project
+#   - cargo machete: Static analysis of Cargo.toml, does not compile
+#   - cargo clean: Output-only, does not affect reproducibility of build results
+#   - cargo init/new/search/login/owner/yank: Registry or scaffolding commands,
+#     not project builds (unlikely in CI but listed for completeness)
+#   - cargo bench: Benchmarking, not a correctness gate
+LOCKED_EXEMPT_PATTERNS="fmt|publish|install|machete|clean|init|new|search|login|owner|yank|bench"
+
+MISSING_LOCKED=0
+for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$workflow" ] || continue
+    WORKFLOW_NAME=$(basename "$workflow")
+
+    # Extract cargo commands from run: blocks (handles multi-line with \)
+    # Look for cargo commands that:
+    #   1. Are not exempt commands
+    #   2. Do not already have --locked
+    while IFS= read -r line; do
+        # Skip comment lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Only match cargo commands inside run: blocks, not in YAML keys
+        # like "name: Cache cargo registry", "path: ~/.cargo/", "key: ...-cargo-"
+        if [[ "$line" =~ ^[[:space:]]*(-[[:space:]]+)?[a-z_]+: ]] && \
+           ! [[ "$line" =~ ^[[:space:]]*(-[[:space:]]+)?run: ]]; then
+            continue
+        fi
+
+        # Match cargo command invocations (with optional +toolchain prefix)
+        if [[ "$line" =~ cargo[[:space:]](\+[^[:space:]]+[[:space:]]+)?([a-z-]+) ]]; then
+            CARGO_SUBCMD="${BASH_REMATCH[2]}"
+
+            # Skip exempt commands
+            if echo "$CARGO_SUBCMD" | grep -qE "^($LOCKED_EXEMPT_PATTERNS)$"; then
+                continue
+            fi
+
+            # cargo miri setup is exempt (tool setup, not a project build),
+            # but cargo miri test should use --locked like any other test command
+            if [ "$CARGO_SUBCMD" = "miri" ] && echo "$line" | grep -q "miri setup"; then
+                continue
+            fi
+
+            # Check if --locked is present in the line
+            if ! echo "$line" | grep -q -- "--locked"; then
+                warn "$WORKFLOW_NAME: 'cargo $CARGO_SUBCMD' missing --locked flag"
+                warn "  Line: $(echo "$line" | sed 's/^[[:space:]]*//')"
+                MISSING_LOCKED=$((MISSING_LOCKED + 1))
+            fi
+        fi
+    done < "$workflow"
+done
+
+if [ "$MISSING_LOCKED" -eq 0 ]; then
+    success "All cargo build/test/check commands use --locked"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "=========================================="

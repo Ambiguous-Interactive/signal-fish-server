@@ -493,7 +493,9 @@ async fn message_loop(
                 eprintln!("WebSocket error: {e}");
                 break;
             }
-            _ => continue,
+            Ok(Message::Binary(_)) => continue,
+            Ok(Message::Ping(_)) => continue,
+            Ok(Message::Pong(_)) => continue,
         };
 
         match msg {
@@ -665,6 +667,70 @@ through three states: `waiting`, `lobby`, and `finalized`.
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
+enum ReadyUpLoopControl {
+    Continue,
+    Break,
+}
+
+fn handle_ready_up_message(
+    msg: ServerMessage,
+) -> ReadyUpLoopControl {
+    match msg {
+        ServerMessage::LobbyStateChanged {
+            lobby_state,
+            all_ready,
+            ready_players,
+        } => {
+            println!(
+                "Lobby state: {lobby_state} \
+                 ({}/{} ready)",
+                ready_players.len(),
+                if all_ready { "all" } else { "waiting" }
+            );
+            if lobby_state == "finalized" {
+                println!("Game has started");
+                ReadyUpLoopControl::Break
+            } else {
+                ReadyUpLoopControl::Continue
+            }
+        }
+        ServerMessage::GameStarting {
+            peer_connections,
+        } => {
+            println!("Game starting");
+            for peer in &peer_connections {
+                println!(
+                    "  Peer: {} ({})",
+                    peer.player_name, peer.player_id
+                );
+            }
+            ReadyUpLoopControl::Break
+        }
+        ServerMessage::Authenticated { .. }
+        | ServerMessage::AuthenticationError { .. }
+        | ServerMessage::RoomJoined { .. }
+        | ServerMessage::RoomJoinFailed { .. }
+        | ServerMessage::RoomLeft
+        | ServerMessage::PlayerJoined { .. }
+        | ServerMessage::PlayerLeft { .. }
+        | ServerMessage::GameData { .. }
+        | ServerMessage::AuthorityChanged { .. }
+        | ServerMessage::AuthorityResponse { .. }
+        | ServerMessage::Pong
+        | ServerMessage::Reconnected { .. }
+        | ServerMessage::ReconnectionFailed { .. }
+        | ServerMessage::PlayerReconnected { .. }
+        | ServerMessage::SpectatorJoined { .. }
+        | ServerMessage::SpectatorJoinFailed { .. }
+        | ServerMessage::SpectatorLeft { .. }
+        | ServerMessage::NewSpectatorJoined { .. }
+        | ServerMessage::SpectatorDisconnected { .. }
+        | ServerMessage::Error { .. } => {
+            ReadyUpLoopControl::Continue
+        }
+    }
+}
+
 async fn ready_up_and_wait(
     write: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -693,36 +759,11 @@ async fn ready_up_and_wait(
     {
         let msg: ServerMessage =
             serde_json::from_str(&text)?;
-        match msg {
-            ServerMessage::LobbyStateChanged {
-                lobby_state,
-                all_ready,
-                ready_players,
-            } => {
-                println!(
-                    "Lobby state: {lobby_state} \
-                     ({}/{} ready)",
-                    ready_players.len(),
-                    if all_ready { "all" } else { "waiting" }
-                );
-                if lobby_state == "finalized" {
-                    println!("Game has started");
-                    break;
-                }
-            }
-            ServerMessage::GameStarting {
-                peer_connections,
-            } => {
-                println!("Game starting");
-                for peer in &peer_connections {
-                    println!(
-                        "  Peer: {} ({})",
-                        peer.player_name, peer.player_id
-                    );
-                }
+        match handle_ready_up_message(msg) {
+            ReadyUpLoopControl::Continue => {}
+            ReadyUpLoopControl::Break => {
                 break;
             }
-            _ => {}
         }
     }
 
@@ -855,6 +896,56 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
+fn handle_spectator_stream_message(msg: ServerMessage) {
+    match msg {
+        ServerMessage::GameData {
+            from_player,
+            data,
+        } => {
+            println!(
+                "[spectator] {from_player}: \
+                 {data}"
+            );
+        }
+        ServerMessage::PlayerJoined {
+            player,
+        } => {
+            println!(
+                "[spectator] Player joined: \
+                 {}",
+                player.name
+            );
+        }
+        ServerMessage::PlayerLeft {
+            player_id,
+        } => {
+            println!(
+                "[spectator] Player left: \
+                 {player_id}"
+            );
+        }
+        ServerMessage::Authenticated { .. }
+        | ServerMessage::AuthenticationError { .. }
+        | ServerMessage::RoomJoined { .. }
+        | ServerMessage::RoomJoinFailed { .. }
+        | ServerMessage::RoomLeft
+        | ServerMessage::LobbyStateChanged { .. }
+        | ServerMessage::GameStarting { .. }
+        | ServerMessage::AuthorityChanged { .. }
+        | ServerMessage::AuthorityResponse { .. }
+        | ServerMessage::Pong
+        | ServerMessage::Reconnected { .. }
+        | ServerMessage::ReconnectionFailed { .. }
+        | ServerMessage::PlayerReconnected { .. }
+        | ServerMessage::SpectatorJoined { .. }
+        | ServerMessage::SpectatorJoinFailed { .. }
+        | ServerMessage::SpectatorLeft { .. }
+        | ServerMessage::NewSpectatorJoined { .. }
+        | ServerMessage::SpectatorDisconnected { .. }
+        | ServerMessage::Error { .. } => {}
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = Url::parse("ws://localhost:3536/v2/ws")?;
@@ -916,35 +1007,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(msg) =
             serde_json::from_str::<ServerMessage>(&text)
         {
-            match msg {
-                ServerMessage::GameData {
-                    from_player,
-                    data,
-                } => {
-                    println!(
-                        "[spectator] {from_player}: \
-                         {data}"
-                    );
-                }
-                ServerMessage::PlayerJoined {
-                    player,
-                } => {
-                    println!(
-                        "[spectator] Player joined: \
-                         {}",
-                        player.name
-                    );
-                }
-                ServerMessage::PlayerLeft {
-                    player_id,
-                } => {
-                    println!(
-                        "[spectator] Player left: \
-                         {player_id}"
-                    );
-                }
-                _ => {}
-            }
+            handle_spectator_stream_message(msg);
         }
     }
 
@@ -1043,7 +1106,26 @@ fn handle_server_message(msg: &ServerMessage) {
                  ({error_code})"
             );
         }
-        _ => {}
+        ServerMessage::Authenticated { .. }
+        | ServerMessage::AuthenticationError { .. }
+        | ServerMessage::RoomJoined { .. }
+        | ServerMessage::RoomLeft
+        | ServerMessage::PlayerJoined { .. }
+        | ServerMessage::PlayerLeft { .. }
+        | ServerMessage::GameData { .. }
+        | ServerMessage::LobbyStateChanged { .. }
+        | ServerMessage::GameStarting { .. }
+        | ServerMessage::AuthorityChanged { .. }
+        | ServerMessage::AuthorityResponse { .. }
+        | ServerMessage::Pong
+        | ServerMessage::Reconnected { .. }
+        | ServerMessage::PlayerReconnected { .. }
+        | ServerMessage::SpectatorJoined { .. }
+        | ServerMessage::SpectatorJoinFailed { .. }
+        | ServerMessage::SpectatorLeft { .. }
+        | ServerMessage::NewSpectatorJoined { .. }
+        | ServerMessage::SpectatorDisconnected { .. }
+        | ServerMessage::Error { .. } => {}
     }
 }
 ```
@@ -1492,7 +1574,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Error: {e}");
                 break;
             }
-            _ => continue,
+            Ok(Message::Binary(_)) => continue,
+            Ok(Message::Ping(_)) => continue,
+            Ok(Message::Pong(_)) => continue,
         };
 
         let msg: ServerMessage =

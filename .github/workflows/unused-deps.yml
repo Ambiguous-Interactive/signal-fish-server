@@ -135,5 +135,5 @@ jobs:
         #   - Platform-specific dependencies (cfg-gated)
         #   - Build dependencies used only in build.rs
         # Always review udeps output manually before removing dependencies.
-        run: cargo +nightly-2026-02-01 udeps --all-targets
+        run: cargo +nightly-2026-02-01 udeps --locked --all-targets
         continue-on-error: true

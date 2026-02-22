@@ -731,8 +731,13 @@ mod tests {
         true
     }
 
+    // NOTE: All proptest tests are excluded from Miri runs via
+    // `#[cfg_attr(miri, ignore)]`. Proptest's failure-persistence layer calls
+    // `std::env::current_dir()` (getcwd), which is blocked by Miri isolation
+    // and aborts the entire test binary.
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn game_name_validation_matches_predicate(raw in proptest::collection::vec(any::<char>(), 0..=64)) {
             let candidate: String = raw.into_iter().collect();
             let config = ProtocolConfig::default();
@@ -743,6 +748,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn room_code_validation_matches_predicate(raw in proptest::collection::vec(any::<char>(), 0..=10)) {
             let candidate: String = raw.into_iter().collect();
             let config = ProtocolConfig::default();
@@ -753,6 +759,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn player_name_validation_matches_predicate(raw in proptest::collection::vec(any::<char>(), 0..=32)) {
             let candidate: String = raw.into_iter().collect();
             let config = ProtocolConfig::default();

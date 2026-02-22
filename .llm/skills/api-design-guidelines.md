@@ -16,7 +16,7 @@
 - Adding HTTP or WebSocket API endpoints
 - Creating SDK-facing interfaces
 - Reviewing API ergonomics or naming conventions
-- Future-proofing with `#[non_exhaustive]` or sealed traits
+- Future-proofing with sealed traits, private fields, and explicit exhaustive protocol enums
 
 ---
 
@@ -33,7 +33,7 @@
 - Follow the Rust API Guidelines Checklist (RFC 1105) for all public types.
 - Use newtypes and enums for type safety — never raw strings or booleans for distinct concepts.
 - Minimize public API surface — expose the minimum needed, keep everything else `pub(crate)`.
-- Future-proof with `#[non_exhaustive]`, sealed traits, and private fields.
+- Future-proof with sealed traits, private fields, and explicit exhaustive enum matching guidance.
 - Document every public item with examples, error conditions, and panic conditions.
 
 ---
@@ -171,25 +171,23 @@ pub fn find_rooms(&self, filter: &Filter) -> impl Iterator<Item = RoomInfo> + '_
 
 ## Future-Proofing
 
-### `#[non_exhaustive]` on Public Enums and Structs
+### Exhaustive Public Enum Design
 
 ```rust
 
-// ✅ Allows adding variants without semver break
-#[non_exhaustive]
+// ✅ Keep protocol and domain enums explicit and fully matched
 pub enum DisconnectReason {
     Timeout,
     Kicked,
     ClientLeft,
-    // Can add ServerShutdown later without breaking downstream
+    ServerShutdown,
 }
 
-// ✅ Allows adding fields without semver break
-#[non_exhaustive]
+// ✅ Keep struct fields explicit in public API docs and constructors
 pub struct RoomInfo {
     pub code: RoomCode,
     pub player_count: usize,
-    // Can add created_at later without breaking downstream
+    pub created_at: DateTime<Utc>,
 }
 
 ```
@@ -275,9 +273,9 @@ Expose stable, documented methods as `pub`; keep implementation details `pub(cra
 ## Semver Compatibility
 
 **Breaking** (major bump): Removing public items, changing signatures,
-adding required fields without `#[non_exhaustive]`, changing trait bounds, changing enum variants.
+adding required fields, changing trait bounds, changing enum variants.
 
-**Non-breaking**: Adding new public items, adding variants/fields to `#[non_exhaustive]` types,
+**Non-breaking**: Adding new public items, adding optional methods with defaults,
 adding default trait methods, weakening trait bounds.
 
 ---
@@ -320,7 +318,7 @@ to clients. For REST APIs with multiple endpoints, maintain an OpenAPI specifica
 
 ### Protocol Messages
 
-Use `#[non_exhaustive]` and `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums.
+Use `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums and match variants explicitly.
 See [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
 
 ### Error Responses
@@ -349,7 +347,7 @@ See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full types
 - [ ] All public types implement `Send + Sync` (verify with `static_assertions`)
 - [ ] Newtypes for IDs, codes, tokens — no raw `String`/`Uuid` in APIs
 - [ ] Enums instead of booleans for function parameters
-- [ ] `#[non_exhaustive]` on public enums and structs
+- [ ] Protocol/domain enums are matched explicitly without wildcard catch-all arms
 - [ ] `#[must_use]` on Result-returning functions
 - [ ] Functions accept borrows/generics, return owned/concrete
 - [ ] Private fields with constructors enforce invariants

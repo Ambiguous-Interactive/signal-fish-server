@@ -6232,9 +6232,9 @@ fn test_sbom_job_generates_cyclonedx_json() {
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
     assert!(
-        ci_content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
-        "CI SBOM job must generate CycloneDX v1.5 JSON format.\n\
-         Expected command: cargo sbom --output-format cyclone_dx_json_1_5\n\
+        ci_content.contains("cargo sbom --locked --output-format cyclone_dx_json_1_5"),
+        "CI SBOM job must generate CycloneDX v1.5 JSON format with --locked.\n\
+         Expected command: cargo sbom --locked --output-format cyclone_dx_json_1_5\n\
          This ensures a standardized, machine-readable SBOM is produced."
     );
 
@@ -6347,8 +6347,8 @@ fn test_release_workflow_generates_sbom() {
     let content = read_file(&release_yml);
 
     assert!(
-        content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
-        "release.yml must generate a CycloneDX v1.5 JSON SBOM.\n\
+        content.contains("cargo sbom --locked --output-format cyclone_dx_json_1_5"),
+        "release.yml must generate a CycloneDX v1.5 JSON SBOM with --locked.\n\
          This provides supply-chain provenance metadata with every release.\n\
          File: {}",
         release_yml.display()
@@ -7559,4 +7559,426 @@ fn test_no_british_english_spellings() {
          See also: .typos.toml for automated spell-check rules.",
         violations = violations.join("\n"),
     );
+}
+
+// ============================================================================
+// Miri Safety Annotation Tests
+// ============================================================================
+
+#[test]
+fn test_proptest_tests_ignored_under_miri() {
+    // This test ensures that all `#[test]` functions inside `proptest!` blocks
+    // have `#[cfg_attr(miri, ignore)]` annotations.
+    //
+    // Background: Proptest's failure-persistence layer calls `std::env::current_dir()`
+    // to absolutize source file paths. Miri blocks `getcwd` in isolation mode,
+    // causing the entire test binary to abort. This is not a per-test failure --
+    // it kills every test in the binary.
+    //
+    // The fix is to annotate each `#[test]` inside a `proptest!` block with
+    // `#[cfg_attr(miri, ignore)]` so Miri skips those tests entirely.
+
+    let root = repo_root();
+    let src_dir = root.join("src");
+
+    let rust_files =
+        find_files_with_extension(&src_dir, "rs", &["target", "third_party", "node_modules"]);
+
+    assert!(!rust_files.is_empty(), "No Rust source files found in src/");
+
+    let mut violations = Vec::new();
+    let mut total_proptest_blocks = 0;
+    let mut total_tests_in_proptest = 0;
+    let mut tests_with_miri_ignore = 0;
+
+    for file in &rust_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Track proptest! macro blocks by brace depth.
+        // When we see `proptest!` followed by `{`, we enter a proptest block.
+        // Inside the block, every `#[test]` must have a preceding
+        // `#[cfg_attr(miri, ignore)]` attribute.
+        let mut in_proptest_block = false;
+        let mut brace_depth: i32 = 0;
+        let mut proptest_brace_depth: i32 = 0;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+
+            if !in_proptest_block {
+                // Detect the start of a proptest! macro invocation.
+                // The macro is typically invoked as:
+                //   proptest! {
+                // or on the same line as `proptest!{`
+                if trimmed.starts_with("proptest!") {
+                    in_proptest_block = true;
+                    total_proptest_blocks += 1;
+                    // Count opening braces on this line to set the initial depth
+                    let opens = trimmed.matches('{').count() as i32;
+                    let closes = trimmed.matches('}').count() as i32;
+                    brace_depth = opens - closes;
+                    proptest_brace_depth = 0; // the proptest block starts at depth 0
+                    continue;
+                }
+            } else {
+                // Track brace depth inside the proptest block
+                let opens = trimmed.matches('{').count() as i32;
+                let closes = trimmed.matches('}').count() as i32;
+                brace_depth += opens - closes;
+
+                // Check for #[test] attributes inside the proptest block
+                if trimmed == "#[test]" {
+                    total_tests_in_proptest += 1;
+
+                    // Look backward from this #[test] line for #[cfg_attr(miri, ignore)]
+                    // It should be on one of the immediately preceding lines (allowing
+                    // for blank lines and other attributes between them).
+                    let mut found_miri_ignore = false;
+                    let search_start = line_idx.saturating_sub(5);
+                    for check_idx in (search_start..line_idx).rev() {
+                        let check_line = lines[check_idx].trim();
+                        if check_line.is_empty() || check_line.starts_with('#') {
+                            if check_line.contains("cfg_attr(miri, ignore)") {
+                                found_miri_ignore = true;
+                                break;
+                            }
+                            continue;
+                        }
+                        // Hit a non-attribute, non-empty line -- stop searching
+                        break;
+                    }
+
+                    // Also check forward: the annotation might be after #[test]
+                    // (though convention is before)
+                    if !found_miri_ignore {
+                        let search_end = if line_idx + 5 < lines.len() {
+                            line_idx + 5
+                        } else {
+                            lines.len()
+                        };
+                        for check_line in lines.iter().take(search_end).skip(line_idx + 1) {
+                            let check_line = check_line.trim();
+                            if check_line.contains("cfg_attr(miri, ignore)") {
+                                found_miri_ignore = true;
+                                break;
+                            }
+                            // Stop at fn definition or another #[test]
+                            if check_line.starts_with("fn ") || check_line == "#[test]" {
+                                break;
+                            }
+                        }
+                    }
+
+                    if found_miri_ignore {
+                        tests_with_miri_ignore += 1;
+                    } else {
+                        violations.push(format!(
+                            "{}:{}: #[test] inside proptest! block is missing \
+                             #[cfg_attr(miri, ignore)]\n  \
+                             Proptest calls std::env::current_dir() which Miri blocks.\n  \
+                             Fix: Add #[cfg_attr(miri, ignore)] above or below the #[test] attribute.",
+                            relative_path.display(),
+                            line_idx + 1,
+                        ));
+                    }
+                }
+
+                // Exit the proptest block when brace depth returns to zero
+                if brace_depth <= proptest_brace_depth {
+                    in_proptest_block = false;
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Proptest tests missing Miri ignore annotations:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Total proptest! blocks found: {}\n\
+             - Total #[test] inside proptest! blocks: {}\n\
+             - Tests with #[cfg_attr(miri, ignore)]: {}\n\
+             - Tests missing annotation: {}\n\n\
+             Why this is required:\n\
+             - Proptest's failure-persistence layer calls std::env::current_dir()\n\
+             - Miri blocks getcwd in isolation mode\n\
+             - This aborts the ENTIRE test binary, not just one test\n\
+             - Adding #[cfg_attr(miri, ignore)] skips the test under Miri\n\n\
+             Fix: Add #[cfg_attr(miri, ignore)] to each #[test] inside proptest! blocks.\n\
+             Also add an explanatory comment above the proptest! macro:\n\
+             // NOTE: All proptest tests are excluded from Miri runs via\n\
+             // `#[cfg_attr(miri, ignore)]`. Proptest's failure-persistence layer calls\n\
+             // `std::env::current_dir()` (getcwd), which is blocked by Miri isolation\n\
+             // and aborts the entire test binary.",
+            violations.join("\n"),
+            total_proptest_blocks,
+            total_tests_in_proptest,
+            tests_with_miri_ignore,
+            violations.len(),
+        );
+    }
+}
+
+// ============================================================================
+// Bash Code Block Validation Tests
+// ============================================================================
+
+#[test]
+fn test_bash_code_blocks_contain_bash_syntax() {
+    // This test ensures that markdown code blocks tagged as bash/sh/shell
+    // actually contain bash-compatible syntax, not TOML, Dockerfile, YAML,
+    // or other languages that were incorrectly tagged.
+    //
+    // Background: A CI failure occurred because a bash-tagged code block in
+    // docs/git-hooks-guide.md contained TOML and Dockerfile syntax. The CI
+    // doc-validation workflow validates bash blocks with `bash -n` and
+    // `shellcheck`, which fail on non-bash syntax.
+    //
+    // This test catches the issue early by scanning for common non-bash
+    // patterns inside bash-tagged code blocks.
+
+    let root = repo_root();
+
+    let markdown_files = find_files_with_extension(
+        &root,
+        "md",
+        &[
+            "target",
+            "third_party",
+            "node_modules",
+            "test-fixtures",
+            // .llm/skills/ files may contain intentionally mixed-syntax blocks
+            // for educational/reference purposes. CI's doc-validation.yml still
+            // validates these, so regressions are caught in CI.
+            ".llm",
+        ],
+    );
+
+    if markdown_files.is_empty() {
+        return;
+    }
+
+    // Non-bash syntax patterns that indicate the code block is mislabeled.
+    // Each entry: (pattern_description, detection_function)
+    // The detection function takes a code block's lines and returns true if
+    // the block likely contains non-bash syntax.
+    //
+    // We check for multiple signals to reduce false positives:
+    // - TOML: key = "value" assignments (with quotes), [section] headers
+    // - Dockerfile: FROM, RUN, COPY, WORKDIR, ENV, ENTRYPOINT, CMD
+    // - YAML: key: value mappings (with specific patterns)
+
+    let mut violations = Vec::new();
+    let mut total_bash_blocks = 0;
+
+    for file in &markdown_files {
+        let content = read_file(file);
+        let relative_path = file.strip_prefix(&root).unwrap_or(file);
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Track code blocks using fence width for proper CommonMark handling.
+        // Outer fences (4+ backticks) contain nested examples and are skipped.
+        let mut outer_fence_width: usize = 0;
+        let mut in_bash_block = false;
+        let mut bash_block_start: usize = 0;
+        let mut bash_block_lines: Vec<&str> = Vec::new();
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+
+            // Track outer fences (4+ backticks) to skip nested code examples
+            if trimmed.starts_with("````") {
+                let width = trimmed.chars().take_while(|&c| c == '`').count();
+                if outer_fence_width == 0 {
+                    outer_fence_width = width;
+                } else if width >= outer_fence_width {
+                    let rest = &trimmed[width..];
+                    if rest.trim().is_empty() {
+                        outer_fence_width = 0;
+                    }
+                }
+                continue;
+            }
+
+            // Skip content inside outer fences
+            if outer_fence_width > 0 {
+                continue;
+            }
+
+            // Detect opening/closing of 3-backtick fences
+            if trimmed.starts_with("```") && !trimmed.starts_with("````") {
+                if !in_bash_block {
+                    // Check if this is a bash/sh/shell code block
+                    let lang = trimmed.trim_start_matches('`').trim();
+                    if lang == "bash" || lang == "sh" || lang == "shell" {
+                        in_bash_block = true;
+                        bash_block_start = line_idx + 1;
+                        bash_block_lines.clear();
+                        total_bash_blocks += 1;
+                    }
+                } else {
+                    // Closing fence -- analyze the collected block
+                    if !bash_block_lines.is_empty() {
+                        let non_bash = detect_non_bash_syntax(&bash_block_lines);
+                        if let Some(reason) = non_bash {
+                            violations.push(format!(
+                                "{}:{}: Bash code block contains non-bash syntax\n  \
+                                 Detected: {}\n  \
+                                 Fix: Change the code block language tag to `text` \
+                                 for mixed-syntax examples,\n  \
+                                 or split into separate correctly-tagged blocks.",
+                                relative_path.display(),
+                                bash_block_start,
+                                reason,
+                            ));
+                        }
+                    }
+                    in_bash_block = false;
+                }
+                continue;
+            }
+
+            if in_bash_block {
+                bash_block_lines.push(trimmed);
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "Bash code blocks contain non-bash syntax:\n\n{}\n\n\
+             Diagnostic Information:\n\
+             - Total bash/sh/shell code blocks scanned: {}\n\
+             - Blocks with non-bash syntax: {}\n\n\
+             Why this matters:\n\
+             - The CI doc-validation workflow validates bash blocks with `bash -n` and `shellcheck`\n\
+             - Non-bash syntax (TOML, Dockerfile, YAML) causes validation failures\n\
+             - Use `text` for mixed-syntax examples showing multiple file edits\n\n\
+             Fix options:\n\
+             1. Change the code block language tag from `bash` to `text`\n\
+             2. Split into separate blocks with correct language tags\n\
+             3. If the block genuinely contains bash with embedded syntax,\n\
+                wrap the non-bash parts in heredocs or echo statements",
+            violations.join("\n"),
+            total_bash_blocks,
+            violations.len(),
+        );
+    }
+}
+
+/// Detect non-bash syntax patterns in a code block.
+///
+/// Returns `Some(reason)` if the block likely contains non-bash syntax,
+/// or `None` if the block appears to be valid bash.
+///
+/// Uses a scoring system to reduce false positives: individual patterns
+/// like `key = "value"` could appear in bash (e.g., variable assignments
+/// with spaces around `=`), but multiple TOML/Dockerfile/YAML signals
+/// in a single block strongly indicate a mislabeled block.
+fn detect_non_bash_syntax(lines: &[&str]) -> Option<String> {
+    let mut toml_signals = 0;
+    let mut dockerfile_signals = 0;
+    let mut yaml_signals = 0;
+
+    for line in lines {
+        let trimmed = line.trim();
+
+        // Skip empty lines and comments (# is valid in bash, TOML, and YAML)
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // TOML signals:
+        // - [section] headers (not bash test expressions like [ -f file ])
+        // - key = "value" with quoted string values
+        // - key = { inline table }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && !trimmed.contains(' ') {
+            // [section.name] or [dependencies] -- likely TOML section header
+            // Exclude bash test expressions: [ -f file ], [ "$x" = "y" ]
+            toml_signals += 2;
+        }
+        if let Some((_key, value)) = trimmed.split_once(" = ") {
+            let value = value.trim();
+            if value.starts_with('"') || value.starts_with('{') || value.starts_with('[') {
+                toml_signals += 1;
+            }
+        }
+
+        // Dockerfile signals:
+        // - FROM, RUN, COPY, WORKDIR, ENV, ENTRYPOINT, CMD, ADD, EXPOSE, ARG
+        // These are always at the start of a line in Dockerfiles
+        let dockerfile_keywords = [
+            "FROM ",
+            "RUN ",
+            "COPY ",
+            "WORKDIR ",
+            "ENV ",
+            "ENTRYPOINT ",
+            "CMD ",
+            "ADD ",
+            "EXPOSE ",
+            "ARG ",
+        ];
+        for keyword in &dockerfile_keywords {
+            if trimmed.starts_with(keyword) {
+                dockerfile_signals += 1;
+            }
+        }
+
+        // YAML mapping signals:
+        // - key: value (but not bash case labels like "pattern)")
+        // - Indented key: value with specific YAML patterns
+        // Be careful: bash `case` statements use `:` in labels but not the same pattern
+        if let Some((key, _value)) = trimmed.split_once(": ") {
+            let key = key.trim();
+            // YAML keys are typically alphanumeric with hyphens/underscores
+            // Exclude bash-like patterns (command: is common in YAML)
+            if !key.contains(' ')
+                && !key.starts_with('-')
+                && !key.starts_with('$')
+                && !key.contains('(')
+                && key
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
+                yaml_signals += 1;
+            }
+        }
+    }
+
+    // Require multiple signals to reduce false positives.
+    // A single TOML-like line could be a coincidence in bash.
+    if toml_signals >= 3 {
+        return Some(format!(
+            "TOML syntax detected ({toml_signals} signals: section headers, \
+             key = \"value\" assignments)"
+        ));
+    }
+
+    if dockerfile_signals >= 2 {
+        return Some(format!(
+            "Dockerfile syntax detected ({dockerfile_signals} signals: \
+             FROM/RUN/COPY/WORKDIR/ENV keywords)"
+        ));
+    }
+
+    if yaml_signals >= 3 {
+        return Some(format!(
+            "YAML syntax detected ({yaml_signals} signals: key: value mappings)"
+        ));
+    }
+
+    // Combined signals: if we see signals from multiple non-bash languages,
+    // the block is almost certainly mislabeled
+    let total_non_bash = toml_signals + dockerfile_signals + yaml_signals;
+    if total_non_bash >= 4 {
+        return Some(format!(
+            "Mixed non-bash syntax detected (TOML: {toml_signals}, \
+             Dockerfile: {dockerfile_signals}, YAML: {yaml_signals})"
+        ));
+    }
+
+    None
 }

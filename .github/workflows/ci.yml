@@ -304,7 +304,7 @@ jobs:
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
       - name: Enforce coverage threshold
-        run: cargo llvm-cov report --locked --fail-under-lines 70
+        run: cargo llvm-cov report --locked --all-features --workspace --fail-under-lines 70
 
       - name: Upload coverage report
         if: always()
@@ -356,7 +356,7 @@ jobs:
           tool: cargo-sbom
 
       - name: Generate SBOM (CycloneDX)
-        run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
+        run: cargo sbom --locked --output-format cyclone_dx_json_1_5 > sbom.cdx.json
 
       - name: Upload SBOM artifact
         if: success()
