@@ -636,7 +636,7 @@ analyses.
 
 ### Nightly Toolchain
 
-Both jobs require nightly Rust (pinned to `nightly-2025-12-15` for
+Both jobs require nightly Rust (pinned to `nightly-2026-02-01` for
 reproducibility). The nightly pin follows the same strategy as
 `unused-deps.yml` — see the workflow header comment for update criteria.
 

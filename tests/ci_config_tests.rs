@@ -6662,7 +6662,7 @@ fn test_pinned_nightly_staleness_warning() {
     });
 
     let nightly_version = nightly_version
-        .expect("ci-safety.yml must contain a pinned nightly date (e.g., nightly-2025-12-15)");
+        .expect("ci-safety.yml must contain a pinned nightly date (e.g., nightly-2026-02-01)");
 
     // Extract YYYY and MM
     let date_part = nightly_version
@@ -6743,5 +6743,325 @@ fn test_scripts_pass_basic_syntax_check() {
         failures.is_empty(),
         "Shell scripts have syntax errors:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn test_action_sha_references_are_valid_length() {
+    // Validates that every SHA-pinned GitHub Action reference uses exactly 40
+    // hexadecimal characters. A previous CI failure was caused by a SHA that was
+    // only 39 characters (taiki-e/install-action with a truncated SHA), which
+    // passed the "is it hex?" check but failed at runtime because GitHub requires
+    // exactly 40-character commit SHAs.
+    //
+    // The existing test_github_actions_are_pinned_to_sha validates that actions
+    // ARE pinned, but this test specifically targets length validity to catch
+    // truncation or copy-paste errors.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+    let mut total_sha_refs = 0;
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed for human readability
+            let trimmed = line.trim();
+
+            // Look for "uses:" lines that reference actions
+            if trimmed.starts_with("uses:") {
+                let uses_value = trimmed.trim_start_matches("uses:").trim();
+
+                // Skip local actions (e.g., ./.github/actions/setup)
+                if uses_value.starts_with("./") {
+                    continue;
+                }
+
+                // Skip docker:// references (different security model)
+                if uses_value.starts_with("docker://") {
+                    continue;
+                }
+
+                // Extract the action reference (owner/repo@ref)
+                let parts: Vec<&str> = uses_value.split('@').collect();
+                if parts.len() < 2 {
+                    continue; // Missing @ is caught by test_github_actions_are_pinned_to_sha
+                }
+
+                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
+
+                // Only check references that look like hex SHAs (skip tag references like v4)
+                if action_ref.chars().all(|c| c.is_ascii_hexdigit()) && !action_ref.is_empty() {
+                    total_sha_refs += 1;
+                    let sha_len = action_ref.len();
+                    if sha_len != 40 {
+                        violations.push(format!(
+                            "{}:{}: SHA reference has {} characters (expected 40): {}\n  \
+                             Action: {}\n  \
+                             SHA: {}\n  \
+                             This is likely a truncation or copy-paste error.\n  \
+                             GitHub requires exactly 40-character hexadecimal commit SHAs.\n  \
+                             Fix: Look up the correct full SHA at https://github.com/{}/releases\n  \
+                             and replace with the complete 40-character SHA.",
+                            filename, line_num, sha_len, uses_value, parts[0], action_ref, parts[0]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !violations.is_empty() {
+        panic!(
+            "GitHub Action SHA references must be exactly 40 hexadecimal characters:\n\n\
+             {}\n\n\
+             Diagnostic Information:\n\
+             - Workflow files checked: {}\n\
+             - Total SHA references found: {}\n\
+             - Invalid SHA references: {}\n\n\
+             Why this matters:\n\
+             - GitHub commit SHAs are always exactly 40 hex characters\n\
+             - A truncated SHA (e.g., 39 characters) will fail with a cryptic GitHub error\n\
+             - This was an actual CI failure: taiki-e/install-action had a 39-character SHA\n\n\
+             How to fix:\n\
+             1. Go to https://github.com/owner/repo/releases and find the release tag\n\
+             2. Click on the commit hash to see the full 40-character SHA\n\
+             3. Copy the complete SHA and update the workflow file\n\
+             4. Verify with: echo -n '<sha>' | wc -c  (should output 40)",
+            violations.join("\n\n"),
+            workflow_files.len(),
+            total_sha_refs,
+            violations.len()
+        );
+    }
+}
+
+#[test]
+fn test_same_action_uses_consistent_sha_across_workflows() {
+    // Validates that every unique GitHub Action (e.g., taiki-e/install-action)
+    // uses the same SHA across ALL workflow files. A previous CI failure was
+    // caused by updating the taiki-e/install-action SHA in one workflow but
+    // missing another, leading to version inconsistency and unexpected behavior.
+    //
+    // This test collects all SHA-pinned action references, groups them by
+    // action name (owner/repo), and verifies that each action uses exactly
+    // one unique SHA across all workflow files.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    if workflow_files.is_empty() {
+        return;
+    }
+
+    // Map of action name -> Vec<(sha, filename, line_num)>
+    let mut action_shas: std::collections::HashMap<String, Vec<(String, String, usize)>> =
+        std::collections::HashMap::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed for human readability
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("uses:") {
+                let uses_value = trimmed.trim_start_matches("uses:").trim();
+
+                // Skip local actions and docker references
+                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
+                    continue;
+                }
+
+                let parts: Vec<&str> = uses_value.split('@').collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+
+                let action_name = parts[0].to_string();
+                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
+
+                // Only track SHA-pinned references (40-char hex)
+                if action_ref.len() == 40 && action_ref.chars().all(|c| c.is_ascii_hexdigit()) {
+                    action_shas
+                        .entry(action_name)
+                        .or_default()
+                        .push((action_ref.to_string(), filename.clone(), line_num));
+                }
+            }
+        }
+    }
+
+    let mut inconsistencies = Vec::new();
+
+    for (action_name, refs) in &action_shas {
+        let unique_shas: std::collections::HashSet<&str> =
+            refs.iter().map(|(sha, _, _)| sha.as_str()).collect();
+
+        if unique_shas.len() > 1 {
+            let mut details = format!(
+                "Action '{}' uses {} different SHAs across workflow files:",
+                action_name,
+                unique_shas.len()
+            );
+            for (sha, filename, line_num) in refs {
+                details.push_str(&format!("\n    {}:{}: {}", filename, line_num, sha));
+            }
+            details.push_str(&format!(
+                "\n  Fix: Update all references to '{}' to use the same SHA.\n  \
+                 Pick the most recent version and apply it to every workflow file.\n  \
+                 Search with: grep -rn '{}' .github/workflows/",
+                action_name, action_name
+            ));
+            inconsistencies.push(details);
+        }
+    }
+
+    if !inconsistencies.is_empty() {
+        let total_actions = action_shas.len();
+        let consistent_actions = total_actions - inconsistencies.len();
+        panic!(
+            "GitHub Action SHA references must be consistent across all workflow files:\n\n\
+             {}\n\n\
+             Diagnostic Information:\n\
+             - Unique actions found: {}\n\
+             - Actions with consistent SHAs: {}\n\
+             - Actions with inconsistent SHAs: {}\n\n\
+             Why this matters:\n\
+             - Different SHAs for the same action mean different code versions are running\n\
+             - This was an actual CI failure: taiki-e/install-action was updated in one \
+             workflow but missed in another\n\
+             - Version drift can cause subtle behavior differences across workflows\n\n\
+             How to fix:\n\
+             1. Identify the latest desired SHA for each action\n\
+             2. Update ALL workflow files to use that SHA\n\
+             3. Verify with: grep -rn 'action-name@' .github/workflows/\n\
+             4. Ensure the version comment (# vX.Y.Z) matches the SHA",
+            inconsistencies.join("\n\n"),
+            total_actions,
+            consistent_actions,
+            inconsistencies.len()
+        );
+    }
+}
+
+#[test]
+fn test_dockerfile_suppresses_false_positive_security_warnings() {
+    // Validates that the Dockerfile includes a BuildKit check directive to
+    // suppress false-positive security warnings when ENV variables have
+    // security-adjacent names (like SECURITY, AUTH, TOKEN, KEY) but are
+    // assigned non-sensitive values (like "false", "true", "0", "1").
+    //
+    // A previous CI failure occurred because Docker Scout / BuildKit flagged
+    // ENV variables like SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false as
+    // potential secret leaks (SecretsUsedInArgOrEnv). The fix is to add a
+    // `# check=skip=SecretsUsedInArgOrEnv` directive at the top of the
+    // Dockerfile to suppress these false positives.
+
+    let root = repo_root();
+    let dockerfile = root.join("Dockerfile");
+
+    if !dockerfile.exists() {
+        return;
+    }
+
+    let content = read_file(&dockerfile);
+
+    // Patterns that Docker Scout / BuildKit flag as potential secrets in ENV names
+    let security_patterns = [
+        "SECURITY", "SECRET", "PASSWORD", "TOKEN", "KEY", "AUTH",
+    ];
+
+    // Values that are clearly non-sensitive (boolean/numeric flags)
+    let safe_values = ["false", "true", "0", "1"];
+
+    // Find ENV variables with security-adjacent names assigned non-sensitive values
+    let mut flagged_env_vars = Vec::new();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1; // 1-indexed for human readability
+        let trimmed = line.trim();
+
+        // Match ENV directives (ENV KEY=value or ENV KEY value)
+        if let Some(rest) = trimmed.strip_prefix("ENV ") {
+            let rest = rest.trim();
+
+            // Extract the variable name and value
+            let (var_name, var_value) = if let Some(eq_pos) = rest.find('=') {
+                let name = rest[..eq_pos].trim();
+                let value = rest[eq_pos + 1..].trim().trim_matches('"');
+                (name, value)
+            } else {
+                // ENV KEY value (space-separated form)
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let name = parts.next().unwrap_or("");
+                let value = parts.next().unwrap_or("").trim().trim_matches('"');
+                (name, value)
+            };
+
+            let name_upper = var_name.to_uppercase();
+            let has_security_pattern = security_patterns
+                .iter()
+                .any(|pattern| name_upper.contains(pattern));
+            let has_safe_value = safe_values.contains(&var_value);
+
+            if has_security_pattern && has_safe_value {
+                flagged_env_vars.push(format!(
+                    "  line {}: ENV {}={}",
+                    line_num, var_name, var_value
+                ));
+            }
+        }
+    }
+
+    if flagged_env_vars.is_empty() {
+        // No security-adjacent ENV vars with safe values, no directive needed
+        return;
+    }
+
+    // Check that the Dockerfile starts with the suppression directive
+    let first_line = content.lines().next().unwrap_or("");
+    let has_check_directive = first_line.contains("# check=")
+        && first_line.contains("skip=SecretsUsedInArgOrEnv");
+
+    assert!(
+        has_check_directive,
+        "Dockerfile contains ENV variables with security-adjacent names assigned \
+         non-sensitive values, but is missing the BuildKit check directive to \
+         suppress false-positive security warnings.\n\n\
+         Flagged ENV variables:\n{}\n\n\
+         These variables have names matching security patterns ({}) but are \
+         assigned safe values ({}). Docker Scout / BuildKit will flag these as \
+         potential secret leaks (SecretsUsedInArgOrEnv).\n\n\
+         Fix: Add this directive as the FIRST line of the Dockerfile:\n\
+         # check=skip=SecretsUsedInArgOrEnv\n\n\
+         Why this matters:\n\
+         - Docker BuildKit's SecretsUsedInArgOrEnv check flags any ENV with \
+         security-related names\n\
+         - These are false positives because the values are non-sensitive boolean flags\n\
+         - Without the suppression directive, CI builds will emit warnings or fail\n\n\
+         File: {}",
+        flagged_env_vars.join("\n"),
+        security_patterns.join(", "),
+        safe_values.join(", "),
+        dockerfile.display()
     );
 }

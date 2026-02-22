@@ -19,7 +19,7 @@
 #   cargo-udeps requires nightly Rust because it uses unstable compiler features
 #   to analyze dependency usage at a deeper level than stable tools can provide.
 #
-#   Nightly Version: nightly-2025-12-15
+#   Nightly Version: nightly-2026-02-01
 #   Last Updated: 2026-02-22
 #
 #   Update Criteria (when to update this nightly version):
@@ -81,7 +81,7 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: nightly-2025-12-15
+          toolchain: nightly-2026-02-01
           components: rustc
 
       - name: Cache Rust dependencies
@@ -112,7 +112,7 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: nightly-2025-12-15
+          toolchain: nightly-2026-02-01
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
@@ -135,5 +135,5 @@ jobs:
         #   - Platform-specific dependencies (cfg-gated)
         #   - Build dependencies used only in build.rs
         # Always review udeps output manually before removing dependencies.
-        run: cargo +nightly-2025-12-15 udeps --all-targets
+        run: cargo +nightly-2026-02-01 udeps --all-targets
         continue-on-error: true
