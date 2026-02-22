@@ -40,6 +40,11 @@ extend-exclude = [
     ".vscode/",
     ".idea/",
     ".devcontainer/",
+
+    # Test files that intentionally contain "wrong" spellings as test data.
+    # These files store British/American spelling pairs for validation tests and
+    # must not be checked by typos, which would flag the British forms as errors.
+    "tests/ci_config_tests.rs",
 ]
 
 [default.extend-words]

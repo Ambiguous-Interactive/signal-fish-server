@@ -5531,6 +5531,18 @@ fn test_release_workflow_requires_preflight() {
             release_yml.display()
         );
     }
+
+    // Preflight must validate WORKFLOW_ID uniqueness. If multiple workflows
+    // share the same name, the gh API returns multiple IDs and the subsequent
+    // run lookup would query the wrong workflow.
+    assert!(
+        content.contains("Multiple workflows found"),
+        "release.yml preflight must check for duplicate WORKFLOW_ID results.\n\
+         If multiple workflows share a name, the gh API returns multiple IDs, \
+         which would cause the preflight to query the wrong workflow run.\n\
+         File: {}",
+        release_yml.display()
+    );
 }
 
 #[test]
@@ -5593,6 +5605,20 @@ fn test_release_workflow_handles_path_filtered_workflows() {
         content.contains("should have triggered this workflow"),
         "release.yml preflight job must still error when a path-filtered workflow \
          has no run but the commit DID touch relevant paths.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // Verify fail-closed behavior when CHANGED_FILES cannot be retrieved.
+    // If the GitHub API fails to return changed files, the preflight must
+    // fail (FAILED=1) rather than warn, to prevent releasing without CI
+    // verification.
+    assert!(
+        content.contains("Failing closed"),
+        "release.yml preflight job must fail closed when CHANGED_FILES is empty.\n\
+         If the GitHub API fails to return changed files for the commit, the \
+         preflight must set FAILED=1 rather than warning, to prevent releasing \
+         without CI verification.\n\
          File: {}",
         release_yml.display()
     );
@@ -6157,6 +6183,38 @@ fn parse_lychee_exclude_path_patterns(content: &str) -> Vec<String> {
 }
 
 // ============================================================================
+// Coverage Job Tests
+// ============================================================================
+
+#[test]
+fn test_coverage_job_uses_locked_flag() {
+    // Validates that the coverage job uses `--locked` for cargo llvm-cov
+    // commands. Without --locked, cargo may re-resolve dependencies during CI,
+    // producing coverage results against different dependency versions than
+    // what was tested.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    // Both the coverage generation and report commands should use --locked
+    assert!(
+        ci_content.contains("cargo llvm-cov --locked"),
+        "Coverage job must use 'cargo llvm-cov --locked' to ensure dependencies \
+         match Cargo.lock.\n\
+         Without --locked, cargo may re-resolve dependencies, producing coverage \
+         against different versions than what was tested.\n\
+         File: .github/workflows/ci.yml"
+    );
+
+    assert!(
+        ci_content.contains("cargo llvm-cov report --locked"),
+        "Coverage threshold check must use 'cargo llvm-cov report --locked' to \
+         ensure the coverage report uses the same locked dependencies.\n\
+         File: .github/workflows/ci.yml"
+    );
+}
+
+// ============================================================================
 // SBOM (Software Bill of Materials) Tests
 // ============================================================================
 //
@@ -6306,8 +6364,10 @@ fn test_release_workflow_generates_sbom() {
 
 #[test]
 fn test_release_workflow_attaches_sbom_to_release() {
-    // Validates that the SBOM file is included in the GitHub release assets.
-    // This ensures consumers can download the SBOM alongside the release.
+    // Validates that the SBOM file is attached to the GitHub release in a
+    // separate step that is conditional on successful SBOM generation.
+    // This ensures the release is created even if SBOM generation fails,
+    // while still attaching the SBOM when it succeeds.
 
     let root = repo_root();
     let release_yml = root.join(".github/workflows/release.yml");
@@ -6318,11 +6378,32 @@ fn test_release_workflow_attaches_sbom_to_release() {
 
     let content = read_file(&release_yml);
 
-    // The action-gh-release `files:` field should include the SBOM
+    // The SBOM must be attached via a dedicated "Attach SBOM to release" step
+    assert!(
+        content.contains("name: Attach SBOM to release"),
+        "release.yml must have a separate 'Attach SBOM to release' step.\n\
+         The SBOM attachment should be decoupled from the main release creation \
+         so that SBOM failure does not block the GitHub Release.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // The attach step must be conditional on SBOM generation success
+    assert!(
+        content.contains("steps.sbom.outcome == 'success'"),
+        "release.yml 'Attach SBOM to release' step must be conditional on \
+         steps.sbom.outcome == 'success'.\n\
+         This ensures the SBOM is only attached when generation succeeded, \
+         and the release is not blocked when it fails.\n\
+         File: {}",
+        release_yml.display()
+    );
+
+    // The attach step must reference sbom.cdx.json
     assert!(
         content.contains("files: sbom.cdx.json"),
         "release.yml must attach sbom.cdx.json to the GitHub release.\n\
-         Add 'files: sbom.cdx.json' to the softprops/action-gh-release step.\n\
+         Add 'files: sbom.cdx.json' to the 'Attach SBOM to release' step.\n\
          This allows release consumers to download the SBOM for audit purposes.\n\
          File: {}",
         release_yml.display()
@@ -6382,6 +6463,20 @@ fn test_release_sbom_has_continue_on_error() {
          Without this, a transient SBOM generation failure would block the \
          GitHub Release after the crate has already been published to crates.io.\n\
          SBOM failure must not block releases after crates.io publish.\n\
+         Step block:\n{}\n\
+         File: {}",
+        sbom_step_block,
+        release_yml.display()
+    );
+
+    // The SBOM generation step must have `id: sbom` so the conditional
+    // "Attach SBOM to release" step can reference `steps.sbom.outcome`.
+    assert!(
+        sbom_step_block.contains("id: sbom"),
+        "The 'Generate SBOM (CycloneDX)' step in release.yml MUST have \
+         `id: sbom`.\n\
+         This step ID is referenced by the conditional 'Attach SBOM to release' \
+         step via `steps.sbom.outcome == 'success'`.\n\
          Step block:\n{}\n\
          File: {}",
         sbom_step_block,
@@ -6699,6 +6794,65 @@ fn test_pre_commit_hook_checks_formatting_and_clippy() {
 }
 
 #[test]
+fn test_pre_commit_hook_includes_skills_index_freshness_check_16() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-commit must exist to enforce local quality gates"
+    );
+
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("# Check 16: Skills index generation freshness"),
+        "Pre-commit hook must define Check 16 for skills index freshness."
+    );
+
+    assert!(
+        content.contains("scripts/generate-skills-index.sh --check"),
+        "Check 16 must use generator check mode to verify freshness without rewriting files."
+    );
+
+    assert!(
+        content.contains("check_fail \"Skills index freshness\"")
+            && content.contains(
+                "Run './scripts/generate-skills-index.sh' and stage .llm/skills/INDEX.md."
+            ),
+        "Check 16 must fail with actionable regeneration guidance when the index is stale."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("git diff --cached --name-only -z --diff-filter=ACDMR --"),
+        "Check 16 should gate on staged path changes using an explicit diff-filter."
+    );
+
+    for required_trigger in [
+        ".llm/context.md",
+        "scripts/generate-skills-index.sh",
+        "':(glob).llm/skills/*.md'",
+    ] {
+        assert!(
+            content.contains(required_trigger),
+            "Check 16 trigger list must include: {required_trigger}"
+        );
+    }
+
+    assert!(
+        content.contains("check_skip \"Skills index freshness\""),
+        "Check 16 should skip cleanly when no skills/context/index inputs are staged."
+    );
+}
+
+#[test]
 fn test_check_no_panics_script_structure() {
     let root = repo_root();
     let script_path = root.join("scripts/check-no-panics.sh");
@@ -6723,10 +6877,11 @@ fn test_check_no_panics_script_structure() {
          to prevent 'integer expression expected' errors"
     );
 
-    // Must use --lib for clippy, not --all-targets
+    // Must use --lib --bins for clippy, not --all-targets
     assert!(
-        content.contains("clippy --lib") || content.contains("clippy\" --lib"),
-        "check-no-panics.sh clippy must use --lib to avoid flagging test code.\n\
+        content.contains("clippy --lib --bins") || content.contains("clippy\" --lib --bins"),
+        "check-no-panics.sh clippy must use --lib --bins to check library and \
+         binary targets without flagging test code.\n\
          Using --all-targets would report false positives for .unwrap() in tests."
     );
 
@@ -7028,10 +7183,11 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
 
                 // Only track SHA-pinned references (40-char hex)
                 if action_ref.len() == 40 && action_ref.chars().all(|c| c.is_ascii_hexdigit()) {
-                    action_shas
-                        .entry(action_name)
-                        .or_default()
-                        .push((action_ref.to_string(), filename.clone(), line_num));
+                    action_shas.entry(action_name).or_default().push((
+                        action_ref.to_string(),
+                        filename.clone(),
+                        line_num,
+                    ));
                 }
             }
         }
@@ -7050,13 +7206,12 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
                 unique_shas.len()
             );
             for (sha, filename, line_num) in refs {
-                details.push_str(&format!("\n    {}:{}: {}", filename, line_num, sha));
+                details.push_str(&format!("\n    {filename}:{line_num}: {sha}"));
             }
             details.push_str(&format!(
-                "\n  Fix: Update all references to '{}' to use the same SHA.\n  \
+                "\n  Fix: Update all references to '{action_name}' to use the same SHA.\n  \
                  Pick the most recent version and apply it to every workflow file.\n  \
-                 Search with: grep -rn '{}' .github/workflows/",
-                action_name, action_name
+                 Search with: grep -rn '{action_name}' .github/workflows/"
             ));
             inconsistencies.push(details);
         }
@@ -7113,9 +7268,7 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
     let content = read_file(&dockerfile);
 
     // Patterns that Docker Scout / BuildKit flag as potential secrets in ENV names
-    let security_patterns = [
-        "SECURITY", "SECRET", "PASSWORD", "TOKEN", "KEY", "AUTH",
-    ];
+    let security_patterns = ["SECURITY", "SECRET", "PASSWORD", "TOKEN", "KEY", "AUTH"];
 
     // Values that are clearly non-sensitive (boolean/numeric flags)
     let safe_values = ["false", "true", "0", "1"];
@@ -7151,10 +7304,7 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
             let has_safe_value = safe_values.contains(&var_value);
 
             if has_security_pattern && has_safe_value {
-                flagged_env_vars.push(format!(
-                    "  line {}: ENV {}={}",
-                    line_num, var_name, var_value
-                ));
+                flagged_env_vars.push(format!("  line {line_num}: ENV {var_name}={var_value}"));
             }
         }
     }
@@ -7166,8 +7316,8 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
 
     // Check that the Dockerfile starts with the suppression directive
     let first_line = content.lines().next().unwrap_or("");
-    let has_check_directive = first_line.contains("# check=")
-        && first_line.contains("skip=SecretsUsedInArgOrEnv");
+    let has_check_directive =
+        first_line.contains("# check=") && first_line.contains("skip=SecretsUsedInArgOrEnv");
 
     assert!(
         has_check_directive,
@@ -7289,7 +7439,7 @@ fn test_ci_schedule_only_runs_audit() {
 /// British English spellings that should be replaced with American English equivalents.
 ///
 /// Each entry is (british_pattern, american_replacement). The patterns are
-/// case-insensitive substrings so "uninitialised" also catches "Uninitialised".
+/// case-insensitive substrings, so each lowercase pattern also matches its capitalized variant.
 const BRITISH_AMERICAN_PAIRS: &[(&str, &str)] = &[
     ("uninitialised", "uninitialized"),
     ("behaviour", "behavior"),

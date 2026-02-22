@@ -16,7 +16,7 @@
 - Editing an existing skill to add or update content
 - Splitting a skill that exceeds the size limit
 - Reviewing skill compliance with formatting rules
-- Regenerating the skills index in context.md
+- Regenerating the skills index in `.llm/skills/INDEX.md`
 
 ---
 
@@ -121,7 +121,11 @@ Run the size linter: `bash scripts/lint-skill-sizes.sh`
 4. If > 500 lines: **STOP** — must split before continuing
 5. Run format linter: `bash scripts/lint-llm-instructions.sh`
 6. Regenerate index: `bash scripts/generate-skills-index.sh`
-7. Verify context.md updated correctly
+
+- Index ordering contract: deterministic `LC_ALL=C` sort by file path/filename (not by title)
+
+1. Ensure `.llm/skills/INDEX.md` is updated and staged
+2. Verify `.llm/context.md` references `skills/INDEX.md`
 
 ---
 

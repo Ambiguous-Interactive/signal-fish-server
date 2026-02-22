@@ -54,6 +54,25 @@
 
 - **Test configuration files**: Add CI tests to validate consistency (MSRV, typos.toml, etc.)
 - **AWK patterns**: Use prefix matching (`/^```rust/`) for flexibility, not exact patterns
+- **rustfmt check fails**: Run `cargo fmt` before committing — the pre-commit hook (Check 1)
+  catches this automatically
+- **typos false positives in test data**: Add files that intentionally contain "wrong" spellings
+  (e.g., British/American pairs) to `[files] extend-exclude` in `.typos.toml` with a comment
+- **YAML `...` in doc code blocks**: Replace the YAML document-end marker `...` with `# ...`
+  in documentation code block examples so YAML validators can parse them
+- **Miri clock_gettime failure**: Add `#[cfg_attr(miri, ignore)]` to tests that call
+  `chrono::Utc::now()` or any wall-clock API; add a comment explaining the reason and
+  track a future `Clock` trait abstraction to make the tests Miri-compatible
+
+**Shell & Release Safety:**
+
+- **POSIX shell portability**: Use `[[:space:]]` not `\s` in grep; avoid `tac` on macOS
+  (use AWK reverse pass); beware POSIX vs GNU extensions in CI scripts
+- **Release preflight**: Fail closed on API errors; assert workflow ID uniqueness;
+  conditionally attach artifacts (`if: steps.X.outcome == 'success'`)
+- **Panic policy precision**: `#[cfg(test)]` on `mod tests` not standalone items;
+  `cargo clippy --lib --bins` to cover binaries; schedule guard allowlists for
+  workflow jobs
 
 ---
 
@@ -3372,5 +3391,96 @@ Based on recent issues fixed in this project:
 - **Detection:** Docker build checksum errors; security audit flagging mutable action refs;
   exit code 127 in workflow steps (or silent pass with `continue-on-error: true`)
 - **Prevention:** Audit Dockerfiles and workflows when removing files; enforce SHA pinning
-  for all `uses:` references; validate script paths exist; avoid `continue-on-error` masking real failures
-- **Fix Time:** Minutes (update or remove stale references) but Hours (if silent failures went unnoticed)
+  for all `uses:` references; validate script paths exist;
+  avoid `continue-on-error` masking real failures
+- **Fix Time:** Minutes (update or remove stale references) but
+  Hours (if silent failures went unnoticed)
+
+### Category 7: Formatter / Spell-Checker Failures in New Test Code
+
+- **Example:** `rustfmt --check` fails on newly added test file; `typos` flags British
+  spellings in `BRITISH_AMERICAN_PAIRS` test data; doc comment uses the literal misspelling
+  as an example
+- **Detection:** Lint CI job fails with `Diff in tests/...rs:NNNN`; Spell Check job
+  exits 2 with `error: '<BrE spelling>' should be '<AmE spelling>'`
+- **Prevention:** Run `cargo fmt` before staging; add test data files that intentionally
+  contain "wrong" spellings to `[files] extend-exclude` in `.typos.toml`; rewrite doc
+  comments to describe patterns without using the literal misspelling (e.g.,
+  "also matches capitalized variant" instead of quoting the literal BrE spelling)
+- **Fix Time:** Minutes
+
+### Category 8: Invalid YAML in Documentation Code Block Examples
+
+- **Example:** `.llm/skills/github-actions-best-practices.md` code block uses `...` as a
+  placeholder for "rest of job definition"; the YAML document-end marker `...` at
+  line-start causes `yq` to fail with a parse error
+- **Detection:** Markdown Code Validation CI job fails with `✗ Invalid YAML in ./file.md
+  at line NNN`; `1/N blocks invalid`
+- **Prevention:** In YAML documentation examples, use `# ...` (YAML comment) instead of
+  `...` as a placeholder; `...` is a YAML document-end marker and invalid in many
+  parser contexts
+- **Fix Time:** Minutes (replace `...` with `# ...` in the fenced code block)
+
+### Category 9: Miri Isolation Failures for Wall-Clock Time
+
+- **Example:** `database::tests::test_create_room_atomic_consistency` calls
+  `chrono::Utc::now()` via `InMemoryDatabase::create_room`; Miri's isolation mode
+  blocks `clock_gettime(CLOCK_REALTIME)` because it introduces non-deterministic state,
+  aborting all subsequent tests in the binary
+- **Detection:** Miri CI job fails with `error: unsupported operation: clock_gettime with
+  REALTIME clocks not available when isolation is enabled`; all subsequent tests in the
+  same binary are skipped (Miri hard-aborts the process, not just marks the test failed);
+  tests in other binaries still run when `--no-fail-fast` is passed
+- **Prevention:** Any test that (directly or transitively) calls wall-clock time APIs
+  must have `#[cfg_attr(miri, ignore)]` with a comment; the long-term fix is to inject
+  a `Clock` trait into types like `InMemoryDatabase` so tests can provide a mock clock
+- **Fix Time:** Minutes (add `#[cfg_attr(miri, ignore)]`); Days (if implementing
+  clock abstraction for full Miri coverage)
+
+### Category 10: POSIX Shell Portability
+
+- **Example:** `grep '\s'` works with GNU grep but fails silently on macOS BSD grep;
+  `tac` command unavailable on macOS; `sed -i ''` (macOS) vs `sed -i` (GNU) syntax
+  differences
+- **Detection:** CI scripts pass on Linux runners but fail on macOS runners (or vice
+  versa); shellcheck may not catch all portability issues; manual testing on both
+  platforms reveals divergence
+- **Prevention:** Use POSIX character classes (`[[:space:]]`) instead of GNU extensions
+  (`\s`); replace `tac` with an AWK reverse pass (`awk '{a[NR]=$0} END{for(i=NR;i>=1;i--)print a[i]}'`);
+  be aware of POSIX vs GNU extension differences in `grep`, `sed`, and `sort`;
+  test CI scripts on both Linux and macOS runners when workflows target both
+- **Fix Time:** Minutes (replace non-portable constructs with POSIX equivalents)
+
+### Category 11: Release Preflight Safety
+
+- **Example:** Release preflight script calls `gh api` to verify required workflow
+  runs but treats API errors (HTTP 500, network timeout) as "no run found" instead
+  of failing; workflow IDs assumed unique but duplicate names cause silent mismatches;
+  release attaches artifact files that may not exist if a prior step was skipped
+- **Detection:** Release proceeds despite API outage (false green); release preflight
+  passes when two workflows share a name (only one is checked); release step fails
+  with "file not found" when attaching artifacts from a skipped build step
+- **Prevention:** Fail closed on API errors (check `gh api` exit code and HTTP status
+  before interpreting response body); assert uniqueness of workflow IDs/names at the
+  start of preflight; conditionally attach artifacts using step output checks
+  (`if: steps.<step-id>.outcome == 'success'`) instead of assuming files always exist
+- **Fix Time:** Minutes (add error checks and conditional steps)
+
+### Category 12: Panic Policy Precision
+
+- **Example:** `#[cfg(test)]` applied to a standalone function instead of the
+  enclosing `mod tests` block, causing the function to be invisible outside tests;
+  `cargo clippy --lib` enforces `forbid(clippy::panic)` on library code but misses
+  panics in binary crates; schedule-triggered workflow runs all jobs including ones
+  that should only run on push/PR events
+- **Detection:** Clippy passes in CI but panics appear in production binary; test
+  helper functions missing at compile time outside `cfg(test)`; scheduled runs
+  trigger deploy or release jobs unexpectedly
+- **Prevention:** Apply `#[cfg(test)]` to `mod tests` blocks, not individual items
+  within them (unless the item is truly test-only and lives outside the test module);
+  use `cargo clippy --lib --bins` (not just `--lib`) to lint both library and binary
+  targets; add schedule guard allowlists (`if: github.event_name != 'schedule'` or an
+  explicit allowlist of job names) for workflows where only specific jobs should run on
+  schedule
+- **Fix Time:** Minutes (fix attribute placement or clippy target flags); Hours (if
+  redesigning workflow job conditions)

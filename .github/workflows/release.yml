@@ -108,6 +108,15 @@ jobs:
               continue
             fi
 
+            # Ensure exactly one workflow matched the name
+            WORKFLOW_ID_COUNT=$(echo "$WORKFLOW_ID" | grep -c .)
+            if [ "$WORKFLOW_ID_COUNT" -gt 1 ]; then
+              echo "ERROR: Multiple workflows found with name '${WORKFLOW_NAME}'"
+              echo "  IDs: $WORKFLOW_ID"
+              FAILED=1
+              continue
+            fi
+
             # Get the most recent completed run for this workflow on the commit's branch
             CONCLUSION=$(gh api \
               "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?head_sha=${COMMIT_SHA}&status=completed&per_page=1" \
@@ -126,9 +135,11 @@ jobs:
                   --jq '.files[].filename' 2>/dev/null || echo "")
 
                 if [ -z "$CHANGED_FILES" ]; then
-                  echo "  WARNING: Could not retrieve changed files for commit ${COMMIT_SHA}"
-                  echo "  Treating path-filtered workflow as skipped (no files to match)."
-                  echo "WARNING: '${WORKFLOW_NAME}' assumed skipped (could not retrieve changed files)"
+                  echo "  ERROR: Could not retrieve changed files for commit ${COMMIT_SHA}"
+                  echo "  Release preflight requires file change data to verify path-filtered workflows."
+                  echo "  This may be caused by GitHub API rate limiting or a transient outage."
+                  echo "  Failing closed to prevent releasing without CI verification."
+                  FAILED=1
                   continue
                 fi
 
@@ -334,6 +345,7 @@ jobs:
           tool: cargo-sbom
 
       - name: Generate SBOM (CycloneDX)
+        id: sbom
         run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
         continue-on-error: true
 
@@ -367,6 +379,14 @@ jobs:
           body_path: release_notes.md
           draft: false
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach SBOM to release
+        if: steps.sbom.outcome == 'success'
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: ${{ steps.get_version.outputs.tag }}
           files: sbom.cdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -21,6 +21,7 @@
 #  13. British English spellings (warning only)
 #  14. Path-filtered workflow registration (if workflow files modified)
 #  15. Schedule trigger guards (if workflow files modified)
+#  16. Skills index generation freshness (if skills inputs/script/context change)
 
 set -e
 
@@ -40,7 +41,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=15
+TOTAL_CHECKS=16
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -641,7 +642,7 @@ if [ -n "$WORKFLOW_FILES" ]; then
             [ -z "$WF_NAME" ] && continue
 
             # Check if this workflow uses path filters
-            HAS_PATHS=$(grep -c '^\s*paths:' "$wf_file" 2>/dev/null || echo "0")
+            HAS_PATHS=$(grep -c '^[[:space:]]*paths:' "$wf_file" 2>/dev/null || echo "0")
 
             if [ "$HAS_PATHS" -gt 0 ]; then
                 # Check if it's in REQUIRED_WORKFLOWS
@@ -683,8 +684,15 @@ if [ -n "$WORKFLOW_FILES" ]; then
         [ -f "$wf_file" ] || continue
 
         # Check if this workflow has a schedule trigger
-        HAS_SCHEDULE=$(grep -c '^\s*schedule:' "$wf_file" 2>/dev/null || echo "0")
+        HAS_SCHEDULE=$(grep -c '^[[:space:]]*schedule:' "$wf_file" 2>/dev/null || echo "0")
         [ "$HAS_SCHEDULE" -eq 0 ] && continue
+
+        # Check for workflow-level allowlist: if the workflow has a top-level
+        # comment "# all-jobs-run-on-schedule" in the first 30 lines, all jobs
+        # are intended to run on schedule, so skip the per-job check entirely.
+        if head -30 "$wf_file" | grep -q '# all-jobs-run-on-schedule'; then
+            continue
+        fi
 
         # Extract job names and check for schedule guards
         # A job that should run on schedule won't have the guard (e.g., security audit).
@@ -709,9 +717,9 @@ if [ -n "$WORKFLOW_FILES" ]; then
             }
             # Check for schedule exclusion guard in job-level if:
             /^    if:.*schedule/ { has_guard = 1 }
-            # Check for comment indicating this job should run on schedule
+            # Check for explicit per-job annotation or keyword heuristic
+            /^    #.*runs-on-schedule/ { is_schedule_job = 1 }
             /^    #.*schedule|^    #.*security|^    #.*audit|^    #.*daily/ { is_schedule_job = 1 }
-            # Also check the job name itself for hints it runs on schedule
             END {
                 if (job_name != "" && !has_guard && !is_schedule_job) {
                     print job_name
@@ -738,6 +746,33 @@ else
     check_skip "Schedule trigger guards" "no workflow files changed"
 fi
 
+# Check 16: Skills index generation freshness
+# Ensures .llm/skills/INDEX.md is generated and up-to-date when staged inputs
+# change (added/modified/deleted/renamed): skill files, generator script,
+# or .llm/context.md.
+echo "${BLUE}[16/${TOTAL_CHECKS}]${NC} Checking generated skills index freshness..."
+STAGED_SKILLS_INDEX_BYTES=$(git diff --cached --name-only -z --diff-filter=ACDMR -- \
+    .llm/context.md \
+    scripts/generate-skills-index.sh \
+    ':(glob).llm/skills/*.md' \
+    | wc -c | tr -d '[:space:]')
+
+if [ "$STAGED_SKILLS_INDEX_BYTES" -gt 0 ]; then
+    if [ -x scripts/generate-skills-index.sh ]; then
+        if scripts/generate-skills-index.sh --check > /dev/null 2>&1; then
+            check_pass "Skills index freshness"
+        else
+            check_fail "Skills index freshness" "Run './scripts/generate-skills-index.sh' and stage .llm/skills/INDEX.md."
+            echo ""
+        fi
+    else
+        check_fail "Skills index freshness" "scripts/generate-skills-index.sh not found or not executable."
+        echo ""
+    fi
+else
+    check_skip "Skills index freshness" "no .llm skills/context/index-related files staged"
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -751,6 +786,7 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  cargo clippy --fix --allow-dirty            # Fix clippy warnings"
     echo "  ./scripts/check-markdown.sh fix             # Fix markdown"
     echo "  ./scripts/validate-ci.sh                    # Validate CI config"
+    echo "  ./scripts/generate-skills-index.sh          # Refresh .llm/skills/INDEX.md"
     echo "  ./scripts/run-local-ci.sh --fix             # Fix all issues"
     echo ""
     echo "${YELLOW}To bypass (NOT recommended):${NC}"

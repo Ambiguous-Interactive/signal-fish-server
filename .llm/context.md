@@ -20,6 +20,11 @@
   or "the signaling server" — not "Matchbox Signaling Server" as a product name.
   "Signal Fish" is acceptable as an informal project reference
 
+## Skills Index
+
+- Generated skill catalog: [skills/INDEX.md](skills/INDEX.md)
+- Regenerate after skill changes: `./scripts/generate-skills-index.sh`
+
 ---
 
 ## ⛔ CRITICAL: Git Safety Protocol - NEVER COMMIT
@@ -336,60 +341,8 @@ cargo bench                                    # Benchmarks
 
 ## Skills Library
 
-<!-- BEGIN GENERATED SKILLS INDEX -->
-
-> Read `rust-idioms-and-patterns` and `error-handling-guide` first -- they are referenced most frequently.
-
-### Core Skills
-
-| Skill                                                                | When to Use                                                              |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| [git-safety-protocol](skills/git-safety-protocol.md)                 | **CRITICAL** - Git operations safety rules (NEVER commit or configure)   |
-| [agentic-workflow-patterns](skills/agentic-workflow-patterns.md)     | Patterns for effective AI agent workflows and subagent dispatch          |
-| [agent-self-review-checklist](skills/agent-self-review-checklist.md) | Structured self-verification before marking any task complete            |
-| [clippy-and-linting](skills/clippy-and-linting.md)                   | Configuring lints; resolving clippy warnings; CI setup                   |
-| [code-review-checklist](skills/code-review-checklist.md)             | AI-driven code review with structured output                             |
-| [ddos-and-rate-limiting](skills/ddos-and-rate-limiting.md)           | Protecting a Rust/axum WebSocket signaling server from DDoS and abuse    |
-| [defensive-programming](skills/defensive-programming.md)             | Eliminating runtime panics and compile-time safety                       |
-| [documentation-standards](skills/documentation-standards.md)         | Documentation requirements and quality standards for all changes         |
-| [error-handling-guide](skills/error-handling-guide.md)               | Designing error types and propagation patterns                           |
-| [graceful-degradation](skills/graceful-degradation.md)               | Reliability patterns: circuit breakers, health checks, graceful shutdown |
-| [manage-skills](skills/manage-skills.md)                             | Creating, editing, and maintaining skill files                           |
-| [mandatory-workflow](skills/mandatory-workflow.md)                   | Mandatory linting, formatting, and validation workflow for every change  |
-| [markdown-best-practices](skills/markdown-best-practices.md)         | Markdown documentation, code blocks, proper nouns, link validation       |
-| [`rust-idioms-and-patterns`](skills/rust-idioms-and-patterns.md)     | Canonical Rust patterns for writing and reviewing code                   |
-| [`rust-refactoring-guide`](skills/rust-refactoring-guide.md)         | Safe incremental Rust refactoring workflows                              |
-| [solid-principles-enforcement](skills/solid-principles-enforcement.md) | Enforcing SOLID principles in Rust                                     |
-| [testing-strategies](skills/testing-strategies.md)                   | Core testing methodology and patterns                                    |
-| [testing-tools-and-frameworks](skills/testing-tools-and-frameworks.md) | Testing tools, frameworks, and coverage measurement                    |
-| [web-service-security](skills/web-service-security.md)               | Hardening a Rust/axum WebSocket signaling server against common attacks  |
-
-### Security & Infrastructure Skills
-
-| Skill                                                              | When to Use                                                       |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| [supply-chain-security](skills/supply-chain-security.md)                     | Dependency auditing, cargo-deny, SBOM, reproducible builds        |
-| [`websocket-session-security`](skills/websocket-session-security.md)         | WebSocket session lifecycle security, token rotation, anti-replay |
-| [container-and-deployment](skills/container-and-deployment.md)               | Docker, CI/CD, container security for game servers                |
-| [`github-actions-best-practices`](skills/github-actions-best-practices.md)   | GitHub Actions workflows, Bash/AWK pipelines, CI/CD debugging     |
-| [ci-cd-troubleshooting](skills/ci-cd-troubleshooting.md)                     | Common CI failures, cache errors, configuration mismatches        |
-| [msrv-and-toolchain-management](skills/msrv-and-toolchain-management.md)     | MSRV updates, toolchain consistency, dependency compatibility     |
-| [awk-and-shell-scripting](skills/awk-and-shell-scripting.md)                 | POSIX-compatible AWK/shell scripts, multi-line processing in CI   |
-| [git-hooks-setup](skills/git-hooks-setup.md)                                 | Creating and maintaining git hooks with proper permissions        |
-| [test-fixture-patterns](skills/test-fixture-patterns.md)                     | Test fixtures and data-driven CI configuration testing            |
-
-### Performance & Feature Skills
-
-| Skill                                                                    | When to Use                                                 |
-| ------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| [`async-rust-best-practices`](skills/async-rust-best-practices.md)       | Working with tokio, channels, async code, or concurrency    |
-| [observability-and-logging](skills/observability-and-logging.md)         | Adding metrics, tracing spans, and structured logging       |
-| [`rust-performance-optimization`](skills/rust-performance-optimization.md) | Optimizing hot paths, reducing allocations, and profiling |
-| [api-design-guidelines](skills/api-design-guidelines.md)                 | Designing public APIs, protocol types, or interfaces        |
-| [dependency-management](skills/dependency-management.md)                 | Adding, auditing, and managing Rust crate dependencies      |
-| [`websocket-protocol-patterns`](skills/websocket-protocol-patterns.md)   | WebSocket lifecycle, message design, and broadcast patterns |
-
-<!-- END GENERATED SKILLS INDEX -->
+The canonical skill list is generated in [skills/INDEX.md](skills/INDEX.md).
+Do not maintain a duplicate generated list in this file.
 
 ---
 

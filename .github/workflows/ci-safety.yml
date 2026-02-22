@@ -59,6 +59,7 @@
 #     - No nightly toolchain incidents (breakage, unavailability) during that window
 #     - Median runtime stays within the timeout budget (45 min Miri, 30 min ASan)
 #   Until promotion, failures are informational and should be triaged weekly.
+# all-jobs-run-on-schedule
 
 name: Advanced Safety
 

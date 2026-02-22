@@ -74,6 +74,9 @@
 - Use retry loops with `Docker logs` dumps for smoke tests
 - Pin all action versions with SHA256 digests
 - Document magic numbers: timeout values, AWK field offsets, counter file formats
+- Use `--locked` on all `cargo` commands in CI for reproducible builds
+- Release preflight: fail closed on API errors; assert workflow ID uniqueness
+- Conditionally attach artifacts with `if: steps.<id>.outcome == 'success'`
 
 ---
 
@@ -2048,11 +2051,11 @@ on:
 
 jobs:
   deny:    # <-- This is the only job we want on schedule
-    ...
+    # ...
   lint:    # <-- This will ALSO run on schedule without a guard!
-    ...
+    # ...
   nextest: # <-- This too!
-    ...
+    # ...
 
 ```
 
@@ -2074,13 +2077,13 @@ jobs:
     name: Lint
     if: github.event_name != 'schedule'  # Skip on daily cron
     runs-on: ubuntu-latest
-    ...
+    # ...
 
   nextest:
     name: Tests
     if: github.event_name != 'schedule'  # Skip on daily cron
     runs-on: ubuntu-latest
-    ...
+    # ...
 
 ```
 
@@ -2297,6 +2300,80 @@ The test `test_release_workflow_handles_path_filtered_workflows` in
 
 ---
 
+## 20. Cargo `--locked` Consistency and Release Preflight Hardening
+
+### Use `--locked` Across All Cargo Commands in CI
+
+Every `cargo` invocation in CI should use `--locked` to ensure the checked-in
+`Cargo.lock` is respected. Without it, CI may silently resolve different dependency
+versions than what was tested locally.
+
+```yaml
+# ❌ WRONG: Inconsistent --locked usage
+- run: cargo build --locked
+- run: cargo test              # ← missing --locked, may resolve different deps
+- run: cargo clippy             # ← also missing --locked
+
+# ✅ CORRECT: All cargo commands use --locked
+- run: cargo build --locked
+- run: cargo test --locked
+- run: cargo clippy --locked --all-targets --all-features
+```
+
+### Conditional Artifact Attachment
+
+Do not assume build artifacts exist. Use step IDs and outcome checks to
+conditionally attach artifacts, preventing failures when a prior step was skipped.
+
+```yaml
+- name: Build release binary
+  id: build
+  run: cargo build --release --locked
+
+- name: Upload artifact
+  if: steps.build.outcome == 'success'
+  uses: actions/upload-artifact@v4
+  with:
+    name: release-binary
+    path: target/release/my-binary
+```
+
+### Release Preflight: Fail Closed on API Errors
+
+When querying GitHub APIs during release preflight, always check the exit code
+before interpreting the response. An API outage should block the release, not
+silently pass it.
+
+```bash
+# ❌ WRONG: API failure treated as "no runs found"
+RUNS=$(gh api "repos/${REPO}/actions/workflows/${WF_ID}/runs" --jq '.workflow_runs[0].conclusion')
+
+# ✅ CORRECT: Fail closed on API errors
+if ! RUNS=$(gh api "repos/${REPO}/actions/workflows/${WF_ID}/runs" \
+  --jq '.workflow_runs[0].conclusion' 2>/dev/null); then
+  echo "ERROR: GitHub API request failed for workflow ${WF_ID}"
+  exit 1
+fi
+```
+
+### Assert WORKFLOW_ID Uniqueness
+
+If the release preflight iterates over a list of required workflow names or IDs,
+assert that each ID is unique at the start of the script. Duplicate entries cause
+silent mismatches where only one workflow is actually verified.
+
+```bash
+# Assert no duplicate workflow IDs
+UNIQUE_COUNT=$(printf '%s\n' "${WORKFLOW_IDS[@]}" | sort -u | wc -l)
+TOTAL_COUNT=${#WORKFLOW_IDS[@]}
+if [ "$UNIQUE_COUNT" -ne "$TOTAL_COUNT" ]; then
+  echo "ERROR: Duplicate workflow IDs detected in REQUIRED_WORKFLOWS"
+  exit 1
+fi
+```
+
+---
+
 ## Agent Checklist
 
 ### AWK Best Practices
@@ -2336,6 +2413,10 @@ The test `test_release_workflow_handles_path_filtered_workflows` in
 - [ ] Path-filtered required workflows registered in release preflight `PATH_FILTERED_WORKFLOWS`
 - [ ] Schedule-triggered workflows have job-level `if:` guards for non-audit jobs
 - [ ] All text uses American English spellings (see [documentation-standards](./documentation-standards.md))
+- [ ] All `cargo` commands in CI use `--locked` consistently
+- [ ] Artifact upload steps use `if: steps.<id>.outcome == 'success'` guards
+- [ ] Release preflight fails closed on API errors (checks `gh api` exit code)
+- [ ] Required workflow ID lists asserted unique at start of preflight
 
 ---
 

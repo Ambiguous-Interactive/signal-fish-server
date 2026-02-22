@@ -32,8 +32,8 @@ check_clippy() {
         return 0
     fi
 
-    # Run clippy with strict panic-prevention lints on library code only.
-    # We use --lib instead of --all-targets to avoid flagging test code,
+    # Run clippy with strict panic-prevention lints on library and binary code.
+    # We use --lib --bins instead of --all-targets to avoid flagging test code,
     # where .unwrap(), .expect(), and panic!() are acceptable.
     # These lints catch code that could panic at runtime:
     # - clippy::panic: explicit panic!() calls
@@ -43,7 +43,7 @@ check_clippy() {
     # - clippy::unimplemented: unimplemented!() macros
     # - clippy::unreachable: unreachable!() macros
     # - clippy::indexing_slicing: unchecked array/slice indexing
-    if cargo clippy --lib --all-features -- \
+    if cargo clippy --lib --bins --all-features -- \
         -D clippy::panic \
         -D clippy::unwrap_used \
         -D clippy::expect_used \
@@ -84,26 +84,62 @@ filter_test_code() {
             *_tests.rs|*_test.rs) continue ;;
         esac
 
-        # Find the line number where #[cfg(test)] appears in this file.
-        # If the match is at or after that line, it's test code — skip it.
-        local cfg_test_line
-        cfg_test_line=$(grep -n '#\[cfg(test)\]' "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$cfg_test_line" ] && [ "$line_num" -ge "$cfg_test_line" ]; then
+        # Find the line number where a #[cfg(test)] MODULE begins.
+        # We only skip code inside test modules (not standalone #[cfg(test)]
+        # attributes on individual items like helper methods).
+        # A test module is #[cfg(test)] followed by a `mod` declaration.
+        local cfg_test_mod_line
+        cfg_test_mod_line=$(awk '
+            /^[[:space:]]*#\[cfg\(test\)\]/ {
+                candidate = NR
+                next
+            }
+            candidate && /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]/ {
+                print candidate
+                exit
+            }
+            candidate && /^[[:space:]]*$/ {
+                # Allow blank lines between #[cfg(test)] and mod
+                next
+            }
+            candidate {
+                # Non-blank, non-mod line means this #[cfg(test)] is not a module
+                candidate = 0
+            }
+        ' "$file" 2>/dev/null)
+        if [ -n "$cfg_test_mod_line" ] && [ "$line_num" -ge "$cfg_test_mod_line" ]; then
             continue
         fi
 
         # Also check if the line is inside a #[test] function by scanning
-        # backwards from the match line for #[test] or #[tokio::test] attributes
+        # backwards from the match line. First finds the enclosing `fn`, then
+        # continues scanning upward past attributes to see if #[test] or
+        # #[tokio::test] precedes it.
+        # Uses a single forward AWK pass (avoids `tac` which is unavailable on macOS).
         local in_test_fn
-        in_test_fn=$(head -n "$line_num" "$file" 2>/dev/null | tac | awk '
-            /^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+/ {
-                # We hit a function definition before finding a test attribute
-                print "no"; exit
+        in_test_fn=$(awk -v target="$line_num" '
+            NR <= target { lines[NR] = $0 }
+            END {
+                found_fn = 0
+                for (i = target; i >= 1; i--) {
+                    if (lines[i] ~ /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+/) {
+                        found_fn = 1
+                        continue
+                    }
+                    if (found_fn) {
+                        # After finding fn, look for #[test] attribute above it
+                        if (lines[i] ~ /^[[:space:]]*#\[test\]/ || lines[i] ~ /^[[:space:]]*#\[tokio::test/) {
+                            print "yes"; exit
+                        }
+                        # Allow other attributes between #[test] and fn
+                        if (lines[i] ~ /^[[:space:]]*#\[/) continue
+                        # Non-attribute line means fn is not a test
+                        print "no"; exit
+                    }
+                }
+                print "no"
             }
-            /^[[:space:]]*#\[test\]/ || /^[[:space:]]*#\[tokio::test/ {
-                print "yes"; exit
-            }
-        ')
+        ' "$file" 2>/dev/null)
         if [ "$in_test_fn" = "yes" ]; then
             continue
         fi
