@@ -1,0 +1,51 @@
+# LLM File Size Check
+#
+# Validates that .llm/ documentation files stay within the 300-line limit.
+# This workflow prevents AI context files from growing too large, which
+# degrades agent performance and increases token costs.
+#
+# Runs on:
+#   - Push to main branch (only for .llm/** or script changes)
+#   - Pull requests to main (only for .llm/** or script changes)
+
+name: LLM File Size Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.llm/**'
+      - 'scripts/check-llm-file-sizes.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.llm/**'
+      - 'scripts/check-llm-file-sizes.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  llm-file-sizes:
+    name: Check LLM File Sizes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run LLM file size checks
+        run: ./scripts/check-llm-file-sizes.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "LLM file size check completed."
+          echo ""
+          echo "This check validates:"
+          echo "  - All .llm/ files are within the 300-line limit"
+          echo "  - Context and skill files remain concise for agent use"

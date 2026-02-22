@@ -146,7 +146,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
             if [ "$AGE_DAYS" -gt "$NIGHTLY_STALENESS_ERROR_DAYS" ]; then
                 error "$WORKFLOW_NAME: Nightly toolchain is over 1 year old ($AGE_DAYS days)"
                 error "  Update toolchain to nightly-$(date +%Y-%m-%d -d '1 month ago')"
-                error "  See .llm/skills/msrv-and-toolchain-management.md for update procedure"
+                error "  See .llm/skills/msrv-management.md for update procedure"
             elif [ "$AGE_DAYS" -gt "$NIGHTLY_STALENESS_WARN_DAYS" ]; then
                 warn "$WORKFLOW_NAME: Nightly toolchain is over 6 months old ($AGE_DAYS days)"
                 warn "  Consider updating to nightly-$(date +%Y-%m-%d -d '1 month ago')"
@@ -339,60 +339,211 @@ echo ""
 # ---------------------------------------------------------------------------
 info "Checking for cargo commands missing --locked..."
 
+# Extract run blocks from a workflow YAML file.
+# Output format: NUL-delimited records: "<start_line>\t<run_content>".
+extract_run_blocks_for_workflow() {
+    local workflow_file="$1"
+
+    awk '
+        function indent_level(s,    i, c, n) {
+            n = 0
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (c == " " || c == "\t") {
+                    n++
+                } else {
+                    break
+                }
+            }
+            return n
+        }
+
+        function ltrim(s) {
+            sub(/^[ \t]+/, "", s)
+            return s
+        }
+
+        function flush_run_block() {
+            if (in_run_block) {
+                printf "%d\t%s%c", run_start_line, run_content, 0
+                in_run_block = 0
+                run_content = ""
+                run_block_indent = -1
+            }
+        }
+
+        {
+            line = $0
+            trimmed = ltrim(line)
+            current_indent = indent_level(line)
+
+            # Continue collecting a run: | / run: > block until we hit a
+            # non-empty line at the same or lower indentation as the run key.
+            if (in_run_block) {
+                if (trimmed != "" && current_indent <= run_key_indent) {
+                    flush_run_block()
+                    # Fall through: this line may start a new run key.
+                } else {
+                    content_line = line
+                    if (trimmed != "") {
+                        if (run_block_indent < 0) {
+                            run_block_indent = current_indent
+                        }
+                        remove = run_block_indent
+                        while (remove > 0 && length(content_line) > 0) {
+                            first = substr(content_line, 1, 1)
+                            if (first == " " || first == "\t") {
+                                content_line = substr(content_line, 2)
+                                remove--
+                            } else {
+                                break
+                            }
+                        }
+                    } else {
+                        content_line = ""
+                    }
+
+                    if (run_content == "") {
+                        run_content = content_line
+                    } else {
+                        run_content = run_content "\n" content_line
+                    }
+                    next
+                }
+            }
+
+            # Multiline YAML run block (literal/folded scalars).
+            if (trimmed ~ /^run:[ \t]*[|>]/) {
+                in_run_block = 1
+                run_start_line = NR
+                run_key_indent = current_indent
+                run_block_indent = -1
+                run_content = ""
+                next
+            }
+
+            # Single-line run key.
+            if (trimmed ~ /^run:[ \t]*[^|>]/) {
+                inline_cmd = trimmed
+                sub(/^run:[ \t]*/, "", inline_cmd)
+                printf "%d\t%s%c", NR, inline_cmd, 0
+            }
+        }
+
+        END {
+            flush_run_block()
+        }
+    ' "$workflow_file"
+}
+
+# Normalize shell continuation lines from a run block into logical commands.
+# Example:
+#   cargo test \
+#     --all-features \
+#     --locked
+# becomes one logical line.
+normalize_run_block_commands() {
+    local run_block="$1"
+
+    printf '%s\n' "$run_block" | awk '
+        {
+            line = $0
+
+            if (continued) {
+                sub(/^[ \t]+/, "", line)
+                logical = logical " " line
+            } else {
+                logical = line
+            }
+
+            if (line ~ /\\[ \t]*$/) {
+                sub(/\\[ \t]*$/, "", logical)
+                continued = 1
+            } else {
+                print logical
+                continued = 0
+                logical = ""
+            }
+        }
+
+        END {
+            if (continued && logical != "") {
+                print logical
+            }
+        }
+    '
+}
+
 # Commands that are exempt from the --locked requirement:
 #   - cargo fmt: Formatter only, does not resolve dependencies
 #   - cargo publish: Intentionally resolves from registry for crates.io compatibility
 #   - cargo install: Installing tools, not building the project
 #   - cargo machete: Static analysis of Cargo.toml, does not compile
+#   - cargo sbom: cargo-sbom does not support --locked
 #   - cargo clean: Output-only, does not affect reproducibility of build results
 #   - cargo init/new/search/login/owner/yank: Registry or scaffolding commands,
 #     not project builds (unlikely in CI but listed for completeness)
 #   - cargo bench: Benchmarking, not a correctness gate
-LOCKED_EXEMPT_PATTERNS="fmt|publish|install|machete|clean|init|new|search|login|owner|yank|bench"
+LOCKED_EXEMPT_PATTERNS="fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench"
 
 MISSING_LOCKED=0
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
     [ -f "$workflow" ] || continue
     WORKFLOW_NAME=$(basename "$workflow")
 
-    # Extract cargo commands from run: blocks (handles multi-line with \)
-    # Look for cargo commands that:
-    #   1. Are not exempt commands
-    #   2. Do not already have --locked
-    while IFS= read -r line; do
-        # Skip comment lines
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    # Parse full run blocks (single-line and multiline) and then scan logical
+    # shell command lines. This avoids false positives/negatives where command
+    # flags are split across YAML lines.
+    while IFS= read -r -d '' run_record; do
+        RUN_START_LINE=${run_record%%$'\t'*}
+        RUN_BLOCK=${run_record#*$'\t'}
 
-        # Only match cargo commands inside run: blocks, not in YAML keys
-        # like "name: Cache cargo registry", "path: ~/.cargo/", "key: ...-cargo-"
-        if [[ "$line" =~ ^[[:space:]]*(-[[:space:]]+)?[a-z_]+: ]] && \
-           ! [[ "$line" =~ ^[[:space:]]*(-[[:space:]]+)?run: ]]; then
-            continue
-        fi
+        while IFS= read -r logical_cmd; do
+            # Split chained commands (&&, ||, ;) into individual statements.
+            while IFS= read -r statement; do
+                # Trim leading/trailing whitespace.
+                statement=$(echo "$statement" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+                [ -z "$statement" ] && continue
+                [[ "$statement" =~ ^# ]] && continue
 
-        # Match cargo command invocations (with optional +toolchain prefix)
-        if [[ "$line" =~ cargo[[:space:]](\+[^[:space:]]+[[:space:]]+)?([a-z-]+) ]]; then
-            CARGO_SUBCMD="${BASH_REMATCH[2]}"
+                # Match cargo command invocations with optional +toolchain.
+                if [[ "$statement" =~ (^|[[:space:]\(\)\{\}\|&;])cargo[[:space:]](\+[^[:space:]]+[[:space:]]+)?([a-z-]+) ]]; then
+                    CARGO_SUBCMD="${BASH_REMATCH[3]}"
 
-            # Skip exempt commands
-            if echo "$CARGO_SUBCMD" | grep -qE "^($LOCKED_EXEMPT_PATTERNS)$"; then
-                continue
-            fi
+                    # Known incompatible command/flag combinations (real CI regressions).
+                    if [ "$CARGO_SUBCMD" = "sbom" ] && echo "$statement" | grep -q -- "--locked"; then
+                        error "$WORKFLOW_NAME:$RUN_START_LINE: cargo sbom does not support --locked"
+                        error "  Command: $statement"
+                        continue
+                    fi
+                    if [ "$CARGO_SUBCMD" = "llvm-cov" ] &&
+                       echo "$statement" | grep -q "llvm-cov[[:space:]]\+report" &&
+                       echo "$statement" | grep -qE -- "--all-features|--workspace"; then
+                        error "$WORKFLOW_NAME:$RUN_START_LINE: cargo llvm-cov report does not accept --all-features/--workspace"
+                        error "  Command: $statement"
+                        continue
+                    fi
 
-            # cargo miri setup is exempt (tool setup, not a project build),
-            # but cargo miri test should use --locked like any other test command
-            if [ "$CARGO_SUBCMD" = "miri" ] && echo "$line" | grep -q "miri setup"; then
-                continue
-            fi
+                    # Skip exempt commands
+                    if echo "$CARGO_SUBCMD" | grep -qE "^($LOCKED_EXEMPT_PATTERNS)$"; then
+                        continue
+                    fi
 
-            # Check if --locked is present in the line
-            if ! echo "$line" | grep -q -- "--locked"; then
-                warn "$WORKFLOW_NAME: 'cargo $CARGO_SUBCMD' missing --locked flag"
-                warn "  Line: $(echo "$line" | sed 's/^[[:space:]]*//')"
-                MISSING_LOCKED=$((MISSING_LOCKED + 1))
-            fi
-        fi
-    done < "$workflow"
+                    # cargo miri setup is exempt (tool setup, not a project build),
+                    # but cargo miri test should use --locked like any test command.
+                    if [ "$CARGO_SUBCMD" = "miri" ] && echo "$statement" | grep -q "miri[[:space:]]\+setup"; then
+                        continue
+                    fi
+
+                    if ! echo "$statement" | grep -q -- "--locked"; then
+                        warn "$WORKFLOW_NAME:$RUN_START_LINE: 'cargo $CARGO_SUBCMD' missing --locked flag"
+                        warn "  Command: $statement"
+                        MISSING_LOCKED=$((MISSING_LOCKED + 1))
+                    fi
+                fi
+            done < <(printf '%s\n' "$logical_cmd" | sed -E 's/(&&|\|\||;)/\n/g')
+        done < <(normalize_run_block_commands "$RUN_BLOCK")
+    done < <(extract_run_blocks_for_workflow "$workflow")
 done
 
 if [ "$MISSING_LOCKED" -eq 0 ]; then

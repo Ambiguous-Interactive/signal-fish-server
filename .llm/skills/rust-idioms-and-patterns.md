@@ -54,29 +54,18 @@ impl RoomCode {
     fn to_uppercase(&self) -> String { self.0.to_uppercase() }
     fn into_inner(self) -> String { self.0 }
 }
-
-// ❌ Wrong: using get_ prefix or wrong conversion prefix
-impl RoomCode {
-    fn get_str(&self) -> &str { &self.0 }         // Don't use get_
-    fn into_uppercase(&self) -> String { todo!() }      // into_ implies ownership
-}
-
 ```
 
 ### Getter Naming — No `get_` Prefix
 
 ```rust
-
 impl Player {
     fn name(&self) -> &str { &self.name }
     fn id(&self) -> PlayerId { self.id }
-    fn is_ready(&self) -> bool { self.ready }       // is_ for booleans
-    fn has_authority(&self) -> bool { self.authority }// has_ for booleans
+    fn is_ready(&self) -> bool { self.ready }        // is_ for booleans
+    fn has_authority(&self) -> bool { self.authority } // has_ for booleans
 }
-
 ```
-
-### Iterator Naming
 
 Use `iter()`, `iter_mut()`, `into_iter()` for standard iteration.
 Use descriptive names like `player_ids()` for filtered/mapped iterators.
@@ -122,7 +111,6 @@ impl TryFrom<&str> for RoomCode {
 impl AsRef<str> for RoomCode {
     fn as_ref(&self) -> &str { &self.0 }
 }
-
 ```
 
 **In function signatures:** Use `impl Into<T>` for owned+flexibility, `&str`/`AsRef<T>` for read-only,
@@ -132,10 +120,7 @@ impl AsRef<str> for RoomCode {
 
 ## The Newtype Pattern
 
-Wrap primitive types to add type safety and domain semantics.
-
 ```rust
-
 // ✅ Newtype: prevents mixing up PlayerId and RoomId
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlayerId(pub(crate) Uuid);
@@ -143,7 +128,6 @@ pub struct PlayerId(pub(crate) Uuid);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoomCode(String);
 
-// Constructors enforce invariants
 impl RoomCode {
     pub fn new(code: &str) -> Result<Self, ValidationError> {
         if code.len() != 6 { return Err(ValidationError::InvalidLength); }
@@ -152,16 +136,13 @@ impl RoomCode {
         }
         Ok(Self(code.to_uppercase()))
     }
-
     pub fn as_str(&self) -> &str { &self.0 }
 }
 
 // ❌ Without newtypes: easy to mix up arguments
 fn transfer_authority(from: Uuid, to: Uuid, room: String) { todo!() }
-
 // ✅ With newtypes: compiler catches mistakes
 fn transfer_authority(from: PlayerId, to: PlayerId, room: RoomCode) { todo!() }
-
 ```
 
 ---
@@ -169,17 +150,13 @@ fn transfer_authority(from: PlayerId, to: PlayerId, room: RoomCode) { todo!() }
 ## Enums Instead of Booleans
 
 ```rust
-
 // ❌ Unclear: create_room("ABC123", true, false)
-
 #[derive(Debug, Clone, Copy)]
 pub enum Persistence { Temporary, Persistent }
 #[derive(Debug, Clone, Copy)]
 pub enum Visibility { Private, Public }
-
 // ✅ Self-documenting
 create_room("ABC123", Persistence::Persistent, Visibility::Private);
-
 ```
 
 ---
@@ -187,24 +164,12 @@ create_room("ABC123", Persistence::Persistent, Visibility::Private);
 ## Builder Pattern
 
 ```rust
-
-// ✅ Builder for complex configuration
-pub struct ServerConfig { /* private fields */ }
-
-pub struct ServerConfigBuilder {
-    port: u16,
-    max_rooms: Option<usize>,
-    tls: Option<TlsConfig>,
-}
+pub struct ServerConfigBuilder { port: u16, max_rooms: Option<usize>, tls: Option<TlsConfig> }
 
 impl ServerConfigBuilder {
-    pub fn new(port: u16) -> Self {
-        Self { port, max_rooms: None, tls: None }
-    }
-
+    pub fn new(port: u16) -> Self { Self { port, max_rooms: None, tls: None } }
     pub fn max_rooms(mut self, n: usize) -> Self { self.max_rooms = Some(n); self }
     pub fn tls(mut self, config: TlsConfig) -> Self { self.tls = Some(config); self }
-
     pub fn build(self) -> Result<ServerConfig, ConfigError> {
         Ok(ServerConfig {
             port: self.port,
@@ -213,9 +178,7 @@ impl ServerConfigBuilder {
         })
     }
 }
-
 // Usage: ServerConfigBuilder::new(8080).max_rooms(50).tls(tls).build()?
-
 ```
 
 ---
@@ -225,7 +188,6 @@ impl ServerConfigBuilder {
 Compile-time state machine — invalid transitions are unrepresentable:
 
 ```rust
-
 pub struct Connection<S: ConnectionState> { inner: TcpStream, _state: PhantomData<S> }
 pub struct Disconnected;
 pub struct Connected;
@@ -241,49 +203,13 @@ impl Connection<Authenticated> {
     pub fn send(&self, msg: &Message) -> Result<(), Error> { todo!() }
 }
 // conn.send(&msg) on Connected won't compile — must authenticate first.
-
 ```
 
----
+Sealed traits prevent external trait implementations — see [api-design-guidelines.md](api-design-guidelines.md).
 
-## Sealed Traits
-
-Use sealed traits to prevent external implementations of traits you control.
-
-See [api-design-guidelines.md](api-design-guidelines.md) for the sealed trait pattern and future-proofing strategies.
-
----
-
-## Temporary Mutability
-
-```rust
-
-// ✅ Limit mutable scope with a block
-let sorted_players = {
-    let mut players = room.players().to_vec();
-    players.sort_by_key(|p| p.join_time);
-    players // Now immutable
-};
-
-```
-
----
-
-## `#[must_use]` and Exhaustive Enums
-
-Use `#[must_use]` on Result-returning functions, guards, and important return values.
-Use explicit, exhaustive enum variants in protocol and domain types so new variants fail to compile until handled.
-
-See [api-design-guidelines](./api-design-guidelines.md) for detailed future-proofing patterns.
-
----
-
-## Exhaustive Matching
-
-Always match all enum variants explicitly without wildcard `_` catch-alls on owned enums.
+Always match all enum variants explicitly without wildcard `_` on owned enums.
 Destructure structs in trait impls to catch new fields at compile time.
-
-See [defensive-programming.md](defensive-programming.md) for exhaustive matching and destructuring patterns with examples.
+See [defensive-programming.md](defensive-programming.md) for exhaustive matching patterns.
 
 ---
 
@@ -292,14 +218,12 @@ See [defensive-programming.md](defensive-programming.md) for exhaustive matching
 ```rust
 use std::borrow::Cow;
 
-// ✅ Avoid cloning when the borrow suffices
 fn format_error(code: u16, msg: Option<&str>) -> Cow<'_, str> {
     match msg {
         Some(m) => Cow::Borrowed(m),
         None => Cow::Owned(format!("Error {code}")),
     }
 }
-
 ```
 
 ---
@@ -307,7 +231,6 @@ fn format_error(code: u16, msg: Option<&str>) -> Cow<'_, str> {
 ## Return `impl Iterator`, Accept Borrows
 
 ```rust
-
 // ✅ Return impl Iterator — lazy, no allocation
 fn active_players(&self) -> impl Iterator<Item = &Player> {
     self.players.iter().filter(|p| p.is_connected())
@@ -316,21 +239,9 @@ fn active_players(&self) -> impl Iterator<Item = &Player> {
 // ✅ Accept borrows, return owned
 fn normalize(input: &str) -> String { input.trim().to_lowercase() }
 
-```
-
----
-
-## Use `clone_from()` Over `= .clone()`
-
-```rust
-
 // ✅ Reuse existing allocation
 let mut buffer = String::with_capacity(1024);
-buffer.clone_from(&new_data);  // Reuses buffer's allocation
-
-// ❌ Discards existing allocation
-buffer = new_data.clone();  // Allocates new, drops old
-
+buffer.clone_from(&new_data);  // Reuses buffer's allocation (vs buffer = new_data.clone())
 ```
 
 ---
@@ -345,7 +256,6 @@ buffer = new_data.clone();  // Allocates new, drops old
 - [ ] Builder for 3+ optional fields
 - [ ] `#[must_use]` on Result-returning functions, guards, and important values
 - [ ] Explicit exhaustive enum matches in protocol/domain code (no wildcard catch-all)
-- [ ] No wildcard `_` catch-all on owned enums
 - [ ] Destructure structs in trait impls to catch new fields
 - [ ] Return `impl Iterator` instead of `Vec` where possible
 - [ ] `clone_from()` when reusing an existing allocation

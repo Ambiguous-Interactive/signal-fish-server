@@ -43,6 +43,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Room::new calls Utc::now() (clock_gettime), which Miri isolation blocks
     fn test_room_creation() {
         let room = Room::new(
             "test_game".to_string(),
@@ -60,6 +61,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Utc::now() in test data; blocked by Miri isolation
     fn test_player_management() {
         let mut room = Room::new(
             "test_game".to_string(),
@@ -107,6 +109,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_authority_management() {
         let mut room = Room::new(
             "test_game".to_string(),
@@ -134,6 +137,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_authority_management_disabled() {
         let mut room = Room::new(
             "test_game".to_string(),
@@ -206,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Utc::now() in PlayerInfo test fixtures
     fn test_player_name_uniqueness() {
         use std::collections::HashMap;
         use validation::*;
@@ -266,6 +271,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_authority_protocol_basic_rules() {
         // Test first player gets authority rule
         let mut room = Room::new(
@@ -314,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_authority_protocol_single_authority_rule() {
         let mut room = Room::new(
             "test_game".to_string(),
@@ -369,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_authority_protocol_no_auto_reassignment() {
         let mut room = Room::new(
             "test_game".to_string(),
@@ -415,6 +423,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_authority_protocol_room_support_validation() {
         // Room WITH authority support
         let mut auth_room = Room::new(
@@ -473,6 +482,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_lobby_state_transitions() {
         let mut room = Room::new(
             "lobby_game".to_string(),
@@ -543,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_lobby_ready_state_changes() {
         let mut room = Room::new(
             "ready_game".to_string(),
@@ -590,6 +601,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_peer_connections() {
         let mut room = Room::new(
             "peer_game".to_string(),
@@ -636,6 +648,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Uses Room::new/Utc::now(); clock_gettime is blocked under Miri isolation
     fn test_lobby_edge_cases() {
         let mut room = Room::new(
             "edge_game".to_string(),

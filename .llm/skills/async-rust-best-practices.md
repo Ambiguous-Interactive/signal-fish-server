@@ -34,7 +34,7 @@
 - Always use bounded channels with backpressure — never unbounded.
 - Never hold a `std::sync::Mutex` guard across an `.await` point.
 - Use `tokio::select!` with cancellation-safe futures only.
-- Implement graceful shutdown with broadcast channels or similar cancellation patterns.
+- Implement graceful shutdown with broadcast channels or cancellation tokens.
 
 ---
 
@@ -56,7 +56,6 @@ let hash = tokio::task::spawn_blocking(move || {
 
 // ❌ CPU-bound work blocking the async runtime
 let hash = compute_expensive_hash(&data);  // Blocks executor thread!
-
 ```
 
 ---
@@ -64,7 +63,6 @@ let hash = compute_expensive_hash(&data);  // Blocks executor thread!
 ## Bounded Channels with Backpressure
 
 ```rust
-
 // ✅ Bounded channel — provides backpressure
 let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(1024);
 
@@ -80,12 +78,12 @@ match tx.try_send(msg) {
     }
     Err(TrySendError::Closed(_)) => return Err(Error::ChannelClosed),
 }
-
 ```
 
 **Channel sizing guidance:**
 
 | Use case | Capacity |
+|----------|----------|
 | Player message relay | 256–1024 |
 | Admin commands | 16–64 |
 | Metrics/telemetry | 1024–4096 |
@@ -96,7 +94,6 @@ match tx.try_send(msg) {
 ## Never Hold Locks Across `.await`
 
 ```rust
-
 // ❌ DEADLOCK: guard held across .await
 let guard = self.state.lock().unwrap();
 let result = database.query(&guard.key).await;  // .await while holding guard!
@@ -108,41 +105,26 @@ let key = {
 };  // guard dropped here
 let result = database.query(&key).await;
 
-// ✅ For tokio::sync::Mutex — minimize critical section
-{
-    let mut guard = self.state.lock().await;
-    guard.value = new_value;  // Quick mutation only
-}  // guard dropped before any .await
-
 // ✅ Use DashMap for concurrent read/write access — no lock needed
 let rooms: DashMap<RoomId, Room> = DashMap::new();
 rooms.insert(room_id, room);
-
 ```
 
-**Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the entire `if let` block.
-Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
+**Watch out:** `if let Some(x) = mutex.lock().await.get(&key)` keeps the guard alive through the
+entire `if let` block. Extract the value first: `let val = mutex.lock().await.get(&key).cloned();`
 
 ---
 
 ## Cancellation Safety with `tokio::select!`
 
 ```rust
-
 // ✅ Use cancellation-safe operations in select!
 tokio::select! {
-    // recv() is cancellation-safe — no data lost on cancel
-    msg = rx.recv() => {
+    msg = rx.recv() => {                        // recv() is cancellation-safe
         if let Some(msg) = msg { handle(msg).await; }
     }
-    // timeout is cancellation-safe
-    _ = tokio::time::sleep(Duration::from_secs(30)) => {
-        handle_timeout().await;
-    }
-    // shutdown signal
-    _ = shutdown.cancelled() => {
-        return Ok(());
-    }
+    _ = tokio::time::sleep(Duration::from_secs(30)) => { handle_timeout().await; }
+    _ = shutdown.cancelled() => { return Ok(()); }
 }
 
 // ❌ read_exact is NOT cancellation-safe — partial reads are lost
@@ -150,13 +132,6 @@ tokio::select! {
     result = stream.read_exact(&mut buf) => { ... }  // Data loss if cancelled!
     _ = shutdown.cancelled() => { return; }
 }
-
-// ✅ Use cancellation-safe wrapper or read into owned buffer
-tokio::select! {
-    result = read_message(&mut stream) => { ... }  // Custom cancel-safe fn
-    _ = shutdown.cancelled() => { return; }
-}
-
 ```
 
 **Cancellation-safe:** `recv()`, `oneshot`, `sleep()`, `accept()`.
@@ -167,19 +142,13 @@ tokio::select! {
 ## Structured Concurrency with JoinSet
 
 ```rust
-
 use tokio::task::JoinSet;
 
-// ✅ JoinSet tracks and cleans up spawned tasks
 let mut set = JoinSet::new();
-
 for player in players {
-    set.spawn(async move {
-        notify_player(player).await
-    });
+    set.spawn(async move { notify_player(player).await });
 }
 
-// Await all tasks, handling errors
 while let Some(result) = set.join_next().await {
     match result {
         Ok(Ok(())) => {}
@@ -188,7 +157,6 @@ while let Some(result) = set.join_next().await {
     }
 }
 // All tasks complete here — no leaked futures
-
 ```
 
 ---
@@ -196,7 +164,6 @@ while let Some(result) = set.join_next().await {
 ## `spawn` vs `spawn_blocking`
 
 ```rust
-
 // ✅ tokio::spawn — for async I/O-bound tasks
 tokio::spawn(async move { handle_websocket(stream).await });
 
@@ -204,28 +171,21 @@ tokio::spawn(async move { handle_websocket(stream).await });
 let result = tokio::task::spawn_blocking(move || {
     serde_json::to_string(&large_state)
 }).await?;
-// Don't use spawn_blocking for async work, and don't do CPU work in async tasks.
-
 ```
 
 ---
 
 ## Graceful Shutdown
 
-**Note:** The following demonstrates a common shutdown pattern. This project may use alternative approaches such as
-broadcast channels or similar cancellation mechanisms. Check the actual codebase implementation.
-
 ```rust
-
-// Example pattern (using tokio_util::sync::CancellationToken from external crate)
 use tokio_util::sync::CancellationToken;
 
 async fn run_server(shutdown: CancellationToken) {
-    let listener = TcpListener::bind("0.0.0.0:3536").await?;
+    let listener = TcpListener::bind("0.0.0.0:3536").await.unwrap();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = accepted.unwrap();
                 let token = shutdown.child_token();
                 tokio::spawn(async move { handle_connection(stream, token).await });
             }
@@ -233,23 +193,17 @@ async fn run_server(shutdown: CancellationToken) {
         }
     }
 }
-
 ```
 
-**Alternative pattern:** Use `tokio::sync::broadcast` channels for shutdown signals, or implement custom cancellation
-using atomic flags and condition variables. The key principle is coordinated shutdown across all active connections.
+Alternative: use `tokio::sync::broadcast` channels for shutdown signals.
+This project may use alternative approaches — check the actual codebase implementation.
 
 ---
 
 ## Async Trait Methods
 
-Use native async traits (Rust 1.75+) for static dispatch.
-Use `#[async_trait]` when you need `dyn Trait` (trait objects, dependency injection).
-This project uses `async_trait` for trait objects.
-
 ```rust
-
-// Native async trait (preferred for generics)
+// Native async trait (preferred for generics, Rust 1.75+)
 trait Database: Send + Sync {
     async fn get_room(&self, id: &RoomId) -> Result<Option<Room>, DbError>;
 }
@@ -259,15 +213,15 @@ trait Database: Send + Sync {
 trait DatabaseDyn: Send + Sync {
     async fn get_room(&self, id: &RoomId) -> Result<Option<Room>, DbError>;
 }
-
 ```
+
+This project uses `async_trait` for trait objects.
 
 ---
 
 ## Timeout Patterns
 
 ```rust
-
 use tokio::time::{timeout, Duration};
 
 // ✅ Timeout on any async operation
@@ -276,14 +230,6 @@ match timeout(Duration::from_secs(5), database.query(&key)).await {
     Ok(Err(db_err)) => return Err(db_err.into()),
     Err(_elapsed) => return Err(Error::Timeout),
 }
-
-// ✅ Timeout on WebSocket operations
-let msg = timeout(Duration::from_secs(30), ws_stream.next())
-    .await
-    .map_err(|_| Error::WebSocketTimeout)?
-    .ok_or(Error::ConnectionClosed)?
-    .map_err(Error::WebSocket)?;
-
 ```
 
 ---
@@ -296,7 +242,6 @@ let msg = timeout(Duration::from_secs(30), ws_stream.next())
 - [ ] `tokio::select!` uses only cancellation-safe branches
 - [ ] Graceful shutdown implemented with appropriate cancellation mechanism
 - [ ] Timeouts on all external I/O (database, network, WebSocket)
-- [ ] Connection pools used for database and Redis
 - [ ] `JoinSet` used for structured spawning with cleanup
 - [ ] No `std::thread::sleep` in async code
 - [ ] No `std::fs` in async code (use `tokio::fs`)

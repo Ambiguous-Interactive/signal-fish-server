@@ -10,6 +10,7 @@
 
 #![cfg(test)]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Get the repository root directory
@@ -425,6 +426,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "ci-safety.yml",
         "Advanced safety analysis (Miri, AddressSanitizer — staged)",
+    ),
+    (
+        "llm-file-sizes.yml",
+        "LLM skill file size enforcement (max 300 lines per .llm/ file)",
     ),
 ];
 
@@ -6212,6 +6217,16 @@ fn test_coverage_job_uses_locked_flag() {
          ensure the coverage report uses the same locked dependencies.\n\
          File: .github/workflows/ci.yml"
     );
+
+    // `cargo llvm-cov report` does not accept build-selection flags like
+    // `--all-features` / `--workspace`. Those belong on the coverage collection
+    // command (`cargo llvm-cov ...`), not the report subcommand.
+    assert!(
+        !ci_content.contains("cargo llvm-cov report --locked --all-features --workspace"),
+        "Coverage threshold command uses invalid flags for cargo-llvm-cov report.\n\
+         Found: cargo llvm-cov report --locked --all-features --workspace ...\n\
+         Fix: Use 'cargo llvm-cov report --locked --fail-under-lines <N>'"
+    );
 }
 
 // ============================================================================
@@ -6232,10 +6247,17 @@ fn test_sbom_job_generates_cyclonedx_json() {
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
     assert!(
-        ci_content.contains("cargo sbom --locked --output-format cyclone_dx_json_1_5"),
-        "CI SBOM job must generate CycloneDX v1.5 JSON format with --locked.\n\
-         Expected command: cargo sbom --locked --output-format cyclone_dx_json_1_5\n\
+        ci_content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
+        "CI SBOM job must generate CycloneDX v1.5 JSON format.\n\
+         Expected command: cargo sbom --output-format cyclone_dx_json_1_5\n\
          This ensures a standardized, machine-readable SBOM is produced."
+    );
+
+    assert!(
+        !ci_content.contains("cargo sbom --locked"),
+        "cargo-sbom does not support the --locked flag.\n\
+         Found unsupported command: cargo sbom --locked ...\n\
+         Fix: remove --locked from SBOM commands in .github/workflows/ci.yml."
     );
 
     assert!(
@@ -6347,10 +6369,18 @@ fn test_release_workflow_generates_sbom() {
     let content = read_file(&release_yml);
 
     assert!(
-        content.contains("cargo sbom --locked --output-format cyclone_dx_json_1_5"),
-        "release.yml must generate a CycloneDX v1.5 JSON SBOM with --locked.\n\
+        content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
+        "release.yml must generate a CycloneDX v1.5 JSON SBOM.\n\
          This provides supply-chain provenance metadata with every release.\n\
          File: {}",
+        release_yml.display()
+    );
+
+    assert!(
+        !content.contains("cargo sbom --locked"),
+        "release.yml uses an unsupported cargo-sbom flag: --locked.\n\
+         File: {}\n\
+         Fix: remove --locked from cargo sbom commands.",
         release_yml.display()
     );
 
@@ -6359,6 +6389,60 @@ fn test_release_workflow_generates_sbom() {
         "release.yml must install cargo-sbom for SBOM generation.\n\
          File: {}",
         release_yml.display()
+    );
+}
+
+#[test]
+fn test_workflow_cargo_command_flag_compatibility() {
+    // Data-driven regression guard for CI command/flag compatibility issues that
+    // caused real failures:
+    //   1) cargo-sbom rejects --locked
+    //   2) cargo llvm-cov report rejects --all-features and --workspace
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let mut violations = Vec::new();
+
+    for entry in fs::read_dir(&workflows_dir)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", workflows_dir.display()))
+    {
+        let path = entry
+            .unwrap_or_else(|e| panic!("Failed to read workflow entry: {e}"))
+            .path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+
+        let content = read_file(&path);
+        for (idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.contains("cargo sbom") && trimmed.contains("--locked") {
+                violations.push(format!(
+                    "{}:{}: cargo sbom does not support --locked",
+                    path.display(),
+                    idx + 1
+                ));
+            }
+            if trimmed.contains("cargo llvm-cov report")
+                && (trimmed.contains("--all-features") || trimmed.contains("--workspace"))
+            {
+                violations.push(format!(
+                    "{}:{}: cargo llvm-cov report does not accept --all-features/--workspace",
+                    path.display(),
+                    idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Found incompatible Cargo command flags in workflow files:\n\n{}\n\n\
+         Fixes:\n\
+         - Use `cargo sbom --output-format cyclone_dx_json_1_5` (no --locked)\n\
+         - Use `cargo llvm-cov report --locked --fail-under-lines <N>` \
+           (no --all-features / --workspace on report)",
+        violations.join("\n")
     );
 }
 
@@ -6818,7 +6902,7 @@ fn test_pre_commit_hook_includes_skills_index_freshness_check_16() {
     assert!(
         content.contains("check_fail \"Skills index freshness\"")
             && content.contains(
-                "Run './scripts/generate-skills-index.sh' and stage .llm/skills/INDEX.md."
+                "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
             ),
         "Check 16 must fail with actionable regeneration guidance when the index is stale."
     );
@@ -6849,6 +6933,94 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     assert!(
         content.contains("check_skip \"Skills index freshness\""),
         "Check 16 should skip cleanly when no skills/context/index inputs are staged."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_includes_workflow_hygiene_check_17() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-commit must exist to enforce local quality gates"
+    );
+
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("# Check 17: Workflow hygiene script checks"),
+        "Pre-commit hook must define Check 17 for workflow hygiene validation."
+    );
+
+    assert!(
+        content.contains("scripts/check-workflow-hygiene.sh"),
+        "Check 17 must invoke scripts/check-workflow-hygiene.sh."
+    );
+
+    assert!(
+        content.contains("check_fail \"Workflow hygiene checks\"")
+            && content.contains("Run './scripts/check-workflow-hygiene.sh' and fix reported errors."),
+        "Check 17 must fail with actionable remediation guidance when workflow hygiene checks fail."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    for required_trigger in [
+        "':(glob).github/workflows/*.yml'",
+        "':(glob).github/workflows/*.yaml'",
+        "scripts/check-workflow-hygiene.sh",
+    ] {
+        assert!(
+            content.contains(required_trigger),
+            "Check 17 trigger list must include: {required_trigger}"
+        );
+    }
+
+    assert!(
+        content.contains("check_skip \"Workflow hygiene checks\""),
+        "Check 17 should skip cleanly when no workflow/hygiene files are staged."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_includes_llm_file_size_check_18() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    assert!(hook_path.exists(), ".githooks/pre-commit must exist");
+    let content = read_file(&hook_path);
+    assert!(
+        content.contains("# Check 18: LLM file size limit"),
+        "Pre-commit hook must define Check 18 for LLM file size enforcement."
+    );
+    assert!(
+        content.contains("scripts/check-llm-file-sizes.sh"),
+        "Check 18 must invoke scripts/check-llm-file-sizes.sh."
+    );
+    assert!(
+        content.contains("check_fail \"LLM file sizes\"")
+            && content.contains("One or more .llm/ files exceed 300 lines"),
+        "Check 18 must fail with actionable remediation guidance."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+    assert!(
+        content.contains(r"^\.llm/.*\.md$"),
+        "Check 18 trigger filter must match .llm/*.md files using the correct regex."
+    );
+    assert!(
+        content.contains("check_skip \"LLM file sizes\""),
+        "Check 18 should skip cleanly when no .llm/*.md files are staged."
     );
 }
 
@@ -7719,6 +7891,72 @@ fn test_proptest_tests_ignored_under_miri() {
             violations.len(),
         );
     }
+}
+
+#[test]
+fn test_protocol_wall_clock_tests_ignored_under_miri() {
+    // Regression guard: tests in src/protocol/mod.rs that call Room::new() or
+    // use Utc::now() must be ignored under Miri. Those code paths invoke
+    // clock_gettime(CLOCK_REALTIME), which Miri blocks in isolation mode.
+    let root = repo_root();
+    let protocol_mod = root.join("src/protocol/mod.rs");
+    let content = read_file(&protocol_mod);
+    let lines: Vec<&str> = content.lines().collect();
+
+    let required_miri_ignored_tests = [
+        "test_room_creation",
+        "test_player_management",
+        "test_authority_management",
+        "test_authority_management_disabled",
+        "test_player_name_uniqueness",
+        "test_authority_protocol_basic_rules",
+        "test_authority_protocol_single_authority_rule",
+        "test_authority_protocol_no_auto_reassignment",
+        "test_authority_protocol_room_support_validation",
+        "test_lobby_state_transitions",
+        "test_lobby_ready_state_changes",
+        "test_peer_connections",
+        "test_lobby_edge_cases",
+    ];
+
+    let mut violations = Vec::new();
+
+    for test_name in required_miri_ignored_tests {
+        let marker = format!("fn {test_name}(");
+        let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
+            violations.push(format!(
+                "{}: missing expected test function `{}`",
+                protocol_mod.display(),
+                test_name
+            ));
+            continue;
+        };
+
+        let search_start = line_idx.saturating_sub(4);
+        let has_miri_ignore = lines
+            .iter()
+            .take(line_idx)
+            .skip(search_start)
+            .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
+
+        if !has_miri_ignore {
+            violations.push(format!(
+                "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
+                 Miri clock_gettime isolation failures",
+                protocol_mod.display(),
+                line_idx + 1,
+                test_name
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Protocol tests missing Miri ignore for wall-clock-dependent code:\n\n{}\n\n\
+         Fix: add #[cfg_attr(miri, ignore)] above the listed #[test] functions \
+         in src/protocol/mod.rs.",
+        violations.join("\n")
+    );
 }
 
 // ============================================================================

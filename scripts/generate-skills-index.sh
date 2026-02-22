@@ -5,13 +5,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILLS_DIR="$REPO_ROOT/.llm/skills"
-INDEX_FILE="$SKILLS_DIR/INDEX.md"
+INDEX_FILE="$SKILLS_DIR/index.md"
 
 usage() {
     cat <<'EOF'
 Usage:
-  ./scripts/generate-skills-index.sh          # Generate/update .llm/skills/INDEX.md
-  ./scripts/generate-skills-index.sh --check  # Exit non-zero if INDEX.md is stale/missing
+  ./scripts/generate-skills-index.sh          # Generate/update .llm/skills/index.md
+  ./scripts/generate-skills-index.sh --check  # Exit non-zero if index.md is stale/missing
 EOF
 }
 
@@ -49,7 +49,7 @@ trap 'rm -f "$TMP_OUTPUT"' EXIT
     # - Entries are sorted by full file path with LC_ALL=C byte-wise collation.
     # - This keeps output deterministic across platforms and independent of title text.
 
-    find "$SKILLS_DIR" -maxdepth 1 -type f -name '*.md' ! -name 'INDEX.md' -print \
+    find "$SKILLS_DIR" -maxdepth 1 -type f -name '*.md' ! -name 'index.md' -print \
         | LC_ALL=C sort \
         | while IFS= read -r abs_path; do
             file_name="$(basename "$abs_path")"
@@ -78,13 +78,13 @@ trap 'rm -f "$TMP_OUTPUT"' EXIT
 
 if [ "$CHECK_ONLY" = true ]; then
     if [ ! -f "$INDEX_FILE" ]; then
-        echo "Skills index is missing: .llm/skills/INDEX.md"
+        echo "Skills index is missing: .llm/skills/index.md"
         echo "Run: ./scripts/generate-skills-index.sh"
         exit 1
     fi
 
     if ! cmp -s "$TMP_OUTPUT" "$INDEX_FILE"; then
-        echo "Skills index is out of date: .llm/skills/INDEX.md"
+        echo "Skills index is out of date: .llm/skills/index.md"
         echo "Run: ./scripts/generate-skills-index.sh"
         exit 1
     fi
@@ -97,5 +97,5 @@ if [ -f "$INDEX_FILE" ] && cmp -s "$TMP_OUTPUT" "$INDEX_FILE"; then
     echo "Skills index is already up to date."
 else
     cp "$TMP_OUTPUT" "$INDEX_FILE"
-    echo "Generated .llm/skills/INDEX.md"
+    echo "Generated .llm/skills/index.md"
 fi

@@ -21,7 +21,7 @@
 
 ## When NOT to Use
 
-- Choosing test strategies (see [testing-strategies](./testing-strategies.md))
+- Choosing test strategies (see [testing-strategies](./testing-core-patterns.md))
 - Configuring clippy rules (see [clippy-and-linting](./clippy-and-linting.md))
 
 ---
@@ -61,11 +61,11 @@ scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related 
 
 - `check-ci-config.sh`: Catches outdated action versions incompatible with current `Cargo.lock`
 
-  format (see [supply-chain-security](./supply-chain-security.md))
+  format (see [supply-chain-security](./supply-chain-audit-policy.md))
 
 - `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
 
-  `Cargo.toml` (see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
+  `Cargo.toml` (see [msrv-and-toolchain-management](./msrv-management.md))
 
 ---
 
@@ -123,11 +123,11 @@ chore: update MSRV from 1.87.0 to 1.88.0
 - [ ] `cargo deny --all-features check` — supply chain checks pass
 - [ ] `scripts/check-ci-config.sh` — CI config validated
 - [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
-- [ ] New code has exhaustive tests (see [testing-strategies](./testing-strategies.md))
+- [ ] New code has exhaustive tests (see [testing-strategies](./testing-core-patterns.md))
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
 - [ ] CHANGELOG updated for user-facing changes
 - [ ] Breaking changes documented
-- [ ] MSRV update documented (if applicable, see [msrv-and-toolchain-management](./msrv-and-toolchain-management.md))
+- [ ] MSRV update documented (if applicable, see [msrv-and-toolchain-management](./msrv-management.md))
 
 ---
 
@@ -142,5 +142,5 @@ chore: update MSRV from 1.87.0 to 1.88.0
 - [ ] No integer overflow in arithmetic (use `saturating_*` or `checked_*`)
 - [ ] No unchecked array/slice indexing (use `.get()` or `.last()`)
 
-Use [web-service-security](./web-service-security.md)
+Use [web-service-security](./web-service-security-auth.md)
 and [code-review-checklist](./code-review-checklist.md) skills for comprehensive audit.
