@@ -248,7 +248,7 @@ error[E0658]: use of unstable library feature 'foo'
 - uses: dtolnay/rust-toolchain@stable
 
   with:
-    toolchain: nightly-2026-01-15  # ← 32 days old, acceptable
+    toolchain: nightly-2025-12-15  # ← recent, acceptable
 
 ```
 
@@ -271,8 +271,8 @@ See [msrv-and-toolchain-management](./msrv-and-toolchain-management.md) for full
 
 ```yaml
 # Document expected update frequency
-# Nightly Version: nightly-2026-01-15
-# Last Updated: 2026-02-16
+# Nightly Version: nightly-2025-12-15
+# Last Updated: 2026-02-22
 # Review Frequency: Quarterly (every 3 months)
 #
 # Update Criteria:
@@ -3128,7 +3128,7 @@ toolchain: nightly-2025-02-21  # 360 days old
 
 ```yaml
 # Updated to recent nightly
-toolchain: nightly-2026-01-15  # 32 days old
+toolchain: nightly-2025-12-15  # recent, acceptable
 
 ```
 

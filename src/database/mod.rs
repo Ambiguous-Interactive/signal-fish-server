@@ -912,7 +912,11 @@ fn percentile(sorted_values: &[usize], p: f64) -> f64 {
     }
 
     let index = (p * (sorted_values.len() - 1) as f64).round() as usize;
-    sorted_values[index.min(sorted_values.len() - 1)] as f64
+    // SAFETY: The early return guarantees len >= 1, so `len - 1` does not
+    // underflow and `.min(len - 1)` clamps `index` to a valid bound.
+    #[allow(clippy::indexing_slicing)]
+    let value = sorted_values[index.min(sorted_values.len() - 1)];
+    value as f64
 }
 
 #[cfg(test)]

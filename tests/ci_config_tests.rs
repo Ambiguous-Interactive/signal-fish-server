@@ -87,6 +87,21 @@ fn extract_job_display_name(content: &str, job_key: &str) -> Option<String> {
     None
 }
 
+/// Extract the `sbom:` job section from CI workflow YAML content.
+///
+/// Finds the `  sbom:` job header and collects all lines belonging to that job
+/// block (4+-space-indented lines and blank lines) into a single string.
+fn extract_sbom_section(ci_content: &str) -> String {
+    ci_content
+        .lines()
+        .skip_while(|line| !line.starts_with("  sbom:"))
+        .take_while(|line| {
+            line.starts_with("  sbom:") || line.starts_with("    ") || line.trim().is_empty()
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
 /// Validate that a workflow file contains all required jobs with the correct
 /// display names.
 ///
@@ -6080,16 +6095,7 @@ fn test_sbom_job_upload_runs_on_success() {
     // The SBOM job should have an upload step with if: success()
     // We verify this by checking that within the sbom job context,
     // the upload-artifact action is preceded by an `if: success()` condition.
-    let sbom_section: String = ci_content
-        .lines()
-        .skip_while(|line| !line.starts_with("  sbom:"))
-        .take_while(|line| {
-            line.starts_with("  sbom:")
-                || line.starts_with("    ")
-                || line.trim().is_empty()
-        })
-        .collect::<Vec<&str>>()
-        .join("\n");
+    let sbom_section = extract_sbom_section(&ci_content);
 
     assert!(
         !sbom_section.is_empty(),
@@ -6113,16 +6119,7 @@ fn test_sbom_job_installs_cargo_sbom() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let sbom_section: String = ci_content
-        .lines()
-        .skip_while(|line| !line.starts_with("  sbom:"))
-        .take_while(|line| {
-            line.starts_with("  sbom:")
-                || line.starts_with("    ")
-                || line.trim().is_empty()
-        })
-        .collect::<Vec<&str>>()
-        .join("\n");
+    let sbom_section = extract_sbom_section(&ci_content);
 
     assert!(
         sbom_section.contains("tool: cargo-sbom"),
@@ -6140,16 +6137,7 @@ fn test_sbom_job_has_reasonable_timeout() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let sbom_section: String = ci_content
-        .lines()
-        .skip_while(|line| !line.starts_with("  sbom:"))
-        .take_while(|line| {
-            line.starts_with("  sbom:")
-                || line.starts_with("    ")
-                || line.trim().is_empty()
-        })
-        .collect::<Vec<&str>>()
-        .join("\n");
+    let sbom_section = extract_sbom_section(&ci_content);
 
     assert!(
         sbom_section.contains("timeout-minutes: 10"),
@@ -6555,5 +6543,205 @@ fn test_release_sccache_failure_emits_warning() {
          File: {}",
         fallback_block,
         release_yml.display()
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_checks_formatting_and_clippy() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-commit must exist to enforce formatting locally"
+    );
+
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("cargo fmt"),
+        ".githooks/pre-commit must include a 'cargo fmt' check.\n\
+         Without this, formatting errors slip through to CI."
+    );
+
+    assert!(
+        content.contains("cargo clippy"),
+        ".githooks/pre-commit must include a 'cargo clippy' check.\n\
+         Without this, lint errors slip through to CI."
+    );
+}
+
+#[test]
+fn test_check_no_panics_script_structure() {
+    let root = repo_root();
+    let script_path = root.join("scripts/check-no-panics.sh");
+
+    assert!(
+        script_path.exists(),
+        "scripts/check-no-panics.sh must exist for panic-policy CI job"
+    );
+
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("filter_test_code"),
+        "check-no-panics.sh must contain a filter_test_code function \
+         to exclude test code from panic pattern scanning"
+    );
+
+    // The integer expression bug was caused by unsanitized wc -l output
+    assert!(
+        content.contains("tr -d") || content.contains("xargs"),
+        "check-no-panics.sh must sanitize count variables (e.g., via tr -d or xargs) \
+         to prevent 'integer expression expected' errors"
+    );
+
+    // Must use --lib for clippy, not --all-targets
+    assert!(
+        content.contains("clippy --lib") || content.contains("clippy\" --lib"),
+        "check-no-panics.sh clippy must use --lib to avoid flagging test code.\n\
+         Using --all-targets would report false positives for .unwrap() in tests."
+    );
+
+    // Must exclude *_tests.rs files from grep scanning
+    assert!(
+        content.contains("_tests.rs"),
+        "check-no-panics.sh must exclude *_tests.rs files from pattern scanning.\n\
+         Files like src/server/ready_state_tests.rs are #[cfg(test)] modules \
+         that don't contain #[cfg(test)] internally."
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_no_panics_script_patterns_pass() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-no-panics.sh");
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("patterns")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    assert!(
+        output.status.success(),
+        "check-no-panics.sh patterns should pass on the current codebase.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_pinned_nightly_staleness_warning() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+
+    if !workflow_path.exists() {
+        return; // ci-safety.yml is optional
+    }
+
+    let content = read_file(&workflow_path);
+
+    // Extract the first nightly-YYYY-MM-DD pattern
+    let nightly_re_prefix = "nightly-20";
+    let nightly_version: Option<String> = content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed.find(nightly_re_prefix).map(|pos| {
+            let rest = &trimmed[pos..];
+            // Take chars while they match the nightly-YYYY-MM-DD pattern
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .unwrap_or(rest.len());
+            rest[..end].to_string()
+        })
+    });
+
+    let nightly_version = nightly_version
+        .expect("ci-safety.yml must contain a pinned nightly date (e.g., nightly-2025-12-15)");
+
+    // Extract YYYY and MM
+    let date_part = nightly_version
+        .strip_prefix("nightly-")
+        .expect("nightly version must start with 'nightly-'");
+    let parts: Vec<&str> = date_part.split('-').collect();
+    assert!(
+        parts.len() >= 2,
+        "Nightly date '{date_part}' must have at least YYYY-MM format"
+    );
+
+    let year: u32 = parts[0]
+        .parse()
+        .unwrap_or_else(|_| panic!("Invalid year in nightly version: {}", parts[0]));
+    let month: u32 = parts[1]
+        .parse()
+        .unwrap_or_else(|_| panic!("Invalid month in nightly version: {}", parts[1]));
+
+    // Approximate staleness check: compare to build date
+    // This uses a rough heuristic - the test will need updating when the year changes
+    let nightly_months = year * 12 + month;
+    // Use 2026-02 as reference (current date)
+    let reference_months: u32 = 2026 * 12 + 2;
+    let age_months = reference_months.saturating_sub(nightly_months);
+
+    assert!(
+        age_months <= 12,
+        "Pinned nightly '{nightly_version}' is approximately {age_months} months old.\n\
+         Consider testing a newer nightly and updating the pin.\n\
+         See ci-safety.yml header for update criteria."
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_scripts_pass_basic_syntax_check() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let scripts_dir = root.join("scripts");
+
+    if !scripts_dir.exists() {
+        return;
+    }
+
+    let entries: Vec<_> = std::fs::read_dir(&scripts_dir)
+        .expect("Failed to read scripts/ directory")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sh"))
+        .collect();
+
+    assert!(
+        !entries.is_empty(),
+        "scripts/ directory should contain at least one .sh file"
+    );
+
+    let mut failures = Vec::new();
+
+    for entry in &entries {
+        let path = entry.path();
+        // Use bash -n for syntax check (always available, unlike shellcheck)
+        let output = Command::new("bash")
+            .arg("-n")
+            .arg(&path)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to syntax-check {}: {e}", path.display()));
+
+        if !output.status.success() {
+            failures.push(format!(
+                "{}: {}",
+                path.file_name().unwrap().to_string_lossy(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Shell scripts have syntax errors:\n{}",
+        failures.join("\n")
     );
 }

@@ -27,8 +27,8 @@
 #   unstable compiler internals and runtime instrumentation that are not
 #   available on the stable channel.
 #
-#   Nightly Version: nightly-2026-01-15
-#   Last Updated: 2026-02-16
+#   Nightly Version: nightly-2025-12-15
+#   Last Updated: 2026-02-22
 #
 #   Update Criteria (when to update this nightly version):
 #     - If the nightly version is >6 months old
@@ -99,7 +99,7 @@ jobs:
       - name: Install Rust nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: nightly-2026-01-15
+          toolchain: nightly-2025-12-15
           components: miri, rust-src
 
       - name: Cache Rust dependencies
@@ -108,7 +108,7 @@ jobs:
           prefix-key: "ci-safety-nightly"
 
       - name: Setup Miri
-        run: cargo +nightly-2026-01-15 miri setup
+        run: cargo +nightly-2025-12-15 miri setup
 
       - name: Run Miri on library tests
         run: |
@@ -116,7 +116,7 @@ jobs:
           echo "Running Miri on library unit tests..."
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
-          cargo +nightly-2026-01-15 miri test --lib --no-fail-fast 2>&1 | tee miri-output.txt
+          cargo +nightly-2025-12-15 miri test --lib --no-fail-fast 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
       - name: Upload Miri output
@@ -140,7 +140,7 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: nightly-2026-01-15
+          toolchain: nightly-2025-12-15
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
@@ -154,7 +154,7 @@ jobs:
           echo "AddressSanitizer detects memory errors: use-after-free, buffer overflow,"
           echo "stack buffer overflow, and memory leaks."
           RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly-2026-01-15 test --target x86_64-unknown-linux-gnu \
+            cargo +nightly-2025-12-15 test --target x86_64-unknown-linux-gnu \
             --all-features --no-fail-fast 2>&1 | tee asan-output.txt
           echo "AddressSanitizer analysis complete."
         env:

@@ -9,7 +9,11 @@ pub fn generate_room_code_with_config(config: &ProtocolConfig) -> String {
     (0..config.room_code_length)
         .map(|_| {
             let idx = rng.random_range(0..ALPHANUMERIC_CHARS.len());
-            ALPHANUMERIC_CHARS[idx] as char
+            // SAFETY: `idx` is produced by `random_range(0..len)`, so it is
+            // always within [0, len).
+            #[allow(clippy::indexing_slicing)]
+            let ch = ALPHANUMERIC_CHARS[idx] as char;
+            ch
         })
         .collect()
 }
@@ -29,7 +33,11 @@ pub fn generate_clean_room_code_of_length(length: usize) -> String {
     (0..length)
         .map(|_| {
             let idx = rng.random_range(0..CLEAN_CHARS.len());
-            CLEAN_CHARS[idx] as char
+            // SAFETY: `idx` is produced by `random_range(0..len)`, so it is
+            // always within [0, len).
+            #[allow(clippy::indexing_slicing)]
+            let ch = CLEAN_CHARS[idx] as char;
+            ch
         })
         .collect()
 }

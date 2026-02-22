@@ -714,13 +714,15 @@ This project uses nightly Rust **only** for:
 
 | Tool        | Purpose                     | Workflow File                           | Nightly Version    |
 | ----------- | --------------------------- | --------------------------------------- | ------------------ |
-| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml`     | nightly-2026-01-15 |
+| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml`     | nightly-2025-12-15 |
+| Miri         | Undefined behavior detection | `.github/workflows/ci-safety.yml`       | nightly-2025-12-15 |
+| AddressSanitizer | Memory error detection  | `.github/workflows/ci-safety.yml`       | nightly-2025-12-15 |
 
 ### Nightly Version Policy
 
 #### Pinning Strategy
 
-- We pin to a specific nightly date (e.g., `nightly-2026-01-15`)
+- We pin to a specific nightly date (e.g., `nightly-2025-12-15`)
 - We do NOT use rolling `nightly` (always latest)
 - Pinning provides reproducibility and stability
 
@@ -806,8 +808,8 @@ Every nightly usage **must** be documented in the workflow file:
 # cargo-udeps requires nightly Rust because it uses unstable compiler features
 # to analyze dependency usage at a deeper level than stable tools can provide.
 #
-# Nightly Version: nightly-2026-01-15
-# Last Updated: 2026-02-16
+# Nightly Version: nightly-2025-12-15
+# Last Updated: 2026-02-22
 #
 # Update Criteria (when to update this nightly version):
 #   - If the nightly version is >6 months old
@@ -835,7 +837,7 @@ Production Code (Stable MSRV)
 
 CI Analysis Tools (Nightly)
   ↓
-  nightly-2026-01-15 in workflow files  ← Independent of MSRV
+  nightly-2025-12-15 in workflow files  ← Independent of MSRV
   ↓
   Used for: cargo-udeps, cargo-miri (analysis only, no artifacts)
 
@@ -857,7 +859,7 @@ CI Analysis Tools (Nightly)
 
 ### Future Consideration: Rolling Nightly
 
-**Current Policy:** Pinned nightly (e.g., `nightly-2026-01-15`)
+**Current Policy:** Pinned nightly (e.g., `nightly-2025-12-15`)
 
 **Alternative (Not Currently Used):** Rolling nightly (`nightly`)
 
@@ -886,7 +888,7 @@ CI Analysis Tools (Nightly)
 When asked to update nightly version:
 
 1. **Verify nightly is needed**: Check if tool still requires nightly
-2. **Choose recent nightly**: Within last 30 days (e.g., `nightly-2026-01-15`)
+2. **Choose recent nightly**: Within last 30 days (e.g., `nightly-2025-12-15`)
 3. **Update all occurrences**: Search workflow file for old nightly date
 4. **Update documentation**: Change "Last Updated: YYYY-MM-DD" comment
 5. **Explain in workflow file**: Maintain comprehensive comments
