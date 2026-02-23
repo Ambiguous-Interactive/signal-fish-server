@@ -220,14 +220,14 @@ ERROR: typos found: HashiCorp (did you mean: Hashicorp?)
 grep -r '^```$' --include="*.md" .
 
 # Auto-fix with markdownlint-cli2:
-markdownlint-cli2 --fix '**/*.md' '#target/**' '#third_party/**'
+./scripts/check-markdown.sh fix
 ```
 
 **B. Run markdown linting locally:**
 
 ```bash
-npm install -g markdownlint-cli2
-markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'  # Check ALL files, not just docs/
+npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+./scripts/check-markdown.sh  # Check ALL files, not just docs/
 ```
 
 ### Common Markdown Linting Rules
@@ -243,12 +243,12 @@ markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'  # Check ALL files, n
 
 ```bash
 # .githooks/pre-commit
-if command -v markdownlint-cli2 >/dev/null 2>&1; then
-    echo "[pre-commit] Checking markdown files..."
-    if ! scripts/check-markdown.sh; then
-        echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
-        exit 1
-    fi
+if [ -x scripts/check-markdown.sh ]; then
+  echo "[pre-commit] Checking markdown files..."
+  if ! scripts/check-markdown.sh; then
+    echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
+    exit 1
+  fi
 fi
 ```
 

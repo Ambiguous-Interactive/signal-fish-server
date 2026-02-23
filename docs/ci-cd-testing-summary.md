@@ -31,7 +31,7 @@ Three new scripts for fast local validation:
 Updated `.githooks/pre-commit` to include:
 
 - Code formatting checks
-- Markdown linting (if markdownlint-cli2 installed)
+- Markdown linting (if pinned markdownlint-cli2 version installed)
 - Link checking on staged files (if lychee installed, offline mode for speed)
 - Panic-prone pattern detection
 

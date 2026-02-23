@@ -55,7 +55,11 @@ fn bash_command() -> Command {
     }
 }
 
-fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bool, String) {
+fn run_hygiene_with_fixture(
+    workflow_name: &str,
+    workflow_content: &str,
+    extra_files: &[(&str, &str)],
+) -> (bool, String) {
     let temp_root = unique_temp_dir("workflow-hygiene");
     let script_src = repo_root().join("scripts/check-workflow-hygiene.sh");
     let script_dst = temp_root.join("scripts/check-workflow-hygiene.sh");
@@ -66,6 +70,9 @@ fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bo
 
     write_file(&script_dst, &script);
     write_file(&workflow_path, workflow_content);
+    for (relative_path, content) in extra_files {
+        write_file(&temp_root.join(relative_path), content);
+    }
 
     let output = bash_command()
         .arg("scripts/check-workflow-hygiene.sh")
@@ -85,6 +92,10 @@ fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bo
     let _ = fs::remove_dir_all(&temp_root);
 
     (output.status.success(), combined)
+}
+
+fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bool, String) {
+    run_hygiene_with_fixture(workflow_name, workflow_content, &[])
 }
 
 #[test]
@@ -197,5 +208,67 @@ jobs:
     assert!(
         output.contains("cargo sbom does not support --locked"),
         "Expected cargo sbom incompatibility error.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_fails_on_npx_usage_in_automation_scripts() {
+    let workflow = r#"name: Minimal Workflow
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo "ok"
+"#;
+
+    let (success, output) = run_hygiene_with_fixture(
+        "npx-policy.yml",
+        workflow,
+        &[(
+            "scripts/check-docs.sh",
+            "#!/usr/bin/env bash\nnpx --yes markdownlint-cli2 '**/*.md'\n",
+        )],
+    );
+
+    assert!(
+        !success,
+        "Workflow hygiene script must fail when automation scripts use npx.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("Uses npx invocation in automation"),
+        "Expected npx policy violation message.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_fails_on_external_latest_image_usage() {
+    let workflow = r#"name: Minimal Workflow
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo "ok"
+"#;
+
+    let (success, output) = run_hygiene_with_fixture(
+        "external-latest.yml",
+        workflow,
+        &[(
+            "scripts/check-docs.sh",
+            "#!/usr/bin/env bash\ndocker run davidanson/markdownlint-cli2:latest '**/*.md'\n",
+        )],
+    );
+
+    assert!(
+        !success,
+        "Workflow hygiene script must fail when automation scripts use external ':latest' image tags.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("Uses mutable Docker tag ':latest'"),
+        "Expected Docker latest-tag policy violation message.\nOutput:\n{output}"
     );
 }

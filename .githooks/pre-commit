@@ -312,7 +312,7 @@ if [ -n "$STAGED_MD_FILES" ]; then
         else
             MARKDOWN_STATUS=$?
             if [ "$MARKDOWN_STATUS" -eq 2 ]; then
-                check_skip "Markdown linting" "markdownlint unavailable (install markdownlint-cli2, npx, or Docker)"
+                check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
             else
                 check_fail "Markdown linting" "Markdown files have formatting issues."
                 echo "$MARKDOWN_OUTPUT"
@@ -780,12 +780,14 @@ else
 fi
 
 # Check 17: Workflow hygiene script checks
-# Runs the comprehensive workflow-hygiene validator when workflow definitions
-# or the validator script itself is staged.
+# Runs the comprehensive workflow-hygiene validator when workflow files or
+# automation scripts/hooks that can execute third-party tooling are staged.
 echo "${BLUE}[17/${TOTAL_CHECKS}]${NC} Running workflow hygiene script checks..."
 STAGED_WORKFLOW_HYGIENE_BYTES=$(git diff --cached --name-only -z --diff-filter=ACDMR -- \
     ':(glob).github/workflows/*.yml' \
     ':(glob).github/workflows/*.yaml' \
+    ':(glob)scripts/*.sh' \
+    ':(glob).githooks/*' \
     scripts/check-workflow-hygiene.sh \
     .github/workflows/workflow-hygiene.yml \
     | wc -c | tr -d '[:space:]')
@@ -803,7 +805,7 @@ if [ "$STAGED_WORKFLOW_HYGIENE_BYTES" -gt 0 ]; then
         echo ""
     fi
 else
-    check_skip "Workflow hygiene checks" "no workflow or hygiene-script files staged"
+    check_skip "Workflow hygiene checks" "no workflow or automation hygiene files staged"
 fi
 
 # Check 18: LLM file size limit (only if .llm/ files are staged)

@@ -58,7 +58,7 @@ if git config --local core.hooksPath "$DESIRED" 2>/dev/null; then
     log ""
     log "Optional dependencies:"
     log "  - shellcheck: apt-get install shellcheck"
-    log "  - markdownlint-cli2: npm install -g markdownlint-cli2"
+    log "  - markdownlint-cli2 (pinned): npm install -g markdownlint-cli2@\$(cat .markdownlint-version)"
     log "  - lychee: cargo install lychee"
     log ""
     log "Documentation: docs/git-hooks-guide.md"

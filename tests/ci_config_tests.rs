@@ -2025,32 +2025,138 @@ fn test_markdown_guidance_avoids_stale_md060_references() {
 }
 
 #[test]
-fn test_check_markdown_script_supports_fallback_runners() {
-    // Local environments without a global markdownlint-cli2 install should still
-    // be able to run markdown checks via npx or Docker fallback.
+fn test_check_markdown_script_enforces_pinned_runner_policy() {
+    // Supply-chain hardening policy:
+    //   - No npx runtime downloads
+    //   - No Docker latest fallback for markdownlint
+    //   - Enforce pinned markdownlint version via .markdownlint-version
     let root = repo_root();
     let script = root.join("scripts/check-markdown.sh");
     let content = read_file(&script);
 
     assert!(
+        content.contains(".markdownlint-version"),
+        "check-markdown.sh must read required version from .markdownlint-version.\n\
+         Missing pinned version reference in {}",
+        script.display()
+    );
+
+    assert!(
         content.contains("command -v markdownlint-cli2"),
-        "check-markdown.sh must prefer a locally installed markdownlint-cli2 binary.\n\
+        "check-markdown.sh must still detect locally available markdownlint-cli2.\n\
          Missing detection logic in {}",
         script.display()
     );
 
     assert!(
-        content.contains("command -v npx"),
-        "check-markdown.sh should support npx fallback when markdownlint-cli2 is not globally installed.\n\
-         Add npx-based fallback execution in {}",
+        !content.contains("npx --yes") && !content.contains("command -v npx"),
+        "check-markdown.sh must not execute markdownlint via npx runtime downloads.\n\
+         Remove npx fallback logic from {}",
         script.display()
     );
 
     assert!(
-        content.contains("command -v docker") && content.contains("davidanson/markdownlint-cli2"),
-        "check-markdown.sh should support Docker fallback for markdownlint execution.\n\
-         Add docker-based fallback execution in {}",
+        !content.contains("davidanson/markdownlint-cli2:latest")
+            && !content.contains("command -v docker"),
+        "check-markdown.sh must not use Docker latest fallback for markdownlint.\n\
+         Remove docker fallback logic from {}",
         script.display()
+    );
+}
+
+#[test]
+fn test_markdownlint_version_file_exists_and_is_semver() {
+    let root = repo_root();
+    let version_file = root.join(".markdownlint-version");
+
+    assert!(
+        version_file.exists(),
+        ".markdownlint-version must exist to pin markdownlint-cli2 version for local automation."
+    );
+
+    let version = read_file(&version_file).trim().to_string();
+    let semver_pattern = regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("valid semver regex");
+    assert!(
+        semver_pattern.is_match(&version),
+        ".markdownlint-version must contain a plain semantic version (X.Y.Z).\n\
+         Found: '{version}'"
+    );
+}
+
+#[test]
+fn test_automation_files_avoid_unpinned_tool_execution_patterns() {
+    // Prevent recurrence of supply-chain patterns in executable automation:
+    // - npx runtime downloads
+    // - external Docker image :latest tags
+    let root = repo_root();
+    let mut automation_files = Vec::new();
+
+    for dir in [root.join("scripts"), root.join(".github/workflows")] {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(dir).expect("read_dir should succeed") {
+            let entry = entry.expect("directory entry should be readable");
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_sh = path.extension().map(|e| e == "sh").unwrap_or(false);
+            let is_yaml = path
+                .extension()
+                .map(|e| e == "yml" || e == "yaml")
+                .unwrap_or(false);
+            if is_sh || is_yaml {
+                automation_files.push(path);
+            }
+        }
+    }
+    let pre_commit_hook = root.join(".githooks/pre-commit");
+    if pre_commit_hook.exists() {
+        automation_files.push(pre_commit_hook);
+    }
+
+    let npx_pattern = regex::Regex::new(
+        r"(?m)^[[:space:]]*npx([[:space:]]|$)|[;&|][[:space:]]*npx([[:space:]]|$)",
+    )
+    .expect("valid npx invocation regex");
+    let external_latest_pattern =
+        regex::Regex::new(r"([A-Za-z0-9._-]+/[A-Za-z0-9._/-]+):[Ll][Aa][Tt][Ee][Ss][Tt]")
+            .expect("valid docker image regex");
+
+    let mut violations = Vec::new();
+
+    for path in automation_files {
+        let content = read_file(&path);
+        if npx_pattern.is_match(&content) {
+            violations.push(format!(
+                "{}: contains 'npx' invocation (runtime package execution is disallowed in automation)",
+                path.display()
+            ));
+        }
+
+        for captures in external_latest_pattern.captures_iter(&content) {
+            let image = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
+            let is_allowed_first_party = matches!(
+                image,
+                "ghcr.io/ambiguousinteractive/signal-fish-server"
+                    | "ambiguousinteractive/signal-fish-server"
+            );
+            if !is_allowed_first_party {
+                violations.push(format!(
+                    "{}: external image uses mutable ':latest' tag: {image}:latest",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Automation files contain unpinned tooling execution patterns.\n\
+         Fix by pinning tool versions and avoiding npx/runtime latest tags.\n\
+         Violations:\n  - {}",
+        violations.join("\n  - ")
     );
 }
 
@@ -7534,6 +7640,8 @@ fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
     for required_trigger in [
         "':(glob).github/workflows/*.yml'",
         "':(glob).github/workflows/*.yaml'",
+        "':(glob)scripts/*.sh'",
+        "':(glob).githooks/*'",
         "scripts/check-workflow-hygiene.sh",
     ] {
         assert!(

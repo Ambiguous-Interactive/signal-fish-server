@@ -124,7 +124,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 
 **Integration:**
 
-- Pre-commit hook runs markdown linting (if markdownlint-cli2 is installed)
+- Pre-commit hook runs markdown linting (if pinned markdownlint-cli2 version is installed)
 - CI validates markdown files on every PR
 - VS Code extension recommendations for real-time linting
 

@@ -131,9 +131,10 @@ Tables must have consistent column alignment:
 ./scripts/check-markdown.sh fix
 ```
 
-Install `markdownlint-cli2` for local checks: `npm install -g markdownlint-cli2`
+Install the pinned markdownlint version for local checks:
+`npm install -g markdownlint-cli2@$(cat .markdownlint-version)`
 
-The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is installed).
+The pre-commit hook automatically checks markdown files (if the pinned markdownlint version is installed).
 Enable with `./scripts/enable-hooks.sh`.
 
 ### README Badge Consistency

@@ -206,7 +206,7 @@ The pre-commit hook (`.githooks/pre-commit`) runs fast checks before each commit
 
 1. **Code formatting** (`cargo fmt --check`)
 2. **Panic-prone patterns** (`scripts/check-no-panics.sh`)
-3. **Markdown linting** (`markdownlint-cli2`) - if installed
+3. **Markdown linting** (`markdownlint-cli2`) - if pinned version from `.markdownlint-version` is installed
 4. **Link checking** (`lychee --offline`) - if installed, on staged files only
 
 ### Installation

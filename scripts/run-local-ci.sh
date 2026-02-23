@@ -200,18 +200,34 @@ if [ -f scripts/validate-ci.sh ]; then
 fi
 
 # Check 11: Markdown Linting
-if command -v markdownlint-cli2 >/dev/null 2>&1; then
-    if [ -f scripts/check-markdown.sh ]; then
-        if [ "$FIX_MODE" = true ]; then
-            run_check_quiet "markdown" "Fixing markdown files" \
-                scripts/check-markdown.sh fix
+if [ -f scripts/check-markdown.sh ]; then
+    if [ "$FIX_MODE" = true ]; then
+        echo -e "${BOLD}${BLUE}[markdown]${NC} Fixing markdown files"
+        MARKDOWN_ARGS=(fix)
+    else
+        echo -e "${BOLD}${BLUE}[markdown]${NC} Checking markdown files"
+        MARKDOWN_ARGS=()
+    fi
+
+    if MARKDOWN_OUTPUT=$(scripts/check-markdown.sh "${MARKDOWN_ARGS[@]}" 2>&1); then
+        echo -e "${GREEN}✓ PASS${NC}: markdown"
+        PASSED_CHECKS+=("markdown")
+        echo ""
+    else
+        MARKDOWN_STATUS=$?
+        if [ "$MARKDOWN_STATUS" -eq 2 ]; then
+            echo -e "${YELLOW}⊘ SKIP${NC}: markdown (pinned markdownlint-cli2 unavailable)"
+            echo "$MARKDOWN_OUTPUT"
+            echo ""
         else
-            run_check_quiet "markdown" "Checking markdown files" \
-                scripts/check-markdown.sh
+            echo -e "${RED}✗ FAIL${NC}: markdown"
+            echo "$MARKDOWN_OUTPUT"
+            echo ""
+            FAILED_CHECKS+=("markdown")
         fi
     fi
 else
-    echo -e "${YELLOW}⊘ SKIP${NC}: markdown (markdownlint-cli2 not installed)"
+    echo -e "${YELLOW}⊘ SKIP${NC}: markdown (scripts/check-markdown.sh not found)"
     echo ""
 fi
 
