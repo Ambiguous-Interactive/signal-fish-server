@@ -7726,10 +7726,12 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
     );
 
     assert!(
-        content.contains("cargo test --test ci_config_tests")
+        content.contains("cargo test")
+            && content.contains("--locked")
+            && content.contains("--test ci_config_tests")
             && content.contains("test_github_actions_use_version_refs_not_commit_hashes")
             && content.contains("test_workflow_toolchain_fields_do_not_use_moving_aliases"),
-        "pre-push hook must run CI policy tests for action refs and toolchain alias pinning."
+        "pre-push hook must run CI policy tests with --locked for action refs and toolchain alias pinning."
     );
 }
 
@@ -7756,6 +7758,135 @@ fn test_pre_push_hook_is_executable() {
         "{} is not executable.\n\
          Fix: chmod +x .githooks/pre-push && git update-index --chmod=+x .githooks/pre-push",
         hook_path.display()
+    );
+}
+
+#[test]
+fn test_git_hook_cargo_test_invocations_use_locked_and_separator() {
+    // Validates that all `cargo test` invocations in .githooks/ files:
+    //   1. Use --locked (project policy: all cargo build/test/check must use --locked)
+    //   2. Use `--` separator before test filter names when multiple filters are passed
+    //
+    // Background: A bug in .githooks/pre-push passed two TESTNAME positional args
+    // directly to `cargo test` without a `--` separator. Cargo only accepts one
+    // positional TESTNAME; multiple filters must follow `--`. Without `--`, the
+    // second name causes an 'unexpected argument' error.
+
+    let root = repo_root();
+    let hooks_dir = root.join(".githooks");
+
+    let hook_files: Vec<_> = fs::read_dir(&hooks_dir)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", hooks_dir.display()))
+        .filter_map(|entry| {
+            let path = entry
+                .unwrap_or_else(|e| panic!("Failed to read hook entry: {e}"))
+                .path();
+            if path.is_file() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !hook_files.is_empty(),
+        ".githooks/ directory must contain at least one hook file."
+    );
+
+    let mut violations = Vec::new();
+
+    for hook_path in &hook_files {
+        let content = read_file(hook_path);
+        let hook_name = hook_path.file_name().unwrap_or_default().to_string_lossy();
+
+        // Join continuation lines (backslash-newline) so that a single logical
+        // `cargo test` command split across multiple lines is analyzed as one unit.
+        let joined = content.replace("\\\n", " ");
+
+        for (line_idx, line) in joined.lines().enumerate() {
+            let trimmed = line.trim();
+
+            // Skip comments
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Find lines that invoke `cargo test`
+            let Some(cargo_test_pos) = trimmed.find("cargo test") else {
+                continue;
+            };
+
+            let after_cargo_test = &trimmed[cargo_test_pos + "cargo test".len()..];
+
+            // Check 1: --locked must be present
+            if !after_cargo_test.contains("--locked") {
+                violations.push(format!(
+                    ".githooks/{hook_name}:{}: `cargo test` missing --locked flag.\n  \
+                     Found: {trimmed}\n  \
+                     Fix: Add --locked to the cargo test invocation \
+                     (project policy requires --locked on all cargo build/test/check commands).",
+                    line_idx + 1
+                ));
+            }
+
+            // Check 2: When multiple test filter names are passed, they must
+            // appear after a `--` separator.
+            //
+            // Strategy: find the `--test <name>` flag (if present) and then
+            // check if there are multiple bare words after it that are NOT
+            // preceded by `--`.
+            //
+            // We split on `--` to get the part before and after the separator.
+            // If there's no `--`, all args are in the "cargo side".
+            // Test filter names on the cargo side (positional TESTNAME) can only
+            // be one; if we find multiple bare words that look like test names
+            // after `--test <crate>`, that's a violation.
+
+            // Split at the first ` -- ` (with surrounding spaces to avoid matching --locked etc.)
+            let has_double_dash = after_cargo_test.contains(" -- ");
+
+            // Count what look like test filter names (bare words starting with test_)
+            // in the cargo-args portion (before `--`).
+            let cargo_args = if has_double_dash {
+                // Everything before ` -- `
+                after_cargo_test
+                    .split(" -- ")
+                    .next()
+                    .unwrap_or(after_cargo_test)
+            } else {
+                after_cargo_test
+            };
+
+            // After stripping known flags and their values, count remaining
+            // bare words that look like test function names (start with test_).
+            let test_name_args: Vec<&str> = cargo_args
+                .split_whitespace()
+                .filter(|word| word.starts_with("test_"))
+                .collect();
+
+            if test_name_args.len() > 1 {
+                violations.push(format!(
+                    ".githooks/{hook_name}:{}: `cargo test` has multiple test filter names \
+                     as positional args without `--` separator.\n  \
+                     Found: {trimmed}\n  \
+                     Problem: cargo only accepts one positional TESTNAME; additional names \
+                     cause an 'unexpected argument' error.\n  \
+                     Fix: Place all test filter names after `--`, e.g.:\n  \
+                     cargo test --locked --test <crate> -- filter1 filter2",
+                    line_idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Found cargo test invocation issues in git hooks:\n\n{}\n\n\
+         All `cargo test` commands in .githooks/ must:\n\
+         1. Use --locked (ensures dependencies match Cargo.lock)\n\
+         2. Place multiple test filter names after `--` (cargo only accepts one positional TESTNAME)",
+        violations.join("\n\n")
     );
 }
 

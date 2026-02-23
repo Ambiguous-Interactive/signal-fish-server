@@ -176,31 +176,35 @@ COUNT=$(grep -c "pattern" file.txt || echo "0")
 COUNT=$(grep -c "pattern" file.txt 2>/dev/null) || COUNT=0
 ```
 
+### Cargo Test Invocation in Hooks
+
+`cargo test` accepts only **one** positional TESTNAME. To run multiple specific
+tests, pass test names after the `--` separator. Always use `--locked` per
+project policy.
+
+```bash
+# BAD: Two positional args — second causes 'unexpected argument' error
+cargo test --test ci_config_tests test_foo test_bar
+
+# GOOD: Use -- separator; names after -- are passed as filters
+cargo test --locked --test ci_config_tests -- test_foo test_bar
+```
+
 ---
 
 ## Testing Hooks
 
 ```bash
-# 1. Test hook directly
-./.githooks/pre-commit
-echo "Exit code: $?"
+# Test hook directly
+./.githooks/pre-commit && echo "PASS" || echo "FAIL"
 
-# 2. Test with git commit (dry run)
-git add .
+# Test with git commit (dry run)
 git commit --dry-run
 
-# 3. Test actual commit
-touch test-file.txt
-git add test-file.txt
-git commit -m "Test commit"
-
-# 4. Test bypass
+# Test bypass
 git commit --no-verify -m "Bypass test"
-```
 
-### Test Permission Setup
-
-```bash
+# Verify permissions
 ls -la .githooks/pre-commit           # Should show -rwxr-xr-x
 git ls-files -s .githooks/pre-commit  # Should show 100755
 ```

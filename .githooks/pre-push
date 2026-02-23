@@ -60,7 +60,7 @@ if ! scripts/check-workflow-hygiene.sh; then
 fi
 
 echo "${BLUE}[pre-push]${NC} Running workflow action-ref policy tests..."
-if ! cargo test --test ci_config_tests \
+if ! cargo test --locked --test ci_config_tests -- \
     test_github_actions_use_version_refs_not_commit_hashes \
     test_workflow_toolchain_fields_do_not_use_moving_aliases; then
     echo "${RED}[pre-push] ERROR:${NC} CI action-ref policy tests failed."
