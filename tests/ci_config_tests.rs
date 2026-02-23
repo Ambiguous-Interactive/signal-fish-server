@@ -24,6 +24,26 @@ fn read_file(path: &Path) -> String {
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
 }
 
+/// Extract Shields.io URLs from text content with their 1-based line numbers.
+fn extract_shields_urls(content: &str) -> Vec<(usize, String)> {
+    const SHIELDS_PREFIX: &str = "https://img.shields.io/";
+    let mut urls = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let mut rest = line;
+        while let Some(start) = rest.find(SHIELDS_PREFIX) {
+            let candidate = &rest[start..];
+            let end = candidate
+                .find(|c: char| c == '"' || c == '\'' || c == ')' || c == '>' || c.is_whitespace())
+                .unwrap_or(candidate.len());
+            urls.push((line_idx + 1, candidate[..end].to_string()));
+            rest = &candidate[end..];
+        }
+    }
+
+    urls
+}
+
 /// Extract the value of a TOML field like `rust-version = "1.88.0"`
 fn extract_toml_version(content: &str, field: &str) -> Option<String> {
     for line in content.lines() {
@@ -1573,6 +1593,62 @@ fn test_markdown_config_exists() {
     assert!(
         content.contains("MD040"),
         ".markdownlint.json must include MD040 rule (code block language identifiers)"
+    );
+}
+
+#[test]
+fn test_readme_shields_badges_use_for_the_badge_style() {
+    let root = repo_root();
+    let readme = root.join("README.md");
+    let content = read_file(&readme);
+
+    let shields_urls = extract_shields_urls(&content);
+    assert!(
+        !shields_urls.is_empty(),
+        "README.md should contain at least one Shields.io badge URL to validate"
+    );
+
+    let violations: Vec<String> = shields_urls
+        .iter()
+        .filter(|(_, url)| {
+            !url.contains("?style=for-the-badge") && !url.contains("&style=for-the-badge")
+        })
+        .map(|(line_num, url)| format!("README.md:{line_num}: {url}"))
+        .collect();
+
+    assert!(
+        violations.is_empty(),
+        "README Shields badge URLs must include style=for-the-badge for visual consistency.\n\
+         Missing style parameter:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_passes_on_repository() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("README.md")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    assert!(
+        output.status.success(),
+        "check-readme-badges.sh should pass on the current repository.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -7133,6 +7209,60 @@ fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
     assert!(
         content.contains("check_skip \"LLM file sizes\""),
         "Check 18 should skip cleanly when no .llm/*.md files are staged."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    assert!(hook_path.exists(), ".githooks/pre-commit must exist");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("# Check 20: README badge style consistency"),
+        "Pre-commit hook must define Check 20 for README badge style consistency."
+    );
+    assert!(
+        content.contains("scripts/check-readme-badges.sh"),
+        "Check 20 must invoke scripts/check-readme-badges.sh."
+    );
+    assert!(
+        content.contains("check_fail \"README badge styles\"")
+            && content.contains("style=for-the-badge"),
+        "Check 20 must fail with actionable guidance when README badge styles are inconsistent."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_readme_badge_style_trigger_scopes_to_readme() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains(r"^README\.md$"),
+        "Check 20 trigger must match staged README.md changes."
+    );
+    assert!(
+        content.contains("check_skip \"README badge styles\""),
+        "Check 20 should skip cleanly when README.md is not staged."
+    );
+}
+
+#[test]
+fn test_run_local_ci_includes_readme_badge_style_check() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("readme-badges"),
+        "run-local-ci.sh should include a dedicated README badge consistency check."
+    );
+    assert!(
+        content.contains("scripts/check-readme-badges.sh"),
+        "run-local-ci.sh should invoke scripts/check-readme-badges.sh."
     );
 }
 

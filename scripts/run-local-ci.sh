@@ -215,6 +215,12 @@ else
     echo ""
 fi
 
+# Check 12: README Badge Style Consistency
+if [ -f scripts/check-readme-badges.sh ]; then
+    run_check_quiet "readme-badges" "Checking Shields badge style consistency in README" \
+        scripts/check-readme-badges.sh README.md
+fi
+
 # Summary
 echo "=========================================="
 echo -e "${BOLD}Summary${NC}"

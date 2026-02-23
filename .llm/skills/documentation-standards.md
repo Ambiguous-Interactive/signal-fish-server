@@ -136,6 +136,17 @@ Install `markdownlint-cli2` for local checks: `npm install -g markdownlint-cli2`
 The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is installed).
 Enable with `./scripts/enable-hooks.sh`.
 
+### README Badge Consistency
+
+For README Shields badges (`https://img.shields.io/...`), enforce a consistent
+visual style by including `style=for-the-badge` on every badge URL.
+
+Validate locally with:
+
+```bash
+./scripts/check-readme-badges.sh README.md
+```
+
 ### Common Markdown Linting Issues
 
 | Rule  | Issue                                    | Fix                                              |
@@ -180,6 +191,7 @@ After every feature/bugfix:
 - [ ] README updated if user-facing
 - [ ] New behavior clearly marked as new
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)
+- [ ] README Shields badges include `style=for-the-badge` (`./scripts/check-readme-badges.sh README.md`)
 - [ ] All code blocks have language identifiers
 - [ ] Technical terms added to `.typos.toml` if needed
 - [ ] All text uses American English spellings (not British)
