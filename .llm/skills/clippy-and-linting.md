@@ -39,10 +39,7 @@
 
 ## Recommended Cargo.toml Lint Configuration
 
-Add this to the project's `Cargo.toml`:
-
 > **Note:** This `[lints.clippy]` configuration is recommended but not yet in the project's `Cargo.toml`.
-> Add it when ready to enforce stricter linting.
 
 ```toml
 [lints.rust]
@@ -99,7 +96,6 @@ semicolon_outside_block = "warn"
 tests_outside_test_module = "warn"
 unnecessary_self_imports = "warn"
 wildcard_enum_match_arm = "warn"
-
 ```
 
 ---
@@ -109,7 +105,6 @@ wildcard_enum_match_arm = "warn"
 The project's [clippy.toml](../../clippy.toml) is already configured:
 
 ```toml
-
 cognitive-complexity-threshold = 30    # Max cognitive complexity per function
 too-many-lines-threshold = 150         # Max lines per function
 enum-variant-size-threshold = 200      # Trigger large_enum_variant above this
@@ -120,11 +115,6 @@ trivial-copy-size-limit = 8            # Stack size threshold for pass-by-value
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
 msrv = "1.88.0"                        # Minimum supported Rust version
 
-```
-
-**Additional options to consider:**
-
-```toml
 # Disallow specific types in favor of project alternatives
 disallowed-types = [
     { path = "std::collections::HashMap", reason = "Use DashMap for concurrent or FxHashMap for single-thread" },
@@ -136,19 +126,13 @@ disallowed-methods = [
     { path = "std::thread::sleep", reason = "Use tokio::time::sleep in async code" },
     { path = "std::env::var", reason = "Use clap for argument parsing" },
 ]
-
-# Single-char variable names allowed
-allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "f", "_"]
-
 ```
 
 ---
 
 ## Essential Clippy Lints by Category
 
-### Correctness (Always Deny)
-
-These find bugs. Never suppress without exceptional reason.
+### Correctness (Always Deny) — find bugs, never suppress without exceptional reason
 
 | Lint                  | What it catches                       |
 | --------------------- | ------------------------------------- |
@@ -157,15 +141,6 @@ These find bugs. Never suppress without exceptional reason.
 | `almost_swapped`      | Incomplete variable swap              |
 | `invalid_regex`       | Regex that won't compile              |
 | `infinite_iter`       | `.iter()` chains that never terminate |
-| `uninit_assumed_init` | Use of uninitialized memory           |
-
-### Suspicious (Likely Bugs)
-
-| Lint                               | What it catches                             |
-| ---------------------------------- | ------------------------------------------- |
-| `suspicious_else_formatting`       | Else on wrong line                          |
-| `suspicious_op_assign_impl`        | `+=` impl that does `-=`                    |
-| `blanket_clippy_restriction_lints` | `#![warn(clippy::restriction)]` (too noisy) |
 
 ### Perf (Performance Issues)
 
@@ -173,43 +148,23 @@ These find bugs. Never suppress without exceptional reason.
 | ---------------------- | -------------------------------------- |
 | `needless_collect`     | `.collect()` immediately iterated      |
 | `large_enum_variant`   | Enum with one huge variant             |
-| `box_collection`       | `Box<Vec<T>>` — already heap-allocated |
 | `redundant_clone`      | `.clone()` on value about to drop      |
-| `manual_memcpy`        | Loop that could be `copy_from_slice`   |
 | `iter_on_single_items` | `.iter()` on single-element collection |
 
 ### Key Restriction Lints
 
 ```rust
-// unwrap_used — forces ? or explicit handling
-// ❌ Triggers warning
-let val = option.unwrap();
+// unwrap_used — use ? or explicit handling
+let val = option.ok_or(Error::Missing)?;   // ✅
 
-// ✅ Fix: use ? or explicit handling
-let val = option.ok_or(Error::Missing)?;
+// indexing_slicing — use safe accessors
+let first = vec.first().ok_or(Error::Empty)?;  // ✅
 
-// indexing_slicing — forces .get() or pattern matching
-// ❌ Triggers warning
-let first = vec[0];
+// panic/todo/unimplemented — return error instead
+return Err(Error::UnexpectedState);  // ✅
 
-// ✅ Fix: safe access
-let first = vec.first().ok_or(Error::Empty)?;
-
-// panic / todo / unimplemented — no panic points in production
-// ❌ Triggers warning
-panic!("unexpected state");
-todo!("implement later");
-
-// ✅ Fix: return error
-return Err(Error::UnexpectedState);
-
-// dbg_macro — no debug macros in committed code
-// ❌ Triggers warning
-dbg!(value);
-
-// ✅ Fix: use tracing
-tracing::debug!(?value, "debugging value");
-
+// dbg_macro — use tracing
+tracing::debug!(?value, "debugging value");  // ✅
 ```
 
 ---
@@ -217,15 +172,9 @@ tracing::debug!(?value, "debugging value");
 ## Suppressing Lints Properly
 
 ```rust
-
 // ✅ Suppress at the item level with a reason
 #[allow(clippy::too_many_arguments)] // Builder pattern not yet extracted
-fn create_room(
-    code: &str, name: &str, max_players: u32,
-    timeout: Duration, visibility: Visibility,
-    persistence: Persistence, auth: AuthMode,
-    creator: PlayerId, transport: Transport,
-) -> Result<Room, Error> { ... }
+fn create_room(code: &str, name: &str, max_players: u32, ...) -> Result<Room, Error> { ... }
 
 // ✅ Suppress for a single expression
 #[allow(clippy::unwrap_used)] // SAFETY: regex literal is compile-time constant
@@ -242,12 +191,10 @@ let re = Regex::new(r"^\d+$").unwrap();
 
 ## `cargo clippy --fix`
 
-See [Rust-refactoring-guide](./rust-refactoring-guide.md) for the full `clippy --fix` workflow.
+See [Rust-refactoring-guide](./rust-refactoring-guide.md) for the full `cargo clippy --fix` workflow.
 
 ```bash
-
 cargo clippy --all-targets --all-features --fix --allow-dirty
-
 ```
 
 Handles well: redundant clones, match simplification, unnecessary borrows, `use` suggestions.
@@ -257,25 +204,21 @@ Always review with `git diff` after.
 
 ## CI/CD Integration
 
-The project workflow runs:
-
 ```bash
-
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
-
 ```
 
-Use `-D warnings` in CI to fail on any lint warning.
+Use `-D warnings` in CI to fail on any lint warning. **Always use `--all-targets`** — without it,
+`#[cfg(test)]` modules and integration tests are not linted and warnings only surface in CI.
+
+Don't use `#![deny(warnings)]` in libraries — new compiler warnings break downstream builds.
+In binaries, use `-D warnings` as a CI flag instead of in source code.
 
 ---
 
 ## Common CI-Breaking Clippy Lints in Test Code
-
-Test code is compiled and linted when using `--all-targets`, which means clippy lints
-apply to `#[cfg(test)]` modules and integration tests just as they do to production code.
-These lints commonly sneak into test code and break CI:
 
 | Lint               | What it catches                                               |
 | ------------------ | ------------------------------------------------------------- |
@@ -283,81 +226,33 @@ These lints commonly sneak into test code and break CI:
 | `needless_return`  | Explicit `return` statements that can be removed              |
 | `single_match`     | `match` with one arm + wildcard that should be `if let`       |
 
-### Example: `collapsible_if`
-
 ```rust
-// ❌ Triggers collapsible_if warning
-#[test]
-fn test_room_visibility() {
-    let room = create_room("ABC123").unwrap();
-    if room.is_public() {
-        if room.player_count() > 0 {
-            assert!(room.is_joinable());
-        }
-    }
+// ❌ collapsible_if warning
+if room.is_public() {
+    if room.player_count() > 0 { assert!(room.is_joinable()); }
 }
 
-// ✅ Fix: combine nested if statements with &&
-#[test]
-fn test_room_visibility() {
-    let room = create_room("ABC123").unwrap();
-    if room.is_public() && room.player_count() > 0 {
-        assert!(room.is_joinable());
-    }
-}
-
+// ✅ Fix: combine with &&
+if room.is_public() && room.player_count() > 0 { assert!(room.is_joinable()); }
 ```
-
-### Always Lint Test Code Locally
-
-Run clippy with `--all-targets` to include tests, benchmarks, and examples:
-
-```bash
-
-cargo clippy --all-targets --all-features -- -D warnings
-
-```
-
-The `--all-targets` flag is critical — without it, `#[cfg(test)]` modules and
-integration tests are not compiled or linted, and warnings will only surface in CI.
-
----
-
-## The `deny(warnings)` Anti-Pattern
-
-Don't use `#![deny(warnings)]` in libraries — new compiler warnings break downstream builds.
-In binaries, use `-D warnings` as a CI flag instead of in source code.
 
 ---
 
 ## Project-Specific Recommendations
-
-For this project:
 
 | Area                   | Lints to enforce                                                 |
 | ---------------------- | ---------------------------------------------------------------- |
 | **WebSocket handlers** | `unwrap_used`, `indexing_slicing` — untrusted input              |
 | **Async code**         | Verify no `std::thread::sleep` via `disallowed-methods`          |
 | **Serialization**      | `unwrap_used` — malformed data must not panic                    |
-| **Metrics/counters**   | Allow `arithmetic_side_effects` — saturating ops are fine        |
 | **Tests**              | Allow `unwrap_used`, `indexing_slicing` — panics are ok in tests |
-| **Benchmarks**         | Allow `missing_panics_doc` — benchmarks don't need docs          |
-
-### Test Module Overrides
 
 ```rust
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]     // Panics are expected in tests
-    #![allow(clippy::indexing_slicing)] // Tests verify bounds elsewhere
-
-    #[test]
-    fn test_room_creation() {
-        let room = create_room("ABC123").unwrap();
-        assert_eq!(room.code().as_str(), "ABC123");
-    }
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::indexing_slicing)]
 }
-
 ```
 
 ---
@@ -371,7 +266,7 @@ mod tests {
 - [ ] No crate-level `#![allow(...)]` for safety lints
 - [ ] Item-level `#[allow(...)]` has a comment explaining why
 - [ ] CI runs clippy with `-D warnings`
-- [ ] Consider adding `disallowed-types` to block `std::collections::HashMap` in favor of `DashMap`
+- [ ] `disallowed-types` blocks `std::collections::HashMap` in favor of `DashMap`
 - [ ] `disallowed-methods` blocks `std::thread::sleep` in async code
 - [ ] Tests have appropriate `#![allow()]` overrides
 
@@ -382,4 +277,4 @@ mod tests {
 - [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Code patterns that satisfy lints
 - [defensive-programming](./defensive-programming.md) — Patterns enforced by restriction lints
 - [Rust-refactoring-guide](./rust-refactoring-guide.md) — Using `cargo clippy --fix` for automated fixes
-- [testing-strategies](./testing-strategies.md) — CI pipeline integration
+- [testing-strategies](./testing-core-patterns.md) — CI pipeline integration

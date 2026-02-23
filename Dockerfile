@@ -1,3 +1,4 @@
+# check=skip=SecretsUsedInArgOrEnv
 # Multi-stage Dockerfile for Signal Fish Server
 # Optimized with cargo-chef for dependency caching and mold linker for speed
 # Zero external runtime dependencies (no database, no cloud services)

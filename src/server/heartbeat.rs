@@ -79,6 +79,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn handle_ping_resets_timeout_and_replies() {
         let server = create_test_server().await;
         let (sender, mut receiver) = mpsc::channel(4);

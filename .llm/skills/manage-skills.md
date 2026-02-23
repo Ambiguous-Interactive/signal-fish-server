@@ -16,7 +16,7 @@
 - Editing an existing skill to add or update content
 - Splitting a skill that exceeds the size limit
 - Reviewing skill compliance with formatting rules
-- Regenerating the skills index in context.md
+- Regenerating the skills index in `.llm/skills/index.md`
 
 ---
 
@@ -81,6 +81,7 @@ Every skill file MUST follow this structure:
 - **Core** — Skills agents should consider for most tasks
 - **Performance** — Optimization, profiling, allocation-related
 - **Feature** — Feature-specific (WebSocket, serialization, etc.)
+- **Infrastructure** — CI/CD, workflows, shell scripting, deployment, toolchain management
 
 ---
 
@@ -90,10 +91,10 @@ Every skill file MUST follow this structure:
 |-------|--------|--------|
 | < 200 | Ideal | Focused, easy to consume |
 | 200–300 | Good | Acceptable for complex topics |
-| 300–500 | Large | Consider splitting |
-| > 500 | **MUST Split** | Lint script blocks commit |
+| = 300 | At limit | Warnings issued; trim soon |
+| > 300 | **MUST Split** | `check-llm-file-sizes.sh` blocks commit |
 
-Run the size linter: `bash scripts/lint-skill-sizes.sh`
+Run the size linter: `./scripts/check-llm-file-sizes.sh`
 
 ---
 
@@ -116,17 +117,17 @@ Run the size linter: `bash scripts/lint-skill-sizes.sh`
 ## Editing Workflow
 
 1. Edit the skill file
-2. Run size linter: `bash scripts/lint-skill-sizes.sh`
-3. If > 300 lines: consider splitting now
-4. If > 500 lines: **STOP** — must split before continuing
-5. Run format linter: `bash scripts/lint-llm-instructions.sh`
-6. Regenerate index: `bash scripts/generate-skills-index.sh`
-7. Verify context.md updated correctly
+2. Run size linter: `./scripts/check-llm-file-sizes.sh`
+3. If > 300 lines: **STOP** — must split before committing
+4. Regenerate index: `./scripts/generate-skills-index.sh`
+   - Index ordering: deterministic `LC_ALL=C` sort by file path/filename (not by title)
+5. Ensure `.llm/skills/index.md` is updated and staged
+6. Verify `.llm/context.md` references `skills/index.md`
 
 ---
 
 ## Related Skills
 
 - [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Patterns that skills should reference
-- [testing-strategies](./testing-strategies.md) — Testing methodology that all skills reference
+- [testing-strategies](./testing-core-patterns.md) — Testing methodology that all skills reference
 - [clippy-and-linting](./clippy-and-linting.md) — Linting workflow skills must follow

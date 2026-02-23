@@ -1,6 +1,6 @@
 //! Auth integration tests for the in-memory auth backend
 //!
-//! Tests end-to-end authentication behaviour via the server and the standalone
+//! Tests end-to-end authentication behavior via the server and the standalone
 //! `AuthMiddleware` API surface.
 
 mod test_helpers;

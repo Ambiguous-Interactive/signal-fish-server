@@ -193,7 +193,8 @@ When reviewing your own code changes, simulate a fresh perspective:
 4. Run verification commands (test, clippy)
 5. Report findings in structured format
 
-For agentic workflows, use a separate subagent for review. See [agentic-workflow-patterns](./agentic-workflow-patterns.md).
+For agentic workflows, use a separate subagent for review.
+See [agentic-workflow-patterns](./agentic-workflow-patterns.md).
 
 ---
 

@@ -79,7 +79,7 @@ pub fn load() -> Config {
         }
     };
 
-    // Security validation for sensitive fields — intentional warn-only behaviour;
+    // Security validation for sensitive fields — intentional warn-only behavior;
     // main.rs calls validate_config_security() again and propagates errors properly.
     if let Err(e) = validate_config_security(&config) {
         eprintln!("Configuration validation error: {e}");
@@ -195,15 +195,23 @@ fn set_nested_value(target: &mut Value, segments: &[String], value: Value) {
 
     if segments.len() == 1 {
         let map = ensure_object(target);
+        // SAFETY: Length is checked to be exactly 1 on the line above.
+        #[allow(clippy::indexing_slicing)]
         map.insert(segments[0].clone(), value);
         return;
     }
 
     let map = ensure_object(target);
+    // SAFETY: segments.len() > 1 (len 0 and len 1 are handled above), so
+    // index 0 and the [1..] slice are both in bounds.
+    #[allow(clippy::indexing_slicing)]
+    let key = segments[0].clone();
     let entry = map
-        .entry(segments[0].clone())
+        .entry(key)
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    set_nested_value(entry, &segments[1..], value);
+    #[allow(clippy::indexing_slicing)]
+    let rest = &segments[1..];
+    set_nested_value(entry, rest, value);
 }
 
 fn ensure_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
@@ -211,6 +219,9 @@ fn ensure_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
         *value = Value::Object(serde_json::Map::new());
     }
 
+    // SAFETY: The branch above guarantees `value` is a `Value::Object`, so
+    // `as_object_mut()` will always return `Some`.
+    #[allow(clippy::expect_used)]
     value
         .as_object_mut()
         .expect("value should be coerced into an object")

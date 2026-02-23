@@ -50,29 +50,20 @@
 pub enum JoinError {
     #[error("room not found: {code}")]
     RoomNotFound { code: String },
-
     #[error("room is full ({current}/{max} players)")]
     RoomFull { current: usize, max: usize },
-
-    #[error("player already in room")]
-    AlreadyJoined,
-
     #[error("authentication failed")]
     AuthFailed(#[from] AuthError),
-
     #[error("database error")]
     Database(#[from] sqlx::Error),
 }
 
-// ✅ anyhow at the application boundary (main, handler top-level)
+// ✅ anyhow at the application boundary
 use anyhow::Context;
 async fn main() -> anyhow::Result<()> {
-    let config = load_config()
-        .context("Failed to load server configuration")?;
-    run_server(config).await
-        .context("Server exited with error")
+    let config = load_config().context("Failed to load server configuration")?;
+    run_server(config).await.context("Server exited with error")
 }
-
 ```
 
 ---
@@ -82,7 +73,6 @@ async fn main() -> anyhow::Result<()> {
 Design around **what the caller needs to do**, not implementation details:
 
 ```rust
-
 // ❌ Implementation-leaked errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -97,24 +87,18 @@ pub enum Error {
 pub enum RoomError {
     #[error("room {0} not found")]
     NotFound(RoomCode),                    // Caller: return 404
-
     #[error("room {0} is full")]
     Full(RoomCode),                        // Caller: return 409
-
     #[error("invalid room configuration: {0}")]
     InvalidConfig(String),                 // Caller: return 400
-
     #[error("internal error")]
     Internal(#[source] anyhow::Error),     // Caller: return 500, log details
 }
 
 // Convert implementation errors at the boundary
 impl From<sqlx::Error> for RoomError {
-    fn from(err: sqlx::Error) -> Self {
-        Self::Internal(err.into())
-    }
+    fn from(err: sqlx::Error) -> Self { Self::Internal(err.into()) }
 }
-
 ```
 
 ---
@@ -122,7 +106,6 @@ impl From<sqlx::Error> for RoomError {
 ## The `?` Operator and Error Propagation
 
 ```rust
-
 // ✅ Chain ? for clean propagation
 pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinError> {
     let room = self.db.find_room(&req.room_code).await?;      // DbError → JoinError
@@ -130,7 +113,6 @@ pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinErro
     room.add_player(player)?;                                   // RoomError → JoinError
     Ok(JoinResponse { room_id: room.id() })
 }
-
 ```
 
 ---
@@ -138,13 +120,11 @@ pub async fn join_room(&self, req: JoinRequest) -> Result<JoinResponse, JoinErro
 ## Adding Context
 
 ```rust
-
 use anyhow::Context;
 
 // ✅ .context() adds human-readable context to error chain
 let content = std::fs::read_to_string(&path)
     .context("Failed to read configuration file")?;
-
 let config: ServerConfig = serde_json::from_str(&content)
     .with_context(|| format!("Failed to parse config from {}", path.display()))?;
 
@@ -154,13 +134,9 @@ let port: u16 = env::var("PORT")
     .parse()
     .map_err(|_| ConfigError::InvalidValue("PORT", "must be valid u16"))?;
 
-// ✅ .ok_or() / .ok_or_else() to convert Option → Result
+// ✅ .ok_or_else() to convert Option → Result (lazy allocation)
 let room = self.rooms.get(&room_id)
-    .ok_or(RoomError::NotFound(room_id.clone()))?;
-
-let player = self.rooms.get(&room_id)
-    .ok_or_else(|| RoomError::NotFound(room_id.clone()))?;  // Lazy allocation
-
+    .ok_or_else(|| RoomError::NotFound(room_id.clone()))?;
 ```
 
 ---
@@ -168,7 +144,6 @@ let player = self.rooms.get(&room_id)
 ## The Unwrap Hierarchy
 
 ```rust
-
 // ✅ Propagate with ?
 let value = operation()?;
 let value = maybe_value.ok_or(Error::Missing)?;
@@ -180,46 +155,16 @@ let value = maybe_value.unwrap_or_default();
 // ✅ Transform without unwrapping
 let result = maybe_value.map(|v| v.to_string());
 let result = maybe_value.and_then(|v| v.parse().ok());
-
 ```
 
 **`expect()` only for compile-time-provable cases** with a `// SAFETY:` comment — it still panics:
 
 ```rust
-
 // SAFETY: Regex literal is known valid at compile time
 let re = Regex::new(r"^\d+$").expect("valid regex literal");
 
 // ❌ NEVER in production code for runtime-dependent values
 let value = map.get("key").expect("key must exist");  // NOT provable!
-
-```
-
----
-
-## Custom Error Types with Rich Information
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum WebSocketError {
-    #[error("connection closed by peer (code: {code:?}, reason: {reason})")]
-    PeerClosed {
-        code: Option<u16>,
-        reason: String,
-        peer_id: PlayerId,
-    },
-
-    #[error("message too large: {size} bytes (max: {max})")]
-    MessageTooLarge { size: usize, max: usize },
-
-    #[error("rate limited: {requests} requests in {window_secs}s (max: {limit})")]
-    RateLimited {
-        requests: u32,
-        window_secs: u64,
-        limit: u32,
-    },
-}
-
 ```
 
 ---
@@ -227,19 +172,11 @@ pub enum WebSocketError {
 ## Error Conversion with `From`/`Into`
 
 ```rust
-
 // Use #[from] in thiserror for simple forwarding
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("I/O error")]
     Io(#[from] std::io::Error),
-    #[error("configuration error")]
-    Config(#[from] ConfigError),
-}
-
-// Use #[source] when you want wrapping without auto-From
-#[derive(Debug, thiserror::Error)]
-pub enum ServerError {
     #[error("failed to bind to port {port}")]
     Bind { port: u16, #[source] source: std::io::Error },
 }
@@ -253,23 +190,20 @@ impl From<sqlx::Error> for AppError {
         }
     }
 }
-
 ```
 
 ---
 
 ## Error Handling in Async Code
 
-The `?` operator works normally in async functions. For spawned tasks, handle `JoinError` (panics/cancellation) separately:
+The `?` operator works normally in async functions. For spawned tasks, handle `JoinError` separately:
 
 ```rust
-
 match tokio::spawn(async move { process(msg).await }).await {
     Ok(Ok(())) => {}                           // Task succeeded
-    Ok(Err(process_err)) => log_error(process_err),  // Task returned error
+    Ok(Err(process_err)) => log_error(process_err),
     Err(join_err) => tracing::error!("Task failed: {join_err}"), // Panicked/cancelled
 }
-
 ```
 
 See [async-Rust-best-practices](./async-rust-best-practices.md) for structured concurrency with `JoinSet`.
@@ -278,11 +212,9 @@ See [async-Rust-best-practices](./async-rust-best-practices.md) for structured c
 
 ## Error Types in Public APIs (axum Handlers)
 
-Map domain errors to HTTP status codes via `IntoResponse`.
 See [api-design-guidelines](./api-design-guidelines.md) for the full pattern.
 
 ```rust
-
 impl IntoResponse for RoomError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
@@ -297,37 +229,6 @@ impl IntoResponse for RoomError {
         (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
     }
 }
-
-```
-
----
-
-## Logging Errors with Tracing
-
-See [observability-and-logging](./observability-and-logging.md) for full structured logging patterns.
-
-```rust
-
-// ✅ Structured fields, not string interpolation
-tracing::error!(error = %err, room_id = %room_id, "Failed to join room");
-tracing::warn!(error = ?err, "Operation failed, retrying");  // Debug (?) for full chain
-
-```
-
----
-
-## Testing Error Conditions
-
-See [testing-strategies](./testing-strategies.md) for comprehensive test patterns.
-
-```rust
-#[tokio::test]
-async fn test_join_nonexistent_room() {
-    let server = TestServer::new().await;
-    let result = server.join_room("INVALID").await;
-    assert!(matches!(result, Err(JoinError::RoomNotFound { .. })));
-}
-
 ```
 
 ---
@@ -342,7 +243,6 @@ See [defensive-programming](./defensive-programming.md) for comprehensive safe a
 | `s.parse().unwrap()` | `s.parse()?` |
 | `a / b` | `a.checked_div(b).ok_or(Error)?` |
 | `x as u32` | `u32::try_from(x)?` |
-| `mutex.lock().unwrap()` | `mutex.lock().unwrap_or_else(\|p\| p.into_inner())` |
 
 ---
 

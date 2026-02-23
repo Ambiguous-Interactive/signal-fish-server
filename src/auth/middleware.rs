@@ -58,6 +58,8 @@ const DEFAULT_RATE_LIMIT_PER_DAY: u32 = 100_000;
 fn deterministic_uuid(key: &str) -> Uuid {
     let hash = Sha256::digest(key.as_bytes());
     let mut bytes = [0u8; 16];
+    // SAFETY: SHA-256 always produces exactly 32 bytes, so [..16] is always in bounds.
+    #[allow(clippy::indexing_slicing)]
     bytes.copy_from_slice(&hash[..16]);
     // Set version to 4 (bits 48..51)
     bytes[6] = (bytes[6] & 0x0F) | 0x40;

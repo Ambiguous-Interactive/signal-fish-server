@@ -18,6 +18,13 @@
 #  10. Markdown linting (if markdown files modified)
 #  11. Link checking (if markdown files modified)
 #  12. Markdown code block validation (if markdown files modified)
+#  13. British English spellings (warning only)
+#  14. Path-filtered workflow registration (if workflow files modified)
+#  15. Schedule trigger guards (if workflow files modified)
+#  16. Skills index generation freshness (if skills inputs/script/context change)
+#  17. Workflow hygiene script checks (if workflow/hygiene script files modified)
+#  18. LLM file size limit (if .llm/ files modified — max 300 lines per file)
+#  19. Miri compatibility (if Rust source files modified)
 
 set -e
 
@@ -37,7 +44,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=12
+TOTAL_CHECKS=19
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -55,6 +62,12 @@ check_fail() {
     echo "${RED}✗ FAIL${NC}: $1"
     echo "${RED}[pre-commit] ERROR:${NC} $2"
     CHECKS_FAILED=$((CHECKS_FAILED + 1))
+}
+
+check_warn() {
+    echo "${YELLOW}⚠ WARN${NC}: $1"
+    echo "${YELLOW}[pre-commit] WARNING:${NC} $2"
+    CHECKS_PASSED=$((CHECKS_PASSED + 1))
 }
 
 check_skip() {
@@ -541,6 +554,297 @@ else
     check_skip "Code block validation" "no markdown files changed"
 fi
 
+# Check 13: British English spellings (warning only)
+# Catches common British spellings that should be American English.
+# This is a WARNING (non-blocking) since there may be legitimate uses
+# (e.g., external references, proper nouns, quotes).
+echo "${BLUE}[13/${TOTAL_CHECKS}]${NC} Checking for British English spellings..."
+STAGED_TEXT_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(rs|yml|yaml|md)$' || true)
+
+if [ -n "$STAGED_TEXT_FILES" ]; then
+    # Each entry is "british_pattern:american_equivalent"
+    BRITISH_WORDS="uninitialised:uninitialized
+initialised:initialized
+initialise:initialize
+initialising:initializing
+behaviour:behavior
+colour:color
+colours:colors
+favour:favor
+favoured:favored
+favouring:favoring
+honour:honor
+honoured:honored
+honouring:honoring
+serialise:serialize
+serialised:serialized
+serialising:serializing
+organise:organize
+organised:organized
+organising:organizing
+recognise:recognize
+recognised:recognized
+recognising:recognizing"
+
+    # Use a temp file to count warnings across subshells (pipe creates subshell)
+    BRIT_WARN_FILE=$(mktemp)
+    : > "$BRIT_WARN_FILE"
+    for text_file in $STAGED_TEXT_FILES; do
+        [ -f "$text_file" ] || continue
+        LINE_NUM=0
+        while IFS= read -r line; do
+            LINE_NUM=$((LINE_NUM + 1))
+            # Skip lines containing URLs to avoid false positives on external references
+            case "$line" in
+                *http://*|*https://*) continue ;;
+            esac
+            echo "$BRITISH_WORDS" | while IFS=: read -r british american; do
+                [ -z "$british" ] && continue
+                # Case-insensitive match using tr for POSIX compatibility
+                line_lower=$(echo "$line" | tr 'A-Z' 'a-z')
+                if echo "$line_lower" | grep -qw "$british"; then
+                    echo "${YELLOW}  British spelling:${NC} $text_file:$LINE_NUM: found '${british}', prefer '${american}'"
+                    echo "1" >> "$BRIT_WARN_FILE"
+                fi
+            done
+        done < "$text_file"
+    done
+    BRIT_WARNINGS=$(wc -l < "$BRIT_WARN_FILE" | tr -d ' ')
+    rm -f "$BRIT_WARN_FILE"
+
+    if [ "$BRIT_WARNINGS" -gt 0 ]; then
+        check_warn "British English spellings" "$BRIT_WARNINGS British spelling(s) found. Consider using American English."
+    else
+        check_pass "British English spellings"
+    fi
+else
+    check_skip "British English spellings" "no .rs/.yml/.yaml/.md files staged"
+fi
+
+# Check 14: Path-filtered workflow registration in release preflight
+# Ensures any workflow in REQUIRED_WORKFLOWS that uses path filters is also
+# registered in PATH_FILTERED_WORKFLOWS in release.yml, so the release
+# preflight correctly handles skipped workflow runs.
+echo "${BLUE}[14/${TOTAL_CHECKS}]${NC} Checking path-filtered workflow registration..."
+
+RELEASE_FILE=".github/workflows/release.yml"
+if [ -n "$WORKFLOW_FILES" ]; then
+    if [ -f "$RELEASE_FILE" ]; then
+        PF_ERRORS=0
+
+        # For each staged workflow file, check if it has path filters AND
+        # its name appears in REQUIRED_WORKFLOWS. If so, it must also
+        # appear in PATH_FILTERED_WORKFLOWS.
+        for wf_file in $WORKFLOW_FILES; do
+            [ -f "$wf_file" ] || continue
+            # Skip release.yml itself
+            [ "$wf_file" = "$RELEASE_FILE" ] && continue
+
+            # Extract the workflow name
+            WF_NAME=$(grep -E '^name:' "$wf_file" | head -1 | sed 's/^name:[[:space:]]*//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//' || true)
+            [ -z "$WF_NAME" ] && continue
+
+            # Check if this workflow uses path filters
+            HAS_PATHS=$(grep -c '^[[:space:]]*paths:' "$wf_file" 2>/dev/null || echo "0")
+
+            if [ "$HAS_PATHS" -gt 0 ]; then
+                # Check if it's in REQUIRED_WORKFLOWS
+                if grep -q "\"$WF_NAME\"" "$RELEASE_FILE" 2>/dev/null; then
+                    # Check if it's registered in PATH_FILTERED_WORKFLOWS
+                    if ! grep -q "PATH_FILTERED_WORKFLOWS\[\"$WF_NAME\"\]" "$RELEASE_FILE" 2>/dev/null; then
+                        echo "${RED}  Missing registration:${NC} Workflow '${WF_NAME}' (${wf_file})"
+                        echo "${RED}    Has path filters and is in REQUIRED_WORKFLOWS but not in PATH_FILTERED_WORKFLOWS${NC}"
+                        echo "${RED}    Add: PATH_FILTERED_WORKFLOWS[\"${WF_NAME}\"]=\"<paths>\" to release.yml${NC}"
+                        PF_ERRORS=$((PF_ERRORS + 1))
+                    fi
+                fi
+            fi
+        done
+
+        if [ "$PF_ERRORS" -gt 0 ]; then
+            check_fail "Path-filtered workflow registration" "Workflows with path filters in REQUIRED_WORKFLOWS must be registered in PATH_FILTERED_WORKFLOWS in release.yml."
+            echo ""
+        else
+            check_pass "Path-filtered workflow registration"
+        fi
+    else
+        check_skip "Path-filtered workflow registration" "release.yml not found"
+    fi
+else
+    check_skip "Path-filtered workflow registration" "no workflow files changed"
+fi
+
+# Check 15: Schedule trigger guards
+# Ensures CI jobs have `if:` guards to exclude schedule events when the
+# workflow has a schedule trigger. Without these guards, scheduled runs
+# (e.g., daily security audits) execute all jobs unnecessarily.
+echo "${BLUE}[15/${TOTAL_CHECKS}]${NC} Checking schedule trigger guards..."
+
+if [ -n "$WORKFLOW_FILES" ]; then
+    SCHED_ERRORS=0
+
+    for wf_file in $WORKFLOW_FILES; do
+        [ -f "$wf_file" ] || continue
+
+        # Check if this workflow has a schedule trigger
+        HAS_SCHEDULE=$(grep -c '^[[:space:]]*schedule:' "$wf_file" 2>/dev/null || echo "0")
+        [ "$HAS_SCHEDULE" -eq 0 ] && continue
+
+        # Check for workflow-level allowlist: if the workflow has a top-level
+        # comment "# all-jobs-run-on-schedule" in the first 30 lines, all jobs
+        # are intended to run on schedule, so skip the per-job check entirely.
+        if head -30 "$wf_file" | grep -q '# all-jobs-run-on-schedule'; then
+            continue
+        fi
+
+        # Extract job names and check for schedule guards
+        # A job that should run on schedule won't have the guard (e.g., security audit).
+        # Jobs that should NOT run on schedule need: if: github.event_name != 'schedule'
+        # We look for jobs that have neither a schedule-aware `if:` guard
+        # nor an explicit comment indicating they should run on schedule.
+        #
+        # Use AWK to find job blocks and check for if: guards
+        JOBS_WITHOUT_GUARD=$(awk '
+            /^jobs:/ { in_jobs = 1; next }
+            !in_jobs { next }
+            # Match top-level job key (2-space indent under jobs:)
+            /^  [a-zA-Z_][a-zA-Z0-9_-]*:/ {
+                if (job_name != "" && !has_guard && !is_schedule_job) {
+                    print job_name
+                }
+                job_name = $1
+                sub(/:$/, "", job_name)
+                has_guard = 0
+                is_schedule_job = 0
+                next
+            }
+            # Check for schedule exclusion guard in job-level if:
+            /^    if:.*schedule/ { has_guard = 1 }
+            # Check for explicit per-job annotation or keyword heuristic
+            /^    #.*runs-on-schedule/ { is_schedule_job = 1 }
+            /^    #.*schedule|^    #.*security|^    #.*audit|^    #.*daily/ { is_schedule_job = 1 }
+            END {
+                if (job_name != "" && !has_guard && !is_schedule_job) {
+                    print job_name
+                }
+            }
+        ' "$wf_file")
+
+        if [ -n "$JOBS_WITHOUT_GUARD" ]; then
+            for job_name in $JOBS_WITHOUT_GUARD; do
+                echo "${RED}  Missing guard:${NC} ${wf_file}: job '${job_name}' has no schedule exclusion guard"
+                echo "${RED}    Add: if: github.event_name != 'schedule'${NC}"
+                SCHED_ERRORS=$((SCHED_ERRORS + 1))
+            done
+        fi
+    done
+
+    if [ "$SCHED_ERRORS" -gt 0 ]; then
+        check_fail "Schedule trigger guards" "Jobs in schedule-triggered workflows need 'if: github.event_name != '\"'\"'schedule'\"'\"'' guards."
+        echo ""
+    else
+        check_pass "Schedule trigger guards"
+    fi
+else
+    check_skip "Schedule trigger guards" "no workflow files changed"
+fi
+
+# Check 16: Skills index generation freshness
+# Ensures .llm/skills/index.md is generated and up-to-date when staged inputs
+# change (added/modified/deleted/renamed): skill files, generator script,
+# or .llm/context.md.
+echo "${BLUE}[16/${TOTAL_CHECKS}]${NC} Checking generated skills index freshness..."
+STAGED_SKILLS_INDEX_BYTES=$(git diff --cached --name-only -z --diff-filter=ACDMR -- \
+    .llm/context.md \
+    scripts/generate-skills-index.sh \
+    ':(glob).llm/skills/*.md' \
+    | wc -c | tr -d '[:space:]')
+
+if [ "$STAGED_SKILLS_INDEX_BYTES" -gt 0 ]; then
+    if [ -x scripts/generate-skills-index.sh ]; then
+        if scripts/generate-skills-index.sh --check > /dev/null 2>&1; then
+            check_pass "Skills index freshness"
+        else
+            check_fail "Skills index freshness" "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
+            echo ""
+        fi
+    else
+        check_fail "Skills index freshness" "scripts/generate-skills-index.sh not found or not executable."
+        echo ""
+    fi
+else
+    check_skip "Skills index freshness" "no .llm skills/context/index-related files staged"
+fi
+
+# Check 17: Workflow hygiene script checks
+# Runs the comprehensive workflow-hygiene validator when workflow definitions
+# or the validator script itself is staged.
+echo "${BLUE}[17/${TOTAL_CHECKS}]${NC} Running workflow hygiene script checks..."
+STAGED_WORKFLOW_HYGIENE_BYTES=$(git diff --cached --name-only -z --diff-filter=ACDMR -- \
+    ':(glob).github/workflows/*.yml' \
+    ':(glob).github/workflows/*.yaml' \
+    scripts/check-workflow-hygiene.sh \
+    .github/workflows/workflow-hygiene.yml \
+    | wc -c | tr -d '[:space:]')
+
+if [ "$STAGED_WORKFLOW_HYGIENE_BYTES" -gt 0 ]; then
+    if [ -x scripts/check-workflow-hygiene.sh ]; then
+        if scripts/check-workflow-hygiene.sh > /dev/null 2>&1; then
+            check_pass "Workflow hygiene checks"
+        else
+            check_fail "Workflow hygiene checks" "Run './scripts/check-workflow-hygiene.sh' and fix reported errors."
+            echo ""
+        fi
+    else
+        check_fail "Workflow hygiene checks" "scripts/check-workflow-hygiene.sh not found or not executable."
+        echo ""
+    fi
+else
+    check_skip "Workflow hygiene checks" "no workflow or hygiene-script files staged"
+fi
+
+# Check 18: LLM file size limit (only if .llm/ files are staged)
+# Ensures all files in .llm/ stay within the 300-line limit so they remain
+# focused, scannable, and fit within LLM context windows.
+echo "${BLUE}[18/${TOTAL_CHECKS}]${NC} Checking LLM file sizes..."
+STAGED_LLM_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^\.llm/.*\.md$' || true)
+
+if [ -n "$STAGED_LLM_FILES" ]; then
+    if [ -x scripts/check-llm-file-sizes.sh ]; then
+        if ! scripts/check-llm-file-sizes.sh --files $STAGED_LLM_FILES > /dev/null 2>&1; then
+            check_fail "LLM file sizes" "One or more .llm/ files exceed 300 lines. Run './scripts/check-llm-file-sizes.sh' for details."
+            echo "${YELLOW}Tip:${NC} Split oversized files into focused sub-files of ≤300 lines."
+            echo ""
+        else
+            check_pass "LLM file sizes"
+        fi
+    else
+        check_skip "LLM file sizes" "check-llm-file-sizes.sh not found or not executable"
+    fi
+else
+    check_skip "LLM file sizes" "no .llm/*.md files staged"
+fi
+
+# Check 19: Miri compatibility (only if Rust source files staged)
+# Ensures lib tests calling Miri-incompatible APIs have #[cfg_attr(miri, ignore)].
+echo "${BLUE}[19/${TOTAL_CHECKS}]${NC} Checking Miri compatibility..."
+STAGED_SRC_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^src/.*\.rs$' || true)
+
+if [ -n "$STAGED_SRC_RS" ]; then
+    if [ -x scripts/check-miri-compat.sh ]; then
+        MIRI_OUTPUT=$(scripts/check-miri-compat.sh 2>&1)
+        if echo "$MIRI_OUTPUT" | grep -q 'WARNING:'; then
+            check_warn "Miri compatibility" "Some lib tests may need #[cfg_attr(miri, ignore)]. Run './scripts/check-miri-compat.sh' for details."
+        else
+            check_pass "Miri compatibility"
+        fi
+    else
+        check_skip "Miri compatibility" "check-miri-compat.sh not found or not executable"
+    fi
+else
+    check_skip "Miri compatibility" "no src/*.rs files staged"
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -554,6 +858,9 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  cargo clippy --fix --allow-dirty            # Fix clippy warnings"
     echo "  ./scripts/check-markdown.sh fix             # Fix markdown"
     echo "  ./scripts/validate-ci.sh                    # Validate CI config"
+    echo "  ./scripts/generate-skills-index.sh          # Refresh .llm/skills/index.md"
+    echo "  ./scripts/check-llm-file-sizes.sh           # Check .llm/ file sizes"
+    echo "  ./scripts/check-miri-compat.sh              # Check Miri annotations"
     echo "  ./scripts/run-local-ci.sh --fix             # Fix all issues"
     echo ""
     echo "${YELLOW}To bypass (NOT recommended):${NC}"

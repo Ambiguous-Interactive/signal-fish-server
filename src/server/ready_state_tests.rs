@@ -27,6 +27,7 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn handle_player_ready_without_room_returns_not_in_room_error() {
     let server = create_test_server().await;
     let (sender, mut receiver) = mpsc::channel(4);

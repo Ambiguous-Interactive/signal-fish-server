@@ -58,3 +58,8 @@ cobertura.xml
 
 # MkDocs build output
 site/
+
+progress/
+PLAN.md
+
+.claude/

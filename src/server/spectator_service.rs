@@ -407,6 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn join_tracks_room_membership_and_notifies_players() {
         let (service, room, creator_id, coordinator, database) = setup_service().await;
         let spectator_id = PlayerId::new_v4();
@@ -459,6 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn leave_detaches_spectator_and_sends_disconnect_notifications() {
         let (service, room, creator_id, coordinator, database) = setup_service().await;
         let spectator_id = PlayerId::new_v4();

@@ -40,6 +40,11 @@ extend-exclude = [
     ".vscode/",
     ".idea/",
     ".devcontainer/",
+
+    # Test files that intentionally contain "wrong" spellings as test data.
+    # These files store British/American spelling pairs for validation tests and
+    # must not be checked by typos, which would flag the British forms as errors.
+    "tests/ci_config_tests.rs",
 ]
 
 [default.extend-words]
@@ -163,6 +168,62 @@ ser = "ser"              # Serialization abbreviation
 # === Project-Specific Terms ===
 roomcode = "roomcode"
 roomcodes = "roomcodes"
+
+# === British -> American English Consistency ===
+# This project uses American English consistently. These entries catch
+# common British spellings and suggest the American equivalent.
+behaviour = "behavior"
+behaviours = "behaviors"
+colour = "color"
+colours = "colors"
+favour = "favor"
+favours = "favors"
+honour = "honor"
+honours = "honors"
+initialise = "initialize"
+initialised = "initialized"
+initialises = "initializes"
+initialising = "initializing"
+organise = "organize"
+organised = "organized"
+organises = "organizes"
+organising = "organizing"
+recognise = "recognize"
+recognised = "recognized"
+recognises = "recognizes"
+recognising = "recognizing"
+serialise = "serialize"
+serialised = "serialized"
+serialises = "serializes"
+serialising = "serializing"
+uninitialised = "uninitialized"
+optimise = "optimize"
+optimised = "optimized"
+optimises = "optimizes"
+optimising = "optimizing"
+analyse = "analyze"
+analysed = "analyzed"
+# Note: "analyses" (noun plural) is valid in both American and British English.
+# Only the verb form "analyses" (British) should be "analyzes" (American), but
+# typos cannot distinguish noun vs verb usage, so we omit this mapping.
+analysing = "analyzing"
+defence = "defense"
+licence = "license"
+customise = "customize"
+customised = "customized"
+customises = "customizes"
+customising = "customizing"
+synchronise = "synchronize"
+synchronised = "synchronized"
+synchronises = "synchronizes"
+synchronising = "synchronizing"
+authorise = "authorize"
+authorised = "authorized"
+authorises = "authorizes"
+authorising = "authorizing"
+catalogue = "catalog"
+programme = "program"
+practise = "practice"
 
 [default.extend-identifiers]
 # Code identifiers that are intentionally abbreviated

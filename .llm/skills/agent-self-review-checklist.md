@@ -6,7 +6,8 @@
   | Core
 -->
 
-**Trigger**: Before marking any task as complete, before presenting changes to user, or when reviewing own work for correctness.
+**Trigger**: Before marking any task as complete, before presenting changes to user,
+or when reviewing own work for correctness.
 
 ---
 
@@ -18,7 +19,7 @@
 - After implementing a fix to verify it actually resolves the issue
 - Before responding "done" to the user
 
-⛔ **CRITICAL**: You NEVER commit changes - see [git-safety-protocol](./git-safety-protocol.md)
+⛔ **CRITICAL**: You NEVER commit changes - see [git-safety-forbidden-operations](./git-safety-forbidden-operations.md)
 
 ---
 
@@ -163,7 +164,7 @@ For any change touching authentication, user input, or network configuration:
 
 ✅ **REQUIRED**: Instead, provide clear commit instructions for user to execute.
 
-See [git-safety-protocol](./git-safety-protocol.md) for complete details.
+See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) for complete details.
 
 ---
 
@@ -251,7 +252,7 @@ After the checklist passes, provide these instructions to the user:
 3. **Commit**: Follow conventional commits (`feat:`, `fix:`, `refactor:`)
 4. **Push**: `git push origin branch-name` when ready
 
-⛔ **YOU NEVER**: Stage, commit, configure git, or push. See [git-safety-protocol](./git-safety-protocol.md).
+⛔ **YOU NEVER**: Stage, commit, configure git, or push. See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md).
 
 ### Example Instructions to Provide User
 
@@ -277,7 +278,7 @@ git commit -m "feat: add new validation
 
 ## Related Skills
 
-- [git-safety-protocol](./git-safety-protocol.md) — **CRITICAL** - Never commit or configure git
+- [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
 - [code-review-checklist](./code-review-checklist.md) — For reviewing others' code
 - [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Implement → Verify → Review → Present cycle
-- [testing-strategies](./testing-strategies.md) — How to write effective tests
+- [testing-strategies](./testing-core-patterns.md) — How to write effective tests

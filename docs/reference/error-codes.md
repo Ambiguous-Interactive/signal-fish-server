@@ -195,8 +195,11 @@ fn handle_server_error(error: &ServerError) {
         code if code.starts_with("INTERNAL") || code.starts_with("SERVICE") => {
             println!("Server issue. Retrying after a delay.");
         }
-        _ => {
-            eprintln!("Unhandled error code {code}: {}", error.message);
+        unknown_code if !unknown_code.is_empty() => {
+            eprintln!("Unhandled error code {unknown_code}: {}", error.message);
+        }
+        unknown_code => {
+            eprintln!("Unhandled error code (empty): {}", error.message);
         }
     }
 }

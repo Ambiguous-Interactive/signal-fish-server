@@ -16,7 +16,7 @@
 - Adding HTTP or WebSocket API endpoints
 - Creating SDK-facing interfaces
 - Reviewing API ergonomics or naming conventions
-- Future-proofing with `#[non_exhaustive]` or sealed traits
+- Future-proofing with sealed traits, private fields, and explicit exhaustive protocol enums
 
 ---
 
@@ -33,7 +33,7 @@
 - Follow the Rust API Guidelines Checklist (RFC 1105) for all public types.
 - Use newtypes and enums for type safety — never raw strings or booleans for distinct concepts.
 - Minimize public API surface — expose the minimum needed, keep everything else `pub(crate)`.
-- Future-proof with `#[non_exhaustive]`, sealed traits, and private fields.
+- Future-proof with sealed traits, private fields, and explicit exhaustive enum matching guidance.
 - Document every public item with examples, error conditions, and panic conditions.
 
 ---
@@ -46,10 +46,8 @@
 |------|-----------|---------|
 | Types, traits | `UpperCamelCase` | `RoomConfig`, `Database` |
 | Functions, methods | `snake_case` | `find_room`, `player_count` |
-| Local variables | `snake_case` | `room_code`, `max_players` |
 | Constants | `SCREAMING_SNAKE_CASE` | `MAX_ROOMS`, `DEFAULT_TIMEOUT` |
 | Modules | `snake_case` | `room_manager`, `auth` |
-| Type parameters | Short `UpperCamelCase` | `T`, `E`, `S: State` |
 | Lifetimes | Short lowercase | `'a`, `'de`, `'conn` |
 
 ### Conversion Methods
@@ -59,9 +57,7 @@
 | `as_x()` | Cheap borrow-to-borrow cast |
 | `to_x()` | Expensive borrow-to-owned conversion |
 | `into_x()` | Owned-to-owned conversion (consumes self) |
-| `from_x()` | Constructor from another type |
 | `try_x()` | Fallible version of `x()` |
-| `x_mut()` | Mutable variant of `x()` |
 
 ### Getters and Predicates
 
@@ -73,29 +69,13 @@ impl Room {
 
     // ✅ Predicates: is_/has_/can_ prefix
     fn is_full(&self) -> bool { self.players.len() >= self.max_players }
-    fn has_authority(&self) -> bool { self.authority.is_some() }
     fn can_join(&self, player: &Player) -> bool { !self.is_full() && !self.has_player(player) }
 }
 
-```
-
-### Iterator Methods
-
-```rust
-
 impl Room {
     fn iter(&self) -> impl Iterator<Item = &Player> { ... }
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Player> { ... }
     fn player_ids(&self) -> impl Iterator<Item = PlayerId> + '_ { ... }
 }
-
-// Also implement IntoIterator for owned iteration
-impl IntoIterator for Room {
-    type Item = Player;
-    type IntoIter = std::vec::IntoIter<Player>;
-    fn into_iter(self) -> Self::IntoIter { self.players.into_iter() }
-}
-
 ```
 
 ---
@@ -112,27 +92,21 @@ and conversion trait patterns.
 
 ## Type Safety
 
-Use newtypes for domain identifiers and enums instead of booleans for function parameters to get
-compile-time safety. See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for newtypes
-and enums-over-booleans patterns.
+Use newtypes for domain identifiers and enums instead of booleans for function parameters.
+See [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for newtypes and enums-over-booleans patterns.
 
 ### Bitflags for Options
 
 ```rust
-
 // ✅ Use bitflags for combinable options
 bitflags::bitflags! {
     pub struct Capabilities: u32 {
         const RELAY    = 0b0001;
         const OBSERVE  = 0b0010;
         const ADMIN    = 0b0100;
-        const METRICS  = 0b1000;
     }
 }
-
-fn configure_client(caps: Capabilities) { todo!() }
 configure_client(Capabilities::RELAY | Capabilities::OBSERVE);
-
 ```
 
 > **Note:** Add `bitflags` to `Cargo.toml` to use; not currently in project dependencies.
@@ -141,117 +115,67 @@ configure_client(Capabilities::RELAY | Capabilities::OBSERVE);
 
 ## Flexibility
 
-### Accept Generics, Return Concrete
-
 ```rust
-
+// ✅ Accept generics, return concrete
 pub fn set_name(&mut self, name: impl Into<String>) { self.name = name.into(); }
 pub fn get_players(&self) -> &[Player] { &self.players }
-pub fn active_players(&self) -> impl Iterator<Item = &Player> {
-    self.players.iter().filter(|p| p.is_connected())
-}
 
-```
-
-### Return Iterators, Not Collected Vecs
-
-```rust
-
-// ✅ Return iterator — caller decides how to use
+// ✅ Return iterators — caller decides how to use
 pub fn find_rooms(&self, filter: &Filter) -> impl Iterator<Item = RoomInfo> + '_ {
-    self.rooms.iter()
-        .filter(move |r| filter.matches(r))
-        .map(|r| r.info())
+    self.rooms.iter().filter(move |r| filter.matches(r)).map(|r| r.info())
 }
-// Caller: let first_5: Vec<_> = server.find_rooms(&f).take(5).collect();
-
 ```
 
 ---
 
 ## Future-Proofing
 
-### `#[non_exhaustive]` on Public Enums and Structs
+### Exhaustive Public Enum Design
 
 ```rust
-
-// ✅ Allows adding variants without semver break
-#[non_exhaustive]
-pub enum DisconnectReason {
-    Timeout,
-    Kicked,
-    ClientLeft,
-    // Can add ServerShutdown later without breaking downstream
-}
-
-// ✅ Allows adding fields without semver break
-#[non_exhaustive]
-pub struct RoomInfo {
-    pub code: RoomCode,
-    pub player_count: usize,
-    // Can add created_at later without breaking downstream
-}
-
+// ✅ Keep protocol and domain enums explicit and fully matched
+pub enum DisconnectReason { Timeout, Kicked, ClientLeft, ServerShutdown }
 ```
 
 ### Sealed Traits
 
 ```rust
-
 // ✅ Prevent external implementations — you control the trait
-mod private {
-    pub trait Sealed {}
-}
+mod private { pub trait Sealed {} }
 
 pub trait Transport: private::Sealed {
     fn send(&self, data: &[u8]) -> Result<(), Error>;
-    fn recv(&self) -> Result<Vec<u8>, Error>;
 }
 
-// Only your types can implement Transport
 impl private::Sealed for WebSocketTransport {}
 impl Transport for WebSocketTransport { ... }
-
 ```
 
 ### Private Fields with Constructors
 
 ```rust
-
 // ✅ Private fields → can change representation without breaking API
-pub struct Duration {
-    millis: u64,  // Private — could change to nanos later
-}
+pub struct Duration { millis: u64 }
 
 impl Duration {
     pub fn from_secs(secs: u64) -> Self { Self { millis: secs * 1000 } }
     pub fn from_millis(millis: u64) -> Self { Self { millis } }
-    pub fn as_secs(&self) -> u64 { self.millis / 1000 }
     pub fn as_millis(&self) -> u64 { self.millis }
 }
-
 ```
 
 ---
 
 ## Documentation Standards
 
-Every public item needs:
-
-- Summary line (what, not how)
-- `# Errors` listing each error variant
-- `# Panics` if any panics are possible
-- `# Safety` for unsafe code
-- `# Examples` with compilable code
-- Cross-references with `[`TypeName`]` links
+Every public item needs: summary line, `# Errors` listing each variant, `# Panics` if any,
+`# Safety` for unsafe, `# Examples` with compilable code, cross-references with `[`TypeName`]` links.
 
 ```rust
-
 /// Creates a new room with the given configuration.
 ///
 /// # Errors
 /// Returns [`CreateError::InvalidConfig`] if `max_players` is 0.
-/// Returns [`CreateError::DuplicateCode`] if a room with this code exists.
 ///
 /// # Examples
 /// ```
@@ -260,32 +184,22 @@ Every public item needs:
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub async fn create_room(&self, config: RoomConfig) -> Result<Room, CreateError> { todo!() }
-
 ```
 
 ---
 
-## Public API Surface Minimization
+## Public API Surface and Semver
 
-Start with minimum visibility (`pub(crate)` by default), expand only when needed.
-Expose stable, documented methods as `pub`; keep implementation details `pub(crate)` or `pub(super)`.
+Start with `pub(crate)` by default, expand only when needed.
 
----
-
-## Semver Compatibility
-
-**Breaking** (major bump): Removing public items, changing signatures,
-adding required fields without `#[non_exhaustive]`, changing trait bounds, changing enum variants.
-
-**Non-breaking**: Adding new public items, adding variants/fields to `#[non_exhaustive]` types,
-adding default trait methods, weakening trait bounds.
+**Breaking** (major bump): Removing/changing public items, adding required fields, changing trait bounds.
+**Non-breaking**: Adding new public items, adding optional methods with defaults, weakening trait bounds.
 
 ---
 
 ## HTTP/WebSocket API Patterns (axum)
 
 ```rust
-
 // Typed extractors with validation
 async fn join_room(
     State(server): State<Arc<GameServer>>,
@@ -295,7 +209,6 @@ async fn join_room(
     Ok(Json(server.join_room(validated).await?))
 }
 
-// Implement IntoResponse for application errors
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
@@ -308,35 +221,18 @@ impl IntoResponse for AppError {
         (status, Json(ErrorResponse { error: message })).into_response()
     }
 }
-
 ```
 
-Use versioned routes (`/v2/...`). Return structured JSON errors. Log internal errors server-side; return generic messages
-to clients. For REST APIs with multiple endpoints, maintain an OpenAPI specification to document the API contract.
+Use versioned routes (`/v2/...`). Return structured JSON errors.
+Log internal errors server-side; return generic messages to clients.
+Maintain an OpenAPI specification for REST APIs with multiple endpoints.
 
 ---
 
 ## Signaling Server-Specific Guidance
 
-### Protocol Messages
-
-Use `#[non_exhaustive]` and `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums.
+Use `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums.
 See [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
-
-### Error Responses
-
-```rust
-#[derive(Debug, serde::Serialize)]
-pub struct ApiError {
-    pub error: String,
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
-}
-
-```
-
-### Connection State
 
 Use the typestate pattern to prevent invalid operations.
 See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
@@ -346,10 +242,10 @@ See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full types
 ## Agent Checklist
 
 - [ ] All public types implement `Debug`, `Display`, `Clone` (where applicable)
-- [ ] All public types implement `Send + Sync` (verify with `static_assertions`)
+- [ ] All public types implement `Send + Sync`
 - [ ] Newtypes for IDs, codes, tokens — no raw `String`/`Uuid` in APIs
 - [ ] Enums instead of booleans for function parameters
-- [ ] `#[non_exhaustive]` on public enums and structs
+- [ ] Protocol/domain enums matched explicitly without wildcard catch-all arms
 - [ ] `#[must_use]` on Result-returning functions
 - [ ] Functions accept borrows/generics, return owned/concrete
 - [ ] Private fields with constructors enforce invariants

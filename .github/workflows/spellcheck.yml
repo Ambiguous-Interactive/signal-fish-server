@@ -4,7 +4,7 @@
 # and accurate spell checker that catches common typos in code and documentation.
 #
 # Configuration:
-#   - _typos.toml: Spell check configuration and custom dictionary
+#   - .typos.toml: Spell check configuration and custom dictionary
 #
 # Runs on:
 #   - Push to main branch (only for relevant file changes)
@@ -26,7 +26,7 @@ on:
       - '**/*.toml'
       - '**/*.yml'
       - '**/*.yaml'
-      - '_typos.toml'
+      - '.typos.toml'
       - '.github/workflows/spellcheck.yml'
   pull_request:
     branches: [main]
@@ -36,7 +36,7 @@ on:
       - '**/*.toml'
       - '**/*.yml'
       - '**/*.yaml'
-      - '_typos.toml'
+      - '.typos.toml'
       - '.github/workflows/spellcheck.yml'
 
 # Automatically cancel in-progress runs when a new commit is pushed

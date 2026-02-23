@@ -27,6 +27,7 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn delayed_authenticate_is_rejected_with_warning_only() {
     let server = create_test_server().await;
     let (sender, mut receiver) = mpsc::channel(4);
@@ -59,6 +60,7 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn join_room_request_is_forwarded_to_room_service() {
     let server = create_test_server().await;
     let (sender, mut receiver) = mpsc::channel(4);

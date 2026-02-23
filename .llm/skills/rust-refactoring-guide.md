@@ -58,7 +58,6 @@
 ## Safe Refactoring Workflow
 
 ```text
-
 1. Ensure all tests pass:     cargo test --all-features
 2. Make ONE change
 3. Compile:                    cargo check
@@ -67,8 +66,6 @@
 6. Run tests:                  cargo test --all-features
 7. Commit
 8. Repeat from step 2
-
-
 ```
 
 **Never skip step 1.** If tests don't pass before you start, you can't verify your refactoring is correct.
@@ -78,7 +75,6 @@
 ## Extracting Modules and Types
 
 ```rust
-
 // Before: src/server.rs — 2000 lines with 30+ methods on GameServer
 
 // Step 1: Create src/server/room_manager.rs
@@ -99,7 +95,6 @@ impl GameServer {
     }
 }
 // Step 4: Compile, test, commit. Then move more implementation details.
-
 ```
 
 ---
@@ -114,39 +109,25 @@ src/server/
 ├── room_manager.rs   (300 lines)
 ├── player_manager.rs (250 lines)
 └── message_handler.rs(400 lines)
-
 ```
 
 Move `src/server.rs` to `src/server/mod.rs`, then extract one section at a time, compiling after each.
 
 ---
 
-## Replacing Magic Numbers/Strings with Constants/Enums
+## Replacing Magic Numbers/Strings with Constants
 
 ```rust
-
 // ❌ Before: magic numbers scattered
 if room.players.len() >= 8 { return Err(Error::Full); }
 if timeout > 300 { return Err(Error::Timeout); }
-if msg.len() > 65536 { return Err(Error::TooLarge); }
 
 // ✅ After: named constants
 const MAX_PLAYERS_PER_ROOM: usize = 8;
 const CONNECTION_TIMEOUT_SECS: u64 = 300;
-const MAX_MESSAGE_BYTES: usize = 65_536;
-
-if room.players.len() >= MAX_PLAYERS_PER_ROOM { ... }
-if timeout > CONNECTION_TIMEOUT_SECS { ... }
-if msg.len() > MAX_MESSAGE_BYTES { ... }
-
 ```
 
-**Workflow:**
-
-1. `grep` for numeric/string literals in the codebase
-2. Replace one constant at a time
-3. Compile after each replacement
-4. Consider grouping related constants in a `config` module
+Grep for numeric/string literals, replace one at a time, compile after each.
 
 ---
 
@@ -164,27 +145,18 @@ See [error-handling-guide](./error-handling-guide.md) for the full unwrap hierar
 
 ---
 
-## Moving from `String` to `&str` in Parameters
+## Quick Refactoring Recipes
 
-Change parameter from `String` to `&str`. Callers passing `String` get automatic coercion.
-If the function needs ownership internally, use `impl Into<String>`.
-
----
-
-## Replacing HashMap with DashMap
-
-Replace `Arc<Mutex<HashMap<K,V>>>` with `DashMap<K,V>`, remove `.lock().unwrap()` calls,
-and update `.get()` (returns `Ref` guard). The `.entry()` API differs slightly from `HashMap` — check DashMap docs.
-Run concurrent tests to verify.
-
----
-
-## Converting Synchronous Code to Async
-
-See [async-Rust-best-practices](./async-rust-best-practices.md) for async patterns.
-
-**Quick workflow:** Add `async`, replace blocking I/O with async equivalents (e.g., `tokio::fs`), add `.await`,
-update callers, check for `std::sync::Mutex` → `tokio::sync::Mutex`, test with `#[tokio::test]`.
+- **`String` → `&str` params:** Change parameter type; callers passing `String` get auto-coercion.
+  Use `impl Into<String>` if ownership is needed internally.
+- **`HashMap` → `DashMap`:** Replace `Arc<Mutex<HashMap<K,V>>>`, remove `.lock()` calls,
+  update `.get()` (returns `Ref` guard). Check DashMap docs for `.entry()` API differences.
+- **Sync → Async:** Add `async`, replace blocking I/O with `tokio::fs`, add `.await`,
+  check for `std::sync::Mutex` → `tokio::sync::Mutex`.
+  See [async-Rust-best-practices](./async-rust-best-practices.md).
+- **Reduce clone():** Pass `&T`, use `Arc<T>` for shared ownership, `Bytes` for network data,
+  `Cow<str>` for conditional ownership.
+  See [Rust-performance-optimization](./rust-performance-optimization.md).
 
 ---
 
@@ -210,61 +182,36 @@ struct GameServer<D: Database> { db: D }
 struct InMemoryDatabase { rooms: DashMap<String, Room> }
 #[async_trait]
 impl Database for InMemoryDatabase { ... }
-
 ```
-
----
-
-## Reducing `clone()` Usage
-
-See [Rust-performance-optimization](./rust-performance-optimization.md) for detailed clone reduction and zero-copy patterns.
-
-**Quick checks:** Can you pass `&T` instead? Use `Arc<T>` for shared ownership across tasks? Use `Bytes` for network
-data? Use `Cow<str>` for conditional ownership?
 
 ---
 
 ## AI-Assisted Refactoring Patterns
 
-**How agents should approach refactoring:**
-
 1. Read tests first — understand expected behavior before changing code
 2. Make one structural change → `cargo check` → fix errors → `cargo test` → commit
 3. Never combine renames with logic changes in the same step
-4. Use the compiler as your guide: rename a type, then fix every error it reports
 
-**Red flags an AI must stop and flag:**
+**Red flags to stop and flag:**
 
 | Red Flag | Why |
 |----------|-----|
 | Removing or weakening a public API method | Breaks downstream callers/SDKs |
 | Deleting tests without replacement | Loses coverage — always replace first |
-| Skipping `cargo test` after changes | Unverified refactoring is a regression risk |
-| Changing trait signatures on `GameDatabase` | Affects `InMemoryDatabase`, `PostgresDatabase`, `DynamoDbDatabase` |
+| Changing trait signatures on `GameDatabase` | Affects all implementations |
 | Modifying protocol message types | Breaks client SDK compatibility |
-
-**Structured output for agent refactoring steps:**
-
-```text
-REFACTOR: [description]
-  Files: [list of files changed]
-  Risk: low/medium/high
-  Verification: cargo check && cargo test --all-features
-  Rollback: git checkout -- [files]
-
-```
-
-See [code-review-checklist](./code-review-checklist.md) for review patterns and
-[solid-principles-enforcement](./solid-principles-enforcement.md) for design principle checks.
 
 ---
 
 ## Using `cargo clippy --fix`
 
-See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration and `--fix` usage.
+See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration.
 
-**Quick workflow:** Commit → `cargo clippy --fix --allow-dirty` → `git diff` to review → revert readability regressions
-→ commit.
+```bash
+# Commit first, then fix, review, commit
+cargo clippy --fix --allow-dirty
+git diff  # Review all changes before committing
+```
 
 ---
 
@@ -274,10 +221,7 @@ See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration 
 |-------------|-------------------|
 | `extern crate foo;` | Remove (edition 2018+) |
 | `#[macro_use] extern crate;` | `use foo::macro_name;` |
-| `impl Trait for Box<T>` | Use `impl Trait for T` with generics |
 | `fn foo() -> Box<dyn Iterator>` | `fn foo() -> impl Iterator` |
-| `.to_owned()` on `&str` | `.to_string()` (same perf, clearer) |
-| `&vec[..]` | `&vec` (auto-deref) |
 | `0..vec.len()` loop | `for item in &vec` or `.iter()` |
 | `try!()` macro | `?` operator |
 | `#[async_trait]` everywhere | Native async traits (Rust 1.75+) |
@@ -286,19 +230,8 @@ See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration 
 
 ## Agent Checklist
 
-Before refactoring:
-
-- [ ] All tests pass
-- [ ] Code is committed (can revert)
-
-During refactoring:
-
-- [ ] One type of change at a time
-- [ ] Compile after each change
-- [ ] Test after each logical step
-- [ ] Commit working increments
-
-Common refactorings:
+Before: all tests pass, code is committed (can revert).
+During: one type of change at a time, compile and test after each logical step.
 
 - [ ] `unwrap()` → `?` / `.ok_or()` / `.unwrap_or_default()`
 - [ ] `String` params → `&str` (or `impl Into<String>`)
@@ -317,6 +250,6 @@ Common refactorings:
 - [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Target patterns for refactoring
 - [clippy-and-linting](./clippy-and-linting.md) — Automated fixes with clippy
 - [error-handling-guide](./error-handling-guide.md) — Refactoring unwrap chains
-- [testing-strategies](./testing-strategies.md) — Tests must pass before and after refactoring
+- [testing-strategies](./testing-core-patterns.md) — Tests must pass before and after refactoring
 - [code-review-checklist](./code-review-checklist.md) — AI-driven code review with structured output
 - [solid-principles-enforcement](./solid-principles-enforcement.md) — SOLID principle enforcement during refactoring

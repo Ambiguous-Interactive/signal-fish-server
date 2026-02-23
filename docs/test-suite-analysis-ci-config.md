@@ -1144,11 +1144,17 @@ fn report_violations(violations: &[Violation], category: &str) {
         return;
     }
 
-    let (errors, warnings, info): (Vec<_>, Vec<_>, Vec<_>) = violations.iter()
-        .partition(|v| match v.severity {
-            Severity::Error => true,
-            _ => false,
-        });
+    let (errors, warnings, info) = violations.iter().fold(
+        (Vec::new(), Vec::new(), Vec::new()),
+        |(mut errors, mut warnings, mut info), violation| {
+            match violation.severity {
+                Severity::Error => errors.push(violation),
+                Severity::Warning => warnings.push(violation),
+                Severity::Info => info.push(violation),
+            }
+            (errors, warnings, info)
+        },
+    );
 
     if !warnings.is_empty() {
         eprintln!("\nWarnings ({}):", category);

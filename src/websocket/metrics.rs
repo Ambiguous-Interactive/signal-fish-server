@@ -209,6 +209,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_metrics_auth_missing_header_rejected() {
         let server = build_metrics_test_server(ServerConfig::default()).await;
         let headers = HeaderMap::new();
@@ -221,6 +222,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_metrics_auth_accepts_static_token() {
         let config = ServerConfig {
             metrics_auth_token: Some("shared-token".to_string()),
@@ -240,6 +242,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_metrics_auth_wrong_token_rejected() {
         let config = ServerConfig {
             metrics_auth_token: Some("correct-token".to_string()),
@@ -262,6 +265,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_metrics_auth_invalid_scheme_rejected() {
         let config = ServerConfig {
             metrics_auth_token: Some("some-token".to_string()),

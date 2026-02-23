@@ -23,7 +23,7 @@
 
 ## When NOT to Use
 
-- Core test methodology and patterns (see [testing-strategies](./testing-strategies.md))
+- Core test methodology and patterns (see [testing-strategies](./testing-core-patterns.md))
 - Production error handling (see [error-handling-guide](./error-handling-guide.md))
 
 ---
@@ -45,7 +45,6 @@ use testcontainers::{runners::AsyncRunner, GenericImage};
 
 #[tokio::test]
 async fn test_room_persistence_in_postgres() {
-    // Start a real PostgreSQL container
     let container = GenericImage::new("postgres", "16")
         .with_env_var("POSTGRES_PASSWORD", "test")
         .with_env_var("POSTGRES_DB", "matchbox_test")
@@ -56,17 +55,14 @@ async fn test_room_persistence_in_postgres() {
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let db_url = format!("postgres://postgres:test@localhost:{port}/matchbox_test");
 
-    // Run migrations and test
     let pool = PgPool::connect(&db_url).await.unwrap();
     run_migrations(&pool).await.unwrap();
 
     let db = PostgresDatabase::new(pool);
     let room = db.create_room(test_room_config()).await.unwrap();
     let found = db.find_room(&room.code).await.unwrap();
-
     assert_eq!(found.unwrap().code, room.code);
 }
-
 ```
 
 ---
@@ -74,7 +70,6 @@ async fn test_room_persistence_in_postgres() {
 ## Property-Based Testing with proptest
 
 ```rust
-
 use proptest::prelude::*;
 
 proptest! {
@@ -86,28 +81,21 @@ proptest! {
         prop_assert_eq!(msg, decoded);
     }
 
-    // Test that room code validation is consistent
+    // Test that room code validation never panics
     #[test]
     fn room_code_validation_never_panics(s in "\\PC{0,100}") {
-        // Should never panic — always returns Ok or Err
         let _ = RoomCode::new(&s);
     }
 
     // Test that player count never exceeds max
     #[test]
-    fn room_never_exceeds_max_players(
-        max in 1u32..=100,
-        attempts in 1u32..=200,
-    ) {
+    fn room_never_exceeds_max_players(max in 1u32..=100, attempts in 1u32..=200) {
         let mut room = Room::new(RoomConfig { max_players: max, ..Default::default() });
-        for i in 0..attempts {
-            let _ = room.add_player(PlayerId::new());
-        }
+        for _ in 0..attempts { let _ = room.add_player(PlayerId::new()); }
         prop_assert!(room.player_count() <= max as usize);
     }
 }
 
-// Custom strategy for generating valid messages
 fn arb_message() -> impl Strategy<Value = Message> {
     prop_oneof![
         Just(Message::Ping),
@@ -116,17 +104,15 @@ fn arb_message() -> impl Strategy<Value = Message> {
         "[A-Z0-9]{6}".prop_map(|code| Message::JoinRoom(code)),
     ]
 }
-
 ```
 
 ---
 
 ## Snapshot Testing with insta
 
-> **Note:** `insta` is not currently in dev-dependencies. Add `insta = "1.x"` to `[dev-dependencies]` to use snapshot testing.
+> **Note:** `insta` is not currently in dev-dependencies. Add `insta = "1.x"` to use snapshot testing.
 
 ```rust
-
 use insta::assert_json_snapshot;
 
 #[test]
@@ -137,8 +123,6 @@ fn test_room_info_serialization() {
         max_players: 8,
         created_at: DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap(),
     };
-
-    // Creates/updates snapshot file in snapshots/ directory
     assert_json_snapshot!(info, @r###"
     {
       "code": "ABC123",
@@ -148,9 +132,7 @@ fn test_room_info_serialization() {
     }
     "###);
 }
-
 // Review changes: cargo insta review
-
 ```
 
 ---
@@ -158,26 +140,20 @@ fn test_room_info_serialization() {
 ## Benchmark Testing with Criterion
 
 ```rust
-
 // benches/room_operations.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn bench_room_create(c: &mut Criterion) {
     c.bench_function("create_room", |b| {
-        b.iter(|| {
-            Room::new(black_box(RoomConfig::default()))
-        })
+        b.iter(|| Room::new(black_box(RoomConfig::default())))
     });
 }
 
 fn bench_broadcast(c: &mut Criterion) {
     let room = setup_room_with_players(100);
     let msg = Bytes::from_static(b"test message");
-
     c.bench_function("broadcast_100_players", |b| {
-        b.iter(|| {
-            room.broadcast(black_box(msg.clone()))
-        })
+        b.iter(|| room.broadcast(black_box(msg.clone())))
     });
 }
 
@@ -185,20 +161,15 @@ fn bench_room_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("room_lookup");
     for size in [10, 100, 1000, 10000] {
         let server = setup_server_with_rooms(size);
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &size,
-            |b, _| {
-                b.iter(|| server.find_room(black_box(&test_code())))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            b.iter(|| server.find_room(black_box(&test_code())))
+        });
     }
     group.finish();
 }
 
 criterion_group!(benches, bench_room_create, bench_broadcast, bench_room_lookup);
 criterion_main!(benches);
-
 ```
 
 ---
@@ -206,7 +177,6 @@ criterion_main!(benches);
 ## Fuzz Testing Basics
 
 ```rust
-
 // fuzz/fuzz_targets/parse_message.rs
 #![no_main]
 use libfuzzer_sys::fuzz_target;
@@ -215,19 +185,14 @@ fuzz_target!(|data: &[u8]| {
     // Should never panic, regardless of input
     let _ = parse_client_message(data);
 });
-
 // Run: cargo +nightly fuzz run parse_message
-
 ```
 
 ---
 
 ## HTTP Handler Testing with axum-test
 
-Use `axum-test` (in dev-dependencies) for testing axum handlers:
-
 ```rust
-
 use axum_test::TestServer;
 
 #[tokio::test]
@@ -237,7 +202,6 @@ async fn test_health_endpoint() {
     let response = server.get("/health").await;
     response.assert_status_ok();
 }
-
 ```
 
 ---
@@ -245,24 +209,11 @@ async fn test_health_endpoint() {
 ## cargo-nextest for Faster Execution
 
 ```bash
-# Install
 cargo install cargo-nextest
-
-# Run all tests (parallel by default)
-cargo nextest run --all-features
-
-# Run with retries for flaky-test investigation
-cargo nextest run --retries 2
-
-# Run specific test
-cargo nextest run test_room_creation
-
-# Filter by test name pattern
-cargo nextest run -E 'test(websocket)'
-
-# With output capture on failure only
+cargo nextest run --all-features           # Run all tests (parallel by default)
+cargo nextest run --retries 2              # Retries for flaky-test investigation
+cargo nextest run -E 'test(websocket)'     # Filter by test name pattern
 cargo nextest run --failure-output immediate
-
 ```
 
 ---
@@ -270,13 +221,9 @@ cargo nextest run --failure-output immediate
 ## Code Coverage
 
 ```bash
-# Using cargo-tarpaulin (configured in tarpaulin.toml)
 cargo tarpaulin --all-features --out html
-
-# Using llvm-cov for more accurate coverage
 cargo llvm-cov --all-features --html
 cargo llvm-cov --all-features --lcov --output-path lcov.info
-
 ```
 
 ---
@@ -296,7 +243,7 @@ cargo llvm-cov --all-features --lcov --output-path lcov.info
 
 ## Related Skills
 
-- [testing-strategies](./testing-strategies.md) — Core testing methodology and patterns
+- [testing-strategies](./testing-core-patterns.md) — Core testing methodology and patterns
 - [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
 - [Rust-performance-optimization](./rust-performance-optimization.md) — Benchmark setup with criterion
 - [async-Rust-best-practices](./async-rust-best-practices.md) — Async test patterns

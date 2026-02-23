@@ -376,6 +376,8 @@ impl EnhancedGameServer {
         player_id: PlayerId,
         sender: mpsc::Sender<Arc<ServerMessage>>,
     ) {
+        // SAFETY: Parsing a valid string literal — this can never fail.
+        #[allow(clippy::unwrap_used)]
         let addr = "127.0.0.1:0".parse().unwrap();
         self.connection_manager
             .connect_test_client(player_id, sender, addr)

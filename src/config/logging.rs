@@ -57,7 +57,8 @@ impl<'de> Deserialize<'de> for LoggingConfig {
         // Process level field to handle different formats
         let level = helper.level.and_then(|value| {
             if value.is_string() {
-                // Simple string case
+                // SAFETY: `is_string()` is true, so `as_str()` always returns `Some`.
+                #[allow(clippy::unwrap_used)]
                 let level_str = value.as_str().unwrap();
                 match level_str.trim().to_lowercase().as_str() {
                     "trace" => Some(LogLevel::Trace),

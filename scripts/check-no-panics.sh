@@ -32,7 +32,9 @@ check_clippy() {
         return 0
     fi
 
-    # Run clippy with strict panic-prevention lints
+    # Run clippy with strict panic-prevention lints on library and binary code.
+    # We use --lib --bins instead of --all-targets to avoid flagging test code,
+    # where .unwrap(), .expect(), and panic!() are acceptable.
     # These lints catch code that could panic at runtime:
     # - clippy::panic: explicit panic!() calls
     # - clippy::unwrap_used: .unwrap() calls
@@ -41,7 +43,7 @@ check_clippy() {
     # - clippy::unimplemented: unimplemented!() macros
     # - clippy::unreachable: unreachable!() macros
     # - clippy::indexing_slicing: unchecked array/slice indexing
-    if cargo clippy --all-targets --all-features -- \
+    if cargo clippy --lib --bins --all-features -- \
         -D clippy::panic \
         -D clippy::unwrap_used \
         -D clippy::expect_used \
@@ -61,32 +63,202 @@ check_clippy() {
 # ============================================================================
 # PATTERN SCANNING - Quick grep-based checks
 # ============================================================================
+
+# filter_test_code - Filters out matches that are inside #[cfg(test)] modules.
+#
+# Reads grep output in the format "file:line:content" and for each match,
+# checks whether the line falls within a #[cfg(test)] module in that file.
+# Handles both external module declarations (`mod foo;`) and inline module
+# blocks (`mod foo { ... }`) correctly. External declarations only span the
+# #[cfg(test)] and `mod foo;` lines themselves. Inline blocks are tracked
+# via brace-depth scanning so only lines within the block are excluded.
+# Also filters out lines inside #[test] functions and files under tests/.
+filter_test_code() {
+    while IFS= read -r match_line; do
+        # Extract file path and line number from grep output (file:line:content)
+        local file line_num
+        file=$(echo "$match_line" | cut -d: -f1)
+        line_num=$(echo "$match_line" | cut -d: -f2)
+
+        # Skip files in tests/ directory and test module files
+        case "$file" in
+            tests/*) continue ;;
+            *_tests.rs|*_test.rs) continue ;;
+        esac
+
+        # Build test-code line ranges for #[cfg(test)] modules.
+        # Handles two cases:
+        #   1. External module declarations: `#[cfg(test)] mod foo;`
+        #      Only the cfg(test) line and the mod line are test code.
+        #   2. Inline module blocks: `#[cfg(test)] mod foo { ... }`
+        #      The entire block from cfg(test) to the closing brace is test code.
+        #
+        # Note: Brace-depth tracking counts all { and } characters, including
+        # those inside string literals and comments. This is safe in practice
+        # because Rust string braces are nearly always balanced, but could
+        # theoretically miscount with raw strings containing unbalanced braces.
+        #
+        # Returns "yes" if target line is in test code, "no" otherwise.
+        local in_test_module
+        in_test_module=$(awk -v target="$line_num" '
+            BEGIN { candidate = 0; in_range = 0; found = 0 }
+            found { next }
+            /^[[:space:]]*#\[cfg\(test\)\]/ {
+                candidate = NR
+                next
+            }
+            candidate && /^[[:space:]]*$/ {
+                # Allow blank lines between #[cfg(test)] and mod
+                next
+            }
+            candidate && /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]/ {
+                # Found a mod declaration after #[cfg(test)]
+                if (/;[[:space:]]*$/) {
+                    # External module declaration (mod foo;) — only these lines are test code
+                    if (target >= candidate && target <= NR) {
+                        found = 1
+                    }
+                } else {
+                    # Inline module block — track braces to find the end
+                    start = candidate
+                    depth = 0
+                    # Count braces on the mod line itself
+                    line = $0
+                    for (i = 1; i <= length(line); i++) {
+                        c = substr(line, i, 1)
+                        if (c == "{") depth++
+                        if (c == "}") depth--
+                    }
+                    if (depth > 0) {
+                        # Opening brace found, need to find closing brace
+                        in_range = 1
+                    } else if (depth == 0 && index(line, "{") > 0) {
+                        # Braces opened and closed on same line
+                        if (target >= start && target <= NR) {
+                            found = 1
+                        }
+                    }
+                }
+                candidate = 0
+                next
+            }
+            candidate {
+                # Non-blank, non-mod line means this #[cfg(test)] is not a module
+                candidate = 0
+            }
+            in_range {
+                # Track brace depth for inline module blocks
+                line = $0
+                for (i = 1; i <= length(line); i++) {
+                    c = substr(line, i, 1)
+                    if (c == "{") depth++
+                    if (c == "}") depth--
+                }
+                if (depth <= 0) {
+                    # End of inline module block
+                    if (target >= start && target <= NR) {
+                        found = 1
+                    }
+                    in_range = 0
+                }
+            }
+            END {
+                if (found) {
+                    print "yes"
+                } else if (in_range && target >= start) {
+                    # Target is inside an inline block that extends to EOF
+                    print "yes"
+                } else {
+                    print "no"
+                }
+            }
+        ' "$file" 2>/dev/null)
+
+        # Default to "no" if AWK produced no output
+        if [ -z "$in_test_module" ]; then
+            in_test_module="no"
+        fi
+        if [ "$in_test_module" = "yes" ]; then
+            continue
+        fi
+
+        # Also check if the line is inside a #[test] function by scanning
+        # backwards from the match line. First finds the enclosing `fn`, then
+        # continues scanning upward past attributes to see if #[test] or
+        # #[tokio::test] precedes it.
+        # Uses a single forward AWK pass (avoids `tac` which is unavailable on macOS).
+        local in_test_fn
+        in_test_fn=$(awk -v target="$line_num" '
+            NR <= target { lines[NR] = $0 }
+            END {
+                found_fn = 0
+                for (i = target; i >= 1; i--) {
+                    if (lines[i] ~ /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+/) {
+                        found_fn = 1
+                        continue
+                    }
+                    if (found_fn) {
+                        # After finding fn, look for #[test] attribute above it
+                        if (lines[i] ~ /^[[:space:]]*#\[test\]/ || lines[i] ~ /^[[:space:]]*#\[tokio::test/) {
+                            print "yes"; exit
+                        }
+                        # Allow other attributes between #[test] and fn
+                        if (lines[i] ~ /^[[:space:]]*#\[/) continue
+                        # Non-attribute line means fn is not a test
+                        print "no"; exit
+                    }
+                }
+                print "no"
+            }
+        ' "$file" 2>/dev/null)
+        if [ "$in_test_fn" = "yes" ]; then
+            continue
+        fi
+
+        # This match is in production code — keep it
+        echo "$match_line"
+    done
+}
+
 check_patterns() {
     log "Scanning for panic-prone patterns in src/..."
 
     local issues=0
 
     # Check for explicit panic! macros (excluding tests and comments)
-    PANIC_COUNT=$(grep -rn 'panic!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*panic!' | grep -v '#\[should_panic\]' | grep -v 'test' | wc -l || echo "0")
+    PANIC_MATCHES=$(grep -rn 'panic!' src/ --include="*.rs" 2>/dev/null \
+        | grep -v '//.*panic!' \
+        | grep -v '#\[should_panic\]' \
+        | filter_test_code || true)
+    PANIC_COUNT=$(echo "$PANIC_MATCHES" | grep -c . || echo "0")
+    PANIC_COUNT=$(echo "$PANIC_COUNT" | tr -d '[:space:]')
     if [ "$PANIC_COUNT" -gt 0 ]; then
         warn "Found $PANIC_COUNT panic! macro(s) in production code:"
-        grep -rn 'panic!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*panic!' | grep -v '#\[should_panic\]' | grep -v 'test' | head -10 || true
+        echo "$PANIC_MATCHES" | head -10
         issues=$((issues + 1))
     fi
 
-    # Check for todo! macros
-    TODO_COUNT=$(grep -rn 'todo!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*todo!' | wc -l || echo "0")
+    # Check for todo! macros (excluding test code)
+    TODO_MATCHES=$(grep -rn 'todo!' src/ --include="*.rs" 2>/dev/null \
+        | grep -v '//.*todo!' \
+        | filter_test_code || true)
+    TODO_COUNT=$(echo "$TODO_MATCHES" | grep -c . || echo "0")
+    TODO_COUNT=$(echo "$TODO_COUNT" | tr -d '[:space:]')
     if [ "$TODO_COUNT" -gt 0 ]; then
         error "Found $TODO_COUNT todo! macro(s) in production code (must be completed before merge):"
-        grep -rn 'todo!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*todo!' | head -10 || true
+        echo "$TODO_MATCHES" | head -10
         issues=$((issues + 1))
     fi
 
-    # Check for unimplemented! macros
-    UNIMPL_COUNT=$(grep -rn 'unimplemented!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*unimplemented!' | wc -l || echo "0")
+    # Check for unimplemented! macros (excluding test code)
+    UNIMPL_MATCHES=$(grep -rn 'unimplemented!' src/ --include="*.rs" 2>/dev/null \
+        | grep -v '//.*unimplemented!' \
+        | filter_test_code || true)
+    UNIMPL_COUNT=$(echo "$UNIMPL_MATCHES" | grep -c . || echo "0")
+    UNIMPL_COUNT=$(echo "$UNIMPL_COUNT" | tr -d '[:space:]')
     if [ "$UNIMPL_COUNT" -gt 0 ]; then
         error "Found $UNIMPL_COUNT unimplemented! macro(s) in production code:"
-        grep -rn 'unimplemented!' src/ --include="*.rs" 2>/dev/null | grep -v '//.*unimplemented!' | head -10 || true
+        echo "$UNIMPL_MATCHES" | head -10
         issues=$((issues + 1))
     fi
 

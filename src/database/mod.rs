@@ -912,7 +912,11 @@ fn percentile(sorted_values: &[usize], p: f64) -> f64 {
     }
 
     let index = (p * (sorted_values.len() - 1) as f64).round() as usize;
-    sorted_values[index.min(sorted_values.len() - 1)] as f64
+    // SAFETY: The early return guarantees len >= 1, so `len - 1` does not
+    // underflow and `.min(len - 1)` clamps `index` to a valid bound.
+    #[allow(clippy::indexing_slicing)]
+    let value = sorted_values[index.min(sorted_values.len() - 1)];
+    value as f64
 }
 
 #[cfg(test)]
@@ -920,6 +924,18 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    // NOTE: All tests in this module are excluded from Miri runs via
+    // `#[cfg_attr(miri, ignore)]`. This is because `InMemoryDatabase::create_room`
+    // calls `chrono::Utc::now()` to record `connected_at` timestamps, which invokes
+    // the `clock_gettime(CLOCK_REALTIME)` syscall. Miri blocks this syscall by
+    // default (isolation is on unless `-Zmiri-disable-isolation` is passed) because
+    // real-time clocks introduce non-deterministic external state. Additionally, the
+    // concurrent tests use `tokio::spawn`, which Miri does not support.
+    //
+    // TODO(miri-clock): Inject a `Clock` trait into `InMemoryDatabase` so tests can
+    // supply a deterministic mock clock. That would make the non-concurrent tests
+    // Miri-compatible without needing this ignore attribute.
 
     /// Helper: create a room with the given game name and room code using sensible defaults.
     async fn create_test_room(
@@ -941,6 +957,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_create_room_generates_unique_ids() {
         let db = InMemoryDatabase::new();
         let mut ids = HashSet::new();
@@ -963,6 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_create_room_id_is_retrievable_by_id() {
         let db = InMemoryDatabase::new();
         let room = create_test_room(&db, "lookup_game", "LOOK01")
@@ -981,6 +999,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_create_room_room_code_collision_rejected() {
         let db = InMemoryDatabase::new();
 
@@ -1002,6 +1021,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_create_room_same_code_different_game_allowed() {
         let db = InMemoryDatabase::new();
 
@@ -1022,6 +1042,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // clock_gettime + tokio::spawn — both blocked by Miri isolation
     async fn test_create_room_concurrent_unique_ids() {
         let db = Arc::new(InMemoryDatabase::new());
         let task_count = 50;
@@ -1065,6 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // clock_gettime + tokio::spawn — both blocked by Miri isolation
     async fn test_create_room_concurrent_same_code_only_one_succeeds() {
         let db = Arc::new(InMemoryDatabase::new());
         let task_count = 10;
@@ -1122,6 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_create_room_atomic_consistency() {
         let db = InMemoryDatabase::new();
         let room = create_test_room(&db, "atomic_game", "ATOM01")
@@ -1151,6 +1174,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_delete_room_frees_room_code() {
         let db = InMemoryDatabase::new();
 
@@ -1180,6 +1204,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_create_room_preserves_all_fields() {
         let db = InMemoryDatabase::new();
         let creator_id = Uuid::new_v4();
