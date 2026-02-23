@@ -49,7 +49,7 @@ jobs:
 
       - name: Run actionlint
         id: actionlint
-        uses: devops-actions/actionlint@467e2ce19b2310e93c9ffa0b50fe31f86b5a7f23 # v0.1.10
+        uses: devops-actions/actionlint@469810fd82c015d3c43815cd2b0e4d02eecc4819 # v0.1.11
 
       - name: Upload actionlint results
         if: always()

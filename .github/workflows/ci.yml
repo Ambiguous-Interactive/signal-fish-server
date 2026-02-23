@@ -66,7 +66,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -92,10 +92,10 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2
         with:
           tool: cargo-nextest
 
@@ -232,7 +232,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
@@ -293,10 +293,10 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2
         with:
           tool: cargo-llvm-cov
 
@@ -330,7 +330,7 @@ jobs:
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Run panic-policy check
         run: ./scripts/check-no-panics.sh
@@ -348,10 +348,10 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2
         with:
           tool: cargo-sbom
 
