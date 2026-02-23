@@ -1,9 +1,10 @@
 # Skill: Container Security
 
 <!--
-  trigger: container security, secrets, secret rotation, docker security, security context, immutable tags, cosign, sbom, non-root, capabilities
-  | Container secrets management, security contexts, immutable image tags, and supply chain security
-  | Infrastructure
+  trigger: container security, secrets, secret rotation, Docker security,
+  security context, immutable tags, cosign, sbom, non-root, capabilities
+  | Container secrets management, security contexts, immutable image tags, and
+  supply chain security | Infrastructure
 -->
 
 **Trigger**: When hardening container deployments, managing secrets in Kubernetes, signing images,
@@ -11,7 +12,7 @@ or configuring security contexts for the signaling server.
 
 See also:
 
-- [container-docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
+- [container-Docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
 - [deployment-strategies](./deployment-strategies.md) — Kubernetes deployment patterns, health checks
 
 ---
@@ -189,7 +190,7 @@ spec:
 
 ## See Also
 
-- [container-docker](./container-docker.md) — Dockerfile builds, multi-stage, image scanning, CI/CD pipelines
+- [container-Docker](./container-docker.md) — Dockerfile builds, multi-stage, image scanning, CI/CD pipelines
 - [deployment-strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
 - [web-service-security-auth](./web-service-security-auth.md) — TLS, auth, input validation
 - [supply-chain-audit-policy](./supply-chain-audit-policy.md) — cargo audit, cargo deny, dependency pinning

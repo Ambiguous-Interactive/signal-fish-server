@@ -211,7 +211,9 @@ This script checks:
 
 ## Related Skills
 
-- [supply-chain-audit-policy](./supply-chain-audit-policy.md) — cargo audit, cargo-deny config, pinning, reproducible builds
-- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags, workspace dependency patterns
-- [container-and-deployment](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines
+- [supply-chain-audit-policy](./supply-chain-audit-policy.md) — cargo audit, cargo-deny config,
+  pinning, reproducible builds
+- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
+  workspace dependency patterns
+- [Container Docker](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines
 - [clippy-and-linting](./clippy-and-linting.md) — CI integration for static analysis gates

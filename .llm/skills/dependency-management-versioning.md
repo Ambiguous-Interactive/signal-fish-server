@@ -99,7 +99,7 @@ If a dependency update requires a Rust version newer than the project MSRV:
 rand = "=0.9.0"  # Pin to version compatible with current MSRV
 ```
 
-**Option 2: Evaluate alternatives**
+#### Option 2: Evaluate alternatives
 
 - Search for alternative crates with lower MSRV
 - Check if the feature requiring newer Rust is actually needed
@@ -107,7 +107,7 @@ rand = "=0.9.0"  # Pin to version compatible with current MSRV
 
 **Option 3: Update project MSRV** (coordinated change)
 
-- Follow the MSRV update checklist in [msrv-and-toolchain-management](./msrv-management.md)
+- Follow the MSRV update checklist in [msrv-management](./msrv-management.md)
 - Update ALL configuration files: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, `Dockerfile`
 - Run `scripts/check-msrv-consistency.sh` to verify consistency
 - Document the MSRV bump in `CHANGELOG.md`
@@ -125,7 +125,7 @@ cargo tree --all-features | grep -i "requires rustc"
 ./scripts/check-msrv-consistency.sh
 ```
 
-See [msrv-and-toolchain-management](./msrv-management.md) for comprehensive guidance.
+See [msrv-management](./msrv-management.md) for comprehensive guidance.
 
 ---
 
@@ -220,7 +220,7 @@ After running audit tools, document findings:
 ## Related Skills
 
 - [dependency-management-cargo](./dependency-management-cargo.md) — Cargo tooling, feature flags, unused deps
-- [msrv-and-toolchain-management](./msrv-management.md) — MSRV updates and consistency
+- [msrv-management](./msrv-management.md) — MSRV updates and consistency
 - [supply-chain-security](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
 - [Rust-performance-optimization](./rust-performance-optimization.md) — Alternative crate recommendations
 - [testing-strategies](./testing-core-patterns.md) — Testing with optional dependencies

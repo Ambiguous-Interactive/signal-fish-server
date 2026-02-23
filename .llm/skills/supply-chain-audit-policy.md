@@ -229,7 +229,10 @@ ENTRYPOINT ["/matchbox-server"]
 
 ## Related Skills
 
-- [supply-chain-sbom-updates](./supply-chain-sbom-updates.md) — SBOM generation, update policy, CI pipeline, action compatibility
-- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags, workspace dependency patterns
-- [web-service-security-hardening](./web-service-security-hardening.md) — Application-level security, auth, input validation, TLS
-- [container-and-deployment](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines
+- [supply-chain-sbom-updates](./supply-chain-sbom-updates.md) — SBOM generation, update policy,
+  CI pipeline, action compatibility
+- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
+  workspace dependency patterns
+- [web-service-security-hardening](./web-service-security-hardening.md) —
+  Application-level security, auth, input validation, TLS
+- [Container Docker](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines

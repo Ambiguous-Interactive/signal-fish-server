@@ -98,7 +98,7 @@ Don't put commonly-needed deps behind flags (if 90% of users need it, make it de
 **Native C dependencies:** If a feature pulls in a crate that requires native libraries (e.g., `rdkafka` needs `cmake`,
 `libcurl-dev`, `libssl-dev`),
 you must also update `.github/actions/install-build-deps/action.yml` and the `Dockerfile` builder stage.
-See [container-and-deployment § CI Native Build Dependencies](./container-docker.md) for details.
+See [Container Docker § CI Native Build Dependencies](./container-docker.md) for details.
 
 ### Testing All Feature Combinations
 
@@ -260,5 +260,5 @@ This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "thi
 
 - [dependency-management-versioning](./dependency-management-versioning.md) — MSRV, pinning, and recommended crates
 - [supply-chain-security](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
-- [msrv-and-toolchain-management](./msrv-management.md) — MSRV updates and consistency
+- [msrv-management](./msrv-management.md) — MSRV updates and consistency
 - [clippy-and-linting](./clippy-and-linting.md) — CI integration for dependency checks

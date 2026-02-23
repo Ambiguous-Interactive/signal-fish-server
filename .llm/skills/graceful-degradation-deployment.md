@@ -20,9 +20,11 @@ or configuring Kubernetes deployment strategies for the signaling server.
 
 ## When NOT to Use
 
-- Service level degradation or circuit breakers (see [graceful-degradation-service-levels](./graceful-degradation-service-levels.md))
+- Service level degradation or circuit breakers
+  (see [graceful-degradation-service-levels](./graceful-degradation-service-levels.md))
 - Rate limiting or DDoS prevention (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
-- WebSocket protocol design unrelated to availability (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
+- WebSocket protocol design unrelated to availability
+  (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
 
 ## Rationalizations to Reject
 
@@ -233,7 +235,8 @@ impl Room {
 
 ## Related Skills
 
-- [graceful-degradation-service-levels](./graceful-degradation-service-levels.md) — Service levels, circuit breakers, feature flags, DB failover
+- [graceful-degradation-service-levels](./graceful-degradation-service-levels.md) — Service levels,
+  circuit breakers, feature flags, DB failover
 - [async-Rust-best-practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
 - [observability-and-logging](./observability-and-logging.md) — Health metrics, tracing spans, alert thresholds
 - [error-handling-guide](./error-handling-guide.md) — Error types, fallible operations, context propagation

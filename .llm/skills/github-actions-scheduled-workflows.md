@@ -5,7 +5,8 @@
   | Patterns for cron-scheduled CI workflows: proactive security audits, job guards, and alert fatigue prevention | Infrastructure
 -->
 
-**Trigger**: When adding cron schedules to workflows, configuring security audits, or ensuring non-audit jobs do not run on schedule.
+**Trigger**: When adding cron schedules to workflows, configuring security audits, or ensuring
+non-audit jobs do not run on schedule.
 
 ---
 

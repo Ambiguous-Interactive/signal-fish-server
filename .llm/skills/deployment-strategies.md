@@ -1,7 +1,8 @@
 # Skill: Deployment Strategies for WebSocket Services
 
 <!--
-  trigger: kubernetes, k8s, helm, deploy, health check, graceful shutdown, websocket, PodDisruptionBudget, prometheus, monitoring
+  trigger: kubernetes, k8s, helm, deploy, health check, graceful shutdown,
+  WebSocket, PodDisruptionBudget, prometheus, monitoring
   | Kubernetes deployment patterns, health probes, graceful shutdown, and monitoring for WebSocket servers
   | Infrastructure
 -->
@@ -11,7 +12,7 @@ connections, or setting up container monitoring.
 
 See also:
 
-- [container-docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
+- [container-Docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
 - [container-security](./container-security.md) — Secrets management, security contexts
 
 ---
@@ -293,7 +294,7 @@ spec:
 
 ## Related Skills
 
-- [container-docker](./container-docker.md) — Dockerfile, image scanning, CI/CD pipelines
+- [container-Docker](./container-docker.md) — Dockerfile, image scanning, CI/CD pipelines
 - [container-security](./container-security.md) — Secrets management, security contexts
 - [observability-and-logging](./observability-and-logging.md) — Structured logging, tracing, OpenTelemetry
 - [graceful-degradation](./graceful-degradation-deployment.md) — Connection draining, circuit breakers

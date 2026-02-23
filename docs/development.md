@@ -487,7 +487,7 @@ When a dependency requires a newer Rust version, follow the MSRV update checklis
    - Update `CHANGELOG.md`
    - Document reason for MSRV bump in commit message
 
-See [`.llm/skills/msrv-and-toolchain-management.md`](../.llm/skills/msrv-and-toolchain-management.md)
+See [`.llm/skills/msrv-management.md`](../.llm/skills/msrv-management.md)
 for comprehensive MSRV management guidance.
 
 ## Continuous Integration

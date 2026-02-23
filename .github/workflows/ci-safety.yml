@@ -51,7 +51,7 @@
 #     - CI-only analysis tools MAY use nightly if required by the tool
 #     - Nightly is NEVER used for building production artifacts
 #
-#   See also: .llm/skills/msrv-and-toolchain-management.md (Nightly-Only CI Tools section)
+#   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
 #
 # Promotion Criteria:
 #   These staged checks should be promoted to required branch-protection checks when:

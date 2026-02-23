@@ -1,11 +1,13 @@
 # Skill: CI Configuration Validation Tests
 
 <!--
-  trigger: ci config tests, configuration test, msrv consistency, workflow validation, cargo test, preventative, ci_config_tests
+  trigger: ci config tests, configuration test, msrv consistency,
+  workflow validation, cargo test, preventative, ci_config_tests
   | Rust tests that validate CI configuration consistency and prevent recurring issues | Infrastructure
 -->
 
-**Trigger**: When adding tests that validate CI configuration files, MSRV consistency, required workflows, or coding standards.
+**Trigger**: When adding tests that validate CI configuration files, MSRV consistency,
+required workflows, or coding standards.
 
 ---
 
@@ -20,7 +22,7 @@
 ## When NOT to Use
 
 - Runtime test failures (see [testing-strategies](./testing-core-patterns.md))
-- Application code (see [rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Application code (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
 
 ## TL;DR
 

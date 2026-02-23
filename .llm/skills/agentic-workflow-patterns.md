@@ -67,7 +67,8 @@ Every significant code change follows this cycle:
 
 **Never skip verification.** Running `cargo clippy` and `cargo test` catches more issues than visual inspection.
 
-**CRITICAL:** Step 6 is "PRESENT" not "COMMIT" — you provide instructions, user commits. See [git-safety-protocol](./git-safety-forbidden-operations.md).
+**CRITICAL:** Step 6 is "PRESENT" not "COMMIT" — you provide instructions, user commits.
+See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md).
 
 ---
 
@@ -227,7 +228,7 @@ Fix: Suggested improvement
 
 ## Related Skills
 
-- [git-safety-protocol](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
+- [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
 - [code-review-checklist](./code-review-checklist.md) — Detailed review criteria
 - [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow
 - [testing-strategies](./testing-core-patterns.md) — Test writing methodology

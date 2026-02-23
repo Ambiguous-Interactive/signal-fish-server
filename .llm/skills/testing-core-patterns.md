@@ -26,7 +26,7 @@
 - Configuring testing tools or frameworks (see [testing-tools-and-frameworks](./testing-tools-and-frameworks.md))
 - Production error handling (see [error-handling-guide](./error-handling-guide.md))
 - Benchmark-specific setup (see [Rust-performance-optimization](./rust-performance-optimization.md))
-- CI config validation tests (see [test-fixture-patterns](./test-fixture-structure.md))
+- CI config validation tests (see [test-fixture-structure](./test-fixture-structure.md))
 
 ---
 

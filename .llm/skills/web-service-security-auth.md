@@ -241,4 +241,5 @@ axum does NOT enable it by default — do not add `.enable_compression()`.
 - [web-service-security-hardening](./web-service-security-hardening.md) — Secrets, TLS, Rust safety, security logging
 - [defensive-programming](./defensive-programming.md) — Input validation, panic prevention, safe arithmetic
 - [error-handling-guide](./error-handling-guide.md) — Error types, generic messages, context propagation
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) — Rate limiting, connection management, DDoS prevention
+- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+  Rate limiting, connection management, DDoS prevention

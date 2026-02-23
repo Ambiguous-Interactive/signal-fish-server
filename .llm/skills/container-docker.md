@@ -192,7 +192,7 @@ When a Cargo feature requires native C libraries (e.g., `kafka` → `rdkafka` �
 → `cmake`, `libcurl-dev`, `libssl-dev`), CI workflows using `--all-features` will fail
 unless those libraries are installed in the runner environment.
 
-**The Solution: Composite Action**
+### The Solution: Composite Action
 
 All native build dependencies are centralized in:
 

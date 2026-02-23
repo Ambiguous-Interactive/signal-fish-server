@@ -1,8 +1,11 @@
 # Skill: CI/CD Troubleshooting - Script & Test Validation Patterns
 
 <!--
-  trigger: miri failure, proptest miri, test code filtering, coverage flags, bash code blocks, shellcheck, yaml validation, toml validation, fixture exclusion, missing locked flag
-  | Patterns 9-16: locked flag, test code filtering, coverage flags, Miri, bash code blocks, shell script pitfalls, fixture exclusion, YAML validation
+  trigger: miri failure, proptest miri, test code filtering, coverage flags,
+  bash code blocks, shellcheck, yaml validation, toml validation,
+  fixture exclusion, missing locked flag
+  | Patterns 9-16: locked flag, test code filtering, coverage flags, Miri,
+  bash code blocks, shell script pitfalls, fixture exclusion, YAML validation
   | Infrastructure
 -->
 
@@ -293,7 +296,5 @@ code blocks by language tag will attempt to parse them.
 ## Related Skills
 
 - [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md) — Clippy, typos, markdown
-- [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Lychee, link checking
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile, stale scripts
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile
+- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow

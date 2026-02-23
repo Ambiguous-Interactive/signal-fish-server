@@ -1,9 +1,10 @@
 # Skill: CI/CD Troubleshooting - Linting & Documentation Patterns
 
 <!--
-  trigger: clippy failure, typos failure, markdownlint failure, spell check, md044, extend-identifiers, extend-words, documentation linting
-  | Patterns 7-9: Clippy in test code, typos configuration, markdown and spell-check quality
-  | Infrastructure
+  trigger: clippy failure, typos failure, markdownlint failure, spell check,
+  md044, extend-identifiers, extend-words, documentation linting
+  | Patterns 7-9: Clippy in test code, typos configuration, markdown and
+  spell-check quality | Infrastructure
 -->
 
 **Trigger**: When debugging Clippy lints in test code, typos spell-checker false positives
@@ -19,7 +20,8 @@ See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem
 ## TL;DR
 
 - **Clippy check fails**: Run `cargo clippy --all-targets --all-features -- -D warnings` locally
-- **Typos mixed-case**: `HashiCorp`, `GitHub`, `WebSocket` go in `[default.extend-identifiers]`, NOT `[default.extend-words]`
+- **Typos mixed-case**: `HashiCorp`, `GitHub`, `WebSocket` go in
+  `[default.extend-identifiers]`, NOT `[default.extend-words]`
 - **typos false positives in test data**: Add files with intentional "wrong" spellings to `[files] extend-exclude`
 - **MD044 in URLs**: URL-stripping regex needs to cover all URL schemes; check `RAW_URL_STRIP_PATTERN`
 - **YAML `...` in doc code blocks**: Replace with `# ...` (YAML comment) so validators can parse them
@@ -233,7 +235,7 @@ markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**'  # Check ALL files, n
 
 | Rule | Description | Fix |
 |------|-------------|-----|
-| **MD040** | Code blocks must have language identifiers | Add language after \`\`\` (bash, rust, json, text) |
+| **MD040** | Code blocks must have language identifiers | Add language after \`\`\` (bash, Rust, json, text) |
 | **MD013** | Line length limit | Break long lines or disable rule |
 | **MD041** | First line must be top-level heading | Add `# Title` as first line |
 | **MD046** | Code block style | Use fenced code blocks (\`\`\`) consistently |

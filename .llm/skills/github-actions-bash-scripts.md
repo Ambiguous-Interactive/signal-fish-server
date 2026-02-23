@@ -1,11 +1,13 @@
 # Skill: Bash Scripts in CI/CD
 
 <!--
-  trigger: bash, shellcheck, shell script, subshell, variable scope, pipeline, set -e, trap, cleanup, anti-pattern, debugging
+  trigger: bash, shellcheck, shell script, subshell, variable scope,
+  pipeline, set -e, trap, cleanup, anti-pattern, debugging
   | Patterns for writing robust Bash scripts in GitHub Actions workflows | Infrastructure
 -->
 
-**Trigger**: When writing inline shell scripts in GitHub Actions, debugging pipeline variable loss, or fixing shellcheck warnings.
+**Trigger**: When writing inline shell scripts in GitHub Actions, debugging pipeline variable
+loss, or fixing shellcheck warnings.
 
 ---
 

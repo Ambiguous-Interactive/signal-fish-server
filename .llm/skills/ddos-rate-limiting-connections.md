@@ -21,7 +21,7 @@
 
 - Infrastructure-layer DDoS protection (see [ddos-infrastructure-monitoring](./ddos-infrastructure-monitoring.md))
 - General authentication/authorization (see [web-service-security](./web-service-security-auth.md))
-- Performance optimization without a security motivation (see [Rust-performance-optimization](./rust-performance-optimization.md))
+- Non-security performance work (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -294,7 +294,7 @@ if tx.try_send(msg).is_err() {
 
 ## Related Skills
 
-- [ddos-infrastructure-monitoring](./ddos-infrastructure-monitoring.md) — Application-layer protection, WAF, monitoring, graceful degradation
+- [ddos-infrastructure-monitoring](./ddos-infrastructure-monitoring.md) — WAF, monitoring, graceful degradation
 - [web-service-security](./web-service-security-auth.md) — Authentication, authorization, input validation, TLS
 - [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message design, heartbeat
 - [observability-and-logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting

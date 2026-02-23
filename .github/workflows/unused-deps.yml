@@ -43,7 +43,7 @@
 #     - CI-only analysis tools MAY use nightly if required by the tool
 #     - Nightly is NEVER used for building production artifacts
 #
-#   See also: .llm/skills/msrv-and-toolchain-management.md (Nightly-Only CI Tools section)
+#   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
 #
 # Note: cargo-udeps may report false positives for proc-macro dependencies
 #       and conditional dependencies. Review its output manually.

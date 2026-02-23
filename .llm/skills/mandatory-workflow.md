@@ -65,7 +65,7 @@ scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related 
 
 - `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
 
-  `Cargo.toml` (see [msrv-and-toolchain-management](./msrv-management.md))
+  `Cargo.toml` (see [msrv-management](./msrv-management.md))
 
 ---
 
@@ -127,7 +127,7 @@ chore: update MSRV from 1.87.0 to 1.88.0
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
 - [ ] CHANGELOG updated for user-facing changes
 - [ ] Breaking changes documented
-- [ ] MSRV update documented (if applicable, see [msrv-and-toolchain-management](./msrv-management.md))
+- [ ] MSRV update documented (if applicable, see [msrv-management](./msrv-management.md))
 
 ---
 

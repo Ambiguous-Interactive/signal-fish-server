@@ -3064,6 +3064,7 @@ fn test_no_actual_placeholder_urls_in_docs() {
     for file in markdown_files {
         let content = read_file(&file);
         let mut in_code_block = false;
+        let mut opening_backtick_count: usize = 0;
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
@@ -3072,17 +3073,19 @@ fn test_no_actual_placeholder_urls_in_docs() {
             // Track fenced code block state per CommonMark spec:
             // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
             // - Closing fence: 3+ backticks with NO info string (bare backticks only)
+            // - Closing fence must have >= as many backticks as the opening fence
             // When inside a code block, only a bare fence closes it; inner ```rust
             // lines are content, not real fences.
             let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
             if backtick_count >= 3 {
                 let after_backticks = trimmed[backtick_count..].trim();
                 if in_code_block {
-                    if after_backticks.is_empty() {
+                    if after_backticks.is_empty() && backtick_count >= opening_backtick_count {
                         in_code_block = false;
                     }
                 } else {
                     in_code_block = true;
+                    opening_backtick_count = backtick_count;
                 }
                 continue;
             }
@@ -3334,6 +3337,7 @@ fn test_markdown_technical_terms_consistency() {
 
         // Track fenced code block state to match MD044's "code_blocks": false behavior
         let mut in_code_block = false;
+        let mut opening_backtick_count: usize = 0;
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
@@ -3341,6 +3345,7 @@ fn test_markdown_technical_terms_consistency() {
             // Track fenced code block state per CommonMark spec:
             // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
             // - Closing fence: 3+ backticks with NO info string (just backticks + optional spaces)
+            // - Closing fence must have >= as many backticks as the opening fence
             // When already inside a code block, only a bare fence (no info string) closes it.
             // This correctly handles nested code examples in markdown skill docs where
             // inner ```rust fences are content, not real fences.
@@ -3349,14 +3354,16 @@ fn test_markdown_technical_terms_consistency() {
             if backtick_prefix_len >= 3 {
                 let after_backticks = trimmed[backtick_prefix_len..].trim();
                 if in_code_block {
-                    // Inside a code block: only a bare fence line (no info string) closes it
-                    if after_backticks.is_empty() {
+                    // Inside a code block: only a bare fence line (no info string) closes it,
+                    // and it must have at least as many backticks as the opening fence
+                    if after_backticks.is_empty() && backtick_prefix_len >= opening_backtick_count {
                         in_code_block = false;
                     }
                     // Lines like ```rust inside a code block are just content
                 } else {
                     // Outside a code block: any 3+ backtick line opens one
                     in_code_block = true;
+                    opening_backtick_count = backtick_prefix_len;
                 }
                 continue;
             }
@@ -3485,6 +3492,9 @@ fn test_code_block_fence_tracking_commonmark_compliant() {
     // skill docs. The fix uses proper CommonMark parsing:
     //   - Opening fences can have info strings (e.g., ```rust, ```bash)
     //   - Closing fences must be bare (just backticks + optional whitespace)
+    //   - Per CommonMark spec (section 4.5), a closing fence must have at least
+    //     as many backtick characters as the opening fence. This means a ````
+    //     (4-backtick) block is not closed by a ``` (3-backtick) line.
     //
     // This test ensures every markdown file has balanced fence opens/closes,
     // meaning the parser ends outside any code block after processing the entire file.
@@ -3508,6 +3518,7 @@ fn test_code_block_fence_tracking_commonmark_compliant() {
         let mut opens = 0usize;
         let mut closes = 0usize;
         let mut last_open_line = 0usize;
+        let mut opening_backtick_count: usize = 0;
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
@@ -3518,9 +3529,10 @@ fn test_code_block_fence_tracking_commonmark_compliant() {
             if backtick_count >= 3 {
                 let after_backticks = trimmed[backtick_count..].trim();
                 if in_code_block {
-                    // Inside a code block: only a bare fence (no info string) closes it.
-                    // Lines like ```rust inside a code block are just content, not real fences.
-                    if after_backticks.is_empty() {
+                    // Inside a code block: only a bare fence closes it, and
+                    // per CommonMark spec, the closing fence must have at least
+                    // as many backticks as the opening fence.
+                    if after_backticks.is_empty() && backtick_count >= opening_backtick_count {
                         in_code_block = false;
                         closes += 1;
                     }
@@ -3530,6 +3542,7 @@ fn test_code_block_fence_tracking_commonmark_compliant() {
                     in_code_block = true;
                     opens += 1;
                     last_open_line = line_num;
+                    opening_backtick_count = backtick_count;
                 }
             }
         }
@@ -3604,6 +3617,7 @@ fn test_markdown_common_patterns_are_correct() {
     for file in &markdown_files {
         let content = read_file(file);
         let mut in_code_block = false;
+        let mut opening_backtick_count: usize = 0;
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
@@ -3611,15 +3625,17 @@ fn test_markdown_common_patterns_are_correct() {
 
             // Track fenced code block state per CommonMark spec:
             // Opening fences may have info strings; closing fences must be bare.
+            // Closing fence must have >= as many backticks as the opening fence.
             let backtick_count = trimmed.len() - trimmed.trim_start_matches('`').len();
             if backtick_count >= 3 {
                 let after_backticks = trimmed[backtick_count..].trim();
                 if in_code_block {
-                    if after_backticks.is_empty() {
+                    if after_backticks.is_empty() && backtick_count >= opening_backtick_count {
                         in_code_block = false;
                     }
                 } else {
                     in_code_block = true;
+                    opening_backtick_count = backtick_count;
                 }
                 continue;
             }

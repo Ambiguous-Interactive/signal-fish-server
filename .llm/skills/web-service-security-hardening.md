@@ -250,4 +250,5 @@ Set alerting thresholds for security anomalies:
 - [observability-and-logging](./observability-and-logging.md) — Structured logging, tracing spans, log hygiene
 - [dependency-management-cargo](./dependency-management-cargo.md) — Cargo.lock, audit workflows
 - [supply-chain-security](./supply-chain-audit-policy.md) — Full supply chain audit pipeline
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) — Rate limiting, connection management, DDoS prevention
+- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+  Rate limiting, connection management, DDoS prevention

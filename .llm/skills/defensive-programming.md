@@ -24,7 +24,8 @@
 ## When NOT to Use
 
 - Test code where `.unwrap()` and `.expect()` are acceptable
-- Performance-critical inner loops already validated (see [Rust-performance-optimization](./rust-performance-optimization.md))
+- Performance-critical inner loops already validated
+  (see [Rust-performance-optimization](./rust-performance-optimization.md))
 
 ---
 

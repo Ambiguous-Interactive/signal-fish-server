@@ -1,9 +1,10 @@
 # Skill: Git Hooks Check Implementations
 
 <!--
-  trigger: pre-commit check, hook validation, hook testing, hook debugging, hook performance, hook ci, cargo fmt hook, markdownlint hook
-  | Pre-commit hook check design, performance patterns, testing, CI validation, and debugging
-  | Infrastructure
+  trigger: pre-commit check, hook validation, hook testing, hook debugging,
+  hook performance, hook ci, cargo fmt hook, markdownlint hook
+  | Pre-commit hook check design, performance patterns, testing, CI validation,
+  and debugging | Infrastructure
 -->
 
 **Trigger**: When writing specific check implementations for pre-commit hooks, optimizing hook
@@ -290,6 +291,6 @@ When NOT to bypass: "I'll fix it later", "tests are slow", "I know what I'm doin
 ## See Also
 
 - [git-hooks-installation](./git-hooks-installation.md) — Setup, permissions, directory structure, team onboarding
-- [github-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
 - [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI failures
 - [mandatory-workflow](./mandatory-workflow.md) — Required validation steps

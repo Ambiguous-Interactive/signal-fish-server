@@ -74,7 +74,7 @@ When you need git operations performed, provide **clear instructions** for the u
 
 **Instead of committing:**
 
-```markdown
+````markdown
 I've made the following changes:
 
 - Modified: src/server.rs (added validation)
@@ -90,11 +90,11 @@ git commit -m "feat: add input validation to server
 - Add comprehensive test coverage
 "
 ```
-```
+````
 
 **Instead of configuring git:**
 
-```markdown
+````markdown
 To ensure commits are attributed correctly, please verify your git configuration:
 
 ```bash
@@ -108,7 +108,7 @@ If these need to be set:
 git config user.name "Your Name"
 git config user.email "your.email@example.com"
 ```
-```
+````
 
 ---
 
@@ -125,7 +125,7 @@ git commit -m "fix: something"
 
 **GOOD Response:**
 
-```markdown
+````markdown
 I've completed the changes. Here's what was modified:
 
 - src/file.rs: Fixed the validation logic
@@ -142,7 +142,7 @@ git commit -m "fix: correct validation logic in file.rs
 ```
 
 You can modify the commit message as needed before running the command.
-```
+````
 
 ### Scenario 2: User's Git Identity Appears Wrong
 
@@ -155,7 +155,7 @@ git config user.email "correct@email.com"
 
 **GOOD Response:**
 
-```markdown
+````markdown
 I noticed the git configuration may need updating. Currently:
 
 - user.name: [current value]
@@ -172,7 +172,7 @@ git config user.email "your.email@example.com"
 git config --global user.name "Your Name"
 git config --global user.email "your.email@example.com"
 ```
-```
+````
 
 ### Scenario 3: CI/CD Requires a Commit
 
@@ -185,7 +185,7 @@ git commit -m "CI fixes"
 
 **GOOD Response:**
 
-```markdown
+````markdown
 The CI/CD failures have been fixed. For CI to validate the fixes, these changes need to be committed:
 
 - File 1: Description
@@ -203,7 +203,7 @@ git push origin branch-name
 ```
 
 Would you like to review the changes before committing?
-```
+````
 
 ### Scenario 4: Following a Workflow that Mentions Commits
 

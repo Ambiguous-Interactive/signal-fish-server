@@ -57,7 +57,7 @@
 
 **Always include a README.md in test-fixtures:**
 
-```markdown
+````markdown
 # Test Fixtures
 
 This directory contains test fixtures for validating CI/CD configuration.
@@ -92,7 +92,7 @@ assert!(contains_placeholder_url(&fixture));
 - Keep fixtures minimal (only what's needed to demonstrate the pattern)
 - Update fixtures when configuration format changes
 - Document why each fixture exists (what issue it demonstrates)
-```
+````
 
 ---
 

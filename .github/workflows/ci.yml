@@ -220,7 +220,7 @@ jobs:
             echo "2. Update clippy.toml: msrv = \"$MSRV\""
             echo "3. Update Dockerfile: FROM rust:$MSRV-bookworm"
             echo ""
-            echo "See .llm/skills/msrv-and-toolchain-management.md for details"
+            echo "See .llm/skills/msrv-management.md for details"
             exit 1
           fi
 

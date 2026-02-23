@@ -248,6 +248,7 @@ another single character that won't appear in content.
 ### Run `scripts/validate-ci.sh` Before Pushing
 
 Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
+
 - AWK file syntax (files in `.github/scripts/`)
 - Shell script lint (shellcheck on `scripts/` and `.githooks/`)
 - Markdown link integrity
@@ -257,6 +258,6 @@ Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
 ## See Also
 
 - [awk-text-processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
-- [github-actions-bash-scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
+- [GitHub-actions-bash-scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
 - [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
 - [defensive-programming](./defensive-programming.md) — Error handling principles

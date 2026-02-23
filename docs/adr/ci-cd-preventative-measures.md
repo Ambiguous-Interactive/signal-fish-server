@@ -99,7 +99,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 
 - `/scripts/check-msrv-consistency.sh` - Standalone MSRV validation
 - CI job in `.github/workflows/ci.yml` - MSRV verification job
-- `/.llm/skills/msrv-and-toolchain-management.md` - Comprehensive guide
+- `/.llm/skills/msrv-management.md` - Comprehensive guide
 
 **Improvements Made:**
 
@@ -165,9 +165,9 @@ Implement comprehensive CI/CD preventative measures across six layers:
 
 **Existing Documentation Enhanced:**
 
-- `.llm/skills/msrv-and-toolchain-management.md` - Toolchain management
-- `.llm/skills/github-actions-best-practices.md` - Workflow best practices
-- `.llm/skills/dependency-management.md` - Dependency hygiene
+- `.llm/skills/msrv-management.md` - Toolchain management
+- `.llm/skills/github-actions-workflow-config.md` - Workflow best practices
+- `.llm/skills/dependency-management-cargo.md` - Dependency hygiene
 - `/docs/development.md` - Added markdown linting, spell checking, and CI sections
 
 ## Consequences
@@ -383,9 +383,9 @@ ls -la scripts/*.sh
   - 4b9b60d: CI updates (enhanced doc-validation workflow)
 
 - **Related Documentation:**
-  - `.llm/skills/msrv-and-toolchain-management.md`
-  - `.llm/skills/github-actions-best-practices.md`
-  - `.llm/skills/dependency-management.md`
+  - `.llm/skills/msrv-management.md`
+  - `.llm/skills/github-actions-workflow-config.md`
+  - `.llm/skills/dependency-management-cargo.md`
   - `.github/test-fixtures/README.md`
 
 - **Related Workflows:**

@@ -1,8 +1,11 @@
 # Skill: CI/CD Troubleshooting - Supply Chain & Stale Reference Patterns
 
 <!--
-  trigger: sha pinning, supply chain, dockerfile copy, stale script, action not found, continue-on-error, dockerbuildkit warning, secrets env, workflow script missing
-  | Patterns 21-25: Dockerfile COPY stale paths, SHA pinning, stale workflow scripts, SHA not found, Dockerfile false-positive security warnings
+  trigger: sha pinning, supply chain, dockerfile copy, stale script,
+  action not found, continue-on-error, dockerbuildkit warning, secrets env,
+  workflow script missing
+  | Patterns 21-25: Dockerfile COPY stale paths, SHA pinning, stale workflow
+  scripts, SHA not found, Dockerfile false-positive security warnings
   | Infrastructure
 -->
 
@@ -21,8 +24,10 @@ See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem
 
 - **Stale Dockerfile COPY**: Audit all `COPY`/`ADD` instructions when removing directories
 - **SHA pinning**: All `uses:` references must be `@<40-char-sha> # vX.Y.Z` — tags are mutable
-- **Stale script references**: Audit workflow `run:` steps when deleting scripts; `continue-on-error: true` silently masks these
-- **Action SHA not found**: Force-pushed/rebased action repo; look up new SHA with `gh api repos/OWNER/REPO/git/refs/tags/vX.Y.Z --jq '.object.sha'`
+- **Stale script references**: Audit workflow `run:` steps when deleting scripts;
+  `continue-on-error: true` silently masks these
+- **Action SHA not found**: Force-pushed/rebased action repo; look up new SHA with
+  `gh api repos/OWNER/REPO/git/refs/tags/vX.Y.Z --jq '.object.sha'`
 - **Dockerfile BuildKit warning**: Add `# check=skip=SecretsUsedInArgOrEnv` as first line of Dockerfile
 
 ---
@@ -290,4 +295,4 @@ on production code.
 - [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Lychee, link checking
 - [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
 - [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning
-- [github-actions-best-practices](./github-actions-workflow-config.md) — Workflow patterns
+- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — Workflow patterns

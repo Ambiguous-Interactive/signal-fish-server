@@ -289,6 +289,6 @@ fn test_typos_config_has_required_sections() {
 
 - [testing-core-patterns](./testing-core-patterns.md) — Core testing methodology and patterns
 - [testing-error-message-quality](./testing-error-message-quality.md) — Actionable test failure messages
-- [test-fixture-patterns](./test-fixture-structure.md) — Data-driven CI configuration test fixtures
+- [test-fixture-structure](./test-fixture-structure.md) — Data-driven CI configuration test fixtures
 - [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
 - [GitHub-actions-best-practices](./github-actions-workflow-config.md) — GitHub Actions workflow patterns and debugging

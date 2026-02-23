@@ -1,8 +1,10 @@
 # Skill: CI/CD Troubleshooting - Ecosystem & Toolchain Patterns
 
 <!--
-  trigger: ci failure, language mismatch, cache error, toolchain staleness, unused dependencies, works locally fails ci, docker build failure
-  | Patterns 1-6: language/ecosystem mismatch, cache corruption, toolchain staleness, dependency hygiene, local-vs-CI divergence, Docker failures
+  trigger: ci failure, language mismatch, cache error, toolchain staleness,
+  unused dependencies, works locally fails ci, Docker build failure
+  | Patterns 1-6: language/ecosystem mismatch, cache corruption, toolchain
+  staleness, dependency hygiene, local-vs-CI divergence, Docker failures
   | Infrastructure
 -->
 
@@ -112,7 +114,7 @@ WARNING: Failed to restore cache, continuing without cache
 
 ### Prevention
 
-```yaml
+```text
 # GOOD: Versioned cache key
 key: ${{ runner.os }}-rust-v1-${{ hashFiles('**/Cargo.lock') }}
 
@@ -150,7 +152,7 @@ error[E0658]: use of unstable library feature 'foo'
     toolchain: nightly-2026-02-01  # recent, acceptable
 ```
 
-For stable MSRV issues, see [msrv-and-toolchain-management](./msrv-management.md).
+For stable MSRV issues, see [msrv-management](./msrv-management.md).
 
 ### Staleness Thresholds
 
@@ -292,8 +294,7 @@ docker build --no-cache --progress=plain -t test .
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md) — Clippy, typos, markdown linting
 - [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile, stale scripts
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile
 - [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow and quick reference
-- [msrv-and-toolchain-management](./msrv-management.md) — MSRV updates and consistency
+- [msrv-management](./msrv-management.md) — MSRV updates and consistency

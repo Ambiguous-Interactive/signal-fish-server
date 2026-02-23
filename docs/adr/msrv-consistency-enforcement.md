@@ -80,7 +80,7 @@ Standalone script that:
 
 ### 3. LLM Agent Guidance
 
-Created comprehensive skill: `.llm/skills/msrv-and-toolchain-management.md`
+Created comprehensive skill: `.llm/skills/msrv-management.md`
 
 This skill provides AI agents with:
 
@@ -97,7 +97,7 @@ common mistakes and ensures consistent MSRV management practices.
 
 Enhanced related skills with MSRV awareness:
 
-**`dependency-management.md`**:
+**`dependency-management-cargo.md`**:
 
 - Added MSRV compatibility check as first priority
 - Documented options when dependency requires newer Rust

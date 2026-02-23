@@ -1,9 +1,10 @@
 # Skill: CI/CD Troubleshooting - Diagnostic Workflow & Summary
 
 <!--
-  trigger: ci failure, ci debug, diagnostic workflow, ci checklist, ci prevention, ci categories, quick reference, ci error messages
-  | Diagnostic workflow, prevention checklist, quick reference error table, summary categories, real-world examples, escalation
-  | Infrastructure
+  trigger: ci failure, ci debug, diagnostic workflow, ci checklist, ci prevention,
+  ci categories, quick reference, ci error messages
+  | Diagnostic workflow, prevention checklist, quick reference error table,
+  summary categories, real-world examples, escalation | Infrastructure
 -->
 
 **Trigger**: When you need the systematic diagnostic workflow for CI failures, the
@@ -153,47 +154,59 @@ Before committing workflow changes, verify:
 ## Summary: The Twelve Categories
 
 ### Category 1: Configuration Mismatch
+
 **Example:** Python caching on Rust project | **Fix Time:** Minutes
 
 ### Category 2: Dependency Hygiene
+
 **Example:** 15+ unused dependencies | **Fix Time:** Hours
 
 ### Category 3: Toolchain Staleness
+
 **Example:** Nightly from 360 days ago | **Fix Time:** Minutes to Hours
 
 ### Category 4: Validation Script Fragility
+
 **Example:** `grep` exit code 1 kills script; lychee regex vs glob confusion
 **Prevention:** Use AWK over grep; `|| true` with grep; treat `.lychee.toml` exclude as regex
 
 ### Category 5: Code Fence and Config File Mismatches
+
 **Example:** YAML validator fails on `yaml`-tagged shell output; lychee self-scanning
 **Prevention:** Match code fence language tags to content; exclude `.lychee.toml` from self-scanning
 
 ### Category 6: Stale File References and Supply Chain Gaps
+
 **Example:** Dockerfile `COPY vendor/` after vendor deleted; tag-only action references
 **Prevention:** Audit Dockerfiles/workflows when removing files; enforce SHA pinning
 
 ### Category 7: Formatter / Spell-Checker Failures in New Test Code
+
 **Example:** `rustfmt --check` fails on new test file; `typos` flags British spellings in test data
 **Prevention:** Run `cargo fmt` before staging; add test data files to `[files] extend-exclude`
 
 ### Category 8: Invalid YAML in Documentation Code Block Examples
+
 **Example:** `...` placeholder in YAML block causes `yq` to fail
 **Prevention:** Use `# ...` (YAML comment) instead of `...` as a placeholder
 
 ### Category 9: Miri Isolation Failures for Wall-Clock Time
+
 **Example:** `chrono::Utc::now()` blocks Miri's isolation, aborting all tests in binary
 **Prevention:** `#[cfg_attr(miri, ignore)]` on any test calling wall-clock APIs
 
 ### Category 10: POSIX Shell Portability
+
 **Example:** `grep '\s'` fails on macOS BSD grep; `tac` unavailable on macOS
 **Prevention:** Use `[[:space:]]`; replace `tac` with AWK reverse pass
 
 ### Category 11: Release Preflight Safety
+
 **Example:** API errors treated as "no run found"; workflow IDs assumed unique
 **Prevention:** Fail closed on API errors; assert uniqueness; conditional artifact attachment
 
 ### Category 12: Panic Policy Precision
+
 **Example:** `#[cfg(test)]` on standalone function instead of `mod tests` block
 **Prevention:** Apply `#[cfg(test)]` to `mod tests`; use `cargo clippy --lib --bins`
 
@@ -234,12 +247,18 @@ Self-service troubleshooting should resolve 90% of CI issues. Escalate when:
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Patterns 1-6: ecosystem, cache, toolchain, Docker
-- [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md) — Patterns 7-9: Clippy, typos, markdown
-- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Patterns 9-16: locked, Miri, shell scripts, YAML
-- [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Patterns 10-20: lychee, regex, cargo-deny
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — Patterns 21-25: SHA pinning, Dockerfile
-- [github-actions-best-practices](./github-actions-workflow-config.md) — Writing new workflows
-- [msrv-and-toolchain-management](./msrv-management.md) — MSRV updates and consistency
+- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Patterns 1-6:
+  ecosystem, cache, toolchain, Docker
+- [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md) — Patterns 7-9:
+  Clippy, typos, markdown
+- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Patterns 9-16:
+  locked, Miri, shell scripts, YAML
+- [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Patterns 10-20:
+  lychee, regex, cargo-deny
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) —
+  Patterns 21-25: SHA pinning, Dockerfile
+- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — Writing new
+  workflows
+- [msrv-management](./msrv-management.md) — MSRV updates and consistency
 - [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning
 - [agent-self-review-checklist](./agent-self-review-checklist.md) — Pre-commit verification checklist

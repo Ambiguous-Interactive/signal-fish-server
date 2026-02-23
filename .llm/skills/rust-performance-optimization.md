@@ -50,7 +50,8 @@ Consider `panic = "abort"` for production binaries (smaller binary, no unwind ov
 ## Alternative Allocators
 
 Consider `tikv-jemallocator` (multi-threaded server workloads) or `mimalloc` (good cross-platform default).
-Neither is currently in project dependencies. Benchmark before committing — the default is often fine for I/O-bound servers.
+Neither is currently in project dependencies. Benchmark before committing —
+the default is often fine for I/O-bound servers.
 
 ```rust
 #[cfg(not(target_env = "msvc"))]

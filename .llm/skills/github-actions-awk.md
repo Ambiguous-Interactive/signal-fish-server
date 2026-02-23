@@ -5,7 +5,8 @@
   | Portable AWK patterns for multi-line content processing in CI scripts | Infrastructure
 -->
 
-**Trigger**: When writing AWK scripts for CI pipelines, extracting code blocks from Markdown, or debugging AWK failures on Ubuntu runners.
+**Trigger**: When writing AWK scripts for CI pipelines, extracting code blocks from Markdown,
+or debugging AWK failures on Ubuntu runners.
 
 ---
 

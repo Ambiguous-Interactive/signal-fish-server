@@ -1,9 +1,9 @@
 # Skill: DDoS Prevention — Application Protection, Infrastructure, and Monitoring
 
 <!--
-  trigger: ddos, load-shedding, backpressure, graceful-degradation, waf, circuit-breaker, ddos-monitoring, ddos-detection, ddos infrastructure
-  | Application-layer protection, WAF configuration, and DDoS monitoring
-  | Core
+  trigger: ddos, load-shedding, backpressure, graceful-degradation, waf,
+  circuit-breaker, ddos-monitoring, ddos-detection, ddos infrastructure
+  | Application-layer protection, WAF configuration, and DDoS monitoring | Core
 -->
 
 **Trigger**: When implementing application-layer DDoS protection, configuring WAF rules, or setting up
@@ -20,7 +20,8 @@ abuse detection monitoring and circuit breakers.
 
 ## When NOT to Use
 
-- Rate limiting middleware or connection caps (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
+- Rate limiting middleware or connection caps
+  (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
 - General authentication/authorization (see [web-service-security](./web-service-security-auth.md))
 
 ---
@@ -188,7 +189,8 @@ async fn health_check(State(health): State<Arc<ServerHealth>>) -> impl IntoRespo
 }
 ```
 
-On `SIGTERM`, stop accepting new connections and drain with `axum::serve(...).with_graceful_shutdown(shutdown_signal())`.
+On `SIGTERM`, stop accepting new connections and drain with
+`axum::serve(...).with_graceful_shutdown(shutdown_signal())`.
 
 ---
 
@@ -219,7 +221,8 @@ On `SIGTERM`, stop accepting new connections and drain with `axum::serve(...).wi
 
 ## Related Skills
 
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) — Rate limiting, connection caps, WebSocket throttling
+- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+  Rate limiting, connection caps, WebSocket throttling
 - [graceful-degradation](./graceful-degradation-deployment.md) — Full graceful degradation and circuit breaker patterns
 - [web-service-security](./web-service-security-auth.md) — Authentication, authorization, input validation, TLS
 - [observability-and-logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting

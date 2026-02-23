@@ -1,11 +1,13 @@
 # Skill: GitHub Actions Caching & Action Pinning
 
 <!--
-  trigger: github actions, caching, cache, rust-cache, sha pinning, action versions, dockerfile, docker version, msrv
+  trigger: GitHub actions, caching, cache, rust-cache, sha pinning,
+  action versions, dockerfile, Docker version, msrv
   | Patterns for language-specific caching, SHA-pinned action versions, and Docker version formats | Infrastructure
 -->
 
-**Trigger**: When configuring caching in workflows, pinning action versions, or dealing with Docker Hub image tag formats.
+**Trigger**: When configuring caching in workflows, pinning action versions,
+or dealing with Docker Hub image tag formats.
 
 ---
 
@@ -19,7 +21,7 @@
 
 ## When NOT to Use
 
-- Container build and deployment patterns (see [container-and-deployment](./container-docker.md))
+- Container build and deployment patterns (see [Container Docker](./container-docker.md))
 - Scheduled workflow patterns (see [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md))
 
 ## TL;DR

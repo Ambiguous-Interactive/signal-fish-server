@@ -21,7 +21,7 @@ or peer identity verification for the signaling server.
 
 ## When NOT to Use
 
-- Session lifecycle and JWT token validation (see [websocket-session-lifecycle](./websocket-session-lifecycle.md))
+- Session lifecycle and JWT token validation (see [WebSocket-session-lifecycle](./websocket-session-lifecycle.md))
 - Rate limiting and connection caps (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
 
 ## Rationalizations to Reject
@@ -293,7 +293,8 @@ async fn handle_signal(
 
 ## Related Skills
 
-- [websocket-session-lifecycle](./websocket-session-lifecycle.md) — Session creation, JWT validation, timeout management
+- [WebSocket-session-lifecycle](./websocket-session-lifecycle.md) — Session creation, JWT validation, timeout management
 - [web-service-security-auth](./web-service-security-auth.md) — General auth patterns, input validation, TLS
-- [WebSocket-protocol-patterns](./WebSocket-protocol-patterns.md) — WebSocket lifecycle, message framing, heartbeat
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) — Rate limiting, connection caps, abuse prevention
+- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message framing, heartbeat
+- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+  Rate limiting, connection caps, abuse prevention

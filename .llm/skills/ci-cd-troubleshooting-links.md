@@ -1,9 +1,11 @@
 # Skill: CI/CD Troubleshooting - Link Checker & Lychee Patterns
 
 <!--
-  trigger: lychee failure, link checker, broken links, lychee regex, lychee config, lychee toml, exclude_path, lychee version bug, TOML before after example, cargo deny cvss
-  | Patterns 10-20: Link checker failures, lychee configuration, regex pitfalls, version-specific bugs, TOML validation, cargo-deny CVSS
-  | Infrastructure
+  trigger: lychee failure, link checker, broken links, lychee regex, lychee config,
+  lychee toml, exclude_path, lychee version bug, TOML before after example,
+  cargo deny cvss
+  | Patterns 10-20: Link checker failures, lychee configuration, regex pitfalls,
+  version-specific bugs, TOML validation, cargo-deny CVSS | Infrastructure
 -->
 
 **Trigger**: When debugging link checker failures (lychee), `.lychee.toml` regex vs glob
@@ -19,7 +21,8 @@ See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem
 
 ## TL;DR
 
-- **Lychee regex vs glob**: `.lychee.toml` `exclude` field takes **regex**, not glob — escape `.` as `\\.`, use `.*` not `*`
+- **Lychee regex vs glob**: `.lychee.toml` `exclude` field takes **regex**, not glob — escape
+  `.` as `\\.`, use `.*` not `*`
 - **Lychee scans itself**: Use `--exclude-path .lychee.toml` CLI flag; TOML `exclude_path` has bugs
 - **`exclude_path` TOML bug**: Does not apply to glob-expanded files — always use CLI `--exclude-path` flags
 - **TOML before/after examples**: Single block with duplicate table headers is invalid TOML — split into two blocks
@@ -291,6 +294,7 @@ by the corresponding CI validator, so each block must independently pass parsing
 
 - [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
 - [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile, stale scripts
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) —
+  SHA pinning, Dockerfile, stale scripts
 - [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
 - [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning

@@ -1,8 +1,11 @@
 # Skill: GitHub Actions Workflow Configuration
 
 <!--
-  trigger: github actions, workflow, lychee, link checker, case sensitive, smoke test, docker smoke test, permissions, path filter, concurrency, yaml
-  | Patterns for configuring GitHub Actions workflows: link checking, path filters, permissions, smoke tests | Infrastructure
+  trigger: GitHub actions, workflow, lychee, link checker,
+  case sensitive, smoke test, Docker smoke test, permissions,
+  path filter, concurrency, yaml
+  | Patterns for configuring GitHub Actions workflows: link checking, path
+  filters, permissions, smoke tests | Infrastructure
 -->
 
 **Trigger**: When configuring workflow triggers, permissions, link checkers, smoke tests, or path filters.
@@ -287,7 +290,8 @@ installation failures in Docker containers.
 
 ## Related Skills
 
-- [GitHub Actions Caching](./github-actions-caching.md) — Ecosystem-specific caching, SHA pinning, Docker version formats
+- [GitHub Actions Caching](./github-actions-caching.md) —
+  Ecosystem-specific caching, SHA pinning, Docker version formats
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck, Bash best practices
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, proactive monitoring
 - [GitHub Actions Release](./github-actions-release.md) — Release gating, preflight hardening

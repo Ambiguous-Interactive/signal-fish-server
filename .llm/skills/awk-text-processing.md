@@ -82,6 +82,7 @@ done
 ```
 
 Key patterns:
+
 1. **NUL byte output**: `printf "%s%c", content, 0` (POSIX compatible)
 2. **NUL byte input**: `while IFS= read -r -d '' block`
 3. **Empty first line**: Check `if (content == "")` before appending
@@ -251,5 +252,5 @@ anchor the end: `/^```[Rr]ust(,.*| .*)?$/`.
 ## See Also
 
 - [shell-scripting-patterns](./shell-scripting-patterns.md) — bash idioms, error handling, portable scripts
-- [github-actions-awk](./github-actions-awk.md) — AWK examples in workflow YAML
+- [GitHub-actions-awk](./github-actions-awk.md) — AWK examples in workflow YAML
 - [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures

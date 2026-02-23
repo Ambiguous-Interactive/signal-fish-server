@@ -243,4 +243,4 @@ Every test failure message should include:
 
 - [testing-core-patterns](./testing-core-patterns.md) — Core test patterns (unit, async, table-driven)
 - [testing-ci-coverage](./testing-ci-coverage.md) — CI/CD smoke tests and config validation tests
-- [test-fixture-patterns](./test-fixture-structure.md) — Data-driven CI configuration tests
+- [test-fixture-structure](./test-fixture-structure.md) — Data-driven CI configuration tests

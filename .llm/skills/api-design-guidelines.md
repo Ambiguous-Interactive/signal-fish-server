@@ -223,8 +223,9 @@ impl IntoResponse for AppError {
 }
 ```
 
-Use versioned routes (`/v2/...`). Return structured JSON errors. Log internal errors server-side; return generic messages
-to clients. Maintain an OpenAPI specification for REST APIs with multiple endpoints.
+Use versioned routes (`/v2/...`). Return structured JSON errors.
+Log internal errors server-side; return generic messages to clients.
+Maintain an OpenAPI specification for REST APIs with multiple endpoints.
 
 ---
 

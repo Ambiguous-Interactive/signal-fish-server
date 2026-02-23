@@ -1,11 +1,13 @@
 # Skill: GitHub Actions Release Gating
 
 <!--
-  trigger: release, preflight, cargo locked, path filtered workflow, artifact upload, api error, workflow id, release gate
+  trigger: release, preflight, cargo locked, path filtered workflow,
+  artifact upload, api error, workflow id, release gate
   | Patterns for release preflight checks, cargo --locked consistency, and hardened release workflows | Infrastructure
 -->
 
-**Trigger**: When writing release workflows, preflight gates, or ensuring `--locked` consistency across all cargo commands.
+**Trigger**: When writing release workflows, preflight gates,
+or ensuring `--locked` consistency across all cargo commands.
 
 ---
 

@@ -171,7 +171,7 @@ The `typos` tool splits identifiers on case boundaries:
 - `extend-words` handles unsplit, lowercase words
 - `extend-identifiers` handles split, mixed-case terms
 
-**If you put `HashiCorp` in `extend-words`, it won't work** because typos splits it into components and doesn't find a match.
+**If you put `HashiCorp` in `extend-words`, it won't work** because typos splits it into components.
 
 ### Adding New Technical Terms
 

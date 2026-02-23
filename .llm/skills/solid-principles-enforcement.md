@@ -1,12 +1,14 @@
 # Skill: SOLID Principles Enforcement
 
 <!--
-  trigger: solid, single-responsibility, open-closed, liskov, interface-segregation, dependency-inversion, clean-code, architecture
+  trigger: solid, single-responsibility, open-closed, liskov,
+  interface-segregation, dependency-inversion, clean-code, architecture
   | Enforcing SOLID principles in Rust and TypeScript
   | Core
 -->
 
-**Trigger**: When designing, reviewing, or refactoring code to ensure adherence to SOLID principles and clean architecture.
+**Trigger**: When designing, reviewing, or refactoring code to ensure adherence
+to SOLID principles and clean architecture.
 
 ---
 
@@ -212,11 +214,13 @@ struct GameServer<D: Database> {
 
 ## AI-Friendly Code Patterns
 
-Code structured for SOLID is also structured for AI agents. These patterns help agents understand and modify code effectively:
+Code structured for SOLID is also structured for AI agents.
+These patterns help agents understand and modify code effectively:
 
 ### Naming
 
-- **Domain-specific vocabulary**: `RoomManager`, `PeerConnection`, `SignalingMessage` — not `Manager`, `Connection`, `Message`
+- **Domain-specific vocabulary**: `RoomManager`, `PeerConnection`,
+  `SignalingMessage` — not `Manager`, `Connection`, `Message`
 - **Intent-revealing functions**: `establish_peer_connection()` not `do_connect()`
 - **Consistent terminology**: If it's a "room" everywhere, don't alternate with "channel" or "session"
 

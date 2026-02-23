@@ -20,7 +20,7 @@ or session timeout logic for the signaling server.
 
 ## When NOT to Use
 
-- Anti-replay mechanisms, reconnect tokens (see [websocket-session-hijacking](./websocket-session-hijacking.md))
+- Anti-replay mechanisms, reconnect tokens (see [WebSocket-session-hijacking](./websocket-session-hijacking.md))
 - Rate limiting and connection caps (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
 - WebSocket framing or heartbeat (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
 
@@ -193,6 +193,7 @@ let decoding_key = DecodingKey::from_ec_pem(PUBLIC_KEY_PEM)?;
 
 ## Related Skills
 
-- [websocket-session-hijacking](./websocket-session-hijacking.md) — Session hijacking, CSWSH, anti-replay, reconnect tokens
+- [WebSocket-session-hijacking](./websocket-session-hijacking.md) —
+  Session hijacking, CSWSH, anti-replay, reconnect tokens
 - [web-service-security-auth](./web-service-security-auth.md) — General auth patterns, input validation, TLS
 - [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message framing, heartbeat

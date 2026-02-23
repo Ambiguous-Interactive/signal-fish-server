@@ -35,6 +35,7 @@ permissions, or onboarding team members to use pre-commit checks.
 **Without both, hooks work locally but fail for others (or in CI).**
 
 Additional requirements:
+
 - Store hooks in `.githooks/` (not `.git/hooks/`)
 - Configure git: `git config core.hooksPath .githooks`
 - Use `#!/usr/bin/env bash` shebang (portable across platforms)
@@ -107,6 +108,7 @@ git commit -m "Add pre-commit hook"
 ```
 
 **Why `.githooks/` instead of `.git/hooks/`:**
+
 - `.git/` is not tracked by git (local only)
 - `.githooks/` is tracked and shared with team
 
@@ -157,7 +159,7 @@ git commit -m "Add hook installation script"
 
 **Add to README.md or docs/development.md:**
 
-```markdown
+````markdown
 ## Development Setup
 
 ### Enable Git Hooks
@@ -167,15 +169,17 @@ git commit -m "Add hook installation script"
 ```
 
 This configures git to use pre-commit hooks that validate:
+
 - Code formatting (`cargo fmt --check`)
 - Markdown linting (if markdownlint-cli2 is installed)
 - Panic-prone patterns
 
 **To bypass hooks (emergencies only):**
+
 ```bash
 git commit --no-verify
 ```
-```
+````
 
 ---
 
@@ -240,5 +244,5 @@ Before committing new hooks:
 ## See Also
 
 - [git-hooks-checks](./git-hooks-checks.md) — Pre-commit hook design, checks, testing, debugging
-- [github-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
 - [shell-scripting-patterns](./shell-scripting-patterns.md) — Shell scripting best practices
