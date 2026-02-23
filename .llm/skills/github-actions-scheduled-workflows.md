@@ -149,8 +149,8 @@ jobs:
     # No `if:` guard — runs on ALL triggers including schedule
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<SHA>
-      - uses: EmbarkStudios/cargo-deny-action@<SHA>
+      - uses: actions/checkout@v6.0.2
+      - uses: EmbarkStudios/cargo-deny-action@v2.0.15
 
   lint:
     name: Lint
@@ -210,14 +210,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@<SHA>
+        uses: EmbarkStudios/cargo-deny-action@v2.0.15
         with:
           arguments: --all-features
 
       # Send notification on failure (scheduled runs only)
       - name: Notify on failure
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@<SHA>
+        uses: actions/github-script@v8.0.0
         with:
           script: |
             github.rest.issues.create({

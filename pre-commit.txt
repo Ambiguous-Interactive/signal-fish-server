@@ -1,0 +1,105 @@
+[pre-commit] Running pre-commit checks...
+
+[1/20] Checking code formatting...
+✓ PASS: Code formatting
+[2/20] Running clippy on staged files...
+   Compiling signal-fish-server v0.1.1 (/home/wallstop/code/signal-fish-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.27s
+✓ PASS: Clippy lints
+[3/20] Checking for panic-prone patterns...
+✓ PASS: Panic patterns
+[4/20] Checking MSRV consistency...
+⊘ SKIP: MSRV consistency (no MSRV-related files changed)
+[5/20] Validating AWK scripts in workflows...
+✓ PASS: AWK validation
+[6/20] Running yamllint on workflow files...
+⊘ SKIP: YAML lint (yamllint not installed (pip install yamllint))
+[7/20] Validating AWK file syntax...
+⊘ SKIP: AWK file syntax (no .awk files staged)
+[8/20] Running shellcheck on CI scripts...
+⊘ SKIP: Shellcheck CI scripts (no .github/scripts/*.sh files staged)
+[9/20] Validating markdown relative links in docs/...
+⊘ SKIP: Docs link validation (no docs/*.md files staged)
+[10/20] Checking markdown files...
+⊘ SKIP: Markdown linting (pinned markdownlint-cli2 unavailable (see .markdownlint-version))
+[11/20] Checking links in markdown files...
+⊘ SKIP: Link checking (lychee not installed)
+[12/20] Validating code blocks in markdown files...
+✓ PASS: Code block validation (43 blocks: JSON Bash)
+[13/20] Checking for British English spellings...
+✓ PASS: British English spellings
+[14/20] Checking path-filtered workflow registration...
+.githooks/pre-commit: 703: [: Illegal number: 0
+0
+.githooks/pre-commit: 703: [: Illegal number: 0
+0
+.githooks/pre-commit: 703: [: Illegal number: 0
+0
+✓ PASS: Path-filtered workflow registration
+[15/20] Checking schedule trigger guards...
+  Missing guard: .github/workflows/ci-safety.yml: job 'miri' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/ci-safety.yml: job 'asan' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+.githooks/pre-commit: 744: [: Illegal number: 0
+0
+  Missing guard: .github/workflows/doc-validation.yml: job 'shellcheck-workflow' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/doc-validation.yml: job 'rustdoc' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/doc-validation.yml: job 'doc-tests' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/doc-validation.yml: job 'markdown-code-samples' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/doc-validation.yml: job 'link-check' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/doc-validation.yml: job 'inline-code-references' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+.githooks/pre-commit: 744: [: Illegal number: 0
+0
+  Missing guard: .github/workflows/release.yml: job 'preflight' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/release.yml: job 'publish' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/unused-deps.yml: job 'unused-deps' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/unused-deps.yml: job 'unused-features' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+  Missing guard: .github/workflows/workflow-hygiene.yml: job 'workflow-hygiene' has no schedule exclusion guard
+    Add: if: github.event_name != 'schedule'
+✗ FAIL: Schedule trigger guards
+[pre-commit] ERROR: Jobs in schedule-triggered workflows need 'if: github.event_name != '"'"'schedule'"'"'' guards.
+
+[16/20] Checking generated skills index freshness...
+✓ PASS: Skills index freshness
+[17/20] Running workflow hygiene script checks...
+✓ PASS: Workflow hygiene checks
+[18/20] Checking LLM file sizes...
+✗ FAIL: LLM file sizes
+[pre-commit] ERROR: One or more .llm/ files exceed 300 lines. Run './scripts/check-llm-file-sizes.sh' for details.
+Tip: Split oversized files into focused sub-files of ≤300 lines.
+
+[19/20] Checking Miri compatibility...
+⊘ SKIP: Miri compatibility (no src/*.rs files staged)
+[20/20] Checking README badge style consistency...
+⊘ SKIP: README badge styles (README.md and scripts/check-readme-badges.sh not staged)
+
+==========================================
+[pre-commit] 2 check(s) FAILED, 9 passed
+
+Fix the errors above before committing.
+
+Quick fixes:
+  cargo fmt                                    # Fix formatting
+  cargo clippy --fix --allow-dirty            # Fix clippy warnings
+  ./scripts/check-markdown.sh fix             # Fix markdown
+  ./scripts/validate-ci.sh                    # Validate CI config
+  ./scripts/generate-skills-index.sh          # Refresh .llm/skills/index.md
+  ./scripts/check-llm-file-sizes.sh           # Check .llm/ file sizes
+  ./scripts/check-miri-compat.sh              # Check Miri annotations
+  ./scripts/check-readme-badges.sh README.md  # Check README badge styles
+  ./scripts/run-local-ci.sh --fix             # Fix all issues
+
+To bypass (NOT recommended):
+  git commit --no-verify
+

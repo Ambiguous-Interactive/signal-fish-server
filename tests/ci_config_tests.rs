@@ -2379,8 +2379,8 @@ fn test_dockerfile_uses_docker_version_format() {
 
 #[test]
 fn test_github_actions_use_version_refs_not_commit_hashes() {
-    // Enforce version/channel refs for GitHub Actions (e.g., @v4.2.2, @v2, @stable)
-    // and explicitly reject commit-hash pinning in workflow files.
+    // Enforce explicit version tags for GitHub Actions (e.g., @v4.2.2, @v2)
+    // and explicitly reject commit-hash and moving channel refs in workflow files.
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -2424,7 +2424,7 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
             if is_commit_hash(action_ref) {
                 violations.push(format!(
                     "{filename}:{line_num}: Action uses commit hash ref (not allowed): {action_name}@{action_ref}\n  \
-                     Expected a version/channel ref like @vX.Y.Z, @vX, or @stable."
+                     Expected an explicit version ref like @vX.Y.Z or @vX."
                 ));
                 file_has_violation = true;
                 continue;
@@ -2432,8 +2432,9 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
 
             if !is_action_version_ref(action_ref) {
                 violations.push(format!(
-                    "{filename}:{line_num}: Action ref is not an approved version/channel format: {action_name}@{action_ref}\n  \
-                     Allowed formats: @vX, @vX.Y, @vX.Y.Z, optionally with -suffix (e.g., @v2.7.5), or channels @stable/@beta/@nightly."
+                    "{filename}:{line_num}: Action ref is not an approved explicit-version format: {action_name}@{action_ref}\n  \
+                     Allowed formats: @vX, @vX.Y, @vX.Y.Z, optionally with prerelease/build suffix.\n  \
+                     Disallowed moving refs: @stable, @beta, @nightly, @main, @master, @latest."
                 ));
                 file_has_violation = true;
                 continue;
@@ -2449,7 +2450,7 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
 
     if !violations.is_empty() {
         panic!(
-            "GitHub Actions must use explicit version/channel refs and must not use commit hashes:\n\n{}\n\n\
+            "GitHub Actions must use explicit version refs and must not use commit hashes/moving channels:\n\n{}\n\n\
              Diagnostic Information:\n\
              - Workflow files checked: {}\n\
              - Total actions found: {}\n\
@@ -2593,11 +2594,12 @@ fn test_action_reference_parsing_and_validation_data_driven() {
         ("v2.7", true),
         ("v2.7.5", true),
         ("v2.7.5-beta.1", true),
-        ("stable", true),
-        ("beta", true),
-        ("nightly", true),
-        ("latest", false),
+        ("stable", false),
+        ("beta", false),
+        ("nightly", false),
         ("main", false),
+        ("master", false),
+        ("latest", false),
         ("", false),
         ("de0fac2e4500dabe0009e67214ff5f5447ce83dd", false),
     ];
@@ -3363,18 +3365,24 @@ fn parse_remote_action_reference(uses_value: &str) -> Option<(&str, &str)> {
     Some((action_name.trim(), action_ref))
 }
 
-/// Return `true` if the action reference uses an approved version/channel format.
+/// Return `true` if the action reference uses an approved explicit-version format.
 ///
 /// Allowed:
 /// - `vX`, `vX.Y`, `vX.Y.Z`, optional prerelease/build suffixes
-/// - channels: `stable`, `beta`, `nightly`
+///
+/// Disallowed:
+/// - moving channels/branches: `stable`, `beta`, `nightly`, `main`, `master`, `latest`
+/// - commit hashes (40-char hex)
 fn is_action_version_ref(reference: &str) -> bool {
     if reference.is_empty() || is_commit_hash(reference) {
         return false;
     }
 
-    if matches!(reference, "stable" | "beta" | "nightly") {
-        return true;
+    if matches!(
+        reference,
+        "stable" | "beta" | "nightly" | "main" | "master" | "latest"
+    ) {
+        return false;
     }
 
     let Some(version) = reference.strip_prefix('v') else {
@@ -7701,6 +7709,57 @@ fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
 }
 
 #[test]
+fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-push");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-push must exist to enforce workflow policy checks before push."
+    );
+
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("scripts/check-workflow-hygiene.sh"),
+        "pre-push hook must run scripts/check-workflow-hygiene.sh when workflow policy files change."
+    );
+
+    assert!(
+        content.contains("cargo test --test ci_config_tests")
+            && content.contains("test_github_actions_use_version_refs_not_commit_hashes")
+            && content.contains("test_workflow_toolchain_fields_do_not_use_moving_aliases"),
+        "pre-push hook must run CI policy tests for action refs and toolchain alias pinning."
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_pre_push_hook_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-push");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-push must exist to validate executable permissions."
+    );
+
+    let metadata = std::fs::metadata(&hook_path)
+        .unwrap_or_else(|e| panic!("Failed to read metadata for {}: {}", hook_path.display(), e));
+    let mode = metadata.permissions().mode();
+    let is_executable = mode & 0o111 != 0;
+
+    assert!(
+        is_executable,
+        "{} is not executable.\n\
+         Fix: chmod +x .githooks/pre-push && git update-index --chmod=+x .githooks/pre-push",
+        hook_path.display()
+    );
+}
+
+#[test]
 fn test_pre_commit_hook_includes_llm_file_size_check_18() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-commit");
@@ -8023,9 +8082,55 @@ fn test_no_workflow_action_uses_commit_hash_ref() {
 }
 
 #[test]
+fn test_workflow_toolchain_fields_do_not_use_moving_aliases() {
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("toolchain:") else {
+                continue;
+            };
+
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if matches!(value, "stable" | "beta" | "nightly") {
+                violations.push(format!(
+                    "{filename}:{}: toolchain: {value}\n  \
+                     Moving toolchain aliases are not allowed.\n  \
+                     Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-02-01),\n  \
+                     or omit toolchain to use rust-toolchain.toml.",
+                    line_num + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Workflow toolchain fields must not use moving aliases:\n\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn test_same_action_uses_consistent_ref_across_workflows() {
     // Every action should resolve to a single reference value across workflows
-    // to prevent version/channel drift (e.g., one file uses @v2 while another uses @v1).
+    // to prevent version drift (e.g., one file uses @v2 while another uses @v1).
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -8100,7 +8205,7 @@ fn test_same_action_uses_consistent_ref_across_workflows() {
              - Actions with consistent refs: {}\n\
              - Actions with inconsistent refs: {}\n\n\
              Why this matters:\n\
-             - Different refs for the same action mean different code versions/channels are running\n\
+             - Different refs for the same action mean different code versions are running\n\
              - Version drift can cause subtle behavior differences across workflows\n\n\
              How to fix:\n\
              1. Identify the desired ref for each action (e.g., @v2.7.5)\n\

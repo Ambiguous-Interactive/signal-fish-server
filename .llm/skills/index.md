@@ -33,7 +33,7 @@
 - [Git Safety — Safe Operations and Commit Instructions](./git-safety-safe-operations.md)
 - [AWK in CI/CD Pipelines](./github-actions-awk.md)
 - [Bash Scripts in CI/CD](./github-actions-bash-scripts.md)
-- [GitHub Actions Caching & Action Pinning](./github-actions-caching.md)
+- [GitHub Actions Caching & Action Versioning](./github-actions-caching.md)
 - [CI Configuration Validation Tests](./github-actions-config-tests.md)
 - [GitHub Actions Release Gating](./github-actions-release.md)
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md)

@@ -182,8 +182,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@<SHA> # v4.2.2
-      - uses: DavidAnson/markdownlint-cli2-action@<SHA> # v22.0.0
+      - uses: actions/checkout@v6.0.2
+      - uses: DavidAnson/markdownlint-cli2-action@v22.0.0
         with:
           globs: |
             **/*.md
@@ -195,8 +195,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@<SHA> # v4.2.2
-      - uses: lycheeverse/lychee-action@<SHA> # v2.7.0
+      - uses: actions/checkout@v6.0.2
+      - uses: lycheeverse/lychee-action@v2.7.0
         with:
           args: --verbose './**/*.md' --config .lychee.toml
         env:
@@ -207,8 +207,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@<SHA> # v4.2.2
-      - uses: crate-ci/typos@<SHA> # v1.30.1
+      - uses: actions/checkout@v6.0.2
+      - uses: crate-ci/typos@v1.30.1
         with:
           config: .typos.toml
 ```
@@ -217,7 +217,7 @@ jobs:
 
 - Runs on markdown and related documentation-config changes (path filters)
 - Separate jobs for different types of validation
-- Uses official actions with SHA pinning
+- Uses official actions with explicit version tags
 - Explicitly sets least-privilege `permissions` for each job
 
 ---

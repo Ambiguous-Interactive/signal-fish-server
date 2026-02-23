@@ -33,8 +33,8 @@ CI Failure
     +-- Docker error -----------> Check base image, build context, COPY paths
     +-- Workflow error ---------> Check syntax, permissions, secrets
     +-- Exit code 127 ----------> Check script references exist in repo
-    +-- Supply chain risk ------> Check action SHA pins (not tags)
-    +-- Action not found -------> SHA pin references deleted commit (force-push/rebase)
+    +-- Supply chain risk ------> Check action refs use explicit version tags (no moving refs)
+    +-- Action ref failure -----> Invalid/moving action ref or policy mismatch
     +-- Docker warning ---------> BuildKit false positive on ENV variable names
 ```
 
@@ -76,8 +76,8 @@ grep -r "cargo\|rust" .github/workflows/       # Should be present
 grep -E "nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}" .github/workflows/
 # Are any >6 months old?
 
-grep -E "uses: .+@[a-f0-9]{40}" .github/workflows/
-# Are any from >1 year ago?
+grep -E "uses: .+@(stable|beta|nightly|main|master|latest)$" .github/workflows/
+# Any moving refs present?
 
 grep "FROM rust:" Dockerfile
 # Is version current or outdated?
@@ -106,8 +106,8 @@ Before committing workflow changes, verify:
 
 - [ ] MSRV consistent across: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 - [ ] Pinned nightly toolchains documented with age and update criteria
-- [ ] All action `uses:` references are SHA-pinned (`@<40-char-sha> # vX.Y.Z`), not tag-only
-- [ ] Action SHA pins are recent (<1 year) or have documented reason for age
+- [ ] All action `uses:` references use explicit version tags (for example `@v6.0.2`)
+- [ ] No moving action refs (`@stable`, `@main`, `@master`, floating `@v2`)
 
 ### Dependency Hygiene
 
@@ -140,13 +140,13 @@ Before committing workflow changes, verify:
 | Lychee reports broken URL from `.lychee.toml` | Lychee scans its own config | Exclude `.lychee.toml` via `--exclude-path` |
 | Test assertion fails on config regex pattern | `contains("http://localhost")` vs regex | Test regex behavior (compile + match) |
 | `failed to calculate checksum of ref: not found` | Dockerfile `COPY` references removed path | Remove or update stale `COPY` instructions |
-| Action behavior changes without workflow edit | `uses:` references a mutable tag | Pin with SHA pin |
+| Action behavior changes without workflow edit | `uses:` uses a moving ref (`@stable`, `@main`, `@v2`) | Pin to explicit version tag |
 | `No such file or directory` (exit code 127) | `run:` step calls a deleted script | Remove stale script reference |
 | `toolchain 'X.Y.Z' is not installed` in cargo-deny | Docker action uses own toolchain | Set cargo-deny `with.rust-version` (prefer MSRV from Cargo.toml) |
 | Lychee scans dotfiles despite config | lychee v0.21.0 bug #1936 | Pin `lycheeVersion: v0.22.0` |
 | `exclude_path` in `.lychee.toml` has no effect | Confirmed bug for glob-expanded paths | Use `--exclude-path` CLI flags |
 | TOML validator fails on "before/after" example | Duplicate `[dependencies]` headers in one block | Split into separate fenced code blocks |
-| `An action could not be found at the URI` | SHA pin references force-pushed commit | Look up current SHA for version tag |
+| `An action could not be found at the URI` | Invalid/disallowed action ref in workflow | Update to explicit version tag allowed by policy |
 | `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV with security-related names | Add `# check=skip=SecretsUsedInArgOrEnv` as first line |
 | AlignedVec alignment lost after Bytes conversion | rkyv serialize() drops alignment via into_vec() | Use serialize_aligned() for zero-copy access |
 | WSL bash has no installed distributions (Windows CI) | Command::new("bash") resolves to WSL not Git Bash | Use Git Bash path on Windows CI runners |
@@ -180,7 +180,7 @@ Before committing workflow changes, verify:
 ### Category 6: Stale File References and Supply Chain Gaps
 
 **Example:** Dockerfile `COPY vendor/` after vendor deleted; tag-only action references
-**Prevention:** Audit Dockerfiles/workflows when removing files; enforce SHA pinning
+**Prevention:** Audit Dockerfiles/workflows when removing files; enforce explicit-version action refs
 
 ### Category 7: Formatter / Spell-Checker Failures in New Test Code
 
@@ -258,7 +258,7 @@ Self-service troubleshooting should resolve 90% of CI issues. Escalate when:
 - [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Patterns 10-20:
   lychee, regex, cargo-deny
 - [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) —
-  Patterns 21-25: SHA pinning, Dockerfile
+  Patterns 21-25: action ref policy, Dockerfile
 - [GitHub-actions-best-practices](./github-actions-workflow-config.md) — Writing new
   workflows
 - [msrv-management](./msrv-management.md) — MSRV updates and consistency

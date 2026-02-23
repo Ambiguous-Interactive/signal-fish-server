@@ -249,16 +249,11 @@ echo "Summary: total=$total validated=$validated skipped=$skipped failed=$failed
 
 ## Prevention Checklist
 
-Before committing shell scripts:
-
-- [ ] Shell script uses `set -euo pipefail`
-- [ ] All variables quoted: `"$var"`
+- [ ] Uses `set -euo pipefail`; all variables quoted: `"$var"`
 - [ ] Cleanup uses `trap 'rm -rf "$TEMP_DIR"' EXIT`
-- [ ] Pipeline counter variables use file-based approach or process substitution
+- [ ] Pipeline counters use file-based approach or process substitution
 - [ ] `IFS` uses single-character delimiter (not multi-char like `:::`)
-- [ ] Shellcheck validation passes with no warnings
-- [ ] Script documented with comments explaining key patterns
-- [ ] Tested locally before pushing to CI
+- [ ] Shellcheck passes; tested locally before pushing to CI
 
 ---
 
@@ -275,19 +270,29 @@ another single character that won't appear in content.
 `/bin/bash` may not exist on all systems (e.g., FreeBSD uses `/usr/local/bin/bash`).
 `#!/usr/bin/env bash` works on macOS, Linux, and BSD.
 
+### `grep -c` Fallback Produces Multi-Line Output
+
+`grep -c` outputs "0" with exit code 1 when no matches found. Wrapping it as
+`$(grep -c ... || echo "0")` produces "0\n0" — grep emits "0", then the
+fallback echo also emits "0", both inside the same command substitution.
+
+```bash
+# BAD: Multi-line output when grep finds 0 matches
+COUNT=$(grep -c "pattern" file.txt || echo "0")
+
+# GOOD: Separate the fallback from command substitution
+COUNT=$(grep -c "pattern" file.txt 2>/dev/null) || COUNT=0
+```
+
 ### Run `scripts/validate-ci.sh` Before Pushing
 
-Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
-
-- AWK file syntax (files in `.github/scripts/`)
-- Shell script lint (shellcheck on `scripts/` and `.githooks/`)
-- Markdown link integrity
+Validates AWK syntax, shellcheck on `scripts/` and `.githooks/`, and Markdown links.
 
 ---
 
 ## See Also
 
-- [awk-text-processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
-- [GitHub-actions-bash-scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
-- [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
-- [defensive-programming](./defensive-programming.md) — Error handling principles
+- [AWK Text Processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
+- [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
+- [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
+- [Defensive Programming](./defensive-programming.md) — Error handling principles

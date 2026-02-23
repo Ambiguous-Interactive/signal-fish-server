@@ -10,6 +10,8 @@
 #   - Pull requests to main
 #   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
 #
+# all-jobs-run-on-schedule
+#
 # Features:
 #   - Binary caching for cargo-machete and cargo-udeps
 #   - Nightly toolchain pinned for reproducibility (see nightly version below)
@@ -78,7 +80,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
           components: rustc
@@ -107,7 +109,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
 

@@ -10,6 +10,8 @@
 #   - Weekly schedule (Sunday at 02:00 UTC) for heavy analysis jobs
 #   - Manual workflow_dispatch for diagnostics and debugging
 #
+# all-jobs-run-on-schedule
+#
 # Staged / Non-Required Status:
 #   Both jobs use continue-on-error: true and are NOT branch-protection required
 #   checks. They produce actionable diagnostics (uploaded as artifacts) but do
@@ -59,7 +61,6 @@
 #     - No nightly toolchain incidents (breakage, unavailability) during that window
 #     - Median runtime stays within the timeout budget (45 min Miri, 30 min ASan)
 #   Until promotion, failures are informational and should be triaged weekly.
-# all-jobs-run-on-schedule
 
 name: Advanced Safety
 
@@ -97,7 +98,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain with Miri
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
           components: miri, rust-src
@@ -137,7 +138,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
 

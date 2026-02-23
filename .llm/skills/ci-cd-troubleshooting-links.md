@@ -1,5 +1,4 @@
 # Skill: CI/CD Troubleshooting - Link Checker & Lychee Patterns
-
 <!--
   trigger: lychee failure, link checker, broken links, lychee regex, lychee config,
   lychee toml, exclude_path, lychee version bug, TOML before after example,
@@ -8,14 +7,9 @@
   version-specific bugs, TOML validation, cargo-deny CVSS | Infrastructure
 -->
 
-**Trigger**: When debugging link checker failures (lychee), `.lychee.toml` regex vs glob
-confusion, lychee version-specific bugs, TOML before/after validation failures, or
-cargo-deny CVSS parsing errors.
+**Trigger**: When debugging link checker failures (lychee), `.lychee.toml` regex vs glob confusion, lychee version-specific bugs, TOML before/after validation failures, or cargo-deny CVSS parsing errors.
 
-See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md),
-[ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md),
-[ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md),
-[ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
+See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md), [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md), [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md), [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
 
 ---
 
@@ -116,7 +110,7 @@ can force a different version inside the container.
     echo "version=$MSRV" >> "$GITHUB_OUTPUT"
 
 - name: Run cargo-deny
-  uses: EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15
+  uses: EmbarkStudios/cargo-deny-action@v2.0.15
   with:
     arguments: --all-features
     rust-version: ${{ steps.deny-msrv.outputs.version }}
@@ -257,7 +251,7 @@ glob args with `--`:
 
 ```yaml
 - name: Link Checker
-  uses: lycheeverse/lychee-action@<SHA>
+  uses: lycheeverse/lychee-action@v2.7.0
   with:
     args: >-
       --verbose --no-progress
@@ -299,7 +293,6 @@ by the corresponding CI validator, so each block must independently pass parsing
 
 - [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
 - [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) —
-  SHA pinning, Dockerfile, stale scripts
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile, stale scripts
 - [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
 - [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning

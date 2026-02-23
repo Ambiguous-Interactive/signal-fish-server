@@ -118,11 +118,12 @@ Run the size linter: `./scripts/check-llm-file-sizes.sh`
 
 1. Edit the skill file
 2. Run size linter: `./scripts/check-llm-file-sizes.sh`
-3. If > 300 lines: **STOP** — must split before committing
-4. Regenerate index: `./scripts/generate-skills-index.sh`
+3. Run regression guard: `cargo test --test llm_file_size_script_tests`
+4. If > 300 lines: **STOP** — must split before committing
+5. Regenerate index: `./scripts/generate-skills-index.sh`
    - Index ordering: deterministic `LC_ALL=C` sort by file path/filename (not by title)
-5. Ensure `.llm/skills/index.md` is updated and staged
-6. Verify `.llm/context.md` references `skills/index.md`
+6. Ensure `.llm/skills/index.md` is updated and staged
+7. Verify `.llm/context.md` references `skills/index.md`
 
 ---
 

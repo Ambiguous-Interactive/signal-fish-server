@@ -138,7 +138,7 @@ error[E0658]: use of unstable library feature 'foo'
 
 ```yaml
 # PROBLEM: Nightly from 360 days ago
-- uses: dtolnay/rust-toolchain@stable
+- uses: dtolnay/rust-toolchain@v1
   with:
     toolchain: nightly-2025-02-21  # 360 days old!
 ```
@@ -147,7 +147,7 @@ error[E0658]: use of unstable library feature 'foo'
 
 ```yaml
 # CORRECT: Recent nightly (within last 30 days)
-- uses: dtolnay/rust-toolchain@stable
+- uses: dtolnay/rust-toolchain@v1
   with:
     toolchain: nightly-2026-02-01  # recent, acceptable
 ```
@@ -160,7 +160,7 @@ For stable MSRV issues, see [msrv-management](./msrv-management.md).
 |----------------|-------------|-----------------|
 | Stable MSRV | N/A | Update when dependencies require it |
 | Pinned nightly | 6 months | Proactive update recommended |
-| Action SHA pins | 1 year | Review for security updates |
+| Action version tags | 1 year | Review for security updates |
 | Docker base images | 6 months | Update for security patches |
 
 ```bash
@@ -295,6 +295,6 @@ docker build --no-cache --progress=plain -t test .
 ## Related Skills
 
 - [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
 - [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow and quick reference
 - [msrv-management](./msrv-management.md) — MSRV updates and consistency

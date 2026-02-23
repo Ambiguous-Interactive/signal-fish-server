@@ -326,12 +326,13 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 8. Check for explicit action version/channel refs (no commit hashes)
+# 8. Check for explicit action version refs (no commit hashes or moving channels)
 # ---------------------------------------------------------------------------
 info "Checking GitHub Actions reference format policy..."
 
 VALID_REF_COUNT=0
 HASH_REF_COUNT=0
+FLOATING_REF_COUNT=0
 INVALID_REF_COUNT=0
 
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
@@ -357,20 +358,28 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                 continue
             fi
 
-            # Allow semver-ish tags and supported channels.
-            if [[ "$REF" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]] || [[ "$REF" =~ ^(stable|beta|nightly)$ ]]; then
+            # Disallow moving channels/branches.
+            if [[ "$REF" =~ ^(stable|beta|nightly|main|master|latest)$ ]]; then
+                error "$WORKFLOW_NAME: Action uses moving channel/branch ref (disallowed): $ACTION_NAME@$REF"
+                error "  Use an explicit version tag instead (for example @v2.5.0)."
+                FLOATING_REF_COUNT=$((FLOATING_REF_COUNT + 1))
+                continue
+            fi
+
+            # Allow explicit version tags.
+            if [[ "$REF" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
                 VALID_REF_COUNT=$((VALID_REF_COUNT + 1))
             else
                 error "$WORKFLOW_NAME: Action uses invalid ref format: $ACTION_NAME@$REF"
-                error "  Allowed refs: vX, vX.Y, vX.Y.Z (optionally with suffix), stable, beta, nightly"
+                error "  Allowed refs: vX, vX.Y, vX.Y.Z (optionally with prerelease/build suffix)."
                 INVALID_REF_COUNT=$((INVALID_REF_COUNT + 1))
             fi
         fi
     done < "$workflow"
 done
 
-if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ]; then
-    success "All $VALID_REF_COUNT GitHub Actions use explicit version/channel refs"
+if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$FLOATING_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ]; then
+    success "All $VALID_REF_COUNT GitHub Actions use explicit version tags"
 fi
 echo ""
 
@@ -629,6 +638,32 @@ done
 
 if [ "$TOOLING_PIN_VIOLATIONS" -eq 0 ]; then
     success "No unpinned external tooling execution patterns found"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# 11. Check for moving Rust toolchain aliases in workflows
+# ---------------------------------------------------------------------------
+info "Checking workflows for moving Rust toolchain aliases..."
+
+TOOLCHAIN_ALIAS_VIOLATIONS=0
+
+for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$workflow" ] || continue
+    WORKFLOW_NAME=$(basename "$workflow")
+
+    while IFS= read -r match; do
+        [ -n "$match" ] || continue
+        line_no=${match%%:*}
+        line_body=${match#*:}
+        error "$WORKFLOW_NAME:$line_no: Uses moving Rust toolchain alias in workflow: $line_body"
+        error "  Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-02-01), or omit toolchain to use rust-toolchain.toml."
+        TOOLCHAIN_ALIAS_VIOLATIONS=$((TOOLCHAIN_ALIAS_VIOLATIONS + 1))
+    done < <(grep -nE '^[[:space:]]*toolchain:[[:space:]]*["'"'"']?(stable|beta|nightly)["'"'"']?[[:space:]]*$' "$workflow" || true)
+done
+
+if [ "$TOOLCHAIN_ALIAS_VIOLATIONS" -eq 0 ]; then
+    success "No moving Rust toolchain aliases found in workflows"
 fi
 echo ""
 

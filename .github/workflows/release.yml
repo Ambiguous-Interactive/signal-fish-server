@@ -15,9 +15,14 @@
 #   cancel-in-progress is set to false because aborting a half-finished
 #   publish could leave crates.io in an inconsistent state.
 #
-# Versioning philosophy:
-#   All third-party GitHub Actions use explicit version/channel refs
-#   (for example `@v2.5.0` or `@stable`) for readability and consistency.
+# Action reference policy:
+#   We intentionally use explicit version tags (for example `@v2.5.0`) instead
+#   of commit SHAs. Trade-off: tags are mutable, while SHAs are immutable.
+#   Compensating controls in this repository:
+#     - No moving channels/branches for `uses:` refs (`stable`, `main`, etc. disallowed)
+#     - Uniform refs across workflows (drift tests in tests/ci_config_tests.rs)
+#     - Dependabot updates for GitHub Actions plus required CI review
+#     - Least-privilege workflow permissions
 #
 # Steps:
 #   1. Preflight: verify CI and doc-validation passed on this commit
@@ -239,9 +244,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@v1
 
       - name: Configure sccache
         id: sccache
@@ -338,7 +341,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.68.8
         with:
           tool: cargo-sbom
 

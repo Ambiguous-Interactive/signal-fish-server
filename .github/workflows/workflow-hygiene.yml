@@ -11,6 +11,8 @@
 #   - Pull requests to main (only for workflow file changes)
 #   - Weekly schedule (Monday at 06:00 UTC) for proactive staleness detection
 #
+# all-jobs-run-on-schedule
+#
 # Features:
 #   - Language-specific caching validation (no Python cache on Rust projects)
 #   - Nightly toolchain staleness detection (warns at 180 days, errors at 365 days)
@@ -69,4 +71,4 @@ jobs:
           echo "  - Workflows have self-validation infrastructure"
           echo "  - Dependency audit workflows are present"
           echo "  - Jobs have timeout configurations"
-          echo "  - GitHub Actions use explicit version/channel refs"
+          echo "  - GitHub Actions use explicit version tags (no moving channels)"

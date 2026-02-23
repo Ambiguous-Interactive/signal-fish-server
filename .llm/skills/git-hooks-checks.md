@@ -22,7 +22,7 @@ performance, debugging hook failures, or validating hook permissions in CI.
 
 ## When NOT to Use
 
-- Initial hook setup and permissions (see [git-hooks-installation](./git-hooks-installation.md))
+- Initial hook setup and permissions (see [Hook Installation](./git-hooks-installation.md))
 
 ---
 
@@ -160,6 +160,22 @@ echo "[pre-commit] Running fast checks..."
 cargo fmt --check
 ```
 
+### grep -c Fallback Anti-Pattern
+
+In POSIX shell, `grep -c` outputs "0" with exit code 1 when no matches are found.
+Wrapping `$(grep -c ... || echo "0")` produces multi-line output ("0\n0") because
+grep emits "0", then the fallback echo also emits "0" — both inside the same
+command substitution.
+
+```bash
+# BAD: Multi-line output when grep finds 0 matches
+COUNT=$(grep -c "pattern" file.txt || echo "0")
+# COUNT becomes "0\n0" — breaks arithmetic
+
+# GOOD: Separate the fallback from the command substitution
+COUNT=$(grep -c "pattern" file.txt 2>/dev/null) || COUNT=0
+```
+
 ---
 
 ## Testing Hooks
@@ -185,13 +201,8 @@ git commit --no-verify -m "Bypass test"
 ### Test Permission Setup
 
 ```bash
-# Check filesystem permission
-ls -la .githooks/pre-commit
-# Should show: -rwxr-xr-x (executable)
-
-# Check git index permission
-git ls-files -s .githooks/pre-commit
-# Should show: 100755 (executable in git)
+ls -la .githooks/pre-commit           # Should show -rwxr-xr-x
+git ls-files -s .githooks/pre-commit  # Should show 100755
 ```
 
 ---
@@ -252,26 +263,17 @@ set -euo pipefail
 
 ### Common Issues
 
-**Hook not running:**
-
 ```bash
-git config core.hooksPath
-# Should output: .githooks
-git config core.hooksPath .githooks  # Re-enable if needed
-```
+# Hook not running:
+git config core.hooksPath              # Should output: .githooks
+git config core.hooksPath .githooks    # Re-enable if needed
 
-**Permission denied:**
-
-```bash
+# Permission denied:
 chmod +x .githooks/pre-commit
 git update-index --chmod=+x .githooks/pre-commit
-```
 
-**Command not found:**
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-export PATH="/usr/local/bin:$PATH"
+# Command not found:
+export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
 ```
 
 ---
@@ -281,16 +283,14 @@ export PATH="/usr/local/bin:$PATH"
 1. **Make hooks optional** — graceful degradation if tool not installed
 2. **Always document `--no-verify`** — show bypass in error message
 3. **Keep in sync with CI** — hooks should match CI validation steps
-4. **Document requirements** — list optional tools in README
 
 When to bypass: emergency hotfix, hook false positive, iterating on hook itself.
-When NOT to bypass: "I'll fix it later", "tests are slow", "I know what I'm doing".
 
 ---
 
 ## See Also
 
-- [git-hooks-installation](./git-hooks-installation.md) — Setup, permissions, directory structure, team onboarding
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
-- [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI failures
-- [mandatory-workflow](./mandatory-workflow.md) — Required validation steps
+- [Hook Installation](./git-hooks-installation.md) — Setup, permissions, team onboarding
+- [Workflow Configuration](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI failures
+- [Mandatory Workflow](./mandatory-workflow.md) — Required validation steps
