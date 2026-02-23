@@ -57,17 +57,15 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-
+        uses: Swatinem/rust-cache@v2.7.5
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -85,17 +83,14 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
+        uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-
+        uses: Swatinem/rust-cache@v2.7.5
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
 
@@ -112,10 +107,9 @@ jobs:
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
+        uses: EmbarkStudios/cargo-deny-action@v2.0.15
         with:
           arguments: --all-features
         env:
@@ -138,8 +132,7 @@ jobs:
     # across all configuration files (rust-toolchain.toml, clippy.toml, Dockerfile, etc.)
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Extract MSRV from Cargo.toml
         id: msrv
         run: |
@@ -227,12 +220,12 @@ jobs:
           echo "All MSRV configuration checks passed ✓"
 
       - name: Install Rust toolchain at MSRV
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+        uses: Swatinem/rust-cache@v2.7.5
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
@@ -249,8 +242,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Build Docker image
         run: docker build -t signal-fish-server:ci .
 
@@ -285,18 +277,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-
+        uses: Swatinem/rust-cache@v2.7.5
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
 
@@ -308,7 +298,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: coverage-report
           path: lcov.info
@@ -321,17 +311,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-
+        uses: Swatinem/rust-cache@v2.7.5
       - name: Run panic-policy check
         run: ./scripts/check-no-panics.sh
 
@@ -342,16 +330,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
+        uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-
+        uses: Swatinem/rust-cache@v2.7.5
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-sbom
 
@@ -360,7 +345,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: sbom-cyclonedx-${{ github.sha }}
           path: sbom.cdx.json

@@ -15,10 +15,9 @@
 #   cancel-in-progress is set to false because aborting a half-finished
 #   publish could leave crates.io in an inconsistent state.
 #
-# Pinning philosophy:
-#   All third-party GitHub Actions are SHA-pinned with version comments.
-#   Explicit tool version pins are intentionally omitted where the
-#   SHA-pinned action handles versioning, reducing maintenance burden.
+# Versioning philosophy:
+#   All third-party GitHub Actions use explicit version/channel refs
+#   (for example `@v2.5.0` or `@stable`) for readability and consistency.
 #
 # Steps:
 #   1. Preflight: verify CI and doc-validation passed on this commit
@@ -238,16 +237,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.9
         continue-on-error: true
 
       - name: Verify sccache is working
@@ -271,7 +269,7 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        uses: actions/cache@v4.2.2
         with:
           path: |
             ~/.cargo/registry
@@ -340,7 +338,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@f92912fad184299a31e22ad070a5059fd07d4f59 # v2
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-sbom
 
@@ -372,7 +370,7 @@ jobs:
           echo "$CHANGELOG_CONTENT" > release_notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        uses: softprops/action-gh-release@v2.5.0
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
           name: ${{ steps.get_version.outputs.tag }}
@@ -384,7 +382,7 @@ jobs:
 
       - name: Attach SBOM to release
         if: steps.sbom.outcome == 'success'
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        uses: softprops/action-gh-release@v2.5.0
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
           files: sbom.cdx.json

@@ -2336,13 +2336,9 @@ fn test_dockerfile_uses_docker_version_format() {
 }
 
 #[test]
-fn test_github_actions_are_pinned_to_sha() {
-    // This test validates that all GitHub Actions use SHA pinning instead of mutable tags
-    // SHA pinning prevents supply chain attacks where action maintainers could push
-    // malicious code to an existing tag (e.g., v4.2.2 could be changed after we reference it)
-    //
-    // Required format: uses: owner/repo@<64-char-sha> # vX.Y.Z
-    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+fn test_github_actions_use_version_refs_not_commit_hashes() {
+    // Enforce version/channel refs for GitHub Actions (e.g., @v4.2.2, @v2, @stable)
+    // and explicitly reject commit-hash pinning in workflow files.
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -2359,7 +2355,7 @@ fn test_github_actions_are_pinned_to_sha() {
     let mut violations = Vec::new();
     let mut total_files_checked = 0;
     let mut total_actions_found = 0;
-    let mut actions_pinned_correctly = 0;
+    let mut actions_with_valid_refs = 0;
     let mut files_with_violations = std::collections::HashSet::new();
 
     for entry in &workflow_files {
@@ -2373,50 +2369,35 @@ fn test_github_actions_are_pinned_to_sha() {
             let line_num = line_num + 1; // 1-indexed for human readability
             let trimmed = line.trim();
 
-            // Look for "uses:" lines that reference actions
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
+            let Some(uses_value) = extract_uses_value(trimmed) else {
+                continue;
+            };
 
-                // Skip local actions (e.g., ./.github/actions/setup)
-                if uses_value.starts_with("./") {
-                    continue;
-                }
+            let Some((action_name, action_ref)) = parse_remote_action_reference(uses_value) else {
+                continue;
+            };
 
-                // Skip docker:// references (different security model)
-                if uses_value.starts_with("docker://") {
-                    continue;
-                }
+            total_actions_found += 1;
 
-                total_actions_found += 1;
-
-                // Extract the action reference (owner/repo@ref)
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    violations.push(format!(
-                        "{filename}:{line_num}: Invalid action reference (missing @): {uses_value}"
-                    ));
-                    file_has_violation = true;
-                    continue;
-                }
-
-                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
-
-                if !is_sha_pinned(action_ref) {
-                    violations.push(format!(
-                        "{}:{}: Action not pinned to SHA: {}\n  \
-                         Found: {}\n  \
-                         Action references must use full 40-character SHA instead of tags.\n  \
-                         Tags are mutable and can be changed by maintainers (supply chain risk).\n  \
-                         Fix: Find SHA at https://github.com/{}/releases then update to:\n  \
-                         uses: {}@<40-char-sha> # <tag>\n  \
-                         Verify: grep -n 'uses:.*{}' .github/workflows/*.yml",
-                        filename, line_num, parts[0], action_ref, parts[0], parts[0], parts[0]
-                    ));
-                    file_has_violation = true;
-                } else {
-                    actions_pinned_correctly += 1;
-                }
+            if is_commit_hash(action_ref) {
+                violations.push(format!(
+                    "{filename}:{line_num}: Action uses commit hash ref (not allowed): {action_name}@{action_ref}\n  \
+                     Expected a version/channel ref like @vX.Y.Z, @vX, or @stable."
+                ));
+                file_has_violation = true;
+                continue;
             }
+
+            if !is_action_version_ref(action_ref) {
+                violations.push(format!(
+                    "{filename}:{line_num}: Action ref is not an approved version/channel format: {action_name}@{action_ref}\n  \
+                     Allowed formats: @vX, @vX.Y, @vX.Y.Z, optionally with -suffix (e.g., @v2.7.5), or channels @stable/@beta/@nightly."
+                ));
+                file_has_violation = true;
+                continue;
+            }
+
+            actions_with_valid_refs += 1;
         }
 
         if file_has_violation {
@@ -2426,30 +2407,18 @@ fn test_github_actions_are_pinned_to_sha() {
 
     if !violations.is_empty() {
         panic!(
-            "GitHub Actions must be pinned to SHA for security:\n\n{}\n\n\
+            "GitHub Actions must use explicit version/channel refs and must not use commit hashes:\n\n{}\n\n\
              Diagnostic Information:\n\
              - Workflow files checked: {}\n\
              - Total actions found: {}\n\
-             - Actions pinned correctly: {}\n\
+             - Actions with valid refs: {}\n\
              - Actions with violations: {}\n\
              - Workflows with violations: {}\n\n\
-             Workflows with violations:\n{}\n\n\
-             Why SHA pinning is required:\n\
-             - Tags (v1, v1.2.3) are mutable and can be changed by action maintainers\n\
-             - Attackers could compromise maintainer accounts and push malicious code to existing tags\n\
-             - SHA pinning ensures the exact code version is locked\n\n\
-             How to fix:\n\
-             1. Find the release/tag on GitHub: https://github.com/owner/repo/releases\n\
-             2. Click on the commit SHA for that tag\n\
-             3. Copy the full 40-character SHA\n\
-             4. Use format: uses: owner/repo@<SHA> # vX.Y.Z\n\n\
-             Example:\n\
-             - Bad:  uses: actions/checkout@v4.2.2\n\
-             - Good: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+             Workflows with violations:\n{}",
             violations.join("\n"),
             total_files_checked,
             total_actions_found,
-            actions_pinned_correctly,
+            actions_with_valid_refs,
             violations.len(),
             files_with_violations.len(),
             files_with_violations
@@ -2483,73 +2452,60 @@ fn test_cargo_deny_action_minimum_version() {
         let line_num = line_num + 1; // 1-indexed
         let trimmed = line.trim();
 
-        if trimmed.starts_with("uses:") && trimmed.contains("cargo-deny-action") {
+        let Some(uses_value) = extract_uses_value(trimmed) else {
+            continue;
+        };
+
+        if uses_value.contains("cargo-deny-action") {
             found_cargo_deny = true;
 
-            // Extract the SHA and check for version comment
-            let parts: Vec<&str> = trimmed.split('@').collect();
-            if parts.len() < 2 {
+            // Extract and validate action ref
+            let Some((_, action_ref)) = parse_remote_action_reference(uses_value) else {
                 violations.push(format!(
                     "Line {line_num}: cargo-deny-action reference is malformed: {trimmed}"
                 ));
                 continue;
-            }
+            };
 
-            let after_at = parts[1];
-
-            // Check if there's a version comment (# vX.Y.Z)
-            if !after_at.contains('#') {
+            // Parse version (must be vX.Y.Z for this minimum-version check)
+            if !action_ref.starts_with('v') {
                 violations.push(format!(
-                    "Line {line_num}: cargo-deny-action missing version comment\n  \
-                     Expected format: uses: EmbarkStudios/cargo-deny-action@<SHA> # vX.Y.Z"
+                    "Line {line_num}: cargo-deny-action must use an explicit version like @vX.Y.Z, found: @{action_ref}"
                 ));
                 continue;
             }
 
-            // Extract version from comment
-            if let Some(comment_part) = after_at.split('#').nth(1) {
-                let version_str = comment_part.trim();
+            let version_numbers = action_ref.trim_start_matches('v');
+            let version_parts: Vec<&str> = version_numbers.split('.').collect();
 
-                // Parse version (should be vX.Y.Z format)
-                if !version_str.starts_with('v') {
-                    violations.push(format!(
-                        "Line {line_num}: Version comment should start with 'v': {version_str}"
-                    ));
-                    continue;
-                }
+            if version_parts.len() < 3 {
+                violations.push(format!(
+                    "Line {line_num}: Invalid version format (expected vX.Y.Z): {action_ref}"
+                ));
+                continue;
+            }
 
-                let version_numbers = version_str.trim_start_matches('v');
-                let version_parts: Vec<&str> = version_numbers.split('.').collect();
+            // Parse major, minor, patch
+            let major: u32 = version_parts[0].parse().unwrap_or(0);
+            let minor: u32 = version_parts[1].parse().unwrap_or(0);
+            let patch: u32 = version_parts[2].parse().unwrap_or(0);
 
-                if version_parts.len() < 3 {
-                    violations.push(format!(
-                        "Line {line_num}: Invalid version format (expected vX.Y.Z): {version_str}"
-                    ));
-                    continue;
-                }
+            // Check against minimum version: v2.0.15
+            let min_major = 2;
+            let min_minor = 0;
+            let min_patch = 15;
 
-                // Parse major, minor, patch
-                let major: u32 = version_parts[0].parse().unwrap_or(0);
-                let minor: u32 = version_parts[1].parse().unwrap_or(0);
-                let patch: u32 = version_parts[2].parse().unwrap_or(0);
+            let is_sufficient = major > min_major
+                || (major == min_major && minor > min_minor)
+                || (major == min_major && minor == min_minor && patch >= min_patch);
 
-                // Check against minimum version: v2.0.15
-                let min_major = 2;
-                let min_minor = 0;
-                let min_patch = 15;
-
-                let is_sufficient = major > min_major
-                    || (major == min_major && minor > min_minor)
-                    || (major == min_major && minor == min_minor && patch >= min_patch);
-
-                if !is_sufficient {
-                    violations.push(format!(
-                        "Line {line_num}: cargo-deny-action version too old: {version_str}\n  \
-                         Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
-                         Found: v{major}.{minor}.{patch}\n  \
-                         Please update to v2.0.15 or newer for security and stability fixes."
-                    ));
-                }
+            if !is_sufficient {
+                violations.push(format!(
+                    "Line {line_num}: cargo-deny-action version too old: {action_ref}\n  \
+                     Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
+                     Found: v{major}.{minor}.{patch}\n  \
+                     Please update to v2.0.15 or newer for security and stability fixes."
+                ));
             }
         }
     }
@@ -2570,91 +2526,45 @@ fn test_cargo_deny_action_minimum_version() {
 }
 
 #[test]
-fn test_action_version_comments_exist() {
-    // This test validates that all GitHub Actions with SHA pinning have version comments
-    // Version comments make it easy to understand what version is being used without
-    // looking up the SHA on GitHub
-    //
-    // Required format: uses: owner/repo@<sha> # vX.Y.Z or # tag-name
-    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+fn test_action_reference_parsing_and_validation_data_driven() {
+    let parse_cases = [
+        (
+            "uses: actions/checkout@v6.0.2",
+            Some(("actions/checkout", "v6.0.2")),
+        ),
+        (
+            "- uses: actions/checkout@v6.0.2",
+            Some(("actions/checkout", "v6.0.2")),
+        ),
+        ("uses: ./.github/actions/custom", None),
+        ("- uses: docker://alpine:3.20", None),
+        ("run: echo hello", None),
+    ];
 
-    let root = repo_root();
-    let workflows_dir = root.join(".github/workflows");
-
-    let workflow_files = collect_workflow_files(&workflows_dir);
-
-    assert!(
-        !workflow_files.is_empty(),
-        "Workflows directory not found or empty at {}",
-        workflows_dir.display()
-    );
-
-    let mut violations = Vec::new();
-
-    for entry in workflow_files {
-        let path = entry.path();
-        let content = read_file(&path);
-        let filename = path.file_name().unwrap().to_string_lossy();
-
-        for (line_num, line) in content.lines().enumerate() {
-            let line_num = line_num + 1; // 1-indexed
-            let trimmed = line.trim();
-
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
-
-                // Skip local actions and docker references
-                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                // Extract the action reference
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    continue; // Already caught by SHA pinning test
-                }
-
-                let after_at = parts[1];
-                let action_ref = after_at.split_whitespace().next().unwrap_or("");
-
-                if is_sha_pinned(action_ref) {
-                    // SHA-pinned action should have a version comment
-                    if !after_at.contains('#') {
-                        violations.push(format!(
-                            "{}:{}: SHA-pinned action missing version comment: {}\n  \
-                             Add a comment with the version/tag for readability.\n  \
-                             Format: uses: {}@{} # vX.Y.Z or # tag-name",
-                            filename, line_num, parts[0], parts[0], action_ref
-                        ));
-                    } else {
-                        // Verify comment is not empty
-                        if let Some(comment_part) = after_at.split('#').nth(1) {
-                            let comment = comment_part.trim();
-                            if comment.is_empty() {
-                                violations.push(format!(
-                                    "{}:{}: Version comment is empty: {}\n  \
-                                     Provide the version/tag for this SHA (e.g., # v4.2.2)",
-                                    filename, line_num, parts[0]
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    for (line, expected) in parse_cases {
+        let parsed = extract_uses_value(line).and_then(parse_remote_action_reference);
+        assert_eq!(parsed, expected, "Unexpected parse result for line: {line}");
     }
 
-    if !violations.is_empty() {
-        panic!(
-            "GitHub Actions with SHA pinning must have version comments:\n\n{}\n\n\
-             Why version comments are required:\n\
-             - Makes it easy to understand which version is being used\n\
-             - Helps identify when updates are needed\n\
-             - Improves code review (reviewers can see version changes)\n\
-             - Enables automated version tracking tools\n\n\
-             Format: uses: owner/repo@<40-char-SHA> # vX.Y.Z\n\
-             Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
-            violations.join("\n")
+    let ref_cases = [
+        ("v2", true),
+        ("v2.7", true),
+        ("v2.7.5", true),
+        ("v2.7.5-beta.1", true),
+        ("stable", true),
+        ("beta", true),
+        ("nightly", true),
+        ("latest", false),
+        ("main", false),
+        ("", false),
+        ("de0fac2e4500dabe0009e67214ff5f5447ce83dd", false),
+    ];
+
+    for (action_ref, expected) in ref_cases {
+        assert_eq!(
+            is_action_version_ref(action_ref),
+            expected,
+            "Unexpected action ref policy result for: {action_ref}"
         );
     }
 }
@@ -3376,12 +3286,70 @@ fn collect_workflow_files(workflows_dir: &Path) -> Vec<std::fs::DirEntry> {
     files
 }
 
-/// Return `true` if `reference` is a valid 40-character lowercase hex SHA.
-///
-/// GitHub Actions require full-length SHA pinning (not tags) to prevent
-/// supply-chain attacks where a mutable tag could be silently updated.
-fn is_sha_pinned(reference: &str) -> bool {
+/// Return `true` if `reference` is a 40-character hexadecimal commit hash.
+fn is_commit_hash(reference: &str) -> bool {
     reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Extract `uses:` value from either `uses: ...` or `- uses: ...` YAML styles.
+fn extract_uses_value(trimmed_line: &str) -> Option<&str> {
+    trimmed_line
+        .strip_prefix("uses:")
+        .or_else(|| trimmed_line.strip_prefix("- uses:"))
+        .map(str::trim)
+}
+
+/// Parse remote action reference from a `uses` value.
+///
+/// Returns `(action_name, action_ref)` for remote actions and `None` for local actions,
+/// docker references, or malformed lines.
+fn parse_remote_action_reference(uses_value: &str) -> Option<(&str, &str)> {
+    if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
+        return None;
+    }
+
+    let (action_name, ref_and_comment) = uses_value.split_once('@')?;
+    let action_ref = ref_and_comment
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim();
+    if action_name.trim().is_empty() || action_ref.is_empty() {
+        return None;
+    }
+
+    Some((action_name.trim(), action_ref))
+}
+
+/// Return `true` if the action reference uses an approved version/channel format.
+///
+/// Allowed:
+/// - `vX`, `vX.Y`, `vX.Y.Z`, optional prerelease/build suffixes
+/// - channels: `stable`, `beta`, `nightly`
+fn is_action_version_ref(reference: &str) -> bool {
+    if reference.is_empty() || is_commit_hash(reference) {
+        return false;
+    }
+
+    if matches!(reference, "stable" | "beta" | "nightly") {
+        return true;
+    }
+
+    let Some(version) = reference.strip_prefix('v') else {
+        return false;
+    };
+
+    let mut chars = version.chars();
+    let Some(first_char) = chars.next() else {
+        return false;
+    };
+    if !first_char.is_ascii_digit() {
+        return false;
+    }
+
+    version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
 /// Truncate a semver string to `major.minor` format.
@@ -5538,7 +5506,7 @@ fn test_cargo_deny_has_rustup_toolchain_override() {
 
         // Detect the cargo-deny step (by name or uses)
         if trimmed.contains("cargo-deny")
-            && (trimmed.starts_with("uses:") || trimmed.starts_with("- name:"))
+            && (extract_uses_value(trimmed).is_some() || trimmed.starts_with("- name:"))
         {
             in_deny_step = true;
             deny_step_line = line_num + 1;
@@ -6131,8 +6099,8 @@ fn test_workflow_script_references_exist() {
 #[test]
 fn test_release_workflow_conventions() {
     // This test validates that the release workflow follows the same conventions
-    // as the other CI workflows (SHA pinning is checked separately by
-    // test_github_actions_are_pinned_to_sha which covers all workflows).
+    // as the other CI workflows (action ref policy is checked separately by
+    // test_github_actions_use_version_refs_not_commit_hashes which covers all workflows).
     //
     // Specific checks for release.yml:
     //   1. Has a timeout-minutes to prevent runaway builds
@@ -7983,20 +7951,9 @@ fn test_scripts_pass_basic_syntax_check() {
 }
 
 #[test]
-fn test_action_sha_references_are_valid_length() {
-    // Validates that every SHA-pinned GitHub Action reference uses exactly 40
-    // hexadecimal characters. A previous CI failure was caused by a SHA that was
-    // only 39 characters (taiki-e/install-action with a truncated SHA), which
-    // passed the "is it hex?" check but failed at runtime because GitHub requires
-    // exactly 40-character commit SHAs.
-    //
-    // The existing test_github_actions_are_pinned_to_sha validates that actions
-    // ARE pinned, but this test specifically targets length validity to catch
-    // truncation or copy-paste errors.
-
+fn test_no_workflow_action_uses_commit_hash_ref() {
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
-
     let workflow_files = collect_workflow_files(&workflows_dir);
 
     assert!(
@@ -8007,7 +7964,6 @@ fn test_action_sha_references_are_valid_length() {
     );
 
     let mut violations = Vec::new();
-    let mut total_sha_refs = 0;
 
     for entry in &workflow_files {
         let path = entry.path();
@@ -8015,87 +7971,36 @@ fn test_action_sha_references_are_valid_length() {
         let filename = path.file_name().unwrap().to_string_lossy();
 
         for (line_num, line) in content.lines().enumerate() {
-            let line_num = line_num + 1; // 1-indexed for human readability
+            let line_num = line_num + 1;
             let trimmed = line.trim();
 
-            // Look for "uses:" lines that reference actions
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
+            let Some(uses_value) = extract_uses_value(trimmed) else {
+                continue;
+            };
+            let Some((action_name, action_ref)) = parse_remote_action_reference(uses_value) else {
+                continue;
+            };
 
-                // Skip local actions (e.g., ./.github/actions/setup)
-                if uses_value.starts_with("./") {
-                    continue;
-                }
-
-                // Skip docker:// references (different security model)
-                if uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                // Extract the action reference (owner/repo@ref)
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    continue; // Missing @ is caught by test_github_actions_are_pinned_to_sha
-                }
-
-                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
-
-                // Only check references that look like hex SHAs (skip tag references like v4)
-                if action_ref.chars().all(|c| c.is_ascii_hexdigit()) && !action_ref.is_empty() {
-                    total_sha_refs += 1;
-                    let sha_len = action_ref.len();
-                    if sha_len != 40 {
-                        violations.push(format!(
-                            "{}:{}: SHA reference has {} characters (expected 40): {}\n  \
-                             Action: {}\n  \
-                             SHA: {}\n  \
-                             This is likely a truncation or copy-paste error.\n  \
-                             GitHub requires exactly 40-character hexadecimal commit SHAs.\n  \
-                             Fix: Look up the correct full SHA at https://github.com/{}/releases\n  \
-                             and replace with the complete 40-character SHA.",
-                            filename, line_num, sha_len, uses_value, parts[0], action_ref, parts[0]
-                        ));
-                    }
-                }
+            if is_commit_hash(action_ref) {
+                violations.push(format!(
+                    "{filename}:{line_num}: {action_name}@{action_ref}\n  \
+                     Commit hashes are not allowed for workflow action refs."
+                ));
             }
         }
     }
 
-    if !violations.is_empty() {
-        panic!(
-            "GitHub Action SHA references must be exactly 40 hexadecimal characters:\n\n\
-             {}\n\n\
-             Diagnostic Information:\n\
-             - Workflow files checked: {}\n\
-             - Total SHA references found: {}\n\
-             - Invalid SHA references: {}\n\n\
-             Why this matters:\n\
-             - GitHub commit SHAs are always exactly 40 hex characters\n\
-             - A truncated SHA (e.g., 39 characters) will fail with a cryptic GitHub error\n\
-             - This was an actual CI failure: taiki-e/install-action had a 39-character SHA\n\n\
-             How to fix:\n\
-             1. Go to https://github.com/owner/repo/releases and find the release tag\n\
-             2. Click on the commit hash to see the full 40-character SHA\n\
-             3. Copy the complete SHA and update the workflow file\n\
-             4. Verify with: echo -n '<sha>' | wc -c  (should output 40)",
-            violations.join("\n\n"),
-            workflow_files.len(),
-            total_sha_refs,
-            violations.len()
-        );
-    }
+    assert!(
+        violations.is_empty(),
+        "Workflow actions must not use commit hash refs:\n\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
-fn test_same_action_uses_consistent_sha_across_workflows() {
-    // Validates that every unique GitHub Action (e.g., taiki-e/install-action)
-    // uses the same SHA across ALL workflow files. A previous CI failure was
-    // caused by updating the taiki-e/install-action SHA in one workflow but
-    // missing another, leading to version inconsistency and unexpected behavior.
-    //
-    // This test collects all SHA-pinned action references, groups them by
-    // action name (owner/repo), and verifies that each action uses exactly
-    // one unique SHA across all workflow files.
+fn test_same_action_uses_consistent_ref_across_workflows() {
+    // Every action should resolve to a single reference value across workflows
+    // to prevent version/channel drift (e.g., one file uses @v2 while another uses @v1).
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -8106,8 +8011,8 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
         return;
     }
 
-    // Map of action name -> Vec<(sha, filename, line_num)>
-    let mut action_shas: std::collections::HashMap<String, Vec<(String, String, usize)>> =
+    // Map of action name -> Vec<(reference, filename, line_num)>
+    let mut action_refs: std::collections::HashMap<String, Vec<(String, String, usize)>> =
         std::collections::HashMap::new();
 
     for entry in &workflow_files {
@@ -8119,51 +8024,39 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
             let line_num = line_num + 1; // 1-indexed for human readability
             let trimmed = line.trim();
 
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
+            let Some(uses_value) = extract_uses_value(trimmed) else {
+                continue;
+            };
+            let Some((action_name, action_ref)) = parse_remote_action_reference(uses_value) else {
+                continue;
+            };
 
-                // Skip local actions and docker references
-                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    continue;
-                }
-
-                let action_name = parts[0].to_string();
-                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
-
-                // Only track SHA-pinned references (40-char hex)
-                if action_ref.len() == 40 && action_ref.chars().all(|c| c.is_ascii_hexdigit()) {
-                    action_shas.entry(action_name).or_default().push((
-                        action_ref.to_string(),
-                        filename.clone(),
-                        line_num,
-                    ));
-                }
-            }
+            action_refs
+                .entry(action_name.to_string())
+                .or_default()
+                .push((action_ref.to_string(), filename.clone(), line_num));
         }
     }
 
     let mut inconsistencies = Vec::new();
 
-    for (action_name, refs) in &action_shas {
-        let unique_shas: std::collections::HashSet<&str> =
-            refs.iter().map(|(sha, _, _)| sha.as_str()).collect();
+    for (action_name, refs) in &action_refs {
+        let unique_refs: std::collections::HashSet<&str> = refs
+            .iter()
+            .map(|(action_ref, _, _)| action_ref.as_str())
+            .collect();
 
-        if unique_shas.len() > 1 {
+        if unique_refs.len() > 1 {
             let mut details = format!(
-                "Action '{}' uses {} different SHAs across workflow files:",
+                "Action '{}' uses {} different refs across workflow files:",
                 action_name,
-                unique_shas.len()
+                unique_refs.len()
             );
-            for (sha, filename, line_num) in refs {
-                details.push_str(&format!("\n    {filename}:{line_num}: {sha}"));
+            for (action_ref, filename, line_num) in refs {
+                details.push_str(&format!("\n    {filename}:{line_num}: {action_ref}"));
             }
             details.push_str(&format!(
-                "\n  Fix: Update all references to '{action_name}' to use the same SHA.\n  \
+                "\n  Fix: Update all references to '{action_name}' to use the same ref.\n  \
                  Pick the most recent version and apply it to every workflow file.\n  \
                  Search with: grep -rn '{action_name}' .github/workflows/"
             ));
@@ -8172,25 +8065,22 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
     }
 
     if !inconsistencies.is_empty() {
-        let total_actions = action_shas.len();
+        let total_actions = action_refs.len();
         let consistent_actions = total_actions - inconsistencies.len();
         panic!(
-            "GitHub Action SHA references must be consistent across all workflow files:\n\n\
+            "GitHub Action refs must be consistent across all workflow files:\n\n\
              {}\n\n\
              Diagnostic Information:\n\
              - Unique actions found: {}\n\
-             - Actions with consistent SHAs: {}\n\
-             - Actions with inconsistent SHAs: {}\n\n\
+             - Actions with consistent refs: {}\n\
+             - Actions with inconsistent refs: {}\n\n\
              Why this matters:\n\
-             - Different SHAs for the same action mean different code versions are running\n\
-             - This was an actual CI failure: taiki-e/install-action was updated in one \
-             workflow but missed in another\n\
+             - Different refs for the same action mean different code versions/channels are running\n\
              - Version drift can cause subtle behavior differences across workflows\n\n\
              How to fix:\n\
-             1. Identify the latest desired SHA for each action\n\
-             2. Update ALL workflow files to use that SHA\n\
-             3. Verify with: grep -rn 'action-name@' .github/workflows/\n\
-             4. Ensure the version comment (# vX.Y.Z) matches the SHA",
+             1. Identify the desired ref for each action (e.g., @v2.7.5)\n\
+             2. Update ALL workflow files to use that same ref\n\
+             3. Verify with: grep -rn 'action-name@' .github/workflows/",
             inconsistencies.join("\n\n"),
             total_actions,
             consistent_actions,
