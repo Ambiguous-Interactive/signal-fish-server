@@ -44,6 +44,61 @@ fn extract_shields_urls(content: &str) -> Vec<(usize, String)> {
     urls
 }
 
+/// Return true when a Shields URL has `style=for-the-badge` as a query parameter.
+///
+/// This mirrors scripts/check-readme-badges.sh semantics:
+/// - style must be preceded by '?' or '&'
+/// - style must be followed by '&', '#', or end-of-string
+fn shields_url_has_for_the_badge_style(url: &str) -> bool {
+    const STYLE_PARAM: &str = "style=for-the-badge";
+
+    url.match_indices(STYLE_PARAM).any(|(idx, _)| {
+        let has_valid_prefix = idx > 0 && matches!(url.as_bytes()[idx - 1], b'?' | b'&');
+        let suffix_idx = idx + STYLE_PARAM.len();
+        let has_valid_suffix =
+            suffix_idx == url.len() || matches!(url.as_bytes()[suffix_idx], b'&' | b'#');
+        has_valid_prefix && has_valid_suffix
+    })
+}
+
+/// Collect README-style violations for Shields badge URLs that do not include
+/// style=for-the-badge.
+fn collect_shields_style_violations(file_name: &str, content: &str) -> Vec<String> {
+    extract_shields_urls(content)
+        .into_iter()
+        .filter(|(_, url)| !shields_url_has_for_the_badge_style(url))
+        .map(|(line_num, url)| format!("{file_name}:{line_num}: {url}"))
+        .collect()
+}
+
+/// Write a temporary markdown file inside target/test-temp and return its path.
+fn write_temp_markdown_file(root: &Path, prefix: &str, content: &str) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let temp_dir = root.join("target").join("test-temp");
+    fs::create_dir_all(&temp_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to create temporary test directory {}: {e}",
+            temp_dir.display()
+        )
+    });
+
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System clock must be after UNIX_EPOCH")
+        .as_nanos();
+    let temp_path = temp_dir.join(format!("{prefix}-{unique_suffix}.md"));
+
+    fs::write(&temp_path, content).unwrap_or_else(|e| {
+        panic!(
+            "Failed to write temporary markdown file {}: {e}",
+            temp_path.display()
+        )
+    });
+
+    temp_path
+}
+
 /// Extract the value of a TOML field like `rust-version = "1.88.0"`
 fn extract_toml_version(content: &str, field: &str) -> Option<String> {
     for line in content.lines() {
@@ -1602,23 +1657,12 @@ fn test_readme_shields_badges_use_for_the_badge_style() {
     let readme = root.join("README.md");
     let content = read_file(&readme);
 
-    let shields_urls = extract_shields_urls(&content);
-    assert!(
-        !shields_urls.is_empty(),
-        "README.md should contain at least one Shields.io badge URL to validate"
-    );
-
-    let violations: Vec<String> = shields_urls
-        .iter()
-        .filter(|(_, url)| {
-            !url.contains("?style=for-the-badge") && !url.contains("&style=for-the-badge")
-        })
-        .map(|(line_num, url)| format!("README.md:{line_num}: {url}"))
-        .collect();
+    let violations = collect_shields_style_violations("README.md", &content);
 
     assert!(
         violations.is_empty(),
-        "README Shields badge URLs must include style=for-the-badge for visual consistency.\n\
+        "README Shields badge URLs must include style=for-the-badge when present.\n\
+         Note: This repository does not require a minimum number of Shields badges.\n\
          Missing style parameter:\n{}",
         violations.join("\n")
     );
@@ -1646,6 +1690,191 @@ fn test_check_readme_badges_script_passes_on_repository() {
     assert!(
         output.status.success(),
         "check-readme-badges.sh should pass on the current repository.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_shields_style_validation_allows_files_without_shields_urls() {
+    let content = "# README\n\nThis file has no Shields badges.\n";
+    let violations = collect_shields_style_violations("README.md", content);
+    assert!(
+        violations.is_empty(),
+        "Shields style validation should pass when no Shields URLs are present."
+    );
+}
+
+#[test]
+fn test_shields_style_matcher_uses_query_parameter_boundaries() {
+    let valid_urls = [
+        "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue?a=b&style=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge#readme",
+        "https://img.shields.io/badge/docs-ok-blue?a=b&style=for-the-badge&c=d",
+    ];
+    let invalid_urls = [
+        "https://img.shields.io/badge/docs-ok-blue?style=flat-square",
+        "https://img.shields.io/badge/docs-ok-blue?nostyle=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue/path/style=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue?style=for-the-badges",
+    ];
+
+    for url in valid_urls {
+        assert!(
+            shields_url_has_for_the_badge_style(url),
+            "Expected URL to be accepted as style-compliant: {url}"
+        );
+    }
+
+    for url in invalid_urls {
+        assert!(
+            !shields_url_has_for_the_badge_style(url),
+            "Expected URL to be rejected as style-noncompliant: {url}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_passes_when_no_shields_urls() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-no-shields",
+        "# README\n\nNo shields badges in this file.\n",
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(&temp_markdown)
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
+        panic!(
+            "Failed to clean up temporary markdown file {}: {e}",
+            temp_markdown.display()
+        )
+    });
+
+    assert!(
+        output.status.success(),
+        "check-readme-badges.sh should pass when no Shields URLs are present.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("No Shields badge URLs found"),
+        "Expected script output to describe no-Shields pass behavior.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_fails_when_style_param_missing() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-badge-missing-style",
+        r#"<img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue">"#,
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(&temp_markdown)
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
+        panic!(
+            "Failed to clean up temporary markdown file {}: {e}",
+            temp_markdown.display()
+        )
+    });
+
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail when a Shields URL omits style=for-the-badge.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Missing style=for-the-badge"),
+        "Expected script output to identify missing style parameter.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-no-shields-strict",
+        "# README\n\nThis file intentionally has no badges.\n",
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--require-at-least-one")
+        .arg(&temp_markdown)
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
+        panic!(
+            "Failed to clean up temporary markdown file {}: {e}",
+            temp_markdown.display()
+        )
+    });
+
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail in strict mode when no Shields URLs are present.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("requires at least one Shields"),
+        "Expected strict mode output to explain the no-badges failure.\n\
          stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

@@ -239,6 +239,12 @@ fn test_markdownlint_config_exact_content() {
 }
 ```
 
+When validating optional elements, keep policy and implementation aligned:
+
+- Do not assert a non-empty set unless policy explicitly requires presence.
+- For style checks (for example, Shields badge query parameters), validate all discovered items and let empty sets pass by default.
+- If presence is required, encode it as an explicit strict mode or separate assertion with clear wording.
+
 ---
 
 ## 5. Running Configuration Tests
