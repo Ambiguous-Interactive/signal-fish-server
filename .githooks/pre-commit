@@ -306,20 +306,22 @@ echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking markdown files..."
 STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
 
 if [ -n "$STAGED_MD_FILES" ]; then
-    if command -v markdownlint-cli2 >/dev/null 2>&1; then
-        if [ -x scripts/check-markdown.sh ]; then
-            if scripts/check-markdown.sh 2>&1 | grep -q "failed"; then
+    if [ -x scripts/check-markdown.sh ]; then
+        if MARKDOWN_OUTPUT=$(scripts/check-markdown.sh 2>&1); then
+            check_pass "Markdown linting"
+        else
+            MARKDOWN_STATUS=$?
+            if [ "$MARKDOWN_STATUS" -eq 2 ]; then
+                check_skip "Markdown linting" "markdownlint unavailable (install markdownlint-cli2, npx, or Docker)"
+            else
                 check_fail "Markdown linting" "Markdown files have formatting issues."
+                echo "$MARKDOWN_OUTPUT"
                 echo "${YELLOW}Tip:${NC} ./scripts/check-markdown.sh fix"
                 echo ""
-            else
-                check_pass "Markdown linting"
             fi
-        else
-            check_skip "Markdown linting" "check-markdown.sh not found"
         fi
     else
-        check_skip "Markdown linting" "markdownlint-cli2 not installed"
+        check_skip "Markdown linting" "check-markdown.sh not found"
     fi
 else
     check_skip "Markdown linting" "no markdown files changed"

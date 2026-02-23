@@ -72,6 +72,7 @@ fn collect_shields_style_violations(file_name: &str, content: &str) -> Vec<Strin
 }
 
 /// Write a temporary markdown file inside target/test-temp and return its path.
+#[cfg(unix)]
 fn write_temp_markdown_file(root: &Path, prefix: &str, content: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1908,6 +1909,36 @@ fn test_markdown_guidance_avoids_stale_md060_references() {
         "Guidance references MD060 even though this repo disables that rule.\n\
          Remove or replace MD060 references in:\n  - {}",
         violations.join("\n  - ")
+    );
+}
+
+#[test]
+fn test_check_markdown_script_supports_fallback_runners() {
+    // Local environments without a global markdownlint-cli2 install should still
+    // be able to run markdown checks via npx or Docker fallback.
+    let root = repo_root();
+    let script = root.join("scripts/check-markdown.sh");
+    let content = read_file(&script);
+
+    assert!(
+        content.contains("command -v markdownlint-cli2"),
+        "check-markdown.sh must prefer a locally installed markdownlint-cli2 binary.\n\
+         Missing detection logic in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("command -v npx"),
+        "check-markdown.sh should support npx fallback when markdownlint-cli2 is not globally installed.\n\
+         Add npx-based fallback execution in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("command -v docker") && content.contains("davidanson/markdownlint-cli2"),
+        "check-markdown.sh should support Docker fallback for markdownlint execution.\n\
+         Add docker-based fallback execution in {}",
+        script.display()
     );
 }
 

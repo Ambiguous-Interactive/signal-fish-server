@@ -24,19 +24,31 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
-# Check if markdownlint-cli2 is installed
-if ! command -v markdownlint-cli2 &> /dev/null; then
-    echo -e "${RED}ERROR: markdownlint-cli2 is not installed${NC}"
+MARKDOWNLINT_MODE=""
+MARKDOWNLINT_CMD=()
+
+# Prefer local/global CLI, then npx, then Docker fallback.
+if command -v markdownlint-cli2 >/dev/null 2>&1; then
+    MARKDOWNLINT_MODE="markdownlint-cli2"
+    MARKDOWNLINT_CMD=(markdownlint-cli2)
+elif command -v npx >/dev/null 2>&1; then
+    MARKDOWNLINT_MODE="npx markdownlint-cli2"
+    MARKDOWNLINT_CMD=(npx --yes markdownlint-cli2)
+elif command -v docker >/dev/null 2>&1; then
+    MARKDOWNLINT_MODE="docker markdownlint-cli2"
+    MARKDOWNLINT_CMD=(
+        docker run --rm
+        -v "$REPO_ROOT:/work"
+        -w /work
+        davidanson/markdownlint-cli2:latest
+    )
+else
+    echo -e "${RED}ERROR: markdownlint is unavailable${NC}"
     echo ""
-    echo "Install with npm (globally):"
-    echo "  npm install -g markdownlint-cli2"
-    echo ""
-    echo "Or install with npm (locally):"
-    echo "  npm install --save-dev markdownlint-cli2"
-    echo "  npx markdownlint-cli2 '**/*.md'"
-    echo ""
-    echo "Or use Docker:"
-    echo "  docker run --rm -v \"\$PWD:/work\" davidanson/markdownlint-cli2:latest '**/*.md'"
+    echo "Install or enable one of:"
+    echo "  - markdownlint-cli2 (global): npm install -g markdownlint-cli2"
+    echo "  - npx (local download):       npx --yes markdownlint-cli2 '**/*.md'"
+    echo "  - Docker image:               docker run --rm -v \"\$PWD:/work\" -w /work davidanson/markdownlint-cli2:latest '**/*.md'"
     echo ""
     exit 2
 fi
@@ -50,12 +62,22 @@ fi
 echo "=========================================="
 echo "Markdown Linting Check"
 echo "=========================================="
+echo "Runner: $MARKDOWNLINT_MODE"
 echo ""
+
+MARKDOWNLINT_GLOBS=(
+    '**/*.md'
+    '#target/**'
+    '#third_party/**'
+    '#node_modules/**'
+    '#.github/test-fixtures/**'
+    '#test-fixtures/**'
+)
 
 # Run markdownlint-cli2
 if [ "$FIX_MODE" = true ]; then
     echo "Running markdownlint-cli2 with auto-fix..."
-    if markdownlint-cli2 --fix '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'; then
+    if "${MARKDOWNLINT_CMD[@]}" --fix "${MARKDOWNLINT_GLOBS[@]}"; then
         echo -e "${GREEN}All markdown files are valid (after fixes)${NC}"
         exit 0
     else
@@ -64,7 +86,7 @@ if [ "$FIX_MODE" = true ]; then
     fi
 else
     echo "Running markdownlint-cli2..."
-    if markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'; then
+    if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_GLOBS[@]}"; then
         echo -e "${GREEN}All markdown files are valid${NC}"
         exit 0
     else

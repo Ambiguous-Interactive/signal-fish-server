@@ -125,16 +125,14 @@ Add to `.githooks/pre-commit` or `.git/hooks/pre-commit`:
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check markdown files (if markdownlint-cli2 is installed)
-if command -v markdownlint-cli2 >/dev/null 2>&1; then
-    echo "[pre-commit] Checking markdown files..."
-    if ! markdownlint-cli2 '**/*.md' '#target/**' '#node_modules/**'; then
+# Check markdown files via the project script.
+# The script prefers markdownlint-cli2, then falls back to npx or Docker.
+if [ -x scripts/check-markdown.sh ]; then
+    if ! scripts/check-markdown.sh; then
         echo "[pre-commit] ERROR: Markdown linting failed"
-        echo "[pre-commit] To auto-fix: markdownlint-cli2 --fix '**/*.md'"
+        echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
         exit 1
     fi
-else
-    echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
 fi
 
 # Check for typos
