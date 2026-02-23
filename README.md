@@ -11,6 +11,12 @@
     <img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue?style=for-the-badge"
          alt="Documentation">
   </a>
+  <a href="rust-toolchain.toml">
+    <img src="https://img.shields.io/badge/MSRV-1.88.0-blue.svg" alt="MSRV">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  </a>
 </p>
 
 A lightweight, zero-dependency WebSocket signaling server for peer-to-peer
