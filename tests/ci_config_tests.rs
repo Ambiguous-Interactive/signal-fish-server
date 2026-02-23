@@ -73,9 +73,8 @@ fn collect_shields_style_violations(file_name: &str, content: &str) -> Vec<Strin
 
 /// Write a temporary markdown file inside target/test-temp and return its path.
 #[cfg(unix)]
-fn write_temp_markdown_file(root: &Path, prefix: &str, content: &str) -> PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+fn write_temp_markdown_file(root: &Path, prefix: &str, content: &str) -> tempfile::NamedTempFile {
+    use std::io::Write;
     let temp_dir = root.join("target").join("test-temp");
     fs::create_dir_all(&temp_dir).unwrap_or_else(|e| {
         panic!(
@@ -84,20 +83,25 @@ fn write_temp_markdown_file(root: &Path, prefix: &str, content: &str) -> PathBuf
         )
     });
 
-    let unique_suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System clock must be after UNIX_EPOCH")
-        .as_nanos();
-    let temp_path = temp_dir.join(format!("{prefix}-{unique_suffix}.md"));
+    let mut temp_file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".md")
+        .tempfile_in(&temp_dir)
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to create temporary markdown file in {}: {e}",
+                temp_dir.display()
+            )
+        });
 
-    fs::write(&temp_path, content).unwrap_or_else(|e| {
+    temp_file.write_all(content.as_bytes()).unwrap_or_else(|e| {
         panic!(
             "Failed to write temporary markdown file {}: {e}",
-            temp_path.display()
+            temp_file.path().display()
         )
     });
 
-    temp_path
+    temp_file
 }
 
 /// Extract the value of a TOML field like `rust-version = "1.88.0"`
@@ -1778,17 +1782,10 @@ fn test_check_readme_badges_script_passes_when_no_shields_urls() {
 
     let output = Command::new("bash")
         .arg(&script)
-        .arg(&temp_markdown)
+        .arg(temp_markdown.path())
         .current_dir(&root)
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
-
-    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
-        panic!(
-            "Failed to clean up temporary markdown file {}: {e}",
-            temp_markdown.display()
-        )
-    });
 
     assert!(
         output.status.success(),
@@ -1826,17 +1823,10 @@ fn test_check_readme_badges_script_fails_when_style_param_missing() {
 
     let output = Command::new("bash")
         .arg(&script)
-        .arg(&temp_markdown)
+        .arg(temp_markdown.path())
         .current_dir(&root)
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
-
-    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
-        panic!(
-            "Failed to clean up temporary markdown file {}: {e}",
-            temp_markdown.display()
-        )
-    });
 
     assert!(
         !output.status.success(),
@@ -1875,17 +1865,10 @@ fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
 
     let output = Command::new("bash")
         .arg(&script)
-        .arg(&temp_markdown)
+        .arg(temp_markdown.path())
         .current_dir(&root)
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
-
-    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
-        panic!(
-            "Failed to clean up temporary markdown file {}: {e}",
-            temp_markdown.display()
-        )
-    });
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1927,17 +1910,10 @@ fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
     let output = Command::new("bash")
         .arg(&script)
         .arg("--require-at-least-one")
-        .arg(&temp_markdown)
+        .arg(temp_markdown.path())
         .current_dir(&root)
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
-
-    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
-        panic!(
-            "Failed to clean up temporary markdown file {}: {e}",
-            temp_markdown.display()
-        )
-    });
 
     assert!(
         !output.status.success(),
@@ -2061,6 +2037,81 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
         "check-markdown.sh must not use Docker latest fallback for markdownlint.\n\
          Remove docker fallback logic from {}",
         script.display()
+    );
+
+    assert!(
+        content.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
+            && content.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
+        "check-markdown.sh should document both local and global pinned markdownlint installation paths.\n\
+         Update install guidance in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
+        "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
+         Update mismatch guidance in {}",
+        script.display()
+    );
+}
+
+#[test]
+fn test_markdownlint_install_guidance_includes_local_and_global_options() {
+    let root = repo_root();
+    let guidance_files = [
+        "scripts/check-markdown.sh",
+        "scripts/enable-hooks.sh",
+        "docs/git-hooks-guide.md",
+        ".llm/skills/markdown-best-practices-linting.md",
+    ];
+
+    let mut missing_local = Vec::new();
+    let mut missing_global = Vec::new();
+
+    for relative_path in guidance_files {
+        let path = root.join(relative_path);
+        let content = read_file(&path);
+
+        if !content.contains("npm install --save-dev --save-exact markdownlint-cli2@") {
+            missing_local.push(relative_path.to_string());
+        }
+        if !content.contains("npm install -g markdownlint-cli2@") {
+            missing_global.push(relative_path.to_string());
+        }
+    }
+
+    assert!(
+        missing_local.is_empty(),
+        "Markdownlint guidance should include local pinned install instructions.\n\
+         Missing in:\n  - {}",
+        missing_local.join("\n  - ")
+    );
+    assert!(
+        missing_global.is_empty(),
+        "Markdownlint guidance should include global pinned install instructions as an alternative.\n\
+         Missing in:\n  - {}",
+        missing_global.join("\n  - ")
+    );
+}
+
+#[test]
+fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
+    let root = repo_root();
+    let guidance_path = root.join(".llm/skills/git-hooks-checks.md");
+    let content = read_file(&guidance_path);
+
+    assert!(
+        !content.contains("./scripts/check-markdown.sh >/dev/null 2>&1"),
+        "git-hooks-checks skill should not suppress markdown lint output in failure paths.\n\
+         Update {} to capture and print checker output.",
+        guidance_path.display()
+    );
+    assert!(
+        content.contains("MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1)")
+            && content.contains("echo \"$MARKDOWN_OUTPUT\""),
+        "git-hooks-checks skill should demonstrate output capture for markdown lint failures.\n\
+         Update {} with actionable failure output handling.",
+        guidance_path.display()
     );
 }
 
@@ -7711,6 +7762,11 @@ fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
         content.contains("check_fail \"README badge styles\"")
             && content.contains("style=for-the-badge"),
         "Check 20 must fail with actionable guidance when README badge styles are inconsistent."
+    );
+    assert!(
+        content.contains("README_BADGE_OUTPUT=$(scripts/check-readme-badges.sh README.md 2>&1)")
+            && content.contains("echo \"$README_BADGE_OUTPUT\""),
+        "Check 20 should capture and print check-readme-badges.sh output on failure."
     );
 }
 

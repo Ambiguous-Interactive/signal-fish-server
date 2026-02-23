@@ -3,23 +3,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "signal-fish-{prefix}-{}-{nanos}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("Failed to create {}: {e}", dir.display()));
-    dir
+fn unique_temp_dir(prefix: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("signal-fish-{prefix}-"))
+        .tempdir()
+        .unwrap_or_else(|e| panic!("Failed to create temporary directory: {e}"))
 }
 
 fn write_file(path: &Path, content: &str) {
@@ -62,8 +55,10 @@ fn run_hygiene_with_fixture(
 ) -> (bool, String) {
     let temp_root = unique_temp_dir("workflow-hygiene");
     let script_src = repo_root().join("scripts/check-workflow-hygiene.sh");
-    let script_dst = temp_root.join("scripts/check-workflow-hygiene.sh");
-    let workflow_path = temp_root.join(format!(".github/workflows/{workflow_name}"));
+    let script_dst = temp_root.path().join("scripts/check-workflow-hygiene.sh");
+    let workflow_path = temp_root
+        .path()
+        .join(format!(".github/workflows/{workflow_name}"));
 
     let script = fs::read_to_string(&script_src)
         .unwrap_or_else(|e| panic!("Failed to read {}: {e}", script_src.display()));
@@ -71,25 +66,22 @@ fn run_hygiene_with_fixture(
     write_file(&script_dst, &script);
     write_file(&workflow_path, workflow_content);
     for (relative_path, content) in extra_files {
-        write_file(&temp_root.join(relative_path), content);
+        write_file(&temp_root.path().join(relative_path), content);
     }
 
     let output = bash_command()
         .arg("scripts/check-workflow-hygiene.sh")
-        .current_dir(&temp_root)
+        .current_dir(temp_root.path())
         .output()
         .unwrap_or_else(|e| {
             panic!(
                 "Failed to run workflow hygiene script in {}: {e}",
-                temp_root.display()
+                temp_root.path().display()
             )
         });
 
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
-
-    // Best-effort cleanup; ignore failures.
-    let _ = fs::remove_dir_all(&temp_root);
 
     (output.status.success(), combined)
 }

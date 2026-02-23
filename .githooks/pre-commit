@@ -857,10 +857,11 @@ STAGED_README_BADGE_INPUTS=$(git diff --cached --name-only --diff-filter=ACM | g
 
 if [ -n "$STAGED_README_BADGE_INPUTS" ]; then
     if [ -x scripts/check-readme-badges.sh ]; then
-        if scripts/check-readme-badges.sh README.md > /dev/null 2>&1; then
+        if README_BADGE_OUTPUT=$(scripts/check-readme-badges.sh README.md 2>&1); then
             check_pass "README badge styles"
         else
             check_fail "README badge styles" "Run './scripts/check-readme-badges.sh README.md' and ensure all Shields badges use style=for-the-badge."
+            echo "$README_BADGE_OUTPUT"
             echo ""
         fi
     else

@@ -33,6 +33,15 @@ MARKDOWNLINT_MODE=""
 MARKDOWNLINT_CMD=()
 MARKDOWNLINT_VERSION_FILE="$REPO_ROOT/.markdownlint-version"
 
+print_markdownlint_install_help() {
+    echo "Install the pinned version (choose one):"
+    echo "  npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
+    echo "  npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
+    echo ""
+    echo "If installed locally, this script uses:"
+    echo "  $REPO_ROOT/node_modules/.bin/markdownlint-cli2"
+}
+
 if [ ! -f "$MARKDOWNLINT_VERSION_FILE" ]; then
     echo -e "${RED}ERROR: Missing $MARKDOWNLINT_VERSION_FILE${NC}"
     echo ""
@@ -51,8 +60,11 @@ elif command -v markdownlint-cli2 >/dev/null 2>&1; then
 else
     echo -e "${RED}ERROR: markdownlint-cli2 is unavailable${NC}"
     echo ""
-    echo "Install the pinned version:"
-    echo "  npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
+    echo "Searched for:"
+    echo "  - $REPO_ROOT/node_modules/.bin/markdownlint-cli2"
+    echo "  - markdownlint-cli2 on PATH"
+    echo ""
+    print_markdownlint_install_help
     echo ""
     exit 2
 fi
@@ -62,7 +74,10 @@ if [[ "$MARKDOWNLINT_VERSION_RAW" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
     INSTALLED_MARKDOWNLINT_VERSION="${BASH_REMATCH[1]}"
 else
     echo -e "${RED}ERROR: Unable to determine markdownlint-cli2 version${NC}"
+    echo "Detected runner mode: ${MARKDOWNLINT_MODE:-unknown}"
     echo "Command output: ${MARKDOWNLINT_VERSION_RAW:-<empty>}"
+    echo ""
+    print_markdownlint_install_help
     exit 2
 fi
 
@@ -71,9 +86,9 @@ if [ "$INSTALLED_MARKDOWNLINT_VERSION" != "$REQUIRED_MARKDOWNLINT_VERSION" ]; th
     echo ""
     echo "Required: ${REQUIRED_MARKDOWNLINT_VERSION}"
     echo "Detected: ${INSTALLED_MARKDOWNLINT_VERSION}"
+    echo "Detected runner mode: ${MARKDOWNLINT_MODE}"
     echo ""
-    echo "Install the pinned version:"
-    echo "  npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
+    print_markdownlint_install_help
     echo ""
     exit 2
 fi

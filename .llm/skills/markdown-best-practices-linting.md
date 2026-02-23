@@ -103,6 +103,8 @@ project-wide.
 
 ```bash
 # Install pinned markdownlint version once (see .markdownlint-version)
+npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
+# or global if preferred:
 npm install -g markdownlint-cli2@$(cat .markdownlint-version)
 
 # Run markdown linting (uses pinned version enforcement)

@@ -75,8 +75,9 @@ if [ -x scripts/check-markdown.sh ]; then
   echo "[pre-commit] Checking markdown files..."
   STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
   if [ -n "$STAGED_MD" ]; then
-    if ! ./scripts/check-markdown.sh >/dev/null 2>&1; then
+    if ! MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1); then
       echo "[pre-commit] ERROR: Markdown linting failed"
+      echo "$MARKDOWN_OUTPUT"
       echo "[pre-commit] Fix: ./scripts/check-markdown.sh fix"
       FAILURES=$((FAILURES + 1))
     fi

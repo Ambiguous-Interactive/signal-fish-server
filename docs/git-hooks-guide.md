@@ -202,9 +202,11 @@ This check catches regex patterns that are too strict.
 [pre-commit] ERROR: Markdown files have formatting issues.
 ```
 
-**Install pinned markdownlint version:**
+**Install pinned markdownlint version (script prefers local `node_modules/.bin`):**
 
 ```bash
+npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
+# or, if you prefer global tooling:
 npm install -g markdownlint-cli2@$(cat .markdownlint-version)
 ```
 
