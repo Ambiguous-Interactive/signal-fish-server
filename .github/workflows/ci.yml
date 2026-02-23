@@ -108,18 +108,24 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Extract MSRV for cargo-deny toolchain
+        id: deny-msrv
+        run: |
+          set -euo pipefail
+          MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+          if [ -z "$MSRV" ]; then
+            echo "ERROR: Could not extract rust-version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2.0.15
         with:
           arguments: --all-features
-        env:
-          # Override rust-toolchain.toml inside the cargo-deny Docker container.
-          # The container ships its own Rust toolchain and does not have our pinned
-          # version (1.88.0) installed. RUSTUP_TOOLCHAIN takes precedence over the
-          # toolchain file, preventing the "uninstalled toolchain" error.
-          # cargo-deny only inspects metadata and Cargo.lock — it does not compile
-          # code, so the exact Rust version is irrelevant.
-          RUSTUP_TOOLCHAIN: stable
+          # Ensure the Dockerized action installs and uses a concrete toolchain
+          # before executing cargo-deny. This avoids relying on preinstalled
+          # aliases like `stable` that may be absent in the container image.
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
 
   msrv:
     name: MSRV Verification

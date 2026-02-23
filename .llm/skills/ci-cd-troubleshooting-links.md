@@ -105,16 +105,21 @@ RustSec advisory database.
 error: toolchain '1.88.0' is not installed
 ```
 
-The action's Docker image has a stable Rust toolchain, but `rust-toolchain.toml`
-forces a different version inside the container.
+The action's Docker image has its own Rust toolchain, but `rust-toolchain.toml`
+can force a different version inside the container.
 
 ```yaml
+- name: Extract MSRV
+  id: deny-msrv
+  run: |
+    MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+    echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+
 - name: Run cargo-deny
   uses: EmbarkStudios/cargo-deny-action@<SHA> # v2.0.15
-  env:
-    RUSTUP_TOOLCHAIN: stable  # Override rust-toolchain.toml inside container
   with:
     arguments: --all-features
+    rust-version: ${{ steps.deny-msrv.outputs.version }}
 ```
 
 This is safe because cargo-deny inspects metadata and `Cargo.lock` — it does not

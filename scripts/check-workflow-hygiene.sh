@@ -296,7 +296,37 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 7. Check for explicit action version/channel refs (no commit hashes)
+# 7. Check workflow files end with newline
+# ---------------------------------------------------------------------------
+info "Checking workflow files for trailing newline..."
+
+WORKFLOWS_MISSING_EOF_NEWLINE=0
+
+for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$workflow" ] || continue
+
+    if [ ! -s "$workflow" ]; then
+        error "$(basename "$workflow"): File is empty"
+        WORKFLOWS_MISSING_EOF_NEWLINE=$((WORKFLOWS_MISSING_EOF_NEWLINE + 1))
+        continue
+    fi
+
+    # Command substitution strips trailing newlines. If the final byte is '\n',
+    # this yields an empty string. Any other final byte indicates missing EOF newline.
+    if [ "$(tail -c1 "$workflow")" != "" ]; then
+        error "$(basename "$workflow"): Missing trailing newline at end of file"
+        error "  Fix: add a newline after the last line (yamllint rule: new-line-at-end-of-file)"
+        WORKFLOWS_MISSING_EOF_NEWLINE=$((WORKFLOWS_MISSING_EOF_NEWLINE + 1))
+    fi
+done
+
+if [ "$WORKFLOWS_MISSING_EOF_NEWLINE" -eq 0 ]; then
+    success "All workflow files have a trailing newline"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# 8. Check for explicit action version/channel refs (no commit hashes)
 # ---------------------------------------------------------------------------
 info "Checking GitHub Actions reference format policy..."
 
@@ -345,7 +375,7 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 8. Check for cargo commands missing --locked
+# 9. Check for cargo commands missing --locked
 # ---------------------------------------------------------------------------
 info "Checking for cargo commands missing --locked..."
 
@@ -562,7 +592,7 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 9. Check for unpinned external tooling execution
+# 10. Check for unpinned external tooling execution
 # ---------------------------------------------------------------------------
 info "Checking automation files for unpinned external tooling execution..."
 

@@ -1085,6 +1085,48 @@ fn test_workflow_files_are_valid_yaml() {
 }
 
 #[test]
+fn test_workflow_files_end_with_newline() {
+    // Regression guard for yamllint [new-line-at-end-of-file] failures.
+    // Missing trailing newline in workflow files causes CI YAML lint to fail.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("Failed to read workflow file {}: {}", path.display(), e));
+
+        if bytes.is_empty() {
+            violations.push(format!("{}: file is empty", path.display()));
+            continue;
+        }
+
+        if !bytes.ends_with(b"\n") {
+            violations.push(format!(
+                "{}: missing trailing newline at end of file",
+                path.display()
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Workflow files must end with a newline to satisfy YAML lint:\n\n{}\n\n\
+         Fix: add a trailing newline to each listed file.",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn test_no_language_specific_cache_mismatch() {
     // This test prevents the Python cache on Rust project issue (yaml-lint.yml)
     // Ensures workflow caching strategies match project type
@@ -5470,25 +5512,21 @@ fn test_validate_ci_script_exists() {
 // Each test documents the root cause and expected fix.
 
 #[test]
-fn test_cargo_deny_has_rustup_toolchain_override() {
-    // This test prevents regression of the cargo-deny Docker container toolchain issue.
+fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
+    // This test prevents regression of cargo-deny toolchain selection in the
+    // Dockerized action runtime.
     //
-    // Root cause: The cargo-deny-action runs inside a Docker container that ships its
-    // own Rust toolchain. When our repo has rust-toolchain.toml pinning a specific
-    // version (e.g., 1.88.0), rustup inside the container tries to use that version
-    // but fails because it's not installed in the container image.
+    // Root cause: relying on env overrides like RUSTUP_TOOLCHAIN=stable can fail
+    // when that alias is not preinstalled inside the action container.
     //
-    // Fix: Set RUSTUP_TOOLCHAIN=stable as an env var on the cargo-deny step.
-    // RUSTUP_TOOLCHAIN takes precedence over rust-toolchain.toml, so the container
-    // uses its pre-installed stable toolchain instead of trying to download our
-    // pinned version. This is safe because cargo-deny only inspects metadata and
-    // Cargo.lock — it does not compile code, so the exact Rust version is irrelevant.
+    // Fix: Extract MSRV from Cargo.toml in a dedicated step and pass it via the
+    // action's `rust-version` input, so the action installs the exact toolchain
+    // before running cargo-deny.
 
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
     let content = read_file(&ci_workflow);
 
-    // Find the deny job section
     assert!(
         content.contains("  deny:"),
         "CI workflow must have a 'deny' job for dependency auditing.\n\
@@ -5496,62 +5534,49 @@ fn test_cargo_deny_has_rustup_toolchain_override() {
         ci_workflow.display()
     );
 
-    // Find the "Run cargo-deny" step and verify it has RUSTUP_TOOLCHAIN env var
-    let mut in_deny_step = false;
-    let mut found_rustup_toolchain = false;
-    let mut deny_step_line = 0;
+    // Data-driven expectations for required deny job fragments.
+    let required_fragments = [
+        ("deny-msrv step id", "id: deny-msrv"),
+        (
+            "MSRV extraction from Cargo.toml",
+            "MSRV=$(grep '^rust-version = ' Cargo.toml",
+        ),
+        (
+            "deny-msrv output export",
+            "echo \"version=$MSRV\" >> \"$GITHUB_OUTPUT\"",
+        ),
+        (
+            "cargo-deny rust-version input wired to deny-msrv output",
+            "rust-version: ${{ steps.deny-msrv.outputs.version }}",
+        ),
+    ];
 
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-
-        // Detect the cargo-deny step (by name or uses)
-        if trimmed.contains("cargo-deny")
-            && (extract_uses_value(trimmed).is_some() || trimmed.starts_with("- name:"))
-        {
-            in_deny_step = true;
-            deny_step_line = line_num + 1;
-        }
-
-        // Check for RUSTUP_TOOLCHAIN within the step's env block
-        if in_deny_step && trimmed.starts_with("RUSTUP_TOOLCHAIN:") {
-            found_rustup_toolchain = true;
-            let value = trimmed
-                .strip_prefix("RUSTUP_TOOLCHAIN:")
-                .unwrap_or("")
-                .trim();
-            assert!(
-                !value.is_empty(),
-                "RUSTUP_TOOLCHAIN env var in cargo-deny step must have a value (e.g., 'stable').\n\
-                 Line: {}\n\
-                 File: {}",
-                line_num + 1,
-                ci_workflow.display()
-            );
-            break;
-        }
-
-        // If we hit the next step or job after the deny step, stop searching
-        if in_deny_step
-            && (trimmed.starts_with("- name:") || trimmed.starts_with("- uses:"))
-            && deny_step_line != 0
-            && line_num + 1 > deny_step_line + 1
-        {
-            break;
+    let mut missing = Vec::new();
+    for (label, fragment) in required_fragments {
+        if !content.contains(fragment) {
+            missing.push(format!("Missing {label}: expected fragment `{fragment}`"));
         }
     }
 
     assert!(
-        found_rustup_toolchain,
-        "The cargo-deny step in ci.yml must have RUSTUP_TOOLCHAIN env var set.\n\
-         Without it, the cargo-deny Docker container fails when rust-toolchain.toml\n\
-         pins a Rust version not installed in the container image.\n\n\
-         Fix: Add to the cargo-deny step:\n\
-           env:\n\
-             RUSTUP_TOOLCHAIN: stable\n\n\
-         File: {}\n\
-         Deny step found at line: {}",
-        ci_workflow.display(),
-        deny_step_line
+        missing.is_empty(),
+        "cargo-deny workflow configuration is incomplete:\n\n{}\n\n\
+         The deny job must extract MSRV and pass it to cargo-deny via \
+         `with.rust-version` to avoid container-specific toolchain alias failures.\n\
+         File: {}",
+        missing.join("\n"),
+        ci_workflow.display()
+    );
+
+    // Guard against regressing back to env-based alias overrides that caused
+    // container-specific failures in CI.
+    assert!(
+        !content.contains("RUSTUP_TOOLCHAIN:"),
+        "ci.yml deny job should not set RUSTUP_TOOLCHAIN directly.\n\
+         Use cargo-deny `rust-version` input instead to ensure installation\n\
+         and deterministic toolchain selection inside the action container.\n\
+         File: {}",
+        ci_workflow.display()
     );
 }
 
@@ -8566,67 +8591,85 @@ fn test_proptest_tests_ignored_under_miri() {
 }
 
 #[test]
-fn test_protocol_wall_clock_tests_ignored_under_miri() {
-    // Regression guard: tests in src/protocol/mod.rs that call Room::new() or
-    // use Utc::now() must be ignored under Miri. Those code paths invoke
-    // clock_gettime(CLOCK_REALTIME), which Miri blocks in isolation mode.
+fn test_wall_clock_tests_ignored_under_miri() {
+    // Regression guard: tests that use wall-clock APIs (Room::new, Utc::now,
+    // SystemTime::now) must opt out of Miri with #[cfg_attr(miri, ignore)].
+    // Miri blocks clock_gettime(CLOCK_REALTIME) in isolation mode.
     let root = repo_root();
-    let protocol_mod = root.join("src/protocol/mod.rs");
-    let content = read_file(&protocol_mod);
-    let lines: Vec<&str> = content.lines().collect();
-
-    let required_miri_ignored_tests = [
-        "test_room_creation",
-        "test_player_management",
-        "test_authority_management",
-        "test_authority_management_disabled",
-        "test_player_name_uniqueness",
-        "test_authority_protocol_basic_rules",
-        "test_authority_protocol_single_authority_rule",
-        "test_authority_protocol_no_auto_reassignment",
-        "test_authority_protocol_room_support_validation",
-        "test_lobby_state_transitions",
-        "test_lobby_ready_state_changes",
-        "test_peer_connections",
-        "test_lobby_edge_cases",
+    let required_miri_ignored_tests: [(&str, &[&str]); 2] = [
+        (
+            "src/protocol/mod.rs",
+            &[
+                "test_room_creation",
+                "test_player_management",
+                "test_authority_management",
+                "test_authority_management_disabled",
+                "test_player_name_uniqueness",
+                "test_authority_protocol_basic_rules",
+                "test_authority_protocol_single_authority_rule",
+                "test_authority_protocol_no_auto_reassignment",
+                "test_authority_protocol_room_support_validation",
+                "test_lobby_state_transitions",
+                "test_lobby_ready_state_changes",
+                "test_peer_connections",
+                "test_lobby_edge_cases",
+            ],
+        ),
+        (
+            "src/reconnection.rs",
+            &[
+                "test_reconnection_token_creation",
+                "test_reconnection_token_validation",
+                "test_event_buffer_push",
+                "test_event_buffer_get_events_after",
+                "test_reconnection_manager_flow",
+                "test_event_buffering",
+            ],
+        ),
     ];
 
     let mut violations = Vec::new();
 
-    for test_name in required_miri_ignored_tests {
-        let marker = format!("fn {test_name}(");
-        let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
-            violations.push(format!(
-                "{}: missing expected test function `{}`",
-                protocol_mod.display(),
-                test_name
-            ));
-            continue;
-        };
+    for (relative_file, test_names) in required_miri_ignored_tests {
+        let source_file = root.join(relative_file);
+        let content = read_file(&source_file);
+        let lines: Vec<&str> = content.lines().collect();
 
-        let search_start = line_idx.saturating_sub(4);
-        let has_miri_ignore = lines
-            .iter()
-            .take(line_idx)
-            .skip(search_start)
-            .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
+        for test_name in test_names {
+            let marker = format!("fn {test_name}(");
+            let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
+                violations.push(format!(
+                    "{}: missing expected test function `{}`",
+                    source_file.display(),
+                    test_name
+                ));
+                continue;
+            };
 
-        if !has_miri_ignore {
-            violations.push(format!(
-                "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
-                 Miri clock_gettime isolation failures",
-                protocol_mod.display(),
-                line_idx + 1,
-                test_name
-            ));
+            let search_start = line_idx.saturating_sub(4);
+            let has_miri_ignore = lines
+                .iter()
+                .take(line_idx)
+                .skip(search_start)
+                .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
+
+            if !has_miri_ignore {
+                violations.push(format!(
+                    "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
+                     Miri clock_gettime isolation failures",
+                    source_file.display(),
+                    line_idx + 1,
+                    test_name
+                ));
+            }
         }
     }
 
     assert!(
         violations.is_empty(),
-        "Protocol tests missing Miri ignore for wall-clock-dependent code:\n\n{}\n\n\
-         Fix: add #[cfg_attr(miri, ignore)] above the listed #[test] functions \
-         in src/protocol/mod.rs.",
+        "Wall-clock-dependent tests missing Miri ignore annotations:\n\n{}\n\n\
+         Fix: add #[cfg_attr(miri, ignore)] above each listed #[test] or \
+         #[tokio::test] function.",
         violations.join("\n")
     );
 }

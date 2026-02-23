@@ -259,18 +259,24 @@ container with a pre-installed Rust toolchain. If the repository's `rust-toolcha
 specific version, rustup inside the container tries to install that version — which may not be
 available, causing the action to fail.
 
-### Solution: `RUSTUP_TOOLCHAIN` Environment Variable
+### Solution: Explicit `rust-version` Input
 
-Override `rust-toolchain.toml` inside the container by setting `RUSTUP_TOOLCHAIN`:
+Prefer the action input `rust-version` so the container installs a concrete
+toolchain before executing:
 
 ```yaml
-# ✅ CORRECT: Override toolchain for Docker-based actions
+# ✅ CORRECT: install an explicit toolchain for Docker-based actions
+- name: Extract MSRV
+  id: deny-msrv
+  run: |
+    MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+    echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+
 - name: Run cargo-deny
   uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
-  env:
-    RUSTUP_TOOLCHAIN: stable  # Use container's stable toolchain
   with:
     arguments: --all-features
+    rust-version: ${{ steps.deny-msrv.outputs.version }}
 ```
 
 ### When to Use This Pattern
@@ -282,9 +288,10 @@ Override `rust-toolchain.toml` inside the container by setting `RUSTUP_TOOLCHAIN
 | Linting actions (clippy)                 | No              | Lint results depend on Rust version    |
 | Formatting actions (rustfmt)             | Depends         | Format output may vary by version      |
 
-**Key Insight:** Actions that only inspect dependency metadata and lock files (not compile code)
-do not need the project's exact Rust version. Overriding with `stable` avoids toolchain
-installation failures in Docker containers.
+**Key Insight:** Metadata-only actions still need a deterministic toolchain setup.
+Using `with.rust-version` is more reliable than environment alias overrides
+(`RUSTUP_TOOLCHAIN=stable`), which can fail when `stable` is not preinstalled
+in the action image.
 
 ---
 

@@ -142,7 +142,7 @@ Before committing workflow changes, verify:
 | `failed to calculate checksum of ref: not found` | Dockerfile `COPY` references removed path | Remove or update stale `COPY` instructions |
 | Action behavior changes without workflow edit | `uses:` references a mutable tag | Pin with SHA pin |
 | `No such file or directory` (exit code 127) | `run:` step calls a deleted script | Remove stale script reference |
-| `toolchain 'X.Y.Z' is not installed` in cargo-deny | Docker action uses own toolchain | Set `RUSTUP_TOOLCHAIN: stable` env var |
+| `toolchain 'X.Y.Z' is not installed` in cargo-deny | Docker action uses own toolchain | Set cargo-deny `with.rust-version` (prefer MSRV from Cargo.toml) |
 | Lychee scans dotfiles despite config | lychee v0.21.0 bug #1936 | Pin `lycheeVersion: v0.22.0` |
 | `exclude_path` in `.lychee.toml` has no effect | Confirmed bug for glob-expanded paths | Use `--exclude-path` CLI flags |
 | TOML validator fails on "before/after" example | Duplicate `[dependencies]` headers in one block | Split into separate fenced code blocks |
