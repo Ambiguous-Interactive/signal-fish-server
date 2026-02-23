@@ -552,6 +552,47 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# 9. Check for unpinned external tooling execution
+# ---------------------------------------------------------------------------
+info "Checking automation files for unpinned external tooling execution..."
+
+TOOLING_PIN_VIOLATIONS=0
+
+for candidate in scripts/*.sh .githooks/* .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$candidate" ] || continue
+    [ "$candidate" = "scripts/check-workflow-hygiene.sh" ] && continue
+
+    # Avoid on-demand npx execution in automation.
+    if grep -nE '^[[:space:]]*npx([[:space:]]|$)|[;&|][[:space:]]*npx([[:space:]]|$)' "$candidate" >/dev/null 2>&1; then
+        error "$candidate: Uses npx invocation in automation (on-demand package execution is disallowed)"
+        grep -nE '^[[:space:]]*npx([[:space:]]|$)|[;&|][[:space:]]*npx([[:space:]]|$)' "$candidate" | sed 's/^/  /'
+        TOOLING_PIN_VIOLATIONS=$((TOOLING_PIN_VIOLATIONS + 1))
+    fi
+
+    # Require immutable image tags for third-party images in automation.
+    while IFS= read -r match; do
+        line_no=${match%%:*}
+        line_body=${match#*:}
+        image_ref=$(echo "$line_body" | sed -nE 's/.*([A-Za-z0-9._-]+\/[A-Za-z0-9._\/-]+):[Ll][Aa][Tt][Ee][Ss][Tt].*/\1/p')
+        [ -n "$image_ref" ] || continue
+
+        case "$image_ref" in
+            ghcr.io/ambiguousinteractive/signal-fish-server|ambiguousinteractive/signal-fish-server)
+                continue
+                ;;
+        esac
+
+        error "$candidate:$line_no: Uses mutable Docker tag ':latest' for external image '$image_ref'"
+        TOOLING_PIN_VIOLATIONS=$((TOOLING_PIN_VIOLATIONS + 1))
+    done < <(grep -nE '[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+:[Ll][Aa][Tt][Ee][Ss][Tt]' "$candidate" || true)
+done
+
+if [ "$TOOLING_PIN_VIOLATIONS" -eq 0 ]; then
+    success "No unpinned external tooling execution patterns found"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "=========================================="

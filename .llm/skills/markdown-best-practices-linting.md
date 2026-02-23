@@ -22,7 +22,7 @@ See also:
 - MD040: All fenced code blocks must specify a language identifier
 - MD041: First line should be a top-level heading
 - MD013: Line length — disable for technical docs (`"MD013": false`)
-- Run `markdownlint-cli2 --fix '**/*.md'` to auto-fix most issues
+- Run `./scripts/check-markdown.sh fix` to auto-fix most issues with the pinned tool version
 - Use `typos` for spell checking; configure via `.typos.toml`
 
 ---
@@ -102,8 +102,13 @@ project-wide.
 **Before committing:**
 
 ```bash
-# Run markdown linting
-markdownlint-cli2 '**/*.md' '#target/**' '#node_modules/**'
+# Install pinned markdownlint version once (see .markdownlint-version)
+npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
+# or global if preferred:
+npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+
+# Run markdown linting (uses pinned version enforcement)
+./scripts/check-markdown.sh
 
 # Run link checking
 lychee --config .lychee.toml './**/*.md'
@@ -112,7 +117,7 @@ lychee --config .lychee.toml './**/*.md'
 typos
 
 # Auto-fix markdown issues
-markdownlint-cli2 --fix '**/*.md' '#target/**'
+./scripts/check-markdown.sh fix
 ```
 
 ---
@@ -125,16 +130,14 @@ Add to `.githooks/pre-commit` or `.git/hooks/pre-commit`:
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check markdown files (if markdownlint-cli2 is installed)
-if command -v markdownlint-cli2 >/dev/null 2>&1; then
-    echo "[pre-commit] Checking markdown files..."
-    if ! markdownlint-cli2 '**/*.md' '#target/**' '#node_modules/**'; then
+# Check markdown files via the project script.
+# The script enforces the pinned markdownlint-cli2 version.
+if [ -x scripts/check-markdown.sh ]; then
+    if ! scripts/check-markdown.sh; then
         echo "[pre-commit] ERROR: Markdown linting failed"
-        echo "[pre-commit] To auto-fix: markdownlint-cli2 --fix '**/*.md'"
+        echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
         exit 1
     fi
-else
-    echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
 fi
 
 # Check for typos
@@ -271,15 +274,15 @@ Before committing markdown changes:
 - [ ] Tables have consistent column alignment
 - [ ] No trailing whitespace
 - [ ] File starts with top-level heading (`# Title`)
-- [ ] Local validation passes: `markdownlint-cli2`, `lychee`, `typos`
+- [ ] Local validation passes: `./scripts/check-markdown.sh`, `lychee`, `typos`
 
 ---
 
 ## Quick Reference: Validation Commands
 
 ```bash
-markdownlint-cli2 '**/*.md'                # Lint
-markdownlint-cli2 --fix '**/*.md'          # Auto-fix
+./scripts/check-markdown.sh                # Lint
+./scripts/check-markdown.sh fix            # Auto-fix
 lychee --config .lychee.toml './**/*.md'  # Links
 typos                                      # Spell check
 ```

@@ -131,10 +131,25 @@ Tables must have consistent column alignment:
 ./scripts/check-markdown.sh fix
 ```
 
-Install `markdownlint-cli2` for local checks: `npm install -g markdownlint-cli2`
+Install the pinned markdownlint version for local checks:
+`npm install -g markdownlint-cli2@$(cat .markdownlint-version)`
 
-The pre-commit hook automatically checks markdown files (if markdownlint-cli2 is installed).
+The pre-commit hook automatically checks markdown files (if the pinned markdownlint version is installed).
 Enable with `./scripts/enable-hooks.sh`.
+
+### README Badge Consistency
+
+For README Shields badges (`https://img.shields.io/...`), enforce a consistent
+visual style by including `style=for-the-badge` on every badge URL.
+This rule is conditional: if no Shields badges are present, the check still passes.
+Use strict mode only when repository policy explicitly requires at least one badge:
+`./scripts/check-readme-badges.sh --require-at-least-one README.md`.
+
+Validate locally with:
+
+```bash
+./scripts/check-readme-badges.sh README.md
+```
 
 ### Common Markdown Linting Issues
 
@@ -180,6 +195,8 @@ After every feature/bugfix:
 - [ ] README updated if user-facing
 - [ ] New behavior clearly marked as new
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)
+- [ ] README Shields badges include `style=for-the-badge` (`./scripts/check-readme-badges.sh README.md`)
+- [ ] If enforcing a minimum badge count, run strict mode (`./scripts/check-readme-badges.sh --require-at-least-one README.md`)
 - [ ] All code blocks have language identifiers
 - [ ] Technical terms added to `.typos.toml` if needed
 - [ ] All text uses American English spellings (not British)

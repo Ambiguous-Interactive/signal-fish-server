@@ -183,7 +183,7 @@ This check catches regex patterns that are too strict.
 
 **What it checks:** Markdown files follow formatting standards (headings, lists, code blocks).
 
-**When it runs:** When `.md` files are modified (requires `markdownlint-cli2`).
+**When it runs:** When `.md` files are modified (requires pinned `markdownlint-cli2` version from `.markdownlint-version`).
 
 **How to fix:**
 
@@ -202,10 +202,12 @@ This check catches regex patterns that are too strict.
 [pre-commit] ERROR: Markdown files have formatting issues.
 ```
 
-**Install markdownlint:**
+**Install pinned markdownlint version (script prefers local `node_modules/.bin`):**
 
 ```bash
-npm install -g markdownlint-cli2
+npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
+# or, if you prefer global tooling:
+npm install -g markdownlint-cli2@$(cat .markdownlint-version)
 ```
 
 ### 7. Link Checking (Warning Only)

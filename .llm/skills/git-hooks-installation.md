@@ -171,7 +171,7 @@ git commit -m "Add hook installation script"
 This configures git to use pre-commit hooks that validate:
 
 - Code formatting (`cargo fmt --check`)
-- Markdown linting (if markdownlint-cli2 is installed)
+- Markdown linting (if pinned markdownlint-cli2 version is installed)
 - Panic-prone patterns
 
 **To bypass hooks (emergencies only):**
@@ -202,10 +202,10 @@ set -euo pipefail
 
 ```bash
 # Check if command exists before using
-if command -v markdownlint-cli2 >/dev/null 2>&1; then
-  markdownlint-cli2 '**/*.md'
+if [ -x scripts/check-markdown.sh ]; then
+  ./scripts/check-markdown.sh
 else
-  echo "Skipping markdown check (markdownlint-cli2 not installed)"
+  echo "Skipping markdown check (check-markdown.sh not found)"
 fi
 
 # Platform-specific paths

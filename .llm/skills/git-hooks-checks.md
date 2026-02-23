@@ -70,20 +70,20 @@ if [ -f scripts/check-no-panics.sh ]; then
   fi
 fi
 
-# 3. Markdown linting (if available)
-if command -v markdownlint-cli2 >/dev/null 2>&1; then
+# 3. Markdown linting (if pinned version is available)
+if [ -x scripts/check-markdown.sh ]; then
   echo "[pre-commit] Checking markdown files..."
   STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
   if [ -n "$STAGED_MD" ]; then
-    # shellcheck disable=SC2086
-    if ! markdownlint-cli2 $STAGED_MD >/dev/null 2>&1; then
+    if ! MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1); then
       echo "[pre-commit] ERROR: Markdown linting failed"
+      echo "$MARKDOWN_OUTPUT"
       echo "[pre-commit] Fix: ./scripts/check-markdown.sh fix"
       FAILURES=$((FAILURES + 1))
     fi
   fi
 else
-  echo "[pre-commit] Skipping markdown check (markdownlint-cli2 not installed)"
+  echo "[pre-commit] Skipping markdown check (scripts/check-markdown.sh not found)"
 fi
 
 # 4. Link checking (offline mode for speed)

@@ -5,6 +5,11 @@
 # catching common issues like missing language identifiers on code blocks,
 # table alignment problems, and inconsistent formatting.
 #
+# Security note:
+#   This script intentionally avoids npx auto-download and Docker "latest"
+#   fallbacks. It requires a pinned markdownlint-cli2 version from
+#   .markdownlint-version for reproducible and safer local execution.
+#
 # Usage:
 #   ./scripts/check-markdown.sh         # Check all markdown files
 #   ./scripts/check-markdown.sh fix     # Auto-fix issues where possible
@@ -12,7 +17,7 @@
 # Exit codes:
 #   0 - All markdown files pass linting
 #   1 - Linting errors found
-#   2 - markdownlint-cli2 not installed
+#   2 - markdownlint-cli2 missing or wrong version
 
 set -euo pipefail
 
@@ -24,19 +29,66 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
-# Check if markdownlint-cli2 is installed
-if ! command -v markdownlint-cli2 &> /dev/null; then
-    echo -e "${RED}ERROR: markdownlint-cli2 is not installed${NC}"
+MARKDOWNLINT_MODE=""
+MARKDOWNLINT_CMD=()
+MARKDOWNLINT_VERSION_FILE="$REPO_ROOT/.markdownlint-version"
+
+print_markdownlint_install_help() {
+    echo "Install the pinned version (choose one):"
+    echo "  npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
+    echo "  npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
     echo ""
-    echo "Install with npm (globally):"
-    echo "  npm install -g markdownlint-cli2"
+    echo "If installed locally, this script uses:"
+    echo "  $REPO_ROOT/node_modules/.bin/markdownlint-cli2"
+}
+
+if [ ! -f "$MARKDOWNLINT_VERSION_FILE" ]; then
+    echo -e "${RED}ERROR: Missing $MARKDOWNLINT_VERSION_FILE${NC}"
     echo ""
-    echo "Or install with npm (locally):"
-    echo "  npm install --save-dev markdownlint-cli2"
-    echo "  npx markdownlint-cli2 '**/*.md'"
+    echo "Expected a pinned markdownlint-cli2 version file for reproducible linting."
+    exit 2
+fi
+
+REQUIRED_MARKDOWNLINT_VERSION="$(tr -d '[:space:]' < "$MARKDOWNLINT_VERSION_FILE")"
+
+if [ -x "$REPO_ROOT/node_modules/.bin/markdownlint-cli2" ]; then
+    MARKDOWNLINT_MODE="node_modules/.bin/markdownlint-cli2 (pinned)"
+    MARKDOWNLINT_CMD=("$REPO_ROOT/node_modules/.bin/markdownlint-cli2")
+elif command -v markdownlint-cli2 >/dev/null 2>&1; then
+    MARKDOWNLINT_MODE="markdownlint-cli2 (global)"
+    MARKDOWNLINT_CMD=(markdownlint-cli2)
+else
+    echo -e "${RED}ERROR: markdownlint-cli2 is unavailable${NC}"
     echo ""
-    echo "Or use Docker:"
-    echo "  docker run --rm -v \"\$PWD:/work\" davidanson/markdownlint-cli2:latest '**/*.md'"
+    echo "Searched for:"
+    echo "  - $REPO_ROOT/node_modules/.bin/markdownlint-cli2"
+    echo "  - markdownlint-cli2 on PATH"
+    echo ""
+    print_markdownlint_install_help
+    echo ""
+    exit 2
+fi
+
+MARKDOWNLINT_VERSION_RAW="$("${MARKDOWNLINT_CMD[@]}" --version 2>/dev/null || true)"
+if [[ "$MARKDOWNLINT_VERSION_RAW" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    INSTALLED_MARKDOWNLINT_VERSION="${BASH_REMATCH[1]}"
+else
+    echo -e "${RED}ERROR: Unable to determine markdownlint-cli2 version${NC}"
+    echo "Detected runner mode: ${MARKDOWNLINT_MODE:-unknown}"
+    echo "Command output: ${MARKDOWNLINT_VERSION_RAW:-<empty>}"
+    echo ""
+    print_markdownlint_install_help
+    exit 2
+fi
+
+if [ "$INSTALLED_MARKDOWNLINT_VERSION" != "$REQUIRED_MARKDOWNLINT_VERSION" ]; then
+    echo -e "${RED}ERROR: markdownlint-cli2 version mismatch${NC}"
+    echo ""
+    echo "Required: ${REQUIRED_MARKDOWNLINT_VERSION}"
+    echo "Detected: ${INSTALLED_MARKDOWNLINT_VERSION}"
+    echo "Detected runner mode: ${MARKDOWNLINT_MODE}"
+    echo ""
+    print_markdownlint_install_help
     echo ""
     exit 2
 fi
@@ -50,12 +102,23 @@ fi
 echo "=========================================="
 echo "Markdown Linting Check"
 echo "=========================================="
+echo "Runner: $MARKDOWNLINT_MODE"
+echo "Version: $INSTALLED_MARKDOWNLINT_VERSION (required: $REQUIRED_MARKDOWNLINT_VERSION)"
 echo ""
+
+MARKDOWNLINT_GLOBS=(
+    '**/*.md'
+    '#target/**'
+    '#third_party/**'
+    '#node_modules/**'
+    '#.github/test-fixtures/**'
+    '#test-fixtures/**'
+)
 
 # Run markdownlint-cli2
 if [ "$FIX_MODE" = true ]; then
     echo "Running markdownlint-cli2 with auto-fix..."
-    if markdownlint-cli2 --fix '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'; then
+    if "${MARKDOWNLINT_CMD[@]}" --fix "${MARKDOWNLINT_GLOBS[@]}"; then
         echo -e "${GREEN}All markdown files are valid (after fixes)${NC}"
         exit 0
     else
@@ -64,7 +127,7 @@ if [ "$FIX_MODE" = true ]; then
     fi
 else
     echo "Running markdownlint-cli2..."
-    if markdownlint-cli2 '**/*.md' '#target/**' '#third_party/**' '#node_modules/**'; then
+    if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_GLOBS[@]}"; then
         echo -e "${GREEN}All markdown files are valid${NC}"
         exit 0
     else

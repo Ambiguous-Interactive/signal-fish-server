@@ -25,6 +25,7 @@
 #  17. Workflow hygiene script checks (if workflow/hygiene script files modified)
 #  18. LLM file size limit (if .llm/ files modified — max 300 lines per file)
 #  19. Miri compatibility (if Rust source files modified)
+#  20. README badge style consistency (if README.md modified)
 
 set -e
 
@@ -44,7 +45,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=19
+TOTAL_CHECKS=20
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -305,20 +306,22 @@ echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking markdown files..."
 STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
 
 if [ -n "$STAGED_MD_FILES" ]; then
-    if command -v markdownlint-cli2 >/dev/null 2>&1; then
-        if [ -x scripts/check-markdown.sh ]; then
-            if scripts/check-markdown.sh 2>&1 | grep -q "failed"; then
+    if [ -x scripts/check-markdown.sh ]; then
+        if MARKDOWN_OUTPUT=$(scripts/check-markdown.sh 2>&1); then
+            check_pass "Markdown linting"
+        else
+            MARKDOWN_STATUS=$?
+            if [ "$MARKDOWN_STATUS" -eq 2 ]; then
+                check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
+            else
                 check_fail "Markdown linting" "Markdown files have formatting issues."
+                echo "$MARKDOWN_OUTPUT"
                 echo "${YELLOW}Tip:${NC} ./scripts/check-markdown.sh fix"
                 echo ""
-            else
-                check_pass "Markdown linting"
             fi
-        else
-            check_skip "Markdown linting" "check-markdown.sh not found"
         fi
     else
-        check_skip "Markdown linting" "markdownlint-cli2 not installed"
+        check_skip "Markdown linting" "check-markdown.sh not found"
     fi
 else
     check_skip "Markdown linting" "no markdown files changed"
@@ -777,12 +780,14 @@ else
 fi
 
 # Check 17: Workflow hygiene script checks
-# Runs the comprehensive workflow-hygiene validator when workflow definitions
-# or the validator script itself is staged.
+# Runs the comprehensive workflow-hygiene validator when workflow files or
+# automation scripts/hooks that can execute third-party tooling are staged.
 echo "${BLUE}[17/${TOTAL_CHECKS}]${NC} Running workflow hygiene script checks..."
 STAGED_WORKFLOW_HYGIENE_BYTES=$(git diff --cached --name-only -z --diff-filter=ACDMR -- \
     ':(glob).github/workflows/*.yml' \
     ':(glob).github/workflows/*.yaml' \
+    ':(glob)scripts/*.sh' \
+    ':(glob).githooks/*' \
     scripts/check-workflow-hygiene.sh \
     .github/workflows/workflow-hygiene.yml \
     | wc -c | tr -d '[:space:]')
@@ -800,7 +805,7 @@ if [ "$STAGED_WORKFLOW_HYGIENE_BYTES" -gt 0 ]; then
         echo ""
     fi
 else
-    check_skip "Workflow hygiene checks" "no workflow or hygiene-script files staged"
+    check_skip "Workflow hygiene checks" "no workflow or automation hygiene files staged"
 fi
 
 # Check 18: LLM file size limit (only if .llm/ files are staged)
@@ -845,6 +850,28 @@ else
     check_skip "Miri compatibility" "no src/*.rs files staged"
 fi
 
+# Check 20: README badge style consistency (if README.md or checker script is staged)
+# Ensures all Shields.io badges in README.md use style=for-the-badge.
+echo "${BLUE}[20/${TOTAL_CHECKS}]${NC} Checking README badge style consistency..."
+STAGED_README_BADGE_INPUTS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^(README\.md|scripts/check-readme-badges\.sh)$' || true)
+
+if [ -n "$STAGED_README_BADGE_INPUTS" ]; then
+    if [ -x scripts/check-readme-badges.sh ]; then
+        if README_BADGE_OUTPUT=$(scripts/check-readme-badges.sh README.md 2>&1); then
+            check_pass "README badge styles"
+        else
+            check_fail "README badge styles" "Run './scripts/check-readme-badges.sh README.md' and ensure all Shields badges use style=for-the-badge."
+            echo "$README_BADGE_OUTPUT"
+            echo ""
+        fi
+    else
+        check_fail "README badge styles" "scripts/check-readme-badges.sh not found or not executable."
+        echo ""
+    fi
+else
+    check_skip "README badge styles" "README.md and scripts/check-readme-badges.sh not staged"
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -861,6 +888,7 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  ./scripts/generate-skills-index.sh          # Refresh .llm/skills/index.md"
     echo "  ./scripts/check-llm-file-sizes.sh           # Check .llm/ file sizes"
     echo "  ./scripts/check-miri-compat.sh              # Check Miri annotations"
+    echo "  ./scripts/check-readme-badges.sh README.md  # Check README badge styles"
     echo "  ./scripts/run-local-ci.sh --fix             # Fix all issues"
     echo ""
     echo "${YELLOW}To bypass (NOT recommended):${NC}"

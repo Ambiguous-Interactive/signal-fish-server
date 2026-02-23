@@ -213,6 +213,26 @@ ENTRYPOINT ["/matchbox-server"]
 
 ---
 
+## 5. Tooling Execution Policy (Scripts and Hooks)
+
+- Do not execute third-party CLIs via `npx` in CI scripts, hooks, or repo automation.
+- Do not use external Docker images with mutable `:latest` tags in automation.
+- Pin tool versions explicitly (for example, via `.markdownlint-version`) and validate versions at runtime.
+- Prefer preinstalled/pinned tools over on-demand network downloads.
+
+```bash
+# BAD: On-demand execution from registry
+npx --yes markdownlint-cli2
+
+# BAD: Mutable Docker tag for third-party image
+docker run davidanson/markdownlint-cli2:latest
+
+# GOOD: Pinned local/global install and explicit version check
+markdownlint-cli2 --version
+```
+
+---
+
 ## Agent Checklist
 
 - [ ] `cargo deny check` passes on every PR (advisories, licenses, bans, sources)
@@ -224,6 +244,7 @@ ENTRYPOINT ["/matchbox-server"]
 - [ ] Banned crates list includes `openssl`, `atty`, and known-problematic crates
 - [ ] `audit.toml` ignores documented with rationale and expiry dates
 - [ ] Docker builds use `--locked` and multi-stage pattern
+- [ ] Automation scripts avoid `npx` runtime downloads and external `:latest` image tags
 
 ---
 

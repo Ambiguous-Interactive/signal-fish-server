@@ -24,6 +24,86 @@ fn read_file(path: &Path) -> String {
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
 }
 
+/// Extract Shields.io URLs from text content with their 1-based line numbers.
+fn extract_shields_urls(content: &str) -> Vec<(usize, String)> {
+    const SHIELDS_PREFIX: &str = "https://img.shields.io/";
+    let mut urls = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let mut rest = line;
+        while let Some(start) = rest.find(SHIELDS_PREFIX) {
+            let candidate = &rest[start..];
+            let end = candidate
+                .find(|c: char| c == '"' || c == '\'' || c == ')' || c == '>' || c.is_whitespace())
+                .unwrap_or(candidate.len());
+            urls.push((line_idx + 1, candidate[..end].to_string()));
+            rest = &candidate[end..];
+        }
+    }
+
+    urls
+}
+
+/// Return true when a Shields URL has `style=for-the-badge` as a query parameter.
+///
+/// This mirrors scripts/check-readme-badges.sh semantics:
+/// - style must be preceded by '?' or '&'
+/// - style must be followed by '&', '#', or end-of-string
+fn shields_url_has_for_the_badge_style(url: &str) -> bool {
+    const STYLE_PARAM: &str = "style=for-the-badge";
+
+    url.match_indices(STYLE_PARAM).any(|(idx, _)| {
+        let has_valid_prefix = idx > 0 && matches!(url.as_bytes()[idx - 1], b'?' | b'&');
+        let suffix_idx = idx + STYLE_PARAM.len();
+        let has_valid_suffix =
+            suffix_idx == url.len() || matches!(url.as_bytes()[suffix_idx], b'&' | b'#');
+        has_valid_prefix && has_valid_suffix
+    })
+}
+
+/// Collect README-style violations for Shields badge URLs that do not include
+/// style=for-the-badge.
+fn collect_shields_style_violations(file_name: &str, content: &str) -> Vec<String> {
+    extract_shields_urls(content)
+        .into_iter()
+        .filter(|(_, url)| !shields_url_has_for_the_badge_style(url))
+        .map(|(line_num, url)| format!("{file_name}:{line_num}: {url}"))
+        .collect()
+}
+
+/// Write a temporary markdown file inside target/test-temp and return its path.
+#[cfg(unix)]
+fn write_temp_markdown_file(root: &Path, prefix: &str, content: &str) -> tempfile::NamedTempFile {
+    use std::io::Write;
+    let temp_dir = root.join("target").join("test-temp");
+    fs::create_dir_all(&temp_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to create temporary test directory {}: {e}",
+            temp_dir.display()
+        )
+    });
+
+    let mut temp_file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".md")
+        .tempfile_in(&temp_dir)
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to create temporary markdown file in {}: {e}",
+                temp_dir.display()
+            )
+        });
+
+    temp_file.write_all(content.as_bytes()).unwrap_or_else(|e| {
+        panic!(
+            "Failed to write temporary markdown file {}: {e}",
+            temp_file.path().display()
+        )
+    });
+
+    temp_file
+}
+
 /// Extract the value of a TOML field like `rust-version = "1.88.0"`
 fn extract_toml_version(content: &str, field: &str) -> Option<String> {
     for line in content.lines() {
@@ -1577,6 +1657,320 @@ fn test_markdown_config_exists() {
 }
 
 #[test]
+fn test_readme_shields_badges_use_for_the_badge_style() {
+    let root = repo_root();
+    let readme = root.join("README.md");
+    let content = read_file(&readme);
+
+    let violations = collect_shields_style_violations("README.md", &content);
+
+    assert!(
+        violations.is_empty(),
+        "README Shields badge URLs must include style=for-the-badge when present.\n\
+         Note: This repository does not require a minimum number of Shields badges.\n\
+         Missing style parameter:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_passes_on_repository() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("README.md")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    assert!(
+        output.status.success(),
+        "check-readme-badges.sh should pass on the current repository.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_shields_style_validation_allows_files_without_shields_urls() {
+    let content = "# README\n\nThis file has no Shields badges.\n";
+    let violations = collect_shields_style_violations("README.md", content);
+    assert!(
+        violations.is_empty(),
+        "Shields style validation should pass when no Shields URLs are present."
+    );
+}
+
+#[test]
+fn test_extract_shields_urls_stops_at_whitespace() {
+    let content = concat!(
+        "<img src=\"https://img.shields.io/badge/docs-ok-blue?style=for-the-badge\">\n",
+        "<img src=\"https://img.shields.io/badge/docs-tab-blue\t?style=for-the-badge\">\n",
+        "<img src=\"https://img.shields.io/badge/docs-space-blue ?style=for-the-badge\">\n",
+    );
+    let urls = extract_shields_urls(content);
+    let extracted: Vec<&str> = urls.iter().map(|(_, url)| url.as_str()).collect();
+
+    assert_eq!(
+        extracted,
+        vec![
+            "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge",
+            "https://img.shields.io/badge/docs-tab-blue",
+            "https://img.shields.io/badge/docs-space-blue",
+        ],
+        "Shields URL extraction should stop at any whitespace boundary."
+    );
+}
+
+#[test]
+fn test_shields_style_matcher_uses_query_parameter_boundaries() {
+    let valid_urls = [
+        "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue?a=b&style=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge#readme",
+        "https://img.shields.io/badge/docs-ok-blue?a=b&style=for-the-badge&c=d",
+    ];
+    let invalid_urls = [
+        "https://img.shields.io/badge/docs-ok-blue?style=flat-square",
+        "https://img.shields.io/badge/docs-ok-blue?nostyle=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue/path/style=for-the-badge",
+        "https://img.shields.io/badge/docs-ok-blue?style=for-the-badges",
+    ];
+
+    for url in valid_urls {
+        assert!(
+            shields_url_has_for_the_badge_style(url),
+            "Expected URL to be accepted as style-compliant: {url}"
+        );
+    }
+
+    for url in invalid_urls {
+        assert!(
+            !shields_url_has_for_the_badge_style(url),
+            "Expected URL to be rejected as style-noncompliant: {url}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_passes_when_no_shields_urls() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-no-shields",
+        "# README\n\nNo shields badges in this file.\n",
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(temp_markdown.path())
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    assert!(
+        output.status.success(),
+        "check-readme-badges.sh should pass when no Shields URLs are present.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("No Shields badge URLs found"),
+        "Expected script output to describe no-Shields pass behavior.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_fails_when_style_param_missing() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-badge-missing-style",
+        r#"<img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue">"#,
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(temp_markdown.path())
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail when a Shields URL omits style=for-the-badge.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Missing style=for-the-badge"),
+        "Expected script output to identify missing style parameter.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    // The style query appears after a tab, so it is not part of the URL token.
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-badge-tab-terminated",
+        "<img src=\"https://img.shields.io/badge/docs-GitHub%20Pages-blue\t?style=for-the-badge\">",
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(temp_markdown.path())
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail when style is only present after tab whitespace.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Missing style=for-the-badge"),
+        "Expected script output to identify missing style parameter.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("https://img.shields.io/badge/docs-GitHub%20Pages-blue"),
+        "Expected script to extract URL only up to tab terminator.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-no-shields-strict",
+        "# README\n\nThis file intentionally has no badges.\n",
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--require-at-least-one")
+        .arg(temp_markdown.path())
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail in strict mode when no Shields URLs are present.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("requires at least one Shields"),
+        "Expected strict mode output to explain the no-badges failure.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_rejects_multiple_positional_args() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("README.md")
+        .arg("Cargo.toml")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail when too many positional args are provided.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Too many positional arguments."),
+        "Expected script output to mention excess positional arguments.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Unexpected arguments:"),
+        "Script should reject extra positional args in-parser and avoid stale post-loop checks.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
 fn test_markdown_guidance_avoids_stale_md060_references() {
     // The repository disables MD060 in .markdownlint.json, so guidance should not
     // instruct contributors to rely on MD060 behavior.
@@ -1602,6 +1996,217 @@ fn test_markdown_guidance_avoids_stale_md060_references() {
         violations.is_empty(),
         "Guidance references MD060 even though this repo disables that rule.\n\
          Remove or replace MD060 references in:\n  - {}",
+        violations.join("\n  - ")
+    );
+}
+
+#[test]
+fn test_check_markdown_script_enforces_pinned_runner_policy() {
+    // Supply-chain hardening policy:
+    //   - No npx runtime downloads
+    //   - No Docker latest fallback for markdownlint
+    //   - Enforce pinned markdownlint version via .markdownlint-version
+    let root = repo_root();
+    let script = root.join("scripts/check-markdown.sh");
+    let content = read_file(&script);
+
+    assert!(
+        content.contains(".markdownlint-version"),
+        "check-markdown.sh must read required version from .markdownlint-version.\n\
+         Missing pinned version reference in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("command -v markdownlint-cli2"),
+        "check-markdown.sh must still detect locally available markdownlint-cli2.\n\
+         Missing detection logic in {}",
+        script.display()
+    );
+
+    assert!(
+        !content.contains("npx --yes") && !content.contains("command -v npx"),
+        "check-markdown.sh must not execute markdownlint via npx runtime downloads.\n\
+         Remove npx fallback logic from {}",
+        script.display()
+    );
+
+    assert!(
+        !content.contains("davidanson/markdownlint-cli2:latest")
+            && !content.contains("command -v docker"),
+        "check-markdown.sh must not use Docker latest fallback for markdownlint.\n\
+         Remove docker fallback logic from {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
+            && content.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
+        "check-markdown.sh should document both local and global pinned markdownlint installation paths.\n\
+         Update install guidance in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
+        "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
+         Update mismatch guidance in {}",
+        script.display()
+    );
+}
+
+#[test]
+fn test_markdownlint_install_guidance_includes_local_and_global_options() {
+    let root = repo_root();
+    let guidance_files = [
+        "scripts/check-markdown.sh",
+        "scripts/enable-hooks.sh",
+        "docs/git-hooks-guide.md",
+        ".llm/skills/markdown-best-practices-linting.md",
+    ];
+
+    let mut missing_local = Vec::new();
+    let mut missing_global = Vec::new();
+
+    for relative_path in guidance_files {
+        let path = root.join(relative_path);
+        let content = read_file(&path);
+
+        if !content.contains("npm install --save-dev --save-exact markdownlint-cli2@") {
+            missing_local.push(relative_path.to_string());
+        }
+        if !content.contains("npm install -g markdownlint-cli2@") {
+            missing_global.push(relative_path.to_string());
+        }
+    }
+
+    assert!(
+        missing_local.is_empty(),
+        "Markdownlint guidance should include local pinned install instructions.\n\
+         Missing in:\n  - {}",
+        missing_local.join("\n  - ")
+    );
+    assert!(
+        missing_global.is_empty(),
+        "Markdownlint guidance should include global pinned install instructions as an alternative.\n\
+         Missing in:\n  - {}",
+        missing_global.join("\n  - ")
+    );
+}
+
+#[test]
+fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
+    let root = repo_root();
+    let guidance_path = root.join(".llm/skills/git-hooks-checks.md");
+    let content = read_file(&guidance_path);
+
+    assert!(
+        !content.contains("./scripts/check-markdown.sh >/dev/null 2>&1"),
+        "git-hooks-checks skill should not suppress markdown lint output in failure paths.\n\
+         Update {} to capture and print checker output.",
+        guidance_path.display()
+    );
+    assert!(
+        content.contains("MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1)")
+            && content.contains("echo \"$MARKDOWN_OUTPUT\""),
+        "git-hooks-checks skill should demonstrate output capture for markdown lint failures.\n\
+         Update {} with actionable failure output handling.",
+        guidance_path.display()
+    );
+}
+
+#[test]
+fn test_markdownlint_version_file_exists_and_is_semver() {
+    let root = repo_root();
+    let version_file = root.join(".markdownlint-version");
+
+    assert!(
+        version_file.exists(),
+        ".markdownlint-version must exist to pin markdownlint-cli2 version for local automation."
+    );
+
+    let version = read_file(&version_file).trim().to_string();
+    let semver_pattern = regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("valid semver regex");
+    assert!(
+        semver_pattern.is_match(&version),
+        ".markdownlint-version must contain a plain semantic version (X.Y.Z).\n\
+         Found: '{version}'"
+    );
+}
+
+#[test]
+fn test_automation_files_avoid_unpinned_tool_execution_patterns() {
+    // Prevent recurrence of supply-chain patterns in executable automation:
+    // - npx runtime downloads
+    // - external Docker image :latest tags
+    let root = repo_root();
+    let mut automation_files = Vec::new();
+
+    for dir in [root.join("scripts"), root.join(".github/workflows")] {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(dir).expect("read_dir should succeed") {
+            let entry = entry.expect("directory entry should be readable");
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_sh = path.extension().map(|e| e == "sh").unwrap_or(false);
+            let is_yaml = path
+                .extension()
+                .map(|e| e == "yml" || e == "yaml")
+                .unwrap_or(false);
+            if is_sh || is_yaml {
+                automation_files.push(path);
+            }
+        }
+    }
+    let pre_commit_hook = root.join(".githooks/pre-commit");
+    if pre_commit_hook.exists() {
+        automation_files.push(pre_commit_hook);
+    }
+
+    let npx_pattern = regex::Regex::new(
+        r"(?m)^[[:space:]]*npx([[:space:]]|$)|[;&|][[:space:]]*npx([[:space:]]|$)",
+    )
+    .expect("valid npx invocation regex");
+    let external_latest_pattern =
+        regex::Regex::new(r"([A-Za-z0-9._-]+/[A-Za-z0-9._/-]+):[Ll][Aa][Tt][Ee][Ss][Tt]")
+            .expect("valid docker image regex");
+
+    let mut violations = Vec::new();
+
+    for path in automation_files {
+        let content = read_file(&path);
+        if npx_pattern.is_match(&content) {
+            violations.push(format!(
+                "{}: contains 'npx' invocation (runtime package execution is disallowed in automation)",
+                path.display()
+            ));
+        }
+
+        for captures in external_latest_pattern.captures_iter(&content) {
+            let image = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
+            let is_allowed_first_party = matches!(
+                image,
+                "ghcr.io/ambiguousinteractive/signal-fish-server"
+                    | "ambiguousinteractive/signal-fish-server"
+            );
+            if !is_allowed_first_party {
+                violations.push(format!(
+                    "{}: external image uses mutable ':latest' tag: {image}:latest",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Automation files contain unpinned tooling execution patterns.\n\
+         Fix by pinning tool versions and avoiding npx/runtime latest tags.\n\
+         Violations:\n  - {}",
         violations.join("\n  - ")
     );
 }
@@ -7086,6 +7691,8 @@ fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
     for required_trigger in [
         "':(glob).github/workflows/*.yml'",
         "':(glob).github/workflows/*.yaml'",
+        "':(glob)scripts/*.sh'",
+        "':(glob).githooks/*'",
         "scripts/check-workflow-hygiene.sh",
     ] {
         assert!(
@@ -7133,6 +7740,69 @@ fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
     assert!(
         content.contains("check_skip \"LLM file sizes\""),
         "Check 18 should skip cleanly when no .llm/*.md files are staged."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    assert!(hook_path.exists(), ".githooks/pre-commit must exist");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("# Check 20: README badge style consistency"),
+        "Pre-commit hook must define Check 20 for README badge style consistency."
+    );
+    assert!(
+        content.contains("scripts/check-readme-badges.sh"),
+        "Check 20 must invoke scripts/check-readme-badges.sh."
+    );
+    assert!(
+        content.contains("check_fail \"README badge styles\"")
+            && content.contains("style=for-the-badge"),
+        "Check 20 must fail with actionable guidance when README badge styles are inconsistent."
+    );
+    assert!(
+        content.contains("README_BADGE_OUTPUT=$(scripts/check-readme-badges.sh README.md 2>&1)")
+            && content.contains("echo \"$README_BADGE_OUTPUT\""),
+        "Check 20 should capture and print check-readme-badges.sh output on failure."
+    );
+}
+
+#[test]
+fn test_pre_commit_hook_readme_badge_style_trigger_includes_checker_script() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains(r"^(README\.md|scripts/check-readme-badges\.sh)$"),
+        "Check 20 trigger must match staged README.md and scripts/check-readme-badges.sh changes."
+    );
+    assert!(
+        content.contains(r"scripts/check-readme-badges\.sh"),
+        "Check 20 trigger should also run when scripts/check-readme-badges.sh is staged."
+    );
+    assert!(
+        content.contains("check_skip \"README badge styles\""),
+        "Check 20 should skip cleanly when neither README.md nor scripts/check-readme-badges.sh is staged."
+    );
+}
+
+#[test]
+fn test_run_local_ci_includes_readme_badge_style_check() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("readme-badges"),
+        "run-local-ci.sh should include a dedicated README badge consistency check."
+    );
+    assert!(
+        content.contains("scripts/check-readme-badges.sh"),
+        "run-local-ci.sh should invoke scripts/check-readme-badges.sh."
     );
 }
 
