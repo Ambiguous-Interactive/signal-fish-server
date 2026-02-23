@@ -8259,6 +8259,69 @@ fn test_workflow_toolchain_fields_do_not_use_moving_aliases() {
 }
 
 #[test]
+fn test_dtolnay_rust_toolchain_v1_has_explicit_toolchain_input() {
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let lines: Vec<&str> = content.lines().collect();
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.contains("dtolnay/rust-toolchain@v") {
+                continue;
+            }
+
+            // Look at the next 5 lines for a `toolchain:` field
+            let mut found_toolchain = false;
+            let lookahead_end = (i + 6).min(lines.len());
+            for next_line in lines.iter().take(lookahead_end).skip(i + 1) {
+                let next_trimmed = next_line.trim();
+
+                // Stop early if we hit another step marker
+                if next_trimmed.starts_with("- name:") || next_trimmed.starts_with("- uses:") {
+                    break;
+                }
+
+                if next_trimmed.starts_with("toolchain:") {
+                    found_toolchain = true;
+                    break;
+                }
+            }
+
+            if !found_toolchain {
+                violations.push(format!(
+                    "{filename}:{}: uses: dtolnay/rust-toolchain@v1\n  \
+                     Missing explicit `toolchain:` input in the `with:` block.\n  \
+                     Every dtolnay/rust-toolchain@v1 invocation must specify a \
+                     pinned toolchain version.",
+                    i + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "dtolnay/rust-toolchain@v1 invocations missing explicit toolchain input:\n\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn test_same_action_uses_consistent_ref_across_workflows() {
     // Every action should resolve to a single reference value across workflows
     // to prevent version drift (e.g., one file uses @v2 while another uses @v1).
@@ -8742,8 +8805,8 @@ fn test_proptest_tests_ignored_under_miri() {
                     // for blank lines and other attributes between them).
                     let mut found_miri_ignore = false;
                     let search_start = line_idx.saturating_sub(5);
-                    for check_idx in (search_start..line_idx).rev() {
-                        let check_line = lines[check_idx].trim();
+                    for check_line in lines[search_start..line_idx].iter().rev() {
+                        let check_line = check_line.trim();
                         if check_line.is_empty() || check_line.starts_with('#') {
                             if check_line.contains("cfg_attr(miri, ignore)") {
                                 found_miri_ignore = true;

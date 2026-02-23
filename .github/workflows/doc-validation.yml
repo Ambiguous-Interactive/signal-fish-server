@@ -113,7 +113,14 @@ jobs:
     timeout-minutes: 15  # Generous timeout for building documentation with all features
     steps:
       - uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@v2.8.2
       # Build rustdoc with strict warnings (no broken links, valid code blocks)
       - name: Build rustdoc
@@ -129,7 +136,14 @@ jobs:
     timeout-minutes: 15  # Generous timeout for running all doc tests with features
     steps:
       - uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@v2.8.2
       # Run all doc tests (tests embedded in /// comments)
       - name: Run doc tests
@@ -145,8 +159,14 @@ jobs:
     timeout-minutes: 20  # Longer timeout - validates multiple languages (Rust, JSON, YAML, TOML, Bash)
     steps:
       - uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt
       - uses: Swatinem/rust-cache@v2.8.2
       # Build the library first so we have it available for compilation validation

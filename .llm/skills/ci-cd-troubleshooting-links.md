@@ -7,9 +7,11 @@
   version-specific bugs, TOML validation, cargo-deny CVSS | Infrastructure
 -->
 
-**Trigger**: When debugging link checker failures (lychee), `.lychee.toml` regex vs glob confusion, lychee version-specific bugs, TOML before/after validation failures, or cargo-deny CVSS parsing errors.
+**Trigger**: When debugging lychee link checker failures, `.lychee.toml` regex vs glob
+confusion, version-specific bugs, TOML before/after validation, or CVSS parsing.
 
-See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md), [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md), [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md), [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
+See also: [Ecosystem](./ci-cd-troubleshooting-ecosystem.md), [Scripts](./ci-cd-troubleshooting-scripts.md),
+[Supply chain](./ci-cd-troubleshooting-supply-chain.md), [Categories](./ci-cd-troubleshooting-categories.md)
 
 ---
 
@@ -291,8 +293,8 @@ by the corresponding CI validator, so each block must independently pass parsing
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile, stale scripts
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
-- [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning
+- [Ecosystem troubleshooting](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [Scripts troubleshooting](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
+- [Supply chain troubleshooting](./ci-cd-troubleshooting-supply-chain.md) — Action refs, Dockerfile, stale scripts
+- [Categories and diagnostics](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
+- [Supply chain audit policy](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning

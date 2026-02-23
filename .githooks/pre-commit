@@ -75,17 +75,34 @@ check_skip() {
     echo "${YELLOW}⊘ SKIP${NC}: $1 ($2)"
 }
 
-# Check 1: Code formatting (always run)
+check_fix() {
+    echo "${GREEN}✓ PASS${NC}: $1 (auto-fixed)"
+    CHECKS_PASSED=$((CHECKS_PASSED + 1))
+}
+
+# Check 1: Code formatting (always run, auto-fixable)
 echo "${BLUE}[1/${TOTAL_CHECKS}]${NC} Checking code formatting..."
 if cargo fmt --check 2>/dev/null; then
     check_pass "Code formatting"
 else
-    check_fail "Code formatting" "Run 'cargo fmt' to fix formatting issues."
-    echo "${YELLOW}Tip:${NC} cargo fmt --all"
-    echo ""
+    # Save list of staged .rs files before auto-fixing
+    FMT_STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+    echo "${YELLOW}  Auto-fixing...${NC} running cargo fmt"
+    if cargo fmt 2>/dev/null; then
+        # Re-stage only the .rs files that were originally staged
+        if [ -n "$FMT_STAGED_RS" ]; then
+            printf '%s\n' "$FMT_STAGED_RS" | while IFS= read -r _file; do
+                if [ -n "$_file" ]; then git add "$_file"; fi
+            done
+        fi
+        check_fix "Code formatting"
+    else
+        check_fail "Code formatting" "cargo fmt failed. Run 'cargo fmt' manually to investigate."
+        echo ""
+    fi
 fi
 
-# Check 2: Clippy lints (fast check on staged Rust files only)
+# Check 2: Clippy lints (fast check on staged Rust files only, auto-fixable)
 echo "${BLUE}[2/${TOTAL_CHECKS}]${NC} Running clippy on staged files..."
 # Get list of staged Rust files
 STAGED_RS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
@@ -93,12 +110,31 @@ STAGED_RS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.r
 if [ -n "$STAGED_RS_FILES" ]; then
     # Run clippy on workspace (faster than per-file)
     # Use --all-features to catch all issues, but allow a longer timeout
-    if ! cargo clippy --all-targets --all-features -- -D warnings 2>&1; then
-        check_fail "Clippy lints" "Fix clippy warnings before committing."
-        echo "${YELLOW}Tip:${NC} cargo clippy --fix --allow-dirty --all-targets --all-features"
-        echo ""
-    else
+    if CLIPPY_OUT=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1); then
         check_pass "Clippy lints"
+    else
+        # Save list of staged .rs files before auto-fixing
+        CLIPPY_STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+        echo "${YELLOW}  Auto-fixing...${NC} running cargo clippy --fix"
+        # --allow-dirty: working tree may have unstaged changes
+        # --allow-staged: pre-commit hook always has staged changes
+        CLIPPY_FIX_OUT=$(cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features 2>&1) || true
+        # Re-stage only the .rs files that were originally staged
+        if [ -n "$CLIPPY_STAGED_RS" ]; then
+            printf '%s\n' "$CLIPPY_STAGED_RS" | while IFS= read -r _file; do
+                if [ -n "$_file" ]; then git add "$_file"; fi
+            done
+        fi
+        # Re-run clippy to verify the fix worked
+        if CLIPPY_RECHECK=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1); then
+            check_fix "Clippy lints"
+        else
+            check_fail "Clippy lints" "Fix clippy warnings before committing."
+            echo "$CLIPPY_RECHECK"
+            echo "${YELLOW}Note:${NC} Some lints have placeholder suggestions and cannot be auto-fixed."
+            echo "${YELLOW}Tip:${NC} cargo clippy --fix --allow-dirty --all-targets --all-features"
+            echo ""
+        fi
     fi
 else
     check_skip "Clippy lints" "no Rust files staged"
@@ -166,7 +202,7 @@ if [ -n "$WORKFLOW_FILES" ]; then
         YAMLLINT_ERRORS=0
         for wf_file in $WORKFLOW_FILES; do
             if [ -f "$wf_file" ]; then
-                YAMLLINT_OUT=$(yamllint -c .yamllint.yml "$wf_file" 2>&1)
+                YAMLLINT_OUT=$(yamllint -c .yamllint.yml "$wf_file" 2>&1) || true
                 if echo "$YAMLLINT_OUT" | grep -q "\[error\]"; then
                     echo "${RED}  YAML lint errors:${NC} $wf_file"
                     echo "$YAMLLINT_OUT" | grep "\[error\]" || true
@@ -301,7 +337,7 @@ else
     check_skip "Docs link validation" "no docs/*.md files staged"
 fi
 
-# Check 10: Markdown linting (only if markdown files changed)
+# Check 10: Markdown linting (only if markdown files changed, auto-fixable)
 echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking markdown files..."
 STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
 
@@ -314,10 +350,31 @@ if [ -n "$STAGED_MD_FILES" ]; then
             if [ "$MARKDOWN_STATUS" -eq 2 ]; then
                 check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
             else
-                check_fail "Markdown linting" "Markdown files have formatting issues."
-                echo "$MARKDOWN_OUTPUT"
-                echo "${YELLOW}Tip:${NC} ./scripts/check-markdown.sh fix"
-                echo ""
+                # Exit code 1 means lint errors — attempt auto-fix
+                # Save list of staged .md files before auto-fixing
+                MD_STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
+                echo "${YELLOW}  Auto-fixing...${NC} running scripts/check-markdown.sh fix"
+                scripts/check-markdown.sh fix 2>/dev/null || true
+                # Re-stage only the .md files that were originally staged
+                if [ -n "$MD_STAGED_FILES" ]; then
+                    printf '%s\n' "$MD_STAGED_FILES" | while IFS= read -r _file; do
+                        if [ -n "$_file" ]; then git add "$_file"; fi
+                    done
+                fi
+                # Re-run to verify the fix worked (capture fresh output)
+                if MARKDOWN_RECHECK=$(scripts/check-markdown.sh 2>&1); then
+                    check_fix "Markdown linting"
+                else
+                    RECHECK_STATUS=$?
+                    if [ "$RECHECK_STATUS" -eq 2 ]; then
+                        check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
+                    else
+                        check_fail "Markdown linting" "Markdown files have formatting issues."
+                        echo "$MARKDOWN_RECHECK"
+                        echo "${YELLOW}Tip:${NC} ./scripts/check-markdown.sh fix"
+                        echo ""
+                    fi
+                fi
             fi
         fi
     else
@@ -332,19 +389,13 @@ echo "${BLUE}[11/${TOTAL_CHECKS}]${NC} Checking links in markdown files..."
 
 if [ -n "$STAGED_MD_FILES" ]; then
     if command -v lychee >/dev/null 2>&1; then
-        # Use a temporary file to avoid issues with filenames containing spaces
-        TEMP_FILE=$(mktemp)
-        echo "$STAGED_MD_FILES" > "$TEMP_FILE"
         # Run lychee with fast settings (offline mode for pre-commit speed)
-        if ! xargs -a "$TEMP_FILE" lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
-            echo "${YELLOW}⚠ WARNING${NC}: Link check found issues in staged markdown files."
-            echo "${YELLOW}Note:${NC} This is a warning only (offline mode)."
-            echo "${YELLOW}Tip:${NC} Run 'lychee --config .lychee.toml <file>' for full check."
-            # Non-blocking warning
+        # Pipe file list via stdin to avoid GNU-only xargs -a flag
+        if ! printf '%s\n' "$STAGED_MD_FILES" | xargs lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
+            check_warn "Link checking (offline)" "Link issues found (offline mode). Run 'lychee --config .lychee.toml <file>' for full check."
         else
             check_pass "Link checking (offline)"
         fi
-        rm -f "$TEMP_FILE"
     else
         check_skip "Link checking" "lychee not installed"
     fi
@@ -818,8 +869,23 @@ if [ "$STAGED_SKILLS_INDEX_BYTES" -gt 0 ]; then
         if scripts/generate-skills-index.sh --check > /dev/null 2>&1; then
             check_pass "Skills index freshness"
         else
-            check_fail "Skills index freshness" "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
-            echo ""
+            # Index is stale — attempt auto-fix by regenerating
+            echo "${YELLOW}  Auto-fixing...${NC} running scripts/generate-skills-index.sh"
+            if scripts/generate-skills-index.sh > /dev/null 2>&1; then
+                # Always re-stage index.md — it's a generated file that must
+                # be committed alongside its inputs.
+                git add .llm/skills/index.md
+                # Re-run check to verify the fix worked
+                if scripts/generate-skills-index.sh --check > /dev/null 2>&1; then
+                    check_fix "Skills index freshness"
+                else
+                    check_fail "Skills index freshness" "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
+                    echo ""
+                fi
+            else
+                check_fail "Skills index freshness" "scripts/generate-skills-index.sh failed. Run it manually to investigate."
+                echo ""
+            fi
         fi
     else
         check_fail "Skills index freshness" "scripts/generate-skills-index.sh not found or not executable."
@@ -887,7 +953,7 @@ STAGED_SRC_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^src/
 
 if [ -n "$STAGED_SRC_RS" ]; then
     if [ -x scripts/check-miri-compat.sh ]; then
-        MIRI_OUTPUT=$(scripts/check-miri-compat.sh 2>&1)
+        MIRI_OUTPUT=$(scripts/check-miri-compat.sh 2>&1) || true
         if echo "$MIRI_OUTPUT" | grep -q 'WARNING:'; then
             check_warn "Miri compatibility" "Some lib tests may need #[cfg_attr(miri, ignore)]. Run './scripts/check-miri-compat.sh' for details."
         else

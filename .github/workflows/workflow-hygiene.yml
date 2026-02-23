@@ -20,6 +20,7 @@
 #   - Dependency audit workflow presence validation
 #   - Timeout configuration checks
 #   - GitHub Actions version pinning validation
+#   - Rust toolchain input validation (dtolnay/rust-toolchain must specify toolchain:)
 
 name: Workflow Hygiene
 
@@ -30,6 +31,7 @@ on:
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
       - 'scripts/check-workflow-hygiene.sh'
+      - 'scripts/check-workflow-toolchain.sh'
       - '.github/workflows/workflow-hygiene.yml'
   pull_request:
     branches: [main]
@@ -37,6 +39,7 @@ on:
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
       - 'scripts/check-workflow-hygiene.sh'
+      - 'scripts/check-workflow-toolchain.sh'
       - '.github/workflows/workflow-hygiene.yml'
   schedule:
     # Run weekly on Monday at 06:00 UTC to detect stale nightly toolchains
@@ -60,6 +63,9 @@ jobs:
       - name: Run workflow hygiene checks
         run: ./scripts/check-workflow-hygiene.sh
 
+      - name: Validate toolchain inputs
+        run: ./scripts/check-workflow-toolchain.sh
+
       - name: Summary
         if: always()
         run: |
@@ -72,3 +78,4 @@ jobs:
           echo "  - Dependency audit workflows are present"
           echo "  - Jobs have timeout configurations"
           echo "  - GitHub Actions use explicit version tags (no moving channels)"
+          echo "  - dtolnay/rust-toolchain usages specify explicit toolchain input"

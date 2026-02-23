@@ -243,8 +243,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Configure sccache
         id: sccache

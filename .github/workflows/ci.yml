@@ -58,10 +58,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
         uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
@@ -84,9 +90,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
         uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-nextest
@@ -284,9 +297,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
@@ -318,10 +337,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
         uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy
 
       - name: Cache Rust dependencies
@@ -337,8 +362,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-sbom

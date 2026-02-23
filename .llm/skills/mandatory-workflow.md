@@ -31,6 +31,10 @@
 1. **Read the code** before modifying it — NEVER modify code you haven't read.
 2. **Run the appropriate linters** after every change (see table below).
 3. **Zero warnings, zero errors** — all linters enforce strict compliance.
+4. **For user-visible changes**: run changelog flow
+   [classify-user-visible-changes](./classify-user-visible-changes.md) ->
+   [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) ->
+   [review-changelog-entries](./review-changelog-entries.md).
 
 ---
 
@@ -125,7 +129,9 @@ chore: update MSRV from 1.87.0 to 1.88.0
 - [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
 - [ ] New code has exhaustive tests (see [testing-strategies](./testing-core-patterns.md))
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
-- [ ] CHANGELOG updated for user-facing changes
+- [ ] CHANGELOG decision documented via [classify-user-visible-changes](./classify-user-visible-changes.md)
+- [ ] CHANGELOG updated for user-facing changes via [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md)
+- [ ] CHANGELOG reviewed via [review-changelog-entries](./review-changelog-entries.md)
 - [ ] Breaking changes documented
 - [ ] MSRV update documented (if applicable, see [msrv-management](./msrv-management.md))
 
