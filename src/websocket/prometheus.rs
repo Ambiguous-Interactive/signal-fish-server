@@ -469,6 +469,7 @@ mod tests {
     use std::process::{Command, Stdio};
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn prometheus_metrics_survive_promtool_check() {
         let promtool_path = match std::env::var_os("PROMTOOL") {
             Some(path) if !path.is_empty() => PathBuf::from(path),
@@ -513,6 +514,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_render_prometheus_metrics_includes_core_counters() {
         let metrics = ServerMetrics::new();
         metrics.increment_connections();

@@ -195,7 +195,7 @@ exit 1
 ### Default to Read-Only
 
 ```yaml
-# NEVER omit permissions — defaults to full write access
+# NEVER omit permissions — defaults vary by repo/org settings and may be broader than intended
 permissions:
   contents: read
 ```

@@ -27,6 +27,7 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn leave_room_sends_confirmation_and_clears_membership() {
     let server = create_test_server().await;
     let (sender, mut receiver) = mpsc::channel(8);

@@ -282,6 +282,7 @@ async fn test_database_migration() {
 - [ ] Regression tests cite the issue number
 - [ ] Test names follow `test_<unit>_<condition>_<expected>` convention
 - [ ] Tests never depend on execution order
+- [ ] Lib tests calling Miri-incompatible APIs (Utc::now, SystemTime::now) have #[cfg_attr(miri, ignore)]
 - [ ] Flaky tests are treated as bugs — not retried into silence
 
 ---

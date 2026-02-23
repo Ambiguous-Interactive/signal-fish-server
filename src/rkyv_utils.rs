@@ -8,15 +8,15 @@
 //! ```rust,ignore
 //! use signal_fish_server::rkyv_utils::{RkyvSerializer, zero_copy_access, deserialize};
 //!
-//! // Serialize data
+//! // Serialize data (aligned for zero-copy access)
 //! let serializer = RkyvSerializer::new();
-//! let bytes = serializer.serialize(&my_struct)?;
+//! let aligned = serializer.serialize_aligned(&my_struct)?;
 //!
 //! // Zero-copy access (no deserialization needed)
-//! let archived = zero_copy_access::<MyStruct>(&bytes)?;
+//! let archived = zero_copy_access::<MyStruct>(aligned.as_ref())?;
 //!
 //! // Full deserialization when needed
-//! let deserialized: MyStruct = deserialize::<MyStruct>(&bytes)?;
+//! let deserialized: MyStruct = deserialize::<MyStruct>(aligned.as_ref())?;
 //! ```
 
 use bytes::Bytes;
@@ -80,8 +80,10 @@ impl RkyvSerializer {
 
     /// Serialize a value to bytes using rkyv.
     ///
-    /// The returned `Bytes` can be used for zero-copy access via `zero_copy_access`
-    /// or full deserialization via `deserialize`.
+    /// **Note:** The returned `Bytes` may not preserve the alignment required for
+    /// `zero_copy_access`. Use `serialize_aligned` when alignment is needed for
+    /// zero-copy operations. The returned bytes are suitable for network transmission
+    /// or storage where the receiver will copy into an aligned buffer.
     ///
     /// # Errors
     ///
@@ -221,11 +223,12 @@ mod tests {
         };
 
         let serializer = RkyvSerializer::new();
-        let bytes = serializer
-            .serialize(&original)
+        let aligned = serializer
+            .serialize_aligned(&original)
             .expect("serialization failed");
 
-        let deserialized: TestStruct = deserialize(&bytes).expect("deserialization failed");
+        let deserialized: TestStruct =
+            deserialize(aligned.as_ref()).expect("deserialization failed");
 
         assert_eq!(original, deserialized);
     }
@@ -239,11 +242,12 @@ mod tests {
         };
 
         let serializer = RkyvSerializer::new();
-        let bytes = serializer
-            .serialize(&original)
+        let aligned = serializer
+            .serialize_aligned(&original)
             .expect("serialization failed");
 
-        let archived = zero_copy_access::<ArchivedTestStruct>(&bytes).expect("access failed");
+        let archived =
+            zero_copy_access::<ArchivedTestStruct>(aligned.as_ref()).expect("access failed");
 
         assert_eq!(archived.id, 42);
         assert_eq!(archived.name.as_str(), "test");
@@ -274,13 +278,19 @@ mod tests {
         };
 
         let serializer = RkyvSerializer::new();
-        let bytes = serializer
-            .serialize(&original)
+        let aligned = serializer
+            .serialize_aligned(&original)
             .expect("serialization failed");
 
         // AlignedVec guarantees proper alignment
-        assert!(is_aligned::<ArchivedTestStruct>(&bytes));
-        assert!(validate_alignment::<ArchivedTestStruct>(&bytes).is_ok());
+        assert!(
+            is_aligned::<ArchivedTestStruct>(aligned.as_ref()),
+            "AlignedVec should guarantee proper alignment for ArchivedTestStruct"
+        );
+        assert!(
+            validate_alignment::<ArchivedTestStruct>(aligned.as_ref()).is_ok(),
+            "validate_alignment should succeed for properly aligned data"
+        );
     }
 
     #[test]
@@ -295,6 +305,28 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid alignment: required 8 bytes, got 4 bytes"
+        );
+    }
+
+    #[test]
+    fn test_serialize_produces_valid_bytes() {
+        let original = TestStruct {
+            id: 77,
+            name: "bytes_test".to_string(),
+            active: true,
+        };
+
+        let serializer = RkyvSerializer::new();
+        let bytes = serializer
+            .serialize(&original)
+            .expect("serialization failed");
+
+        // Bytes should be non-empty and contain serialized data
+        assert!(!bytes.is_empty(), "serialized bytes should not be empty");
+        // The length should be reasonable for the struct
+        assert!(
+            bytes.len() > 4,
+            "serialized bytes should contain enough data for the struct fields"
         );
     }
 

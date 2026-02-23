@@ -553,6 +553,7 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
     async fn test_websocket_connection() {
         // Add overall test timeout to prevent infinite hanging
         let test_result = tokio::time::timeout(

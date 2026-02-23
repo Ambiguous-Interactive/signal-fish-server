@@ -88,27 +88,41 @@ startupProbe:   { httpGet: { path: /startupz, port: 3536 }, periodSeconds: 3, fa
 use tokio::sync::watch;
 const DRAIN_PERIOD: Duration = Duration::from_secs(30);
 
-async fn shutdown_signal() {
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .unwrap().recv().await;
+        let mut signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        signal.recv().await;
+        Ok::<(), std::io::Error>(())
     };
+    #[cfg(unix)]
     tokio::select! { _ = tokio::signal::ctrl_c() => {} _ = terminate => {} }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 
 // BAD: Abrupt shutdown drops all connections
-axum::serve(listener, app).await.unwrap();
+axum::serve(listener, app).await?;
 
 // GOOD: Signal propagation + drain period
-async fn serve_with_graceful_shutdown(app: Router, shutdown_tx: watch::Sender<bool>) {
-    let listener = TcpListener::bind("0.0.0.0:3536").await.unwrap();
+async fn serve_with_graceful_shutdown(
+    app: Router,
+    shutdown_tx: watch::Sender<bool>,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind("0.0.0.0:3536").await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+            if let Err(error) = shutdown_signal().await {
+                tracing::error!("Failed to install shutdown handler: {error}");
+            }
             let _ = shutdown_tx.send(true);
             tracing::info!("Draining for {}s", DRAIN_PERIOD.as_secs());
             tokio::time::sleep(DRAIN_PERIOD).await;
-        }).await.unwrap();
+        })
+        .await?;
+    Ok(())
 }
 ```
 

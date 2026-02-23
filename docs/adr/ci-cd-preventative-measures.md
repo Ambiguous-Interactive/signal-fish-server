@@ -27,8 +27,8 @@ we identified the need for systematic preventative measures to catch similar pro
    - **Impact:** Larger binary size, increased attack surface, maintenance burden
    - **Root Cause:** No automated validation that dependencies are actually used
 
-4. **Markdown Linting Issues** (MD040, MD060 rules)
-   - **Problem:** Missing language identifiers on code blocks, table alignment issues
+4. **Markdown Linting Issues** (MD040, MD046 rules)
+   - **Problem:** Missing language identifiers on code blocks, inconsistent code block style
    - **Impact:** CI failures, inconsistent documentation formatting
    - **Root Cause:** No local validation of markdown files before commit
 

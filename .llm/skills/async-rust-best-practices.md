@@ -180,18 +180,25 @@ let result = tokio::task::spawn_blocking(move || {
 ```rust
 use tokio_util::sync::CancellationToken;
 
-async fn run_server(shutdown: CancellationToken) {
-    let listener = TcpListener::bind("0.0.0.0:3536").await.unwrap();
+async fn run_server(shutdown: CancellationToken) -> std::io::Result<()> {
+    let listener = TcpListener::bind("0.0.0.0:3536").await?;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted.unwrap();
-                let token = shutdown.child_token();
-                tokio::spawn(async move { handle_connection(stream, token).await });
+                match accepted {
+                    Ok((stream, _)) => {
+                        let token = shutdown.child_token();
+                        tokio::spawn(async move { handle_connection(stream, token).await });
+                    }
+                    Err(error) => {
+                        tracing::warn!("Accept failed: {error}");
+                    }
+                }
             }
             _ = shutdown.cancelled() => { tracing::info!("Shutting down"); break; }
         }
     }
+    Ok(())
 }
 ```
 

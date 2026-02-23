@@ -1577,6 +1577,102 @@ fn test_markdown_config_exists() {
 }
 
 #[test]
+fn test_markdown_guidance_avoids_stale_md060_references() {
+    // The repository disables MD060 in .markdownlint.json, so guidance should not
+    // instruct contributors to rely on MD060 behavior.
+    let root = repo_root();
+    let guidance_files = [
+        ".llm/skills/markdown-best-practices-linting.md",
+        ".llm/skills/ci-cd-troubleshooting-linting.md",
+        "docs/development.md",
+        "docs/adr/ci-cd-preventative-measures.md",
+        "scripts/check-markdown.sh",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_path in guidance_files {
+        let path = root.join(relative_path);
+        let content = read_file(&path);
+        if content.contains("MD060") {
+            violations.push(relative_path.to_string());
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Guidance references MD060 even though this repo disables that rule.\n\
+         Remove or replace MD060 references in:\n  - {}",
+        violations.join("\n  - ")
+    );
+}
+
+#[test]
+fn test_permissions_guidance_avoids_incorrect_default_claim() {
+    let root = repo_root();
+    let skill_path = root.join(".llm/skills/github-actions-workflow-config.md");
+    let content = read_file(&skill_path);
+
+    assert!(
+        !content.contains("defaults to full write access"),
+        "github-actions-workflow-config.md should not claim omitted permissions always default to full write access.\n\
+         Repo/org defaults vary; guidance should recommend explicit least-privilege permissions."
+    );
+}
+
+#[test]
+fn test_link_hook_snippet_initializes_failures_and_matches_behavior() {
+    let root = repo_root();
+    let skill_path = root.join(".llm/skills/markdown-best-practices-links.md");
+    let content = read_file(&skill_path);
+
+    assert!(
+        content.contains("FAILURES=0"),
+        "markdown-best-practices-links.md pre-commit snippet increments FAILURES but does not initialize it."
+    );
+    assert!(
+        content.contains("# Check for links"),
+        "markdown-best-practices-links.md pre-commit snippet should describe lychee as link checking."
+    );
+    assert!(
+        !content.contains("# Check for typos\nif command -v lychee"),
+        "markdown-best-practices-links.md has a mismatched comment: lychee checks links, not typos."
+    );
+}
+
+#[test]
+fn test_async_network_skills_avoid_unwrap_in_server_startup_examples() {
+    // Prevent panic-prone patterns in best-practice guidance snippets.
+    let root = repo_root();
+    let files = [
+        ".llm/skills/async-rust-best-practices.md",
+        ".llm/skills/graceful-degradation-deployment.md",
+    ];
+
+    let panic_patterns = [
+        "TcpListener::bind(\"0.0.0.0:3536\").await.unwrap()",
+        "let (stream, _) = accepted.unwrap();",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_path in files {
+        let content = read_file(&root.join(relative_path));
+        for pattern in panic_patterns {
+            if content.contains(pattern) {
+                violations.push(format!("{relative_path}: contains `{pattern}`"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Network best-practices examples should avoid panic paths in bind/accept loops.\n\
+         Use Result + ? or explicit error handling.\n\
+         Violations:\n  - {}",
+        violations.join("\n  - ")
+    );
+}
+
+#[test]
 fn test_dockerfile_uses_docker_version_format() {
     // This test enforces that Dockerfile uses Docker's X.Y format instead of X.Y.Z
     //
@@ -4359,7 +4455,7 @@ fn test_workflow_hygiene_requirements() {
             summary: "Why minimal permissions are required:\n\
                       - Compromised workflows or actions cannot abuse excess permissions\n\
                       - GitHub requires explicit permission grants for security audits\n\
-                      - Missing permissions block defaults to GITHUB_TOKEN write access\n\n\
+                      - Omitted permissions rely on repo/org defaults, which may be broader than intended\n\n\
                       Fix: Add a 'permissions:' block to each workflow.\n\
                       For read-only workflows:\n\
                         permissions:\n\

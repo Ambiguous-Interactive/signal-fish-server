@@ -24,6 +24,7 @@
 #  16. Skills index generation freshness (if skills inputs/script/context change)
 #  17. Workflow hygiene script checks (if workflow/hygiene script files modified)
 #  18. LLM file size limit (if .llm/ files modified — max 300 lines per file)
+#  19. Miri compatibility (if Rust source files modified)
 
 set -e
 
@@ -43,7 +44,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=18
+TOTAL_CHECKS=19
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -824,6 +825,26 @@ else
     check_skip "LLM file sizes" "no .llm/*.md files staged"
 fi
 
+# Check 19: Miri compatibility (only if Rust source files staged)
+# Ensures lib tests calling Miri-incompatible APIs have #[cfg_attr(miri, ignore)].
+echo "${BLUE}[19/${TOTAL_CHECKS}]${NC} Checking Miri compatibility..."
+STAGED_SRC_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^src/.*\.rs$' || true)
+
+if [ -n "$STAGED_SRC_RS" ]; then
+    if [ -x scripts/check-miri-compat.sh ]; then
+        MIRI_OUTPUT=$(scripts/check-miri-compat.sh 2>&1)
+        if echo "$MIRI_OUTPUT" | grep -q 'WARNING:'; then
+            check_warn "Miri compatibility" "Some lib tests may need #[cfg_attr(miri, ignore)]. Run './scripts/check-miri-compat.sh' for details."
+        else
+            check_pass "Miri compatibility"
+        fi
+    else
+        check_skip "Miri compatibility" "check-miri-compat.sh not found or not executable"
+    fi
+else
+    check_skip "Miri compatibility" "no src/*.rs files staged"
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -839,6 +860,7 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  ./scripts/validate-ci.sh                    # Validate CI config"
     echo "  ./scripts/generate-skills-index.sh          # Refresh .llm/skills/index.md"
     echo "  ./scripts/check-llm-file-sizes.sh           # Check .llm/ file sizes"
+    echo "  ./scripts/check-miri-compat.sh              # Check Miri annotations"
     echo "  ./scripts/run-local-ci.sh --fix             # Fix all issues"
     echo ""
     echo "${YELLOW}To bypass (NOT recommended):${NC}"

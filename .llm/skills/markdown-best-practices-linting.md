@@ -49,28 +49,6 @@ fn main() {}
 ```
 ````
 
-### MD060: Table Alignment
-
-**Rule:** Table columns must have consistent alignment.
-
-**Why:** Improves readability, prevents parsing errors.
-
-**Fix:**
-
-```markdown
-❌ BEFORE:
-| Column | Value |
-|--------|-------|
-|  foo   | bar  |
-
-✅ AFTER:
-| Column | Value |
-|--------|-------|
-| foo    | bar   |
-```
-
-**Auto-fix:** Run `markdownlint-cli2 --fix '**/*.md'`
-
 ### MD013: Line Length
 
 **Rule:** Lines should not exceed specified length (often 80 or 120 characters).
@@ -105,11 +83,11 @@ This is a paragraph...
 This is a paragraph...
 ```
 
-### MD060 and Compact Table Styles
+### Table Formatting (Project Style)
 
-MD060 (no-space-in-code) may fire false positives on compact table styles that omit
-padding around pipe characters. If your project uses compact tables, consider
-disabling MD060 in `.markdownlint.json`.
+Keep table formatting readable and consistent even when not enforced by a specific
+markdownlint rule. Use `markdownlint-cli2 --fix` for basic normalization, then
+manually align difficult tables if needed.
 
 ### Lint Test Fixtures
 
@@ -178,14 +156,28 @@ name: Documentation Validation
 on:
   push:
     branches: [main]
-    paths: ['**/*.md']
+    paths:
+      - '**/*.md'
+      - '.markdownlint.json'
+      - '.markdownlintignore'
+      - '.lychee.toml'
+      - '.typos.toml'
+      - '.github/workflows/markdownlint.yml'
   pull_request:
     branches: [main]
-    paths: ['**/*.md']
+    paths:
+      - '**/*.md'
+      - '.markdownlint.json'
+      - '.markdownlintignore'
+      - '.lychee.toml'
+      - '.typos.toml'
+      - '.github/workflows/markdownlint.yml'
 
 jobs:
   markdown-lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@<SHA> # v4.2.2
       - uses: DavidAnson/markdownlint-cli2-action@<SHA> # v22.0.0
@@ -197,6 +189,8 @@ jobs:
 
   link-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@<SHA> # v4.2.2
       - uses: lycheeverse/lychee-action@<SHA> # v2.7.0
@@ -207,6 +201,8 @@ jobs:
 
   spell-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@<SHA> # v4.2.2
       - uses: crate-ci/typos@<SHA> # v1.30.1
@@ -216,10 +212,10 @@ jobs:
 
 **Key features:**
 
-- Only runs on markdown file changes (path filters)
+- Runs on markdown and related documentation-config changes (path filters)
 - Separate jobs for different types of validation
 - Uses official actions with SHA pinning
-- Includes configuration file changes in path triggers
+- Explicitly sets least-privilege `permissions` for each job
 
 ---
 

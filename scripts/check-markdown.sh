@@ -77,8 +77,8 @@ else
         echo "Common issues:"
         echo "  - MD040: Missing language identifier on code blocks"
         echo "    Fix: Add language identifier after opening backticks (e.g., \`\`\`bash)"
-        echo "  - MD060: Table alignment issues"
-        echo "    Fix: Use consistent spacing in table columns"
+        echo "  - MD046: Inconsistent code block style"
+        echo "    Fix: Use fenced code blocks (\`\`\`) consistently"
         echo ""
         exit 1
     fi

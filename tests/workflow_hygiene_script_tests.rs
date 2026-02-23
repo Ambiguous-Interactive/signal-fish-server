@@ -30,6 +30,31 @@ fn write_file(path: &Path, content: &str) {
     fs::write(path, content).unwrap_or_else(|e| panic!("Failed to write {}: {e}", path.display()));
 }
 
+fn bash_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, use Git Bash rather than WSL bash (which requires an
+        // installed distribution that GitHub Actions runners do not provide).
+        let candidates = [
+            Path::new("C:\\Program Files\\Git\\bin\\bash.exe"),
+            Path::new("C:\\Program Files (x86)\\Git\\bin\\bash.exe"),
+        ];
+        for path in &candidates {
+            if path.exists() {
+                return Command::new(path);
+            }
+        }
+        panic!(
+            "Git Bash not found at any known location ({candidates:?}). \
+             Cannot run bash scripts on Windows without Git Bash."
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("bash")
+    }
+}
+
 fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bool, String) {
     let temp_root = unique_temp_dir("workflow-hygiene");
     let script_src = repo_root().join("scripts/check-workflow-hygiene.sh");
@@ -42,7 +67,7 @@ fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bo
     write_file(&script_dst, &script);
     write_file(&workflow_path, workflow_content);
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg("scripts/check-workflow-hygiene.sh")
         .current_dir(&temp_root)
         .output()

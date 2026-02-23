@@ -220,7 +220,10 @@ markdownlint-cli2 --fix '**/*.md' '#target/**'
 Add to `.githooks/pre-commit`:
 
 ```bash
-# Check for typos
+# Track blocking checks
+FAILURES=0
+
+# Check for links
 if command -v lychee >/dev/null 2>&1; then
     echo "[pre-commit] Checking links (offline mode)..."
     STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
@@ -233,6 +236,10 @@ if command -v lychee >/dev/null 2>&1; then
     fi
 else
     echo "[pre-commit] Skipping link check (lychee not installed)"
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+    exit 1
 fi
 ```
 

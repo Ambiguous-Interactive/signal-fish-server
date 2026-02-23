@@ -148,6 +148,8 @@ Before committing workflow changes, verify:
 | TOML validator fails on "before/after" example | Duplicate `[dependencies]` headers in one block | Split into separate fenced code blocks |
 | `An action could not be found at the URI` | SHA pin references force-pushed commit | Look up current SHA for version tag |
 | `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV with security-related names | Add `# check=skip=SecretsUsedInArgOrEnv` as first line |
+| AlignedVec alignment lost after Bytes conversion | rkyv serialize() drops alignment via into_vec() | Use serialize_aligned() for zero-copy access |
+| WSL bash has no installed distributions (Windows CI) | Command::new("bash") resolves to WSL not Git Bash | Use Git Bash path on Windows CI runners |
 
 ---
 

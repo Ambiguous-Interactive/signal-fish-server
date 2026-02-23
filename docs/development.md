@@ -183,7 +183,7 @@ Auto-fix markdown issues where possible:
 Common markdown linting rules enforced by CI:
 
 - **MD040**: All code blocks must have language identifiers (e.g., ` ```bash ` not just ` ``` `)
-- **MD060**: Tables must have consistent alignment
+- **MD046**: Use fenced code blocks consistently
 - **MD013**: Lines should not exceed 120 characters (except tables)
 - **MD044**: Proper capitalization of technical terms (JavaScript, GitHub, WebSocket, etc.)
 

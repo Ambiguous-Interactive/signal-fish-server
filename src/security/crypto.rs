@@ -171,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn encrypt_decrypt_roundtrip() {
         let encryptor =
             EnvelopeEncryptor::new_from_base64_key("test-key", &sample_key()).expect("key");
@@ -184,6 +185,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn decrypt_with_wrong_key_id_fails() {
         let encryptor =
             EnvelopeEncryptor::new_from_base64_key("primary", &sample_key()).expect("key");
@@ -192,6 +194,9 @@ mod tests {
         let other =
             EnvelopeEncryptor::new_from_base64_key("secondary", &sample_key()).expect("key");
         let err = other.decrypt(&bundle).expect_err("should fail");
-        matches!(err, EncryptionError::KeyMismatch { .. });
+        assert!(
+            matches!(err, EncryptionError::KeyMismatch { .. }),
+            "expected KeyMismatch error, got: {err}"
+        );
     }
 }

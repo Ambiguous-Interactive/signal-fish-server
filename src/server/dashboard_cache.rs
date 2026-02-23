@@ -293,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn history_entries_respect_selected_fields() {
         let snapshot = DashboardMetricsSnapshot {
             rooms_by_game: HashMap::from([("game".into(), 5usize)]),

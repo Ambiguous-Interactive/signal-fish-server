@@ -208,7 +208,6 @@ fn test_typos_config_exists_and_is_valid() {
 
 ```text
 ERROR: MD040/fenced-code-language: Fenced code blocks should have a language specified
-ERROR: MD060/table-alignment: Table column alignment is inconsistent
 ERROR: typos found: HashiCorp (did you mean: Hashicorp?)
 ```
 
