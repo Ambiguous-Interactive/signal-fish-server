@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.7.5
+      - uses: Swatinem/rust-cache@v2.8.2
       # Build rustdoc with strict warnings (no broken links, valid code blocks)
       - name: Build rustdoc
         run: cargo doc --locked --no-deps --all-features
@@ -130,7 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.7.5
+      - uses: Swatinem/rust-cache@v2.8.2
       # Run all doc tests (tests embedded in /// comments)
       - name: Run doc tests
         run: cargo test --locked --doc
@@ -148,7 +148,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2.7.5
+      - uses: Swatinem/rust-cache@v2.8.2
       # Build the library first so we have it available for compilation validation
       - name: Build library
         run: cargo build --lib --locked --all-features

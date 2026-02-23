@@ -296,41 +296,51 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 7. Check for pinned action versions
+# 7. Check for explicit action version/channel refs (no commit hashes)
 # ---------------------------------------------------------------------------
-info "Checking for pinned GitHub Actions versions..."
+info "Checking GitHub Actions reference format policy..."
 
-UNPINNED_COUNT=0
-PINNED_COUNT=0
+VALID_REF_COUNT=0
+HASH_REF_COUNT=0
+INVALID_REF_COUNT=0
 
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
     [ -f "$workflow" ] || continue
 
     WORKFLOW_NAME=$(basename "$workflow")
 
-    # Look for uses: that don't have SHA pins
     while IFS= read -r line; do
-        if [[ "$line" =~ uses:[[:space:]]*[^@]+@([^#[:space:]]+) ]]; then
-            VERSION="${BASH_REMATCH[1]}"
+        # Match both "uses:" and "- uses:" syntaxes, excluding trailing comments.
+        if [[ "$line" =~ ^[[:space:]-]*uses:[[:space:]]*([^@[:space:]]+)@([^#[:space:]]+) ]]; then
+            ACTION_NAME="${BASH_REMATCH[1]}"
+            REF="${BASH_REMATCH[2]}"
 
-            # Check if version is a SHA (40 hex characters)
-            if [[ "$VERSION" =~ ^[0-9a-f]{40}$ ]]; then
-                PINNED_COUNT=$((PINNED_COUNT + 1))
+            # Skip local and docker actions.
+            if [[ "$ACTION_NAME" == ./* ]] || [[ "$ACTION_NAME" == docker://* ]]; then
+                continue
+            fi
+
+            # Disallow commit-hash refs.
+            if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+                error "$WORKFLOW_NAME: Action uses commit hash ref (disallowed): $ACTION_NAME@$REF"
+                HASH_REF_COUNT=$((HASH_REF_COUNT + 1))
+                continue
+            fi
+
+            # Allow semver-ish tags and supported channels.
+            if [[ "$REF" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]] || [[ "$REF" =~ ^(stable|beta|nightly)$ ]]; then
+                VALID_REF_COUNT=$((VALID_REF_COUNT + 1))
             else
-                UNPINNED_COUNT=$((UNPINNED_COUNT + 1))
+                error "$WORKFLOW_NAME: Action uses invalid ref format: $ACTION_NAME@$REF"
+                error "  Allowed refs: vX, vX.Y, vX.Y.Z (optionally with suffix), stable, beta, nightly"
+                INVALID_REF_COUNT=$((INVALID_REF_COUNT + 1))
             fi
         fi
     done < "$workflow"
 done
 
-if [ "$UNPINNED_COUNT" -gt 0 ]; then
-    # This is informational - pinning to SHA is best practice but not required
-    info "Found $UNPINNED_COUNT actions not pinned to SHA (consider pinning for supply chain security)"
-    info "Found $PINNED_COUNT actions properly pinned to SHA"
-elif [ "$PINNED_COUNT" -gt 0 ]; then
-    success "All $PINNED_COUNT actions are pinned to SHA hashes"
-else
-    info "No GitHub Actions found in workflows"
+if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ]; then
+    success "All $VALID_REF_COUNT GitHub Actions use explicit version/channel refs"
 fi
 echo ""
 

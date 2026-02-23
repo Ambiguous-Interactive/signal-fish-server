@@ -65,7 +65,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -88,7 +88,7 @@ jobs:
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -225,7 +225,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
@@ -284,7 +284,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
@@ -298,7 +298,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: coverage-report
           path: lcov.info
@@ -319,7 +319,7 @@ jobs:
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Run panic-policy check
         run: ./scripts/check-no-panics.sh
 
@@ -334,7 +334,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-sbom
         uses: taiki-e/install-action@v2
         with:
@@ -345,7 +345,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: success()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: sbom-cyclonedx-${{ github.sha }}
           path: sbom.cdx.json

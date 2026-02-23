@@ -103,7 +103,7 @@ jobs:
           components: miri, rust-src
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           prefix-key: "ci-safety-nightly"
 
@@ -121,7 +121,7 @@ jobs:
 
       - name: Upload Miri output
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: miri-output
           path: miri-output.txt
@@ -142,7 +142,7 @@ jobs:
           toolchain: nightly-2026-02-01
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.7.5
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           prefix-key: "ci-safety-nightly"
 
@@ -162,7 +162,7 @@ jobs:
 
       - name: Upload AddressSanitizer output
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: asan-output
           path: asan-output.txt
