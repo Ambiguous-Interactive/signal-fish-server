@@ -1708,6 +1708,27 @@ fn test_shields_style_validation_allows_files_without_shields_urls() {
 }
 
 #[test]
+fn test_extract_shields_urls_stops_at_whitespace() {
+    let content = concat!(
+        "<img src=\"https://img.shields.io/badge/docs-ok-blue?style=for-the-badge\">\n",
+        "<img src=\"https://img.shields.io/badge/docs-tab-blue\t?style=for-the-badge\">\n",
+        "<img src=\"https://img.shields.io/badge/docs-space-blue ?style=for-the-badge\">\n",
+    );
+    let urls = extract_shields_urls(content);
+    let extracted: Vec<&str> = urls.iter().map(|(_, url)| url.as_str()).collect();
+
+    assert_eq!(
+        extracted,
+        vec![
+            "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge",
+            "https://img.shields.io/badge/docs-tab-blue",
+            "https://img.shields.io/badge/docs-space-blue",
+        ],
+        "Shields URL extraction should stop at any whitespace boundary."
+    );
+}
+
+#[test]
 fn test_shields_style_matcher_uses_query_parameter_boundaries() {
     let valid_urls = [
         "https://img.shields.io/badge/docs-ok-blue?style=for-the-badge",
@@ -1835,6 +1856,58 @@ fn test_check_readme_badges_script_fails_when_style_param_missing() {
 
 #[test]
 #[cfg(unix)]
+fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    // The style query appears after a tab, so it is not part of the URL token.
+    let temp_markdown = write_temp_markdown_file(
+        &root,
+        "readme-badge-tab-terminated",
+        "<img src=\"https://img.shields.io/badge/docs-GitHub%20Pages-blue\t?style=for-the-badge\">",
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(&temp_markdown)
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    fs::remove_file(&temp_markdown).unwrap_or_else(|e| {
+        panic!(
+            "Failed to clean up temporary markdown file {}: {e}",
+            temp_markdown.display()
+        )
+    });
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail when style is only present after tab whitespace.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Missing style=for-the-badge"),
+        "Expected script output to identify missing style parameter.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("https://img.shields.io/badge/docs-GitHub%20Pages-blue"),
+        "Expected script to extract URL only up to tab terminator.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
     use std::process::Command;
 
@@ -1879,6 +1952,45 @@ fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
          stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_check_readme_badges_script_rejects_multiple_positional_args() {
+    use std::process::Command;
+
+    let root = repo_root();
+    let script = root.join("scripts/check-readme-badges.sh");
+    assert!(
+        script.exists(),
+        "scripts/check-readme-badges.sh must exist to validate README badge styles"
+    );
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("README.md")
+        .arg("Cargo.toml")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "check-readme-badges.sh should fail when too many positional args are provided.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Too many positional arguments."),
+        "Expected script output to mention excess positional arguments.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Unexpected arguments:"),
+        "Script should reject extra positional args in-parser and avoid stale post-loop checks.\n\
+         stdout: {stdout}\nstderr: {stderr}"
     );
 }
 
@@ -7495,18 +7607,22 @@ fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
 }
 
 #[test]
-fn test_pre_commit_hook_readme_badge_style_trigger_scopes_to_readme() {
+fn test_pre_commit_hook_readme_badge_style_trigger_includes_checker_script() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-commit");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains(r"^README\.md$"),
-        "Check 20 trigger must match staged README.md changes."
+        content.contains(r"^(README\.md|scripts/check-readme-badges\.sh)$"),
+        "Check 20 trigger must match staged README.md and scripts/check-readme-badges.sh changes."
+    );
+    assert!(
+        content.contains(r"scripts/check-readme-badges\.sh"),
+        "Check 20 trigger should also run when scripts/check-readme-badges.sh is staged."
     );
     assert!(
         content.contains("check_skip \"README badge styles\""),
-        "Check 20 should skip cleanly when README.md is not staged."
+        "Check 20 should skip cleanly when neither README.md nor scripts/check-readme-badges.sh is staged."
     );
 }
 

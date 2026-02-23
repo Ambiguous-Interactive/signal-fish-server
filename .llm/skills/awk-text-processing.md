@@ -138,6 +138,21 @@ sub(/^prefix/, "", attrs)        # Remove prefix, keep rest
 | Closing fence | Exact | `/^```$/` |
 | Strict validation | Exact | `/^```Rust,ignore$/` |
 
+### Keep Cross-Language Token Boundaries in Sync
+
+When a shell/AWK script and a Rust test parse the same token (for example, URL extraction),
+use the same boundary semantics in both places.
+
+```awk
+# ❌ DRIFT: only excludes literal spaces, not tabs
+/https:\/\/img\.shields\.io\/[^"' )>]+/
+
+# ✅ PARITY: excludes all whitespace via POSIX class
+/https:\/\/img\.shields\.io\/[^"'[:space:])>]+/
+```
+
+If Rust uses `char::is_whitespace()`, AWK should normally use `[[:space:]]` for equivalent behavior.
+
 ---
 
 ## Multi-Field AWK Output

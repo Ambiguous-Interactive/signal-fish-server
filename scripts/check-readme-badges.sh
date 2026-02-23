@@ -75,12 +75,6 @@ while (($# > 0)); do
     shift
 done
 
-if (($# > 0)); then
-    echo "ERROR: Unexpected arguments: $*"
-    usage
-    exit 2
-fi
-
 if [[ "$TARGET_FILE" = /* ]]; then
     TARGET_PATH="$TARGET_FILE"
 else
@@ -107,7 +101,7 @@ while IFS=$'\t' read -r line_num url; do
 done < <(awk '
 {
     line = $0
-    while (match(line, /https:\/\/img\.shields\.io\/[^"'\'' )>]+/)) {
+    while (match(line, /https:\/\/img\.shields\.io\/[^"'\''[:space:])>]+/)) {
         url = substr(line, RSTART, RLENGTH)
         printf "%d\t%s\n", NR, url
         line = substr(line, RSTART + RLENGTH)

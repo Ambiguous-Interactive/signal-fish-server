@@ -159,6 +159,36 @@ echo "Failed: $FAILED / $TOTAL"
 
 ---
 
+## 5. Argument Parsing Without Dead Checks
+
+When using `while (($# > 0)); do ... shift; done`, all arguments are consumed by design.
+Do not add a post-loop `if (($# > 0)); then ... fi` check; it is unreachable and misleading.
+
+```bash
+# ❌ WRONG: unreachable post-loop check
+while (($# > 0)); do
+  case "$1" in
+    --flag) shift ;;
+    *) shift ;;
+  esac
+done
+if (($# > 0)); then
+  echo "Unexpected arguments"
+fi
+
+# ✅ CORRECT: handle unknown/extra args inside the loop
+while (($# > 0)); do
+  case "$1" in
+    --flag) shift ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1"; exit 2 ;;
+    *) echo "Too many positional arguments"; exit 2 ;;
+  esac
+done
+```
+
+---
+
 ## Real-World Example: Rust Code Block Extraction
 
 ```bash
