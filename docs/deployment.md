@@ -7,13 +7,13 @@ Guide for deploying Signal Fish Server in production.
 ### Pull and Run
 
 ```bash
-docker pull ghcr.io/ambiguousinteractive/signal-fish-server:latest
+docker pull ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 docker run -d \
   --name signal-fish \
   -p 3536:3536 \
   -v ./config.json:/app/config.json:ro \
-  ghcr.io/ambiguousinteractive/signal-fish-server:latest
+  ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 ```
 
@@ -27,7 +27,7 @@ docker run -d \
   -p 3536:3536 \
   -v ./config.json:/app/config.json:ro \
   -v ./logs:/app/logs \
-  ghcr.io/ambiguousinteractive/signal-fish-server:latest
+  ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 ```
 
@@ -40,7 +40,7 @@ docker run -d \
   -e SIGNAL_FISH_PORT=8080 \
   -e SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 \
   -e SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
-  ghcr.io/ambiguousinteractive/signal-fish-server:latest
+  ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 ```
 
@@ -50,7 +50,7 @@ docker run -d \
 
 services:
   signal-fish:
-    image: ghcr.io/ambiguousinteractive/signal-fish-server:latest
+    image: ghcr.io/ambiguous-interactive/signal-fish-server:latest
     ports:
 
       - "3536:3536"
@@ -195,7 +195,7 @@ signal.yourgame.com {
   "containerDefinitions": [
     {
       "name": "signal-fish",
-      "image": "ghcr.io/ambiguousinteractive/signal-fish-server:latest",
+      "image": "ghcr.io/ambiguous-interactive/signal-fish-server:latest",
       "portMappings": [
         {
           "containerPort": 3536,
@@ -227,7 +227,7 @@ signal.yourgame.com {
 ```bash
 
 gcloud run deploy signal-fish \
-  --image ghcr.io/ambiguousinteractive/signal-fish-server:latest \
+  --image ghcr.io/ambiguous-interactive/signal-fish-server:latest \
   --platform managed \
   --region us-central1 \
   --port 3536 \
@@ -259,7 +259,7 @@ spec:
 
       - name: signal-fish
 
-        image: ghcr.io/ambiguousinteractive/signal-fish-server:latest
+        image: ghcr.io/ambiguous-interactive/signal-fish-server:latest
         ports:
 
         - containerPort: 3536

@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Get the repository root directory
 fn repo_root() -> PathBuf {
@@ -22,6 +23,53 @@ fn repo_root() -> PathBuf {
 fn read_file(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
+}
+
+fn parse_github_slug_from_remote_url(remote_url: &str) -> Option<(String, String)> {
+    let trimmed = remote_url.trim().trim_end_matches(".git");
+    let slug = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+
+    let (owner, repo) = slug.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+
+    Some((owner.to_lowercase(), repo.to_lowercase()))
+}
+
+fn expected_first_party_image_refs() -> std::collections::HashSet<String> {
+    let mut refs = std::collections::HashSet::from([
+        "ghcr.io/ambiguous-interactive/signal-fish-server".to_string(),
+        "ambiguous-interactive/signal-fish-server".to_string(),
+        // Legacy namespace retained to avoid false positives during migration.
+        "ghcr.io/ambiguousinteractive/signal-fish-server".to_string(),
+        "ambiguousinteractive/signal-fish-server".to_string(),
+    ]);
+
+    let remote_url = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string());
+
+    if let Some(remote_url) = remote_url {
+        if let Some((owner, repo)) = parse_github_slug_from_remote_url(&remote_url) {
+            refs.insert(format!("ghcr.io/{owner}/{repo}"));
+            refs.insert(format!("{owner}/{repo}"));
+        }
+    }
+
+    refs
 }
 
 /// Extract Shields.io URLs from text content with their 1-based line numbers.
@@ -510,6 +558,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "llm-file-sizes.yml",
         "LLM skill file size enforcement (max 300 lines per .llm/ file)",
+    ),
+    (
+        "docker-publish.yml",
+        "Docker image publish to GHCR (owner/repo-derived image name)",
     ),
 ];
 
@@ -2098,6 +2150,52 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
 }
 
 #[test]
+fn test_pre_commit_hook_fails_closed_when_markdownlint_is_unavailable() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains(
+            "check_fail \"Markdown linting\" \"markdownlint-cli2 unavailable or wrong pinned version.\"",
+        ),
+        ".githooks/pre-commit must fail closed when markdownlint-cli2 is unavailable for staged markdown.\n\
+         This prevents CI-only markdownlint failures.\n\
+         Missing fail-closed handling in {}",
+        hook_path.display()
+    );
+
+    assert!(
+        !content.contains(
+            "check_skip \"Markdown linting\" \"pinned markdownlint-cli2 unavailable (see .markdownlint-version)\"",
+        ),
+        ".githooks/pre-commit should not skip markdown linting when the pinned tool is unavailable.\n\
+         Skipping allows markdown regressions to reach CI."
+    );
+}
+
+#[test]
+fn test_run_local_ci_fails_closed_when_markdownlint_is_unavailable() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains(
+            "FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)",
+        ),
+        "scripts/run-local-ci.sh must mark markdown as FAIL when markdownlint-cli2 is unavailable.\n\
+         Missing fail-closed markdown status in {}",
+        script_path.display()
+    );
+
+    assert!(
+        !content.contains("SKIP${NC}: markdown (pinned markdownlint-cli2 unavailable)"),
+        "scripts/run-local-ci.sh should not skip markdown checks when pinned markdownlint-cli2 is unavailable."
+    );
+}
+
+#[test]
 fn test_markdownlint_install_guidance_includes_local_and_global_options() {
     let root = repo_root();
     let guidance_files = [
@@ -2260,6 +2358,7 @@ fn test_automation_files_avoid_unpinned_tool_execution_patterns() {
             .expect("valid docker image regex");
 
     let mut violations = Vec::new();
+    let first_party_refs = expected_first_party_image_refs();
 
     for path in automation_files {
         let content = read_file(&path);
@@ -2272,11 +2371,7 @@ fn test_automation_files_avoid_unpinned_tool_execution_patterns() {
 
         for captures in external_latest_pattern.captures_iter(&content) {
             let image = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
-            let is_allowed_first_party = matches!(
-                image,
-                "ghcr.io/ambiguousinteractive/signal-fish-server"
-                    | "ambiguousinteractive/signal-fish-server"
-            );
+            let is_allowed_first_party = first_party_refs.contains(image);
             if !is_allowed_first_party {
                 violations.push(format!(
                     "{}: external image uses mutable ':latest' tag: {image}:latest",
@@ -2296,6 +2391,30 @@ fn test_automation_files_avoid_unpinned_tool_execution_patterns() {
 }
 
 #[test]
+fn test_docker_publish_workflow_uses_owner_derived_ghcr_image_name() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/docker-publish.yml");
+    let content = read_file(&workflow_path);
+
+    assert!(
+        content.contains("GITHUB_REPOSITORY_OWNER"),
+        "docker-publish.yml must derive GHCR image owner from GITHUB_REPOSITORY_OWNER."
+    );
+    assert!(
+        content.contains("GITHUB_REPOSITORY#*/"),
+        "docker-publish.yml must derive GHCR repository name from GITHUB_REPOSITORY."
+    );
+    assert!(
+        content.contains("images: ${{ steps.image.outputs.name }}"),
+        "docker-publish.yml must pass a derived step output to docker/metadata-action images."
+    );
+    assert!(
+        !content.contains("images: ghcr.io/"),
+        "docker-publish.yml must not hard-code GHCR owner/repo in metadata-action images."
+    );
+}
+
+#[test]
 fn test_permissions_guidance_avoids_incorrect_default_claim() {
     let root = repo_root();
     let skill_path = root.join(".llm/skills/github-actions-workflow-config.md");
@@ -2305,6 +2424,46 @@ fn test_permissions_guidance_avoids_incorrect_default_claim() {
         !content.contains("defaults to full write access"),
         "github-actions-workflow-config.md should not claim omitted permissions always default to full write access.\n\
          Repo/org defaults vary; guidance should recommend explicit least-privilege permissions."
+    );
+}
+
+#[test]
+fn test_skill_trigger_lines_do_not_form_accidental_setext_headings() {
+    // Regression guard: a Trigger line immediately followed by `---` is parsed
+    // as a setext heading, causing markdownlint MD003/MD026 failures.
+    let root = repo_root();
+    let skills_dir = root.join(".llm/skills");
+    let files = find_files_with_extension(&skills_dir, "md", &[]);
+    assert!(
+        !files.is_empty(),
+        "Expected at least one markdown skill file in {}",
+        skills_dir.display()
+    );
+
+    let mut violations = Vec::new();
+    for file in files {
+        let content = read_file(&file);
+        let lines: Vec<&str> = content.lines().collect();
+
+        for idx in 0..lines.len().saturating_sub(1) {
+            let current = lines[idx].trim_start();
+            let next = lines[idx + 1].trim();
+            if current.starts_with("**Trigger**:") && next == "---" {
+                violations.push(format!(
+                    "{}:{}: `**Trigger**:` is immediately followed by `---`.\n\
+                     Add a blank line between them to avoid accidental setext headings.",
+                    file.display(),
+                    idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Skill trigger formatting violations detected:\n\n{}\n\n\
+         Fix by adding a blank line between `**Trigger**:` and a subsequent `---` separator.",
+        violations.join("\n\n")
     );
 }
 
@@ -8100,8 +8259,9 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
             && content.contains("--locked")
             && content.contains("--test ci_config_tests")
             && content.contains("test_github_actions_use_version_refs_not_commit_hashes")
-            && content.contains("test_workflow_toolchain_fields_do_not_use_moving_aliases"),
-        "pre-push hook must run CI policy tests with --locked for action refs and toolchain alias pinning."
+            && content.contains("test_workflow_toolchain_fields_do_not_use_moving_aliases")
+            && content.contains("test_docker_publish_workflow_uses_owner_derived_ghcr_image_name"),
+        "pre-push hook must run CI policy tests with --locked for action refs, toolchain alias pinning, and owner-derived GHCR image naming."
     );
 }
 

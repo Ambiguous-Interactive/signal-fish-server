@@ -57,9 +57,47 @@ success() {
     echo -e "${GREEN}[OK]${NC} $1"
 }
 
+build_allowed_first_party_image_refs() {
+    # Keep historical namespace for backward compatibility during migration.
+    local allowed_refs
+    allowed_refs="ghcr.io/ambiguous-interactive/signal-fish-server
+ambiguous-interactive/signal-fish-server
+ghcr.io/ambiguousinteractive/signal-fish-server
+ambiguousinteractive/signal-fish-server"
+
+    local remote_url slug owner repo owner_lower repo_lower
+    remote_url=$(git remote get-url origin 2>/dev/null || true)
+    slug=$(printf '%s\n' "$remote_url" | sed -nE \
+        's#^git@github\.com:([^/]+/[^/.]+)(\.git)?$#\1#p; s#^https?://github\.com/([^/]+/[^/.]+)(\.git)?$#\1#p')
+    if [ -n "$slug" ]; then
+        owner=${slug%%/*}
+        repo=${slug##*/}
+        owner_lower=$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')
+        repo_lower=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
+        allowed_refs="$allowed_refs
+ghcr.io/${owner_lower}/${repo_lower}
+${owner_lower}/${repo_lower}"
+    fi
+
+    printf '%s\n' "$allowed_refs" | awk 'NF && !seen[$0]++'
+}
+
+is_allowed_first_party_latest_image() {
+    local image_ref="$1"
+    local allowed
+    while IFS= read -r allowed; do
+        [ -n "$allowed" ] || continue
+        if [ "$image_ref" = "$allowed" ]; then
+            return 0
+        fi
+    done <<< "$ALLOWED_FIRST_PARTY_IMAGE_REFS"
+    return 1
+}
+
 # Find repository root
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 cd "$REPO_ROOT"
+ALLOWED_FIRST_PARTY_IMAGE_REFS=$(build_allowed_first_party_image_refs)
 
 echo -e "${BLUE}Workflow Hygiene Checker${NC}"
 echo "Repository: $REPO_ROOT"
@@ -653,14 +691,12 @@ for candidate in scripts/*.sh .githooks/* .github/workflows/*.yml .github/workfl
     while IFS= read -r match; do
         line_no=${match%%:*}
         line_body=${match#*:}
-        image_ref=$(echo "$line_body" | sed -nE 's/.*([A-Za-z0-9._-]+\/[A-Za-z0-9._\/-]+):[Ll][Aa][Tt][Ee][Ss][Tt].*/\1/p')
+        image_ref=$(echo "$line_body" | grep -oE '[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+:[Ll][Aa][Tt][Ee][Ss][Tt]' | head -n1 | sed -E 's/:[Ll][Aa][Tt][Ee][Ss][Tt]$//')
         [ -n "$image_ref" ] || continue
 
-        case "$image_ref" in
-            ghcr.io/ambiguousinteractive/signal-fish-server|ambiguousinteractive/signal-fish-server)
-                continue
-                ;;
-        esac
+        if is_allowed_first_party_latest_image "$image_ref"; then
+            continue
+        fi
 
         error "$candidate:$line_no: Uses mutable Docker tag ':latest' for external image '$image_ref'"
         TOOLING_PIN_VIOLATIONS=$((TOOLING_PIN_VIOLATIONS + 1))
@@ -896,6 +932,32 @@ done
 
 if [ "$WINDOWS_BASH_VIOLATIONS" -eq 0 ]; then
     success "All Windows job steps with Bash syntax specify shell: bash"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# 13. Check Docker publish workflow for owner-derived GHCR image naming
+# ---------------------------------------------------------------------------
+info "Checking Docker publish workflow GHCR image naming..."
+
+DOCKER_PUBLISH_POLICY_VIOLATIONS=0
+DOCKER_PUBLISH_WORKFLOW=".github/workflows/docker-publish.yml"
+
+if [ -f "$DOCKER_PUBLISH_WORKFLOW" ]; then
+    if grep -qE '^[[:space:]]*images:[[:space:]]*ghcr\.io/[A-Za-z0-9._-]+/[A-Za-z0-9._.-]+' "$DOCKER_PUBLISH_WORKFLOW"; then
+        error "$DOCKER_PUBLISH_WORKFLOW: Uses hard-coded GHCR image name in metadata-action"
+        error "  Derive the image name from repository owner/name and reference a step output."
+        DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
+    fi
+
+    if ! grep -qE '^[[:space:]]*images:[[:space:]]*\$\{\{[[:space:]]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[[:space:]]*\}\}' "$DOCKER_PUBLISH_WORKFLOW"; then
+        error "$DOCKER_PUBLISH_WORKFLOW: metadata-action images input must use a derived step output"
+        DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
+    fi
+fi
+
+if [ "$DOCKER_PUBLISH_POLICY_VIOLATIONS" -eq 0 ]; then
+    success "Docker publish workflow uses owner-derived GHCR image naming"
 fi
 echo ""
 

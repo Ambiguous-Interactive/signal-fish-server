@@ -31,7 +31,7 @@ performance, debugging hook failures, or validating hook permissions in CI.
 - Target execution time: < 5 seconds per hook
 - Check only staged files (`git diff --cached --name-only`)
 - Use NUL-delimited file lists (`git diff -z` + `xargs -0`) for path-safe tooling
-- Gracefully skip checks if optional tools not installed
+- Gracefully skip only truly optional checks; fail closed for CI-parity checks (for example markdownlint)
 - Always document `git commit --no-verify` for emergencies
 - Run all checks even on failure, report summary at end
 
@@ -121,7 +121,8 @@ See full debug examples:
 
 ## Best Practices
 
-1. **Make hooks optional** — graceful degradation if tool not installed
+1. **Separate required vs optional checks** — required CI-parity checks should fail closed;
+   only optional checks should degrade gracefully when a tool is missing
 2. **Always document `--no-verify`** — show bypass in error message
 3. **Keep in sync with CI** — hooks should match CI validation steps
 

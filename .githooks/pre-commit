@@ -351,7 +351,10 @@ if [ -n "$STAGED_MD_FILES" ]; then
         else
             MARKDOWN_STATUS=$?
             if [ "$MARKDOWN_STATUS" -eq 2 ]; then
-                check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
+                check_fail "Markdown linting" "markdownlint-cli2 unavailable or wrong pinned version."
+                echo "$MARKDOWN_OUTPUT"
+                echo "${YELLOW}Tip:${NC} npm install --save-dev --save-exact markdownlint-cli2@\$(cat .markdownlint-version)"
+                echo ""
             else
                 # Exit code 1 means lint errors — attempt auto-fix
                 # Save list of staged .md files before auto-fixing
@@ -370,7 +373,10 @@ if [ -n "$STAGED_MD_FILES" ]; then
                 else
                     RECHECK_STATUS=$?
                     if [ "$RECHECK_STATUS" -eq 2 ]; then
-                        check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
+                        check_fail "Markdown linting" "markdownlint-cli2 unavailable or wrong pinned version."
+                        echo "$MARKDOWN_RECHECK"
+                        echo "${YELLOW}Tip:${NC} npm install --save-dev --save-exact markdownlint-cli2@\$(cat .markdownlint-version)"
+                        echo ""
                     else
                         check_fail "Markdown linting" "Markdown files have formatting issues."
                         echo "$MARKDOWN_RECHECK"
@@ -381,7 +387,9 @@ if [ -n "$STAGED_MD_FILES" ]; then
             fi
         fi
     else
-        check_skip "Markdown linting" "check-markdown.sh not found"
+        check_fail "Markdown linting" "check-markdown.sh not found"
+        echo "${YELLOW}Tip:${NC} Restore scripts/check-markdown.sh"
+        echo ""
     fi
 else
     check_skip "Markdown linting" "no markdown files changed"

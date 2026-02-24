@@ -216,9 +216,10 @@ if [ -f scripts/check-markdown.sh ]; then
     else
         MARKDOWN_STATUS=$?
         if [ "$MARKDOWN_STATUS" -eq 2 ]; then
-            echo -e "${YELLOW}⊘ SKIP${NC}: markdown (pinned markdownlint-cli2 unavailable)"
+            echo -e "${RED}✗ FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)"
             echo "$MARKDOWN_OUTPUT"
             echo ""
+            FAILED_CHECKS+=("markdown")
         else
             echo -e "${RED}✗ FAIL${NC}: markdown"
             echo "$MARKDOWN_OUTPUT"
@@ -227,8 +228,9 @@ if [ -f scripts/check-markdown.sh ]; then
         fi
     fi
 else
-    echo -e "${YELLOW}⊘ SKIP${NC}: markdown (scripts/check-markdown.sh not found)"
+    echo -e "${RED}✗ FAIL${NC}: markdown (scripts/check-markdown.sh not found)"
     echo ""
+    FAILED_CHECKS+=("markdown")
 fi
 
 # Check 12: README Badge Style Consistency

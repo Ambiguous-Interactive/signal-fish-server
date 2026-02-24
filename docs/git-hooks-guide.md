@@ -183,7 +183,10 @@ This check catches regex patterns that are too strict.
 
 **What it checks:** Markdown files follow formatting standards (headings, lists, code blocks).
 
-**When it runs:** When `.md` files are modified (requires pinned `markdownlint-cli2` version from `.markdownlint-version`).
+**When it runs:** When `.md` files are modified
+(requires pinned `markdownlint-cli2` version from `.markdownlint-version`).
+
+**If tool is missing/wrong version:** The hook fails closed to prevent CI-only markdownlint regressions.
 
 **How to fix:**
 

@@ -18,7 +18,7 @@ You need one of the following:
     Pull and run the container image. No configuration needed.
 
     ```bash
-    docker run -p 3536:3536 ghcr.io/ambiguousinteractive/signal-fish-server:latest
+    docker run -p 3536:3536 ghcr.io/ambiguous-interactive/signal-fish-server:latest
     ```
 
 === "Cargo"
