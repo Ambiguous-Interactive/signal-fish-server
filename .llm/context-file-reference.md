@@ -79,3 +79,12 @@
 | `src/logging.rs`                      | Structured logging init           |
 | `src/retry.rs`                        | Exponential backoff utility       |
 | `src/rkyv_utils.rs`                   | Zero-copy serialization helpers   |
+
+## LLM Documentation Assets
+
+| File/Directory                         | Purpose                                      | When to Modify              |
+| -------------------------------------- | -------------------------------------------- | --------------------------- |
+| `.llm/context.md`                      | Central assistant policy and quick reference | Updating agent guidance     |
+| `.llm/skills/`                         | Skill-specific instructions                  | Adding/updating workflows   |
+| `.llm/code-samples/`                   | Canonical reusable documentation samples     | Shared examples in markdown |
+| `.llm/code-samples/protocol/*.jsonl`   | Protocol message sample payloads             | Protocol docs changes       |

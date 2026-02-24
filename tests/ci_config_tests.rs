@@ -8448,7 +8448,16 @@ fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
     let content = read_file(&hook_path);
     assert!(
         content.contains(r"^\.llm/.*\.md$"),
-        "Check 18 trigger filter must match .llm/*.md files using the correct regex."
+        "Check 18 trigger filter must match .llm/*.md files with the anchored regex."
+    );
+    assert!(
+        content.contains("Preserve spaces in staged file paths by splitting only on newlines."),
+        "Check 18 must document why newline-only splitting is required."
+    );
+    assert!(
+        content.contains("set -f")
+            && content.contains("scripts/check-llm-file-sizes.sh --files $STAGED_LLM_FILES"),
+        "Check 18 must disable globbing and pass staged files with newline-only splitting semantics."
     );
     assert!(
         content.contains("check_skip \"LLM file sizes\""),

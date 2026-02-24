@@ -249,54 +249,37 @@ is also supported for game data when `enable_message_pack_game_data` is enabled.
 
 ### Client Messages
 
-```json
-{"type": "Authenticate", "data": {"app_id": "...", "app_secret": "..."}}
-{"type": "CreateRoom", "data": {"game_name": "...", "max_players": 8}}
-{"type": "JoinRoom", "data": {"game_name": "...", "room_code": "ABC123"}}
-{"type": "GameData", "data": {"action": "move", "x": 10}}
-{"type": "AuthorityRequest", "data": {"become_authority": true}}
-{"type": "SetReady", "data": {"ready": true}}
-{"type": "LeaveRoom"}
-{"type": "Ping"}
-```
+Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/code-samples/protocol/v2-client-messages.jsonl)
 
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
-| `Authenticate`     | Authenticate with app credentials (required when auth is enabled)                |
-| `CreateRoom`       | Create a new room for the given game name                                        |
+| `Authenticate`     | Authenticate with app ID (required when auth is enabled)                         |
 | `JoinRoom`         | Join an existing room by game name and room code                                 |
 | `GameData`         | Send arbitrary game data to other players in the room                            |
 | `AuthorityRequest` | Request or release game authority                                                |
-| `SetReady`         | Toggle ready state (drives lobby state transitions)                              |
+| `PlayerReady`      | Signal lobby readiness before game start                                         |
+| `ProvideConnectionInfo` | Share peer connection information for P2P establishment                     |
+| `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`       |
+| `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
+| `LeaveSpectator`   | Leave spectator mode                                                             |
 | `LeaveRoom`        | Leave the current room                                                           |
 | `Ping`             | Heartbeat ping (server responds with `Pong`)                                     |
 
 ### Server Messages
 
-```json
-{"type": "Authenticated", "data": {"server_version": "2.0.0"}}
-{"type": "RoomCreated", "data": {"room_id": "...", "room_code": "ABC123"}}
-{"type": "RoomJoined", "data": {"room_id": "...", "room_code": "ABC123"}}
-{"type": "PlayerJoined", "data": {"player": {"id": "...", "name": "..."}}}
-{"type": "PlayerLeft", "data": {"player_id": "..."}}
-{"type": "GameData", "data": {"from_player": "...", "data": {}}}
-{"type": "LobbyStateChanged", "data": {"state": "Playing"}}
-{"type": "AuthorityGranted", "data": {"player_id": "..."}}
-{"type": "Error", "data": {"reason": "Room is full", "code": "ROOM_FULL"}}
-{"type": "Pong"}
-```
+Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/code-samples/protocol/v2-server-messages.jsonl)
 
 | Message              | Description                                              |
 | -------------------- | -------------------------------------------------------- |
-| `Authenticated`      | Auth succeeded; includes server version                  |
-| `RoomCreated`        | Room created successfully; includes room ID and code     |
+| `Authenticated`      | Auth succeeded; includes app metadata and rate limits    |
+| `ProtocolInfo`       | SDK/protocol compatibility details and capabilities      |
 | `RoomJoined`         | Successfully joined a room                               |
 | `PlayerJoined`       | Another player joined the room                           |
 | `PlayerLeft`         | A player left the room                                   |
 | `GameData`           | Game data relayed from another player                    |
-| `LobbyStateChanged`  | Lobby state transitioned (Waiting, Countdown, Playing)   |
-| `AuthorityGranted`   | Authority was granted to a player                        |
-| `Error`              | An error occurred; includes reason and error code        |
+| `LobbyStateChanged`  | Lobby state transitioned (`waiting`, `lobby`, `finalized`) |
+| `AuthorityResponse`  | Authority request result                                 |
+| `Error`              | An error occurred; includes message and optional code    |
 | `Pong`               | Response to a client `Ping`                              |
 
 ### Typical Session Flow
@@ -306,15 +289,16 @@ Client                              Server
   |                                    |
   |--- Authenticate ------------------>|
   |<-- Authenticated ------------------|
+  |<-- ProtocolInfo -------------------|
   |                                    |
-  |--- CreateRoom -------------------->|
-  |<-- RoomCreated --------------------|
+  |--- JoinRoom ---------------------->|
+  |<-- RoomJoined ---------------------|
   |                                    |
   |         (other client joins)       |
   |<-- PlayerJoined -------------------|
   |                                    |
-  |--- SetReady ---------------------->|
-  |<-- LobbyStateChanged (Playing) ----|
+  |--- PlayerReady -------------------->|
+  |<-- LobbyStateChanged (lobby) -------|
   |                                    |
   |--- GameData ---------------------->|
   |<-- GameData (from other player) ---|
@@ -516,9 +500,9 @@ Authentication is **disabled by default**. To enable it, set
 entries to the `security.authorized_apps` array.
 
 When authentication is enabled, clients must send an `Authenticate` message
-immediately after connecting. The server validates the `app_id` and
-`app_secret` against the configured authorized apps. Per-app rate limiting
-is enforced based on the `rate_limit_per_minute` field.
+immediately after connecting. The server validates the `app_id` against the
+configured authorized apps and enforces per-app rate limiting based on the
+`rate_limit_per_minute` field.
 
 ```json
 {
@@ -540,7 +524,7 @@ is enforced based on the `rate_limit_per_minute` field.
 
 **Important:** Change the default `app_secret` value before deploying to
 production. The example value `CHANGE_ME_BEFORE_PRODUCTION` in
-`config.example.json` is intentionally insecure.
+`config.example.json` is intentionally insecure configuration.
 
 ## MSRV
 
