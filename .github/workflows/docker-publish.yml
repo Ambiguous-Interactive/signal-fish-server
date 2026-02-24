@@ -1,0 +1,96 @@
+# Docker Publish Workflow
+#
+# Builds and pushes the Signal Fish Server Docker image to the GitHub Container
+# Registry (ghcr.io) so that users can pull it publicly.
+#
+# Runs on:
+#   - Push to main branch (publishes the :latest tag)
+#   - Tag pushes matching v* (publishes semver tags, e.g. :1.2.3, :v1.2.3)
+#
+# Published image: ghcr.io/ambiguousinteractive/signal-fish-server
+#
+# Tags published:
+#   - :latest      — always points to the most recent push to main
+#   - :sha-<short> — immutable, traceable to exact commit
+#   - :v1.2.3      — raw git tag (on v* tag pushes)
+#   - :1.2.3       — semver without 'v' prefix (on v* tag pushes)
+#   - :1.2         — major.minor only (on v* tag pushes)
+#
+# ⚠️  Making the package public (one-time manual step):
+#   After the first successful workflow run, the package will be private by
+#   default. An organization owner must make it public at:
+#   https://github.com/orgs/Ambiguous-Interactive/packages/container/signal-fish-server/settings
+#
+#   Alternatively, run:
+#   gh api --method PATCH \
+#     /orgs/Ambiguous-Interactive/packages/container/signal-fish-server \
+#     -f visibility=public
+#
+# Permissions:
+#   packages: write  — required to push to GHCR
+#   contents: read   — required to check out the repository
+#
+# Pinning philosophy:
+#   All third-party GitHub Actions are SHA-pinned with version comments.
+#
+# Security note:
+#   The GITHUB_TOKEN is used for authentication. No long-lived secrets are
+#   baked into the image. Image visibility is managed separately via the
+#   GitHub package settings.
+
+name: Docker Publish
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker-publish:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/ambiguousinteractive/signal-fish-server
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

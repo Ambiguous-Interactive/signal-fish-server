@@ -511,6 +511,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "llm-file-sizes.yml",
         "LLM skill file size enforcement (max 300 lines per .llm/ file)",
     ),
+    (
+        "docker-publish.yml",
+        "Docker image publish to GHCR (ghcr.io/ambiguousinteractive/signal-fish-server)",
+    ),
 ];
 
 #[test]
