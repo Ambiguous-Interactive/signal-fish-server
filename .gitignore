@@ -22,6 +22,9 @@ target
 # Build artifacts
 /target/
 
+pre-commit.txt
+pre-push.txt
+
 # Logs
 logs/
 *.log

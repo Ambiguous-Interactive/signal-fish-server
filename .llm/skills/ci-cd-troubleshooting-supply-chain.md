@@ -1,33 +1,36 @@
 # Skill: CI/CD Troubleshooting - Supply Chain & Stale Reference Patterns
 
 <!--
-  trigger: sha pinning, supply chain, dockerfile copy, stale script,
+  trigger: action ref policy, supply chain, dockerfile copy, stale script,
   action not found, continue-on-error, dockerbuildkit warning, secrets env,
   workflow script missing
-  | Patterns 21-25: Dockerfile COPY stale paths, SHA pinning, stale workflow
-  scripts, SHA not found, Dockerfile false-positive security warnings
+  | Patterns 21-25: Dockerfile COPY stale paths, explicit action version refs,
+  stale workflow scripts, invalid/moving action refs, Dockerfile false-positive
+  security warnings
   | Infrastructure
 -->
 
-**Trigger**: When debugging Dockerfile `COPY` path errors, missing SHA pins on GitHub
-Actions, stale workflow script references, action SHA not found errors, or Dockerfile
-BuildKit `SecretsUsedInArgOrEnv` false-positive warnings.
+**Trigger**: When debugging Dockerfile `COPY` path errors, invalid or moving
+GitHub Action refs, stale workflow script references, or Dockerfile BuildKit
+`SecretsUsedInArgOrEnv` false-positive warnings.
 
-See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md),
-[ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md),
-[ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md),
-[ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
+See also: [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md),
+[Scripts Troubleshooting](./ci-cd-troubleshooting-scripts.md),
+[Links Troubleshooting](./ci-cd-troubleshooting-links.md),
+[Troubleshooting Categories](./ci-cd-troubleshooting-categories.md)
 
 ---
 
 ## TL;DR
 
 - **Stale Dockerfile COPY**: Audit all `COPY`/`ADD` instructions when removing directories
-- **SHA pinning**: All `uses:` references must be `@<40-char-sha> # vX.Y.Z` — tags are mutable
+- **Action refs policy**: All `uses:` references must use explicit version tags
+  (for example `@v6.0.2`), not commit SHAs and not moving refs (`@stable`, `@main`)
+- **Action syntax policy**: Treat malformed remote refs (missing `@ref`, empty ref,
+  or missing `owner/repo`) as violations, not as ignorable lines
 - **Stale script references**: Audit workflow `run:` steps when deleting scripts;
   `continue-on-error: true` silently masks these
-- **Action SHA not found**: Force-pushed/rebased action repo; look up new SHA with
-  `gh api repos/OWNER/REPO/git/refs/tags/vX.Y.Z --jq '.object.sha'`
+- **Action ref drift**: floating refs (`@stable`, `@v2`) change unexpectedly; pin to an explicit release tag
 - **Dockerfile BuildKit warning**: Add `# check=skip=SecretsUsedInArgOrEnv` as first line of Dockerfile
 
 ---
@@ -111,62 +114,62 @@ fn test_dockerfile_copy_sources_exist() {
 
 ---
 
-## Pattern 22: SHA Pinning Stripped from GitHub Actions Workflows
+## Pattern 22: Moving Action Refs Used in GitHub Actions Workflows
 
 ### Symptom
 
 ```yaml
-# Workflow uses tag-based references instead of SHA pins
-- uses: actions/checkout@v4.2.2          # Mutable tag — supply chain risk
-- uses: dtolnay/rust-toolchain@stable    # Mutable tag — supply chain risk
+# Workflow uses moving references
+- uses: taiki-e/install-action@v2        # Floating major tag
+- uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: stable                    # Moving toolchain alias
 ```
 
 ### Root Cause
 
-Tags are Git references that can be moved to point to any commit. An attacker who
-gains push access to an action repo can retag a release. SHA pins are immutable.
+Floating refs (`@stable`, `@main`, `@v2`) are moving targets and can change
+without a workflow edit. This reduces reproducibility and auditability.
 
-**Common ways SHA pins get stripped:**
+This repository intentionally uses explicit version tags instead of commit SHAs.
+Trade-off: tags are mutable; mitigation relies on strict versioning policy,
+Dependabot updates, least-privilege permissions, and CI validation tests.
 
-1. Copying workflow snippets from documentation (docs use short tags)
-2. Dependabot or Renovate updating to tag-only format
-3. Manual edits that simplify the `uses:` line
+**Common ways moving refs get introduced:**
+
+1. Copying examples that use `@stable` / `@main` / `@v2`
+2. Manual “simplification” from explicit version tags to channels
+3. Inconsistent updates where one workflow gets pinned and others do not
 
 ### Solution
 
 ```yaml
-# WRONG: Mutable tag reference (supply chain risk)
-- uses: actions/checkout@v4.2.2
+# WRONG: Moving refs
+- uses: taiki-e/install-action@v2
+- uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: stable
 
-# CORRECT: Immutable SHA pin with version comment
-- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+# CORRECT: Explicit version tags
+- uses: taiki-e/install-action@v2.68.8
+- uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: 1.88.0  # exact pinned value (for example from rust-toolchain.toml)
 ```
 
-**Find the SHA for a given action version:**
+**Audit existing workflows for moving refs:**
 
 ```bash
-gh api repos/actions/checkout/git/refs/tags/v4.2.2 --jq '.object.sha'
+grep -rnE 'uses: .+@(stable|beta|nightly|main|master|latest)$' .github/workflows/
+grep -rnE 'uses: .+@v[0-9]+$' .github/workflows/   # floating major tags
 ```
 
-**Audit existing workflows for missing SHA pins:**
+**Enforcement hooks/tests:**
 
 ```bash
-grep -rn 'uses: .*@v[0-9]' .github/workflows/
-grep -rn 'uses: .*@stable\|@main\|@master' .github/workflows/
+./scripts/check-workflow-hygiene.sh
+cargo test --test ci_config_tests test_github_actions_use_version_refs_not_commit_hashes
 ```
-
-### Prevention
-
-The CI test `test_workflow_actions_are_sha_pinned` in `tests/ci_config_tests.rs`
-iterates all `uses:` lines and asserts the ref after `@` is exactly 40 lowercase hex
-characters. Add workflow header comments to document the required format:
-
-```yaml
-# All action references MUST use SHA pins for supply chain security.
-# Format: uses: owner/repo@<40-char-sha> # vX.Y.Z
-```
-
----
 
 ## Pattern 23: Workflow Script References to Non-Existent Files
 
@@ -209,7 +212,7 @@ scripts to avoid future staleness:
 
 ---
 
-## Pattern 24: Action SHA Not Found
+## Pattern 24: Action Reference Not Allowed by Policy
 
 ### Symptom
 
@@ -220,20 +223,22 @@ An action could not be found at the URI
 
 ### Root Cause
 
-SHA-pinned action reference points to a commit that no longer exists because the
-action maintainer force-pushed, rebased, or deleted the commit.
+Workflow uses a disallowed ref type:
+
+- moving ref (`@stable`, `@main`, `@v2`)
+- commit hash (`@<40-char-sha>`)
+- malformed remote reference (for example missing `@ref`, empty `@`, or `uses: checkout@v1`)
 
 ### Solution
 
-Look up the current SHA for the version tag and update the workflow:
+Use an explicit version tag and apply it consistently across all workflows:
 
 ```bash
-gh api repos/taiki-e/install-action/git/refs/tags/v2.44.30 --jq '.object.sha'
+grep -rn 'taiki-e/install-action@' .github/workflows/
 ```
 
-Then update to `- uses: taiki-e/install-action@<new-40-char-sha> # v2.44.30`.
-Update ALL workflow files that reference the same action, verify the SHA is exactly
-40 hex characters, and include the version tag as a trailing comment.
+Then update all occurrences to the same explicit version tag, for example:
+`- uses: taiki-e/install-action@v2.68.8`.
 
 ---
 
@@ -278,21 +283,15 @@ ENV SIGNAL_FISH_SECURITY_ENABLED=false
 
 ## Lesson Learned: rustfmt --check on Documentation Code Blocks
 
-`rustfmt --check` returns exit code 1 for **both** parse errors and formatting
-differences, making it impossible to distinguish "not valid Rust" from "valid but
-unformatted." When validating Rust code blocks in documentation, treat `rustfmt`
-failures as **warnings**, not hard errors — doc snippets are often fragments or
-pseudo-code that won't parse. Reserve hard errors for `cargo clippy` / `cargo test`
-on production code.
-
----
+`rustfmt --check` returns exit code 1 for **both** parse errors and formatting differences.
+Treat `rustfmt` failures on doc snippets as **warnings**, not hard errors.
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md) — Clippy, typos, markdown
-- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Lychee, link checking
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
-- [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — Workflow patterns
+- [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [Linting Troubleshooting](./ci-cd-troubleshooting-linting.md) — Clippy, typos, markdown
+- [Scripts Troubleshooting](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
+- [Links Troubleshooting](./ci-cd-troubleshooting-links.md) — Lychee, link checking
+- [Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — Security audits and scanning
+- [Workflow Configuration](./github-actions-workflow-config.md) — Workflow patterns

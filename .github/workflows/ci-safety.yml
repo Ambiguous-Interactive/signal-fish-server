@@ -10,6 +10,8 @@
 #   - Weekly schedule (Sunday at 02:00 UTC) for heavy analysis jobs
 #   - Manual workflow_dispatch for diagnostics and debugging
 #
+# all-jobs-run-on-schedule
+#
 # Staged / Non-Required Status:
 #   Both jobs use continue-on-error: true and are NOT branch-protection required
 #   checks. They produce actionable diagnostics (uploaded as artifacts) but do
@@ -59,7 +61,6 @@
 #     - No nightly toolchain incidents (breakage, unavailability) during that window
 #     - Median runtime stays within the timeout budget (45 min Miri, 30 min ASan)
 #   Until promotion, failures are informational and should be triaged weekly.
-# all-jobs-run-on-schedule
 
 name: Advanced Safety
 
@@ -95,16 +96,15 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain with Miri
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
           components: miri, rust-src
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           prefix-key: "ci-safety-nightly"
 
@@ -122,7 +122,7 @@ jobs:
 
       - name: Upload Miri output
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: miri-output
           path: miri-output.txt
@@ -136,15 +136,14 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           prefix-key: "ci-safety-nightly"
 
@@ -164,7 +163,7 @@ jobs:
 
       - name: Upload AddressSanitizer output
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: asan-output
           path: asan-output.txt

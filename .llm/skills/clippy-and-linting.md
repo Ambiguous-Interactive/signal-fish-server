@@ -220,11 +220,29 @@ In binaries, use `-D warnings` as a CI flag instead of in source code.
 
 ## Common CI-Breaking Clippy Lints in Test Code
 
-| Lint               | What it catches                                               |
-| ------------------ | ------------------------------------------------------------- |
-| `collapsible_if`   | Nested `if` statements that can be combined with `&&`         |
-| `needless_return`  | Explicit `return` statements that can be removed              |
-| `single_match`     | `match` with one arm + wildcard that should be `if let`       |
+| Lint                   | What it catches                                           |
+| ---------------------- | --------------------------------------------------------- |
+| `collapsible_if`       | Nested `if` statements that can be combined with `&&`     |
+| `needless_return`      | Explicit `return` statements that can be removed          |
+| `single_match`         | `match` with one arm + wildcard that should be `if let`   |
+| `needless_range_loop`  | Range loop only used to index a collection (use iterator) |
+
+```rust
+// ❌ needless_range_loop — auto-fix uses placeholder `<item>`, so manual fix required
+for j in start..end {
+    let val = lines[j].trim();
+}
+
+// ✅ Fix: use iterator (forward)
+for line in lines.iter().take(end).skip(start) {
+    let val = line.trim();
+}
+
+// ✅ Fix: use slice iterator (reverse)
+for line in lines[start..end].iter().rev() {
+    let val = line.trim();
+}
+```
 
 ```rust
 // ❌ collapsible_if warning

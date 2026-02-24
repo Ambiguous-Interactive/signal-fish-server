@@ -3,8 +3,9 @@
 <!--
   trigger: ci failure, language mismatch, cache error, toolchain staleness,
   unused dependencies, works locally fails ci, Docker build failure
-  | Patterns 1-6: language/ecosystem mismatch, cache corruption, toolchain
-  staleness, dependency hygiene, local-vs-CI divergence, Docker failures
+  | Patterns 1-7: language/ecosystem mismatch, cache corruption, toolchain
+  staleness, dependency hygiene, local-vs-CI divergence, Docker failures,
+  Rust toolchain action input
   | Infrastructure
 -->
 
@@ -63,21 +64,14 @@ Workflow uses caching/tooling for wrong language ecosystem:
 
 ### Detection
 
-| Indicator | Wrong Ecosystem | Correct for Rust |
-|-----------|-----------------|------------------|
-| Cache paths | `~/.cache/pip`, `node_modules/`, `.bundle/` | `~/.cargo/`, `target/` |
-| Hash files | `requirements.txt`, `package-lock.json`, `Gemfile.lock` | `Cargo.lock`, `Cargo.toml` |
-| Install commands | `pip install`, `npm install`, `bundle install` | `cargo build`, `rustup component add` |
-
-**Quick audit command:**
+**Quick audit** — look for cross-ecosystem indicators in workflows:
 
 ```bash
 grep -r "pip\|requirements\.txt\|python" .github/workflows/  # Python patterns
 grep -r "cargo\|Cargo\.toml\|rust" .github/workflows/        # Rust patterns
 ```
 
-**Caveat:** Mixed-language projects are legitimate. Check `requirements*.txt` variants
-(e.g., `requirements-docs.txt` for MkDocs) before flagging as mismatch.
+**Caveat:** Mixed-language projects are legitimate (e.g., `requirements-docs.txt` for MkDocs).
 
 ---
 
@@ -110,18 +104,10 @@ WARNING: Failed to restore cache, continuing without cache
     #                            ^^^ increment version to bust cache
 ```
 
-**Or via GitHub UI:** Go to repository → Actions → Caches → Delete problematic entries.
+**Or via GitHub UI:** Repository → Actions → Caches → Delete problematic entries.
 
-### Prevention
-
-```text
-# GOOD: Versioned cache key
-key: ${{ runner.os }}-rust-v1-${{ hashFiles('**/Cargo.lock') }}
-
-# BEST: Let Swatinem/rust-cache handle cache management
-- uses: Swatinem/rust-cache@v2.7.5
-  # Automatically manages cache keys, invalidation, and restoration
-```
+**Best practice:** Use `Swatinem/rust-cache@v2.7.5` which handles keys and invalidation
+automatically, or version your manual cache keys (`-v2-`, `-v3-`, etc.).
 
 ---
 
@@ -138,7 +124,7 @@ error[E0658]: use of unstable library feature 'foo'
 
 ```yaml
 # PROBLEM: Nightly from 360 days ago
-- uses: dtolnay/rust-toolchain@stable
+- uses: dtolnay/rust-toolchain@v1
   with:
     toolchain: nightly-2025-02-21  # 360 days old!
 ```
@@ -147,7 +133,7 @@ error[E0658]: use of unstable library feature 'foo'
 
 ```yaml
 # CORRECT: Recent nightly (within last 30 days)
-- uses: dtolnay/rust-toolchain@stable
+- uses: dtolnay/rust-toolchain@v1
   with:
     toolchain: nightly-2026-02-01  # recent, acceptable
 ```
@@ -160,7 +146,7 @@ For stable MSRV issues, see [msrv-management](./msrv-management.md).
 |----------------|-------------|-----------------|
 | Stable MSRV | N/A | Update when dependencies require it |
 | Pinned nightly | 6 months | Proactive update recommended |
-| Action SHA pins | 1 year | Review for security updates |
+| Action version tags | 1 year | Review for security updates |
 | Docker base images | 6 months | Update for security patches |
 
 ```bash
@@ -189,23 +175,9 @@ cargo machete              # Find unused dependencies (fast, stable)
 cargo +nightly udeps --all-targets  # More thorough (nightly)
 ```
 
-**Keep vs Remove Decision Matrix:**
-
-| Scenario | Decision | Rationale |
-|----------|----------|-----------|
-| Unused but actively maintained | Remove | Can re-add when needed |
-| Unused behind feature flag | Keep | Optional dependency |
-| Unused, unmaintained (>1 year) | Remove immediately | Security liability |
-| False positive from cargo-udeps | Keep | Mark with `# keep: used in macro` |
-
-```toml
-# keep: Used by serde derive macros (false positive from cargo-udeps)
-serde_derive = "1.0"
-```
-
-### Prevention
-
-Add a weekly CI job with `cargo machete`.
+**Keep vs Remove:** Remove unused deps unless behind a feature flag or a false positive
+(mark with `# keep: used in macro`). Remove unmaintained deps (>1 year) immediately.
+Add a weekly CI job with `cargo machete` for prevention.
 
 ---
 
@@ -264,37 +236,57 @@ cargo test --locked --no-default-features  # Minimal features
 
 ### Solution
 
-```yaml
-# Disable Docker build cache in CI
-- name: Build Docker image
-  run: docker build --no-cache -t myapp:ci .
-```
-
-```dockerfile
-# Multi-platform support
-FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS builder
-```
-
-```text
-# .dockerignore — add to avoid polluting build context
-target/
-.git/
-.github/
-*.md
-.env*
-.vscode/
-```
+Use `docker build --no-cache` in CI and `FROM --platform=$BUILDPLATFORM` for
+multi-platform builds. Ensure `.dockerignore` excludes `target/`, `.git/`, `.github/`,
+`*.md`, `.env*`, and `.vscode/`.
 
 ```bash
-# Simulate CI environment locally (use --no-cache)
+# Simulate CI environment locally
 docker build --no-cache --progress=plain -t test .
 ```
+
+---
+
+## Pattern 7: `dtolnay/rust-toolchain@v1` Requires Explicit `toolchain` Input
+
+### Symptom
+
+```text
+'toolchain' is a required input
+```
+
+Jobs fail at the "Install Rust toolchain" step.
+
+### Root Cause
+
+The `dtolnay/rust-toolchain@v1` action changed to require an explicit `toolchain` input
+parameter. Previous behavior of auto-detecting from `rust-toolchain.toml` no longer works
+with the `@v1` tag.
+
+### Solution
+
+Extract the channel from `rust-toolchain.toml` and pass it dynamically:
+
+```yaml
+- name: Read Rust toolchain
+  id: toolchain
+  run: |
+    CHANNEL=$(grep '^channel = ' rust-toolchain.toml \
+      | sed -E 's/channel = "(.+)"/\1/')
+    echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+- uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: ${{ steps.toolchain.outputs.channel }}
+```
+
+**Important:** Do NOT use bare `stable`, `beta`, or `nightly` — these are moving aliases
+rejected by CI validation tests. Always use the concrete version from `rust-toolchain.toml`.
 
 ---
 
 ## Related Skills
 
 - [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow and quick reference
+- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
+- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick ref
 - [msrv-management](./msrv-management.md) — MSRV updates and consistency

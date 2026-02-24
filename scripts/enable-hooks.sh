@@ -2,8 +2,8 @@
 # enable-hooks.sh - Configure git to use the .githooks directory
 #
 # This script sets up git to use the project's .githooks directory for git hooks.
-# Run this once after cloning the repository to enable pre-commit hooks that
-# check for formatting and panic-prone patterns.
+# Run this once after cloning the repository to enable repository hooks
+# (pre-commit and pre-push) for local policy validation.
 #
 # Usage:
 #   ./scripts/enable-hooks.sh         # Enable hooks
@@ -55,6 +55,10 @@ if git config --local core.hooksPath "$DESIRED" 2>/dev/null; then
     log "   8. Docs link validation (when docs/*.md files change)"
     log "   9. Markdown linting (when .md files change)"
     log "  10. Link checking (when .md files change, warning only)"
+    log ""
+    log "Additional push-time checks run when workflow-policy files change:"
+    log "  - Workflow hygiene script (scripts/check-workflow-hygiene.sh)"
+    log "  - CI policy tests for action refs/toolchain pinning (ci_config_tests)"
     log ""
     log "Optional dependencies:"
     log "  - shellcheck: apt-get install shellcheck"

@@ -11,6 +11,8 @@
 #   - Pull requests to main (only for workflow file changes)
 #   - Weekly schedule (Monday at 06:00 UTC) for proactive staleness detection
 #
+# all-jobs-run-on-schedule
+#
 # Features:
 #   - Language-specific caching validation (no Python cache on Rust projects)
 #   - Nightly toolchain staleness detection (warns at 180 days, errors at 365 days)
@@ -18,6 +20,7 @@
 #   - Dependency audit workflow presence validation
 #   - Timeout configuration checks
 #   - GitHub Actions version pinning validation
+#   - Rust toolchain input validation (dtolnay/rust-toolchain must specify toolchain:)
 
 name: Workflow Hygiene
 
@@ -28,6 +31,7 @@ on:
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
       - 'scripts/check-workflow-hygiene.sh'
+      - 'scripts/check-workflow-toolchain.sh'
       - '.github/workflows/workflow-hygiene.yml'
   pull_request:
     branches: [main]
@@ -35,6 +39,7 @@ on:
       - '.github/workflows/*.yml'
       - '.github/workflows/*.yaml'
       - 'scripts/check-workflow-hygiene.sh'
+      - 'scripts/check-workflow-toolchain.sh'
       - '.github/workflows/workflow-hygiene.yml'
   schedule:
     # Run weekly on Monday at 06:00 UTC to detect stale nightly toolchains
@@ -54,10 +59,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Run workflow hygiene checks
         run: ./scripts/check-workflow-hygiene.sh
+
+      - name: Validate toolchain inputs
+        run: ./scripts/check-workflow-toolchain.sh
 
       - name: Summary
         if: always()
@@ -70,4 +77,5 @@ jobs:
           echo "  - Workflows have self-validation infrastructure"
           echo "  - Dependency audit workflows are present"
           echo "  - Jobs have timeout configurations"
-          echo "  - GitHub Actions are pinned to SHA hashes"
+          echo "  - GitHub Actions use explicit version tags (no moving channels)"
+          echo "  - dtolnay/rust-toolchain usages specify explicit toolchain input"

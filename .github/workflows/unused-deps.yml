@@ -10,6 +10,8 @@
 #   - Pull requests to main
 #   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
 #
+# all-jobs-run-on-schedule
+#
 # Features:
 #   - Binary caching for cargo-machete and cargo-udeps
 #   - Nightly toolchain pinned for reproducibility (see nightly version below)
@@ -76,20 +78,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
           components: rustc
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Cache cargo-machete binary
         id: cache-machete
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@v5.0.3
         with:
           path: ~/.cargo/bin/cargo-machete
           key: ${{ runner.os }}-cargo-machete-0.7.0
@@ -107,19 +107,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Cache cargo-udeps binary
         id: cache-udeps
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@v5.0.3
         with:
           path: ~/.cargo/bin/cargo-udeps
           key: ${{ runner.os }}-cargo-udeps-0.1.53
