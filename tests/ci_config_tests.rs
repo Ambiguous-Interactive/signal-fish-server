@@ -2158,6 +2158,48 @@ fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
 }
 
 #[test]
+fn test_git_hook_skill_external_code_sample_links_exist() {
+    let root = repo_root();
+    let skill_path = root.join(".llm/skills/git-hooks-checks.md");
+    let content = read_file(&skill_path);
+
+    let sample_files = [
+        ".llm/code-samples/git-hooks/pre-commit-fast.sh",
+        ".llm/code-samples/git-hooks/performance-patterns.sh",
+        ".llm/code-samples/git-hooks/ci-hook-validation-tests.rs",
+        ".llm/code-samples/git-hooks/debugging-snippets.sh",
+    ];
+
+    let mut issues = Vec::new();
+
+    for sample in sample_files {
+        let sample_path = root.join(sample);
+        if !sample_path.exists() {
+            issues.push(format!(
+                "Missing external sample file: {}",
+                sample_path.display()
+            ));
+        }
+
+        let markdown_link = sample.replacen(".llm/", "../", 1);
+        if !content.contains(&markdown_link) {
+            issues.push(format!(
+                "{} does not reference expected link target: {}",
+                skill_path.display(),
+                markdown_link
+            ));
+        }
+    }
+
+    assert!(
+        issues.is_empty(),
+        "Git hooks skill external sample references are inconsistent:\n\n{}\n\n\
+         Fix by restoring missing sample files and link targets.",
+        issues.join("\n")
+    );
+}
+
+#[test]
 fn test_markdownlint_version_file_exists_and_is_semver() {
     let root = repo_root();
     let version_file = root.join(".markdownlint-version");
@@ -3377,6 +3419,174 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
 
     visit_dirs(root, extension, exclude_dirs, &mut files);
     files
+}
+
+fn markdown_is_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return false;
+    }
+
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+
+    trimmed
+        .chars()
+        .nth(hashes)
+        .map(|c| c == ' ' || c == '\t')
+        .unwrap_or(true)
+}
+
+fn collect_markdown_heading_blank_line_violations(file: &Path, content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut violations = Vec::new();
+    let mut in_fenced_code = vec![false; lines.len()];
+    let mut in_code_block = false;
+    let mut opening_fence_char = '\0';
+    let mut opening_fence_count = 0usize;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let first_char = trimmed.chars().next().unwrap_or('\0');
+        let is_fence_char = first_char == '`' || first_char == '~';
+
+        if is_fence_char {
+            let fence_count = trimmed.chars().take_while(|&c| c == first_char).count();
+            if fence_count >= 3 {
+                in_fenced_code[idx] = true;
+                let fence_suffix = trimmed[fence_count..].trim();
+                if in_code_block {
+                    if first_char == opening_fence_char
+                        && fence_count >= opening_fence_count
+                        && fence_suffix.is_empty()
+                    {
+                        in_code_block = false;
+                        opening_fence_char = '\0';
+                        opening_fence_count = 0;
+                    }
+                } else {
+                    in_code_block = true;
+                    opening_fence_char = first_char;
+                    opening_fence_count = fence_count;
+                }
+                continue;
+            }
+        }
+
+        in_fenced_code[idx] = in_code_block;
+    }
+
+    let mut is_html_comment_line = vec![false; lines.len()];
+    let mut in_html_comment_block = false;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if in_fenced_code[idx] {
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        if in_html_comment_block {
+            is_html_comment_line[idx] = true;
+            if trimmed.contains("-->") {
+                in_html_comment_block = false;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("<!--") {
+            is_html_comment_line[idx] = true;
+            if !trimmed.contains("-->") {
+                in_html_comment_block = true;
+            }
+        }
+    }
+
+    for (idx, line) in lines.iter().enumerate() {
+        if in_fenced_code[idx] || !markdown_is_heading(line) {
+            continue;
+        }
+
+        if idx > 0 {
+            let previous = lines[idx - 1];
+            if !previous.trim().is_empty() && !is_html_comment_line[idx - 1] {
+                violations.push(format!(
+                    "{}:{}: heading must be preceded by a blank line (MD022).\n  \
+                     Heading: {}\n  \
+                     Previous: {}",
+                    file.display(),
+                    idx + 1,
+                    line.trim(),
+                    previous.trim()
+                ));
+            }
+        }
+
+        if idx + 1 < lines.len() {
+            let next = lines[idx + 1];
+            if !next.trim().is_empty() && !is_html_comment_line[idx + 1] {
+                violations.push(format!(
+                    "{}:{}: heading must be followed by a blank line (MD022).\n  \
+                     Heading: {}\n  \
+                     Next: {}",
+                    file.display(),
+                    idx + 1,
+                    line.trim(),
+                    next.trim()
+                ));
+            }
+        }
+    }
+
+    violations
+}
+
+#[test]
+fn test_markdown_headings_have_surrounding_blank_lines() {
+    // Regression guard for markdownlint MD022 failures caused by headings that
+    // touch list/paragraph content without a separating blank line.
+    let root = repo_root();
+
+    // Data-driven input set: markdown files that follow repository lint policy.
+    let file_sets = [(
+        "repository markdown",
+        find_files_with_extension(
+            &root,
+            "md",
+            &["target", "third_party", "node_modules", "test-fixtures"],
+        ),
+    )];
+
+    let mut violations = Vec::new();
+    let mut checked_files = 0usize;
+
+    for (set_name, files) in file_sets {
+        assert!(
+            !files.is_empty(),
+            "{set_name}: expected at least one markdown file to validate"
+        );
+
+        for file in files {
+            checked_files += 1;
+            let content = read_file(&file);
+            violations.extend(collect_markdown_heading_blank_line_violations(
+                &file, &content,
+            ));
+        }
+    }
+
+    assert!(
+        checked_files > 0,
+        "Expected to validate at least one markdown file for heading spacing rules"
+    );
+
+    assert!(
+        violations.is_empty(),
+        "Markdown heading spacing violations found (MD022):\n\n{}\n\n\
+         Fix by inserting a blank line before and after each heading outside fenced code blocks.",
+        violations.join("\n\n")
+    );
 }
 
 /// Collect all YAML workflow files from the given directory.

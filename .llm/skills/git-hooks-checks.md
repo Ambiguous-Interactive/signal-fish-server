@@ -21,11 +21,13 @@ performance, debugging hook failures, or validating hook permissions in CI.
 - Debugging hook failures
 
 ## When NOT to Use
+
 - Initial hook setup and permissions (see [Hook Installation](./git-hooks-installation.md))
 
 ---
 
 ## TL;DR
+
 - Target execution time: < 5 seconds per hook
 - Check only staged files (`git diff --cached --name-only`)
 - Use NUL-delimited file lists (`git diff -z` + `xargs -0`) for path-safe tooling
@@ -35,250 +37,85 @@ performance, debugging hook failures, or validating hook permissions in CI.
 
 ---
 
-## Example: Fast Pre-Commit Hook
+## Canonical Code Samples
 
-**`.githooks/pre-commit`:**
-
-```bash
-#!/usr/bin/env bash
-#
-# Pre-commit hook for Signal Fish Server
-# Runs fast checks before each commit
-#
-# To bypass: git commit --no-verify
-
-set -euo pipefail
-
-echo "[pre-commit] Running pre-commit checks..."
-FAILURES=0
-
-# 1. Rust code formatting
-echo "[pre-commit] Checking Rust code formatting..."
-if ! cargo fmt --check >/dev/null 2>&1; then
-  echo "[pre-commit] ERROR: Code formatting issues detected"
-  echo "[pre-commit] Fix: cargo fmt"
-  FAILURES=$((FAILURES + 1))
-fi
-
-# 2. Panic-prone patterns
-echo "[pre-commit] Checking for panic-prone patterns..."
-if [ -f scripts/check-no-panics.sh ]; then
-  if ! ./scripts/check-no-panics.sh >/dev/null 2>&1; then
-    echo "[pre-commit] ERROR: Panic-prone patterns detected"
-    FAILURES=$((FAILURES + 1))
-  fi
-fi
-
-# 3. Markdown linting (if pinned version is available)
-if [ -x scripts/check-markdown.sh ]; then
-  echo "[pre-commit] Checking markdown files..."
-  STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
-  if [ -n "$STAGED_MD" ]; then
-    if ! MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1); then
-      echo "[pre-commit] ERROR: Markdown linting failed"
-      echo "$MARKDOWN_OUTPUT"
-      echo "[pre-commit] Fix: ./scripts/check-markdown.sh fix"
-      FAILURES=$((FAILURES + 1))
-    fi
-  fi
-else
-  echo "[pre-commit] Skipping markdown check (scripts/check-markdown.sh not found)"
-fi
-
-# 4. Link checking (offline mode for speed)
-if command -v lychee >/dev/null 2>&1; then
-  echo "[pre-commit] Checking links (offline mode)..."
-  STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
-  if [ -n "$STAGED_MD" ]; then
-    if ! git diff --cached --name-only -z --diff-filter=ACM -- '*.md' \
-      | xargs -0 lychee --offline --config .lychee.toml >/dev/null 2>&1; then
-      echo "[pre-commit] ERROR: Link checking failed"
-      echo "[pre-commit] Fix: ./scripts/check-links-fast.sh"
-      FAILURES=$((FAILURES + 1))
-    fi
-  fi
-else
-  echo "[pre-commit] Skipping link check (lychee not installed)"
-fi
-
-# Summary and exit
-echo ""
-if [ "$FAILURES" -eq 0 ]; then
-  echo "[pre-commit] All checks passed"
-  exit 0
-else
-  echo "[pre-commit] $FAILURES check(s) failed"
-  echo ""
-  echo "To bypass hooks (emergencies only):"
-  echo "  git commit --no-verify"
-  exit 1
-fi
-```
+- Full pre-commit reference implementation:
+  [pre-commit-fast.sh](../code-samples/git-hooks/pre-commit-fast.sh)
+- Performance patterns and anti-patterns:
+  [performance-patterns.sh](../code-samples/git-hooks/performance-patterns.sh)
+- CI validation test patterns:
+  [ci-hook-validation-tests.rs](../code-samples/git-hooks/ci-hook-validation-tests.rs)
+- Debugging snippets:
+  [debugging-snippets.sh](../code-samples/git-hooks/debugging-snippets.sh)
 
 ---
 
-## Hook Performance
+## Critical Pattern: Keep Markdown Lint Output Visible
 
-### Performance Strategies
+Use output capture instead of suppressing stderr/stdout in failure paths.
 
 ```bash
-# 1. Check only staged files
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
-
-# 2. Use offline mode and NUL-safe path passing
-git diff --cached --name-only -z --diff-filter=ACM -- '*.md' \
-  | xargs -0 lychee --offline --config .lychee.toml
-
-# 3. Skip slow checks if tool not installed
-if command -v slow_tool >/dev/null 2>&1; then
-  slow_tool --check
+if [ -x scripts/check-markdown.sh ]; then
+  if ! MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1); then
+    echo "[pre-commit] ERROR: Markdown linting failed"
+    echo "$MARKDOWN_OUTPUT"
+    echo "[pre-commit] Fix: ./scripts/check-markdown.sh fix"
+    exit 1
+  fi
 fi
-
-# 4. Parallel execution for independent checks
-cargo fmt --check &
-FMT_PID=$!
-./scripts/check-panics.sh &
-PANICS_PID=$!
-wait $FMT_PID || FAILURES=$((FAILURES + 1))
-wait $PANICS_PID || FAILURES=$((FAILURES + 1))
 ```
 
-### Anti-Patterns
-
-```bash
-# BAD: Checks all files every time
-cargo clippy --all-targets --all-features  # Slow!
-
-# BAD: Network requests block commit
-lychee '**/*.md'  # Checks external links (slow!)
-
-# BAD: No progress output
-cargo test  # User doesn't know what's happening
-
-# GOOD: Fast, local-only checks with progress
-echo "[pre-commit] Running fast checks..."
-cargo fmt --check
-```
-
-### grep -c Fallback Anti-Pattern
-
-In POSIX shell, `grep -c` outputs "0" with exit code 1 when no matches are found.
-Wrapping `$(grep -c ... || echo "0")` produces multi-line output ("0\n0") because
-grep emits "0", then the fallback echo also emits "0" — both inside the same
-command substitution.
-
-```bash
-# BAD: Multi-line output when grep finds 0 matches
-COUNT=$(grep -c "pattern" file.txt || echo "0")
-# COUNT becomes "0\n0" — breaks arithmetic
-
-# GOOD: Separate the fallback from the command substitution
-COUNT=$(grep -c "pattern" file.txt 2>/dev/null) || COUNT=0
-```
-
-### Cargo Test Invocation in Hooks
-
-`cargo test` accepts only **one** positional TESTNAME. To run multiple specific
-tests, pass test names after the `--` separator. Always use `--locked` per
-project policy.
-
-```bash
-# BAD: Two positional args — second causes 'unexpected argument' error
-cargo test --test ci_config_tests test_foo test_bar
-
-# GOOD: Use -- separator; names after -- are passed as filters
-cargo test --locked --test ci_config_tests -- test_foo test_bar
-```
+See full context:
+[pre-commit-fast.sh](../code-samples/git-hooks/pre-commit-fast.sh).
 
 ---
 
 ## Testing Hooks
 
 ```bash
-# Test hook directly
-./.githooks/pre-commit && echo "PASS" || echo "FAIL"
-
-# Test with git commit (dry run)
-git commit --dry-run
-
-# Test bypass
-git commit --no-verify -m "Bypass test"
-
-# Verify permissions
-ls -la .githooks/pre-commit           # Should show -rwxr-xr-x
-git ls-files -s .githooks/pre-commit  # Should show 100755
+./.githooks/pre-commit && echo "PASS" || echo "FAIL"   # Direct execution
+git commit --dry-run                                   # Through git path
+git commit --no-verify -m "Bypass test"               # Verify bypass behavior
+ls -la .githooks/pre-commit                            # Expect executable bit
+git ls-files -s .githooks/pre-commit                   # Expect mode 100755
 ```
 
 ---
 
 ## Hook Validation in CI
 
-```rust
-// tests/ci_config_tests.rs
+Validate:
 
-#[test]
-fn test_git_hooks_are_executable() {
-    let githooks_dir = repo_root().join(".githooks");
-    if !githooks_dir.exists() { return; }
+- Hook files exist
+- Hooks and installer are executable
+- `cargo test` invocations use `--locked` and `--` separator for multiple filters
 
-    for entry in std::fs::read_dir(&githooks_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() && path.extension().is_none() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-                assert!(
-                    mode & 0o111 != 0,
-                    "{} is not executable.\nFix:\n  chmod +x {}\n  git update-index --chmod=+x {}",
-                    path.display(), path.display(), path.display()
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn test_hook_installation_script_exists() {
-    let script = repo_root().join("scripts/enable-hooks.sh");
-    assert!(script.exists(), "scripts/enable-hooks.sh is required for hook installation.");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
-        assert!(mode & 0o111 != 0, "scripts/enable-hooks.sh must be executable.");
-    }
-}
-```
+Reference:
+[ci-hook-validation-tests.rs](../code-samples/git-hooks/ci-hook-validation-tests.rs).
 
 ---
 
 ## Hook Debugging
 
 ```bash
-#!/usr/bin/env bash
-
-# Enable debug mode with: DEBUG=1 git commit
 if [ "${DEBUG:-0}" = "1" ]; then
   set -x
 fi
 set -euo pipefail
 ```
 
-### Common Issues
+Common troubleshooting commands:
 
 ```bash
-# Hook not running:
 git config core.hooksPath              # Should output: .githooks
 git config core.hooksPath .githooks    # Re-enable if needed
-
-# Permission denied:
 chmod +x .githooks/pre-commit
 git update-index --chmod=+x .githooks/pre-commit
-
-# Command not found:
 export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
 ```
+
+See full debug examples:
+[debugging-snippets.sh](../code-samples/git-hooks/debugging-snippets.sh).
 
 ---
 
