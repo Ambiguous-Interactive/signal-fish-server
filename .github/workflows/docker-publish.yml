@@ -18,12 +18,12 @@
 #
 # ⚠️  Making the package public (one-time manual step):
 #   After the first successful workflow run, the package will be private by
-#   default. An organization owner must make it public at:
-#   https://github.com/orgs/Ambiguous-Interactive/packages/container/signal-fish-server/settings
+#   default. An owner must make it public at:
+#   https://github.com/orgs/${{ github.repository_owner }}/packages/container/signal-fish-server/settings
 #
 #   Alternatively, run:
 #   gh api --method PATCH \
-#     /orgs/Ambiguous-Interactive/packages/container/signal-fish-server \
+#     /orgs/${{ github.repository_owner }}/packages/container/signal-fish-server \
 #     -f visibility=public
 #
 # Permissions:
