@@ -264,3 +264,32 @@ jobs:
         "Expected Docker latest-tag policy violation message.\nOutput:\n{output}"
     );
 }
+
+#[test]
+fn test_workflow_hygiene_fails_on_malformed_remote_action_reference() {
+    let workflow = r#"name: Malformed Uses
+on: [push]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout
+      - run: echo ok
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("malformed-uses.yml", workflow);
+
+    assert!(
+        !success,
+        "Workflow hygiene script must fail on malformed remote action refs.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("Malformed remote action reference"),
+        "Expected malformed action reference violation message.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("owner/repo@ref"),
+        "Expected remediation guidance to include owner/repo@ref syntax.\nOutput:\n{output}"
+    );
+}

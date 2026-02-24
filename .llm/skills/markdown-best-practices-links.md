@@ -251,8 +251,8 @@ fi
 link-check:
   runs-on: ubuntu-latest
   steps:
-    - uses: actions/checkout@<SHA> # v4.2.2
-    - uses: lycheeverse/lychee-action@<SHA> # v2.7.0
+    - uses: actions/checkout@v6.0.2
+    - uses: lycheeverse/lychee-action@v2.7.0
       with:
         args: --verbose './**/*.md' --config .lychee.toml
       env:

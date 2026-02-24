@@ -33,6 +33,7 @@
 - Code samples in docs must compile and run correctly.
 - CHANGELOG uses [Keep a Changelog](https://keepachangelog.com/) format under `[Unreleased]`.
 - Doc comments explain "why", include examples, and use `@since`/`Added in v2.x` annotations.
+- Use changelog workflow skills in order: classify -> update -> review.
 
 ---
 
@@ -106,6 +107,9 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 - Add entries under `[Unreleased]` during development
 - Use imperative mood ("Add feature X", not "Added feature X") — section headers use past tense per Keep a Changelog
 - Reference issue/PR numbers; mark breaking changes explicitly
+- Use [classify-user-visible-changes](./classify-user-visible-changes.md) before writing entries
+- Use [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) to author entries
+- Use [review-changelog-entries](./review-changelog-entries.md) as final changelog QA gate
 
 ---
 
@@ -191,7 +195,9 @@ After every feature/bugfix:
 
 - [ ] Updated relevant `///` doc comments with examples
 - [ ] Code samples compile and run correctly
-- [ ] CHANGELOG entry added under `[Unreleased]`
+- [ ] User-visible scope classified (see [classify-user-visible-changes](./classify-user-visible-changes.md))
+- [ ] CHANGELOG entry added under `[Unreleased]` using Keep a Changelog sections
+- [ ] CHANGELOG entry reviewed (see [review-changelog-entries](./review-changelog-entries.md))
 - [ ] README updated if user-facing
 - [ ] New behavior clearly marked as new
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)

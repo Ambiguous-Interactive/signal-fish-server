@@ -75,17 +75,34 @@ check_skip() {
     echo "${YELLOW}⊘ SKIP${NC}: $1 ($2)"
 }
 
-# Check 1: Code formatting (always run)
+check_fix() {
+    echo "${GREEN}✓ PASS${NC}: $1 (auto-fixed)"
+    CHECKS_PASSED=$((CHECKS_PASSED + 1))
+}
+
+# Check 1: Code formatting (always run, auto-fixable)
 echo "${BLUE}[1/${TOTAL_CHECKS}]${NC} Checking code formatting..."
 if cargo fmt --check 2>/dev/null; then
     check_pass "Code formatting"
 else
-    check_fail "Code formatting" "Run 'cargo fmt' to fix formatting issues."
-    echo "${YELLOW}Tip:${NC} cargo fmt --all"
-    echo ""
+    # Save list of staged .rs files before auto-fixing
+    FMT_STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+    echo "${YELLOW}  Auto-fixing...${NC} running cargo fmt"
+    if cargo fmt 2>/dev/null; then
+        # Re-stage only the .rs files that were originally staged
+        if [ -n "$FMT_STAGED_RS" ]; then
+            printf '%s\n' "$FMT_STAGED_RS" | while IFS= read -r _file; do
+                if [ -n "$_file" ]; then git add "$_file"; fi
+            done
+        fi
+        check_fix "Code formatting"
+    else
+        check_fail "Code formatting" "cargo fmt failed. Run 'cargo fmt' manually to investigate."
+        echo ""
+    fi
 fi
 
-# Check 2: Clippy lints (fast check on staged Rust files only)
+# Check 2: Clippy lints (fast check on staged Rust files only, auto-fixable)
 echo "${BLUE}[2/${TOTAL_CHECKS}]${NC} Running clippy on staged files..."
 # Get list of staged Rust files
 STAGED_RS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
@@ -93,12 +110,31 @@ STAGED_RS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.r
 if [ -n "$STAGED_RS_FILES" ]; then
     # Run clippy on workspace (faster than per-file)
     # Use --all-features to catch all issues, but allow a longer timeout
-    if ! cargo clippy --all-targets --all-features -- -D warnings 2>&1; then
-        check_fail "Clippy lints" "Fix clippy warnings before committing."
-        echo "${YELLOW}Tip:${NC} cargo clippy --fix --allow-dirty --all-targets --all-features"
-        echo ""
-    else
+    if CLIPPY_OUT=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1); then
         check_pass "Clippy lints"
+    else
+        # Save list of staged .rs files before auto-fixing
+        CLIPPY_STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+        echo "${YELLOW}  Auto-fixing...${NC} running cargo clippy --fix"
+        # --allow-dirty: working tree may have unstaged changes
+        # --allow-staged: pre-commit hook always has staged changes
+        CLIPPY_FIX_OUT=$(cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features 2>&1) || true
+        # Re-stage only the .rs files that were originally staged
+        if [ -n "$CLIPPY_STAGED_RS" ]; then
+            printf '%s\n' "$CLIPPY_STAGED_RS" | while IFS= read -r _file; do
+                if [ -n "$_file" ]; then git add "$_file"; fi
+            done
+        fi
+        # Re-run clippy to verify the fix worked
+        if CLIPPY_RECHECK=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1); then
+            check_fix "Clippy lints"
+        else
+            check_fail "Clippy lints" "Fix clippy warnings before committing."
+            echo "$CLIPPY_RECHECK"
+            echo "${YELLOW}Note:${NC} Some lints have placeholder suggestions and cannot be auto-fixed."
+            echo "${YELLOW}Tip:${NC} cargo clippy --fix --allow-dirty --all-targets --all-features"
+            echo ""
+        fi
     fi
 else
     check_skip "Clippy lints" "no Rust files staged"
@@ -143,8 +179,11 @@ WORKFLOW_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.gi
 
 if [ -n "$WORKFLOW_FILES" ]; then
     if [ -x scripts/validate-workflow-awk.sh ]; then
-        # Pass the specific workflow files to check
-        if echo "$WORKFLOW_FILES" | xargs scripts/validate-workflow-awk.sh 2>&1 | grep -q "FAILED"; then
+        # Pass workflow files as NUL-delimited values to preserve spaces in paths.
+        if git diff --cached --name-only -z --diff-filter=ACM -- \
+            ':(glob).github/workflows/*.yml' \
+            ':(glob).github/workflows/*.yaml' \
+            | xargs -0 scripts/validate-workflow-awk.sh 2>&1 | grep -q "FAILED"; then
             check_fail "AWK validation" "AWK script syntax errors in workflow files."
             echo "${YELLOW}Tip:${NC} ./scripts/validate-workflow-awk.sh"
             echo ""
@@ -166,7 +205,7 @@ if [ -n "$WORKFLOW_FILES" ]; then
         YAMLLINT_ERRORS=0
         for wf_file in $WORKFLOW_FILES; do
             if [ -f "$wf_file" ]; then
-                YAMLLINT_OUT=$(yamllint -c .yamllint.yml "$wf_file" 2>&1)
+                YAMLLINT_OUT=$(yamllint -c .yamllint.yml "$wf_file" 2>&1) || true
                 if echo "$YAMLLINT_OUT" | grep -q "\[error\]"; then
                     echo "${RED}  YAML lint errors:${NC} $wf_file"
                     echo "$YAMLLINT_OUT" | grep "\[error\]" || true
@@ -301,7 +340,7 @@ else
     check_skip "Docs link validation" "no docs/*.md files staged"
 fi
 
-# Check 10: Markdown linting (only if markdown files changed)
+# Check 10: Markdown linting (only if markdown files changed, auto-fixable)
 echo "${BLUE}[10/${TOTAL_CHECKS}]${NC} Checking markdown files..."
 STAGED_MD_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
 
@@ -314,10 +353,31 @@ if [ -n "$STAGED_MD_FILES" ]; then
             if [ "$MARKDOWN_STATUS" -eq 2 ]; then
                 check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
             else
-                check_fail "Markdown linting" "Markdown files have formatting issues."
-                echo "$MARKDOWN_OUTPUT"
-                echo "${YELLOW}Tip:${NC} ./scripts/check-markdown.sh fix"
-                echo ""
+                # Exit code 1 means lint errors — attempt auto-fix
+                # Save list of staged .md files before auto-fixing
+                MD_STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
+                echo "${YELLOW}  Auto-fixing...${NC} running scripts/check-markdown.sh fix"
+                scripts/check-markdown.sh fix 2>/dev/null || true
+                # Re-stage only the .md files that were originally staged
+                if [ -n "$MD_STAGED_FILES" ]; then
+                    printf '%s\n' "$MD_STAGED_FILES" | while IFS= read -r _file; do
+                        if [ -n "$_file" ]; then git add "$_file"; fi
+                    done
+                fi
+                # Re-run to verify the fix worked (capture fresh output)
+                if MARKDOWN_RECHECK=$(scripts/check-markdown.sh 2>&1); then
+                    check_fix "Markdown linting"
+                else
+                    RECHECK_STATUS=$?
+                    if [ "$RECHECK_STATUS" -eq 2 ]; then
+                        check_skip "Markdown linting" "pinned markdownlint-cli2 unavailable (see .markdownlint-version)"
+                    else
+                        check_fail "Markdown linting" "Markdown files have formatting issues."
+                        echo "$MARKDOWN_RECHECK"
+                        echo "${YELLOW}Tip:${NC} ./scripts/check-markdown.sh fix"
+                        echo ""
+                    fi
+                fi
             fi
         fi
     else
@@ -332,19 +392,14 @@ echo "${BLUE}[11/${TOTAL_CHECKS}]${NC} Checking links in markdown files..."
 
 if [ -n "$STAGED_MD_FILES" ]; then
     if command -v lychee >/dev/null 2>&1; then
-        # Use a temporary file to avoid issues with filenames containing spaces
-        TEMP_FILE=$(mktemp)
-        echo "$STAGED_MD_FILES" > "$TEMP_FILE"
         # Run lychee with fast settings (offline mode for pre-commit speed)
-        if ! xargs -a "$TEMP_FILE" lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
-            echo "${YELLOW}⚠ WARNING${NC}: Link check found issues in staged markdown files."
-            echo "${YELLOW}Note:${NC} This is a warning only (offline mode)."
-            echo "${YELLOW}Tip:${NC} Run 'lychee --config .lychee.toml <file>' for full check."
-            # Non-blocking warning
+        # Use NUL-delimited file lists so paths with spaces are handled safely.
+        if ! git diff --cached --name-only -z --diff-filter=ACM -- '*.md' \
+            | xargs -0 lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
+            check_warn "Link checking (offline)" "Link issues found (offline mode). Run 'lychee --config .lychee.toml <file>' for full check."
         else
             check_pass "Link checking (offline)"
         fi
-        rm -f "$TEMP_FILE"
     else
         check_skip "Link checking" "lychee not installed"
     fi
@@ -589,31 +644,81 @@ recognise:recognize
 recognised:recognized
 recognising:recognizing"
 
-    # Use a temp file to count warnings across subshells (pipe creates subshell)
-    BRIT_WARN_FILE=$(mktemp)
-    : > "$BRIT_WARN_FILE"
-    for text_file in $STAGED_TEXT_FILES; do
-        [ -f "$text_file" ] || continue
-        LINE_NUM=0
-        while IFS= read -r line; do
-            LINE_NUM=$((LINE_NUM + 1))
-            # Skip lines containing URLs to avoid false positives on external references
-            case "$line" in
-                *http://*|*https://*) continue ;;
-            esac
-            echo "$BRITISH_WORDS" | while IFS=: read -r british american; do
-                [ -z "$british" ] && continue
-                # Case-insensitive match using tr for POSIX compatibility
-                line_lower=$(echo "$line" | tr 'A-Z' 'a-z')
-                if echo "$line_lower" | grep -qw "$british"; then
-                    echo "${YELLOW}  British spelling:${NC} $text_file:$LINE_NUM: found '${british}', prefer '${american}'"
-                    echo "1" >> "$BRIT_WARN_FILE"
-                fi
-            done
-        done < "$text_file"
-    done
-    BRIT_WARNINGS=$(wc -l < "$BRIT_WARN_FILE" | tr -d ' ')
-    rm -f "$BRIT_WARN_FILE"
+    # Fast path: scan only added staged lines, not full files.
+    BRIT_OUTPUT=$(git diff --cached --unified=0 --no-color --diff-filter=ACM -- '*.rs' '*.yml' '*.yaml' '*.md' | awk -v pairs="$BRITISH_WORDS" '
+        BEGIN {
+            n = split(pairs, entries, "\n")
+            word_count = 0
+            for (i = 1; i <= n; i++) {
+                if (entries[i] == "") {
+                    continue
+                }
+                split(entries[i], kv, ":")
+                if (kv[1] == "" || kv[2] == "") {
+                    continue
+                }
+                word_count++
+                british_words[word_count] = kv[1]
+                american[kv[1]] = kv[2]
+            }
+            warning_count = 0
+            file = ""
+            new_line = 0
+        }
+
+        /^\+\+\+ b\// {
+            file = substr($0, 7)
+            next
+        }
+
+        /^@@ / {
+            hunk = $0
+            sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+            sub(/[^0-9].*$/, "", hunk)
+            if (hunk ~ /^[0-9]+$/) {
+                new_line = hunk - 1
+            }
+            next
+        }
+
+        /^ / {
+            new_line++
+            next
+        }
+
+        /^\+/ && $0 !~ /^\+\+\+/ {
+            new_line++
+            line = substr($0, 2)
+
+            # Skip URLs to avoid false positives on external references.
+            if (line ~ /http:\/\/|https:\/\//) {
+                next
+            }
+
+            line_lower = tolower(line)
+            for (i = 1; i <= word_count; i++) {
+                word = british_words[i]
+                pattern = "(^|[^[:alnum:]_])" word "([^[:alnum:]_]|$)"
+                if (line_lower ~ pattern) {
+                    printf "  British spelling: %s:%d: found '\''%s'\'', prefer '\''%s'\''\n", file, new_line, word, american[word]
+                    warning_count++
+                }
+            }
+            next
+        }
+
+        END {
+            print "__BRIT_COUNT__=" warning_count
+        }
+    ')
+
+    BRIT_WARNINGS=$(printf "%s\n" "$BRIT_OUTPUT" | awk -F= '/^__BRIT_COUNT__=/{print $2}')
+    BRIT_WARNINGS=${BRIT_WARNINGS:-0}
+    BRIT_MESSAGES=$(printf "%s\n" "$BRIT_OUTPUT" | sed '/^__BRIT_COUNT__=/d' | sed '/^[[:space:]]*$/d')
+
+    if [ -n "$BRIT_MESSAGES" ]; then
+        echo "$BRIT_MESSAGES"
+    fi
 
     if [ "$BRIT_WARNINGS" -gt 0 ]; then
         check_warn "British English spellings" "$BRIT_WARNINGS British spelling(s) found. Consider using American English."
@@ -648,7 +753,7 @@ if [ -n "$WORKFLOW_FILES" ]; then
             [ -z "$WF_NAME" ] && continue
 
             # Check if this workflow uses path filters
-            HAS_PATHS=$(grep -c '^[[:space:]]*paths:' "$wf_file" 2>/dev/null || echo "0")
+            HAS_PATHS=$(grep -c '^[[:space:]]*paths:' "$wf_file" 2>/dev/null) || HAS_PATHS=0
 
             if [ "$HAS_PATHS" -gt 0 ]; then
                 # Check if it's in REQUIRED_WORKFLOWS
@@ -690,7 +795,7 @@ if [ -n "$WORKFLOW_FILES" ]; then
         [ -f "$wf_file" ] || continue
 
         # Check if this workflow has a schedule trigger
-        HAS_SCHEDULE=$(grep -c '^[[:space:]]*schedule:' "$wf_file" 2>/dev/null || echo "0")
+        HAS_SCHEDULE=$(grep -c '^[[:space:]]*schedule:' "$wf_file" 2>/dev/null) || HAS_SCHEDULE=0
         [ "$HAS_SCHEDULE" -eq 0 ] && continue
 
         # Check for workflow-level allowlist: if the workflow has a top-level
@@ -768,8 +873,23 @@ if [ "$STAGED_SKILLS_INDEX_BYTES" -gt 0 ]; then
         if scripts/generate-skills-index.sh --check > /dev/null 2>&1; then
             check_pass "Skills index freshness"
         else
-            check_fail "Skills index freshness" "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
-            echo ""
+            # Index is stale — attempt auto-fix by regenerating
+            echo "${YELLOW}  Auto-fixing...${NC} running scripts/generate-skills-index.sh"
+            if scripts/generate-skills-index.sh > /dev/null 2>&1; then
+                # Always re-stage index.md — it's a generated file that must
+                # be committed alongside its inputs.
+                git add .llm/skills/index.md
+                # Re-run check to verify the fix worked
+                if scripts/generate-skills-index.sh --check > /dev/null 2>&1; then
+                    check_fix "Skills index freshness"
+                else
+                    check_fail "Skills index freshness" "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
+                    echo ""
+                fi
+            else
+                check_fail "Skills index freshness" "scripts/generate-skills-index.sh failed. Run it manually to investigate."
+                echo ""
+            fi
         fi
     else
         check_fail "Skills index freshness" "scripts/generate-skills-index.sh not found or not executable."
@@ -837,7 +957,7 @@ STAGED_SRC_RS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^src/
 
 if [ -n "$STAGED_SRC_RS" ]; then
     if [ -x scripts/check-miri-compat.sh ]; then
-        MIRI_OUTPUT=$(scripts/check-miri-compat.sh 2>&1)
+        MIRI_OUTPUT=$(scripts/check-miri-compat.sh 2>&1) || true
         if echo "$MIRI_OUTPUT" | grep -q 'WARNING:'; then
             check_warn "Miri compatibility" "Some lib tests may need #[cfg_attr(miri, ignore)]. Run './scripts/check-miri-compat.sh' for details."
         else

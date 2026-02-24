@@ -3,20 +3,16 @@
 <!--
   trigger: miri failure, proptest miri, test code filtering, coverage flags,
   bash code blocks, shellcheck, yaml validation, toml validation,
-  fixture exclusion, missing locked flag
-  | Patterns 9-16: locked flag, test code filtering, coverage flags, Miri,
-  bash code blocks, shell script pitfalls, fixture exclusion, YAML validation
-  | Infrastructure
+  fixture exclusion, missing locked flag, cargo test multi-filter
+  | Patterns 9-17: locked flag, test code filtering, coverage flags, Miri,
+  bash code blocks, shell script pitfalls, fixture exclusion, YAML validation,
+  cargo test syntax | Infrastructure
 -->
 
 **Trigger**: When debugging `--locked` flag omissions, Miri isolation failures, test
 code false negatives, inconsistent coverage, bash code block validation, shell script
-edge cases, test fixture exclusion mismatches, or YAML/TOML fenced-block validation.
-
-See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md),
-[ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md),
-[ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md),
-[ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
+edge cases, test fixture exclusion mismatches, YAML/TOML fenced-block validation,
+or `cargo test` multi-filter syntax errors.
 
 ---
 
@@ -76,22 +72,14 @@ macros that should have been caught.
 `filter_test_code` in `check-no-panics.sh` treats everything after `#[cfg(test)] mod foo;`
 (an external module declaration) as test code, silently skipping production code below it.
 
-**Key distinction:**
-
-1. **`#[cfg(test)] mod foo;`** (semicolon) — External module declaration. Only those two
-   lines are test code; the actual tests live in a separate file.
-2. **`#[cfg(test)] mod tests { ... }`** (braces) — Inline module. Track brace depth to
-   find the closing `}`.
-
 ### Solution
 
-Use AWK brace-depth scanning to correctly determine module boundaries:
+Use AWK brace-depth scanning to correctly determine module boundaries. Distinguish:
 
-- `#[cfg(test)] mod foo;` (semicolon) — only 2 lines are test code; skip them and continue
+- `#[cfg(test)] mod foo;` (semicolon) — only 2 lines are test code; skip and continue
 - `#[cfg(test)] mod tests { ... }` (braces) — track brace depth to find the closing `}`
 
-Always distinguish `mod foo;` (external) from `mod foo { ... }` (inline). Test with
-files that have `#[cfg(test)] mod` near the top (like `src/server.rs`).
+Test with files that have `#[cfg(test)] mod` near the top (like `src/server.rs`).
 
 ---
 
@@ -106,18 +94,13 @@ than what generated the coverage report.
 
 ### Root Cause
 
-```yaml
-# Generates report with --all-features --workspace
-- run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
-
-# Enforces threshold WITHOUT --all-features --workspace (different config!)
-- run: cargo llvm-cov report --locked --fail-under-lines 70
-```
+Collection command uses `--all-features --workspace` but `report` subcommand omits
+them, enforcing the threshold against a different build configuration.
 
 ### Solution
 
-Apply build-selection flags (`--all-features`, `--workspace`) only to the collection
-command. The `report` subcommand reads existing artifacts — use only reporting flags:
+Apply build-selection flags only to the collection command. The `report` subcommand
+reads existing artifacts — use only reporting flags:
 
 ```yaml
 - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
@@ -231,6 +214,7 @@ to a directory is valid but `[ ! -f ]` alone will falsely flag it as broken.
 - [ ] Path validation checks both files (`-f`) and directories (`-d`)
 - [ ] AWK is preferred over `grep` for pattern extraction
 - [ ] Fence tracking handles nested fences (4+ backtick outer fences)
+- [ ] File-list tooling is path-safe (`git diff -z` + `xargs -0`, or `while read -r`)
 - [ ] Use `[[:space:]]` not `\s`; avoid `tac` on macOS
 
 ---
@@ -246,21 +230,14 @@ YAML validator: FAIL on .github/test-fixtures/bad.yml
 
 ### Root Cause
 
-Test fixtures are excluded from some validators but not all. Every validator must
-be updated when adding intentionally invalid test fixtures.
+Test fixtures are excluded from some validators but not all.
 
 ### Solution
 
-When adding test fixture directories, add `! -path './.github/test-fixtures/*'` and
-`! -path './target/*'` exclusions to every `find` command in every validator (JSON,
-YAML, TOML, Bash, Markdown, link checker, spell checker). Missing even one will cause
-that validator to fail on intentionally invalid fixture content.
-
-**When adding a new test fixture directory:**
-
-1. Search the workflow for ALL `find` commands and `grep` invocations
-2. Add exclusion to every validator, not just the one you are testing
-3. Verify by running the full CI pipeline, not just the modified job
+Add `! -path './.github/test-fixtures/*'` and `! -path './target/*'` exclusions
+to **every** `find` command in every validator (JSON, YAML, TOML, Bash, Markdown,
+link checker, spell checker). Search the workflow for ALL `find` and `grep`
+invocations, add exclusions to every validator, and verify with the full CI pipeline.
 
 ---
 
@@ -288,13 +265,36 @@ shell commands, mixed content) cause YAML validators to fail.
 | Mixed shell + YAML | Split into separate blocks | Single `yaml` block |
 
 Before tagging a code block as `yaml`, `json`, `toml`, or `bash`, verify the
-**entire** block content is valid in that language. CI validators that extract
-code blocks by language tag will attempt to parse them.
+**entire** block content is valid in that language.
+
+---
+
+## Pattern 17: Cargo Test Multi-Filter Syntax Error
+
+### Symptom
+
+```text
+cargo test --test ci_config_tests test_foo test_bar
+# Second test name causes 'unexpected argument' error
+```
+
+### Root Cause
+
+`cargo test [TESTNAME] [-- [ARGS]]` accepts only **one** positional TESTNAME
+before `--`. A second positional arg is not a second filter — it is rejected as an unexpected argument.
+
+### Solution
+
+Pass multiple test names after the `--` separator. Always include `--locked`.
+
+```bash
+cargo test --locked --test ci_config_tests -- test_foo test_bar
+```
 
 ---
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — SHA pinning, Dockerfile
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow
+- [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [Supply Chain Troubleshooting](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
+- [Diagnostic Workflow](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

@@ -197,45 +197,22 @@ set -euo pipefail
 
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
+echo "0 0 0 0" > "$TEMP_DIR/counters"  # total validated skipped failed
 
-# Counter file format: total validated skipped failed
-echo "0 0 0 0" > "$TEMP_DIR/counters"
-
+# AWK extracts Rust code blocks as NUL-delimited records
 awk '
-  /^```[Rr]ust/ {
-    in_block = 1; block_start = NR; content = ""
-    attrs = $0
-    sub(/^```[Rr]ust,?/, "", attrs)
-    next
-  }
-  /^```$/ && in_block {
-    printf "%s:::%s:::%s%c", block_start, attrs, content, 0
-    in_block = 0; next
-  }
-  in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
-  }
-  END { if (in_block) printf "%s:::%s:::%s%c", block_start, attrs, content, 0 }
+  /^```[Rr]ust/ { in_block=1; start=NR; content=""; next }
+  /^```$/ && in_block { printf "%s:::%s%c",start,content,0; in_block=0; next }
+  in_block { content = (content=="" ? $0 : content "\n" $0) }
 ' "$@" | while IFS= read -r -d '' record; do
-  # Parse fields from record (use single-char delimiter, not :::)
-  block_start="${record%%:::*}"
-  rest="${record#*:::}"
-  attrs="${rest%%:::*}"
-  content="${rest#*:::}"
-
+  block_start="${record%%:::*}"; content="${record#*:::}"
   read -r total validated skipped failed < "$TEMP_DIR/counters"
   total=$((total + 1))
-
-  if echo "$attrs" | grep -q "ignore"; then
-    skipped=$((skipped + 1))
+  if echo "$content" | rustfmt --check --edition 2021 >/dev/null 2>&1; then
+    validated=$((validated + 1))
   else
-    if echo "$content" | rustfmt --check --edition 2021 >/dev/null 2>&1; then
-      validated=$((validated + 1))
-    else
-      failed=$((failed + 1))
-      echo "ERROR: line $block_start: Invalid Rust code"
-    fi
+    failed=$((failed + 1))
+    echo "ERROR: line $block_start: Invalid Rust code"
   fi
   echo "$total $validated $skipped $failed" > "$TEMP_DIR/counters"
 done
@@ -249,16 +226,11 @@ echo "Summary: total=$total validated=$validated skipped=$skipped failed=$failed
 
 ## Prevention Checklist
 
-Before committing shell scripts:
-
-- [ ] Shell script uses `set -euo pipefail`
-- [ ] All variables quoted: `"$var"`
+- [ ] Uses `set -euo pipefail`; all variables quoted: `"$var"`
 - [ ] Cleanup uses `trap 'rm -rf "$TEMP_DIR"' EXIT`
-- [ ] Pipeline counter variables use file-based approach or process substitution
+- [ ] Pipeline counters use file-based approach or process substitution
 - [ ] `IFS` uses single-character delimiter (not multi-char like `:::`)
-- [ ] Shellcheck validation passes with no warnings
-- [ ] Script documented with comments explaining key patterns
-- [ ] Tested locally before pushing to CI
+- [ ] Shellcheck passes; tested locally before pushing to CI
 
 ---
 
@@ -275,19 +247,43 @@ another single character that won't appear in content.
 `/bin/bash` may not exist on all systems (e.g., FreeBSD uses `/usr/local/bin/bash`).
 `#!/usr/bin/env bash` works on macOS, Linux, and BSD.
 
+### `grep -c` Fallback Produces Multi-Line Output
+
+`grep -c` outputs "0" with exit code 1 when no matches found. Wrapping it as
+`$(grep -c ... || echo "0")` produces "0\n0" — grep emits "0", then the
+fallback echo also emits "0", both inside the same command substitution.
+
+```bash
+# BAD: Multi-line output when grep finds 0 matches
+COUNT=$(grep -c "pattern" file.txt || echo "0")
+
+# GOOD: Separate the fallback from command substitution
+COUNT=$(grep -c "pattern" file.txt 2>/dev/null) || COUNT=0
+```
+
 ### Run `scripts/validate-ci.sh` Before Pushing
 
-Run `scripts/validate-ci.sh` locally before pushing CI/CD changes. It validates:
+Validates AWK syntax, shellcheck on `scripts/` and `.githooks/`, and Markdown links.
 
-- AWK file syntax (files in `.github/scripts/`)
-- Shell script lint (shellcheck on `scripts/` and `.githooks/`)
-- Markdown link integrity
+### `cargo test` Accepts Only One Positional TESTNAME
+
+`cargo test [TESTNAME] [-- [ARGS]]` takes at most one positional filter before `--`.
+To run multiple named tests, pass them after the `--` separator. Forgetting `--`
+causes the second name to be rejected as an unexpected argument.
+
+```bash
+# BAD: Two positional args — second is rejected by cargo
+cargo test --test suite test_a test_b
+
+# GOOD: Multiple filters after --
+cargo test --locked --test suite -- test_a test_b
+```
 
 ---
 
 ## See Also
 
-- [awk-text-processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
-- [GitHub-actions-bash-scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
-- [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
-- [defensive-programming](./defensive-programming.md) — Error handling principles
+- [AWK Text Processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
+- [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
+- [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
+- [Defensive Programming](./defensive-programming.md) — Error handling principles

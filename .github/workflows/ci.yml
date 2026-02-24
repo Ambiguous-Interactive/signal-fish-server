@@ -57,17 +57,22 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -85,17 +90,22 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2
+        uses: taiki-e/install-action@v2.68.8
         with:
           tool: cargo-nextest
 
@@ -112,20 +122,25 @@ jobs:
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
+      - name: Extract MSRV for cargo-deny toolchain
+        id: deny-msrv
+        run: |
+          set -euo pipefail
+          MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+          if [ -z "$MSRV" ]; then
+            echo "ERROR: Could not extract rust-version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
+        uses: EmbarkStudios/cargo-deny-action@v2.0.15
         with:
           arguments: --all-features
-        env:
-          # Override rust-toolchain.toml inside the cargo-deny Docker container.
-          # The container ships its own Rust toolchain and does not have our pinned
-          # version (1.88.0) installed. RUSTUP_TOOLCHAIN takes precedence over the
-          # toolchain file, preventing the "uninstalled toolchain" error.
-          # cargo-deny only inspects metadata and Cargo.lock — it does not compile
-          # code, so the exact Rust version is irrelevant.
-          RUSTUP_TOOLCHAIN: stable
+          # Ensure the Dockerized action installs and uses a concrete toolchain
+          # before executing cargo-deny. This avoids relying on preinstalled
+          # aliases like `stable` that may be absent in the container image.
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
 
   msrv:
     name: MSRV Verification
@@ -138,8 +153,7 @@ jobs:
     # across all configuration files (rust-toolchain.toml, clippy.toml, Dockerfile, etc.)
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Extract MSRV from Cargo.toml
         id: msrv
         run: |
@@ -227,12 +241,12 @@ jobs:
           echo "All MSRV configuration checks passed ✓"
 
       - name: Install Rust toolchain at MSRV
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
@@ -249,8 +263,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
       - name: Build Docker image
         run: docker build -t signal-fish-server:ci .
 
@@ -285,18 +298,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2
+        uses: taiki-e/install-action@v2.68.8
         with:
           tool: cargo-llvm-cov
 
@@ -308,7 +326,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: coverage-report
           path: lcov.info
@@ -321,17 +339,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Run panic-policy check
         run: ./scripts/check-no-panics.sh
 
@@ -342,16 +365,21 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+        uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-
+        uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2
+        uses: taiki-e/install-action@v2.68.8
         with:
           tool: cargo-sbom
 
@@ -360,7 +388,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: success()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: sbom-cyclonedx-${{ github.sha }}
           path: sbom.cdx.json

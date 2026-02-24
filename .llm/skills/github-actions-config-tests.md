@@ -16,7 +16,7 @@ required workflows, or coding standards.
 - Fixing a recurring CI configuration issue (add a test to prevent recurrence)
 - Validating MSRV consistency across `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, and `Dockerfile`
 - Ensuring required workflows exist
-- Enforcing SHA pinning, markdown linting, or script permissions via tests
+- Enforcing explicit action version refs, markdown linting, or script permissions via tests
 - Detecting ecosystem mismatches (Python cache on Rust project) automatically
 
 ## When NOT to Use
@@ -268,7 +268,7 @@ Total time for all configuration tests: < 1 second.
 
 ## Related Skills
 
-- [GitHub Actions Caching](./github-actions-caching.md) — Ecosystem-specific caching, SHA pinning
+- [GitHub Actions Caching](./github-actions-caching.md) — Ecosystem-specific caching, action ref policy
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Schedule guard validation
 - [GitHub Actions Release](./github-actions-release.md) — Release preflight tests
 - [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

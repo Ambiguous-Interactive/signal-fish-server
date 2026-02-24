@@ -273,10 +273,10 @@ jobs:
     name: Configuration Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<SHA>
+      - uses: actions/checkout@v6.0.2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
 
       - name: Run CI config tests
         run: cargo test --test ci_config_tests

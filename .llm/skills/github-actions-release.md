@@ -72,7 +72,7 @@ artifacts, preventing failures when a prior step was skipped or failed.
 
 - name: Upload artifact
   if: steps.build.outcome == 'success'
-  uses: actions/upload-artifact@<SHA>
+  uses: actions/upload-artifact@v6.0.0
   with:
     name: release-binary
     path: target/release/my-binary

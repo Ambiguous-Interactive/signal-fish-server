@@ -1085,6 +1085,48 @@ fn test_workflow_files_are_valid_yaml() {
 }
 
 #[test]
+fn test_workflow_files_end_with_newline() {
+    // Regression guard for yamllint [new-line-at-end-of-file] failures.
+    // Missing trailing newline in workflow files causes CI YAML lint to fail.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/"
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in workflow_files {
+        let path = entry.path();
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("Failed to read workflow file {}: {}", path.display(), e));
+
+        if bytes.is_empty() {
+            violations.push(format!("{}: file is empty", path.display()));
+            continue;
+        }
+
+        if !bytes.ends_with(b"\n") {
+            violations.push(format!(
+                "{}: missing trailing newline at end of file",
+                path.display()
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Workflow files must end with a newline to satisfy YAML lint:\n\n{}\n\n\
+         Fix: add a trailing newline to each listed file.",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn test_no_language_specific_cache_mismatch() {
     // This test prevents the Python cache on Rust project issue (yaml-lint.yml)
     // Ensures workflow caching strategies match project type
@@ -2116,6 +2158,48 @@ fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
 }
 
 #[test]
+fn test_git_hook_skill_external_code_sample_links_exist() {
+    let root = repo_root();
+    let skill_path = root.join(".llm/skills/git-hooks-checks.md");
+    let content = read_file(&skill_path);
+
+    let sample_files = [
+        ".llm/code-samples/git-hooks/pre-commit-fast.sh",
+        ".llm/code-samples/git-hooks/performance-patterns.sh",
+        ".llm/code-samples/git-hooks/ci-hook-validation-tests.rs",
+        ".llm/code-samples/git-hooks/debugging-snippets.sh",
+    ];
+
+    let mut issues = Vec::new();
+
+    for sample in sample_files {
+        let sample_path = root.join(sample);
+        if !sample_path.exists() {
+            issues.push(format!(
+                "Missing external sample file: {}",
+                sample_path.display()
+            ));
+        }
+
+        let markdown_link = sample.replacen(".llm/", "../", 1);
+        if !content.contains(&markdown_link) {
+            issues.push(format!(
+                "{} does not reference expected link target: {}",
+                skill_path.display(),
+                markdown_link
+            ));
+        }
+    }
+
+    assert!(
+        issues.is_empty(),
+        "Git hooks skill external sample references are inconsistent:\n\n{}\n\n\
+         Fix by restoring missing sample files and link targets.",
+        issues.join("\n")
+    );
+}
+
+#[test]
 fn test_markdownlint_version_file_exists_and_is_semver() {
     let root = repo_root();
     let version_file = root.join(".markdownlint-version");
@@ -2336,13 +2420,9 @@ fn test_dockerfile_uses_docker_version_format() {
 }
 
 #[test]
-fn test_github_actions_are_pinned_to_sha() {
-    // This test validates that all GitHub Actions use SHA pinning instead of mutable tags
-    // SHA pinning prevents supply chain attacks where action maintainers could push
-    // malicious code to an existing tag (e.g., v4.2.2 could be changed after we reference it)
-    //
-    // Required format: uses: owner/repo@<64-char-sha> # vX.Y.Z
-    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+fn test_github_actions_use_version_refs_not_commit_hashes() {
+    // Enforce explicit version tags for GitHub Actions (e.g., @v4.2.2, @v2)
+    // and explicitly reject commit-hash and moving channel refs in workflow files.
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -2359,7 +2439,8 @@ fn test_github_actions_are_pinned_to_sha() {
     let mut violations = Vec::new();
     let mut total_files_checked = 0;
     let mut total_actions_found = 0;
-    let mut actions_pinned_correctly = 0;
+    let mut actions_with_valid_refs = 0;
+    let mut malformed_remote_refs = 0;
     let mut files_with_violations = std::collections::HashSet::new();
 
     for entry in &workflow_files {
@@ -2373,50 +2454,51 @@ fn test_github_actions_are_pinned_to_sha() {
             let line_num = line_num + 1; // 1-indexed for human readability
             let trimmed = line.trim();
 
-            // Look for "uses:" lines that reference actions
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
+            let Some(uses_value) = extract_uses_value(trimmed) else {
+                continue;
+            };
 
-                // Skip local actions (e.g., ./.github/actions/setup)
-                if uses_value.starts_with("./") {
-                    continue;
-                }
-
-                // Skip docker:// references (different security model)
-                if uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                total_actions_found += 1;
-
-                // Extract the action reference (owner/repo@ref)
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
+            let parse_result = classify_action_reference(uses_value);
+            let (action_name, action_ref) = match parse_result {
+                ActionReferenceParseResult::LocalOrDocker => continue,
+                ActionReferenceParseResult::MalformedRemote { reason } => {
                     violations.push(format!(
-                        "{filename}:{line_num}: Invalid action reference (missing @): {uses_value}"
+                        "{filename}:{line_num}: Malformed remote action reference in uses: {uses_value}\n  \
+                         Reason: {reason}\n  \
+                         Expected format: owner/repo@ref (for example actions/checkout@v6.0.2)."
                     ));
+                    malformed_remote_refs += 1;
                     file_has_violation = true;
                     continue;
                 }
+                ActionReferenceParseResult::Remote {
+                    action_name,
+                    action_ref,
+                } => (action_name, action_ref),
+            };
 
-                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
+            total_actions_found += 1;
 
-                if !is_sha_pinned(action_ref) {
-                    violations.push(format!(
-                        "{}:{}: Action not pinned to SHA: {}\n  \
-                         Found: {}\n  \
-                         Action references must use full 40-character SHA instead of tags.\n  \
-                         Tags are mutable and can be changed by maintainers (supply chain risk).\n  \
-                         Fix: Find SHA at https://github.com/{}/releases then update to:\n  \
-                         uses: {}@<40-char-sha> # <tag>\n  \
-                         Verify: grep -n 'uses:.*{}' .github/workflows/*.yml",
-                        filename, line_num, parts[0], action_ref, parts[0], parts[0], parts[0]
-                    ));
-                    file_has_violation = true;
-                } else {
-                    actions_pinned_correctly += 1;
-                }
+            if is_commit_hash(action_ref) {
+                violations.push(format!(
+                    "{filename}:{line_num}: Action uses commit hash ref (not allowed): {action_name}@{action_ref}\n  \
+                     Expected an explicit version ref like @vX.Y.Z or @vX."
+                ));
+                file_has_violation = true;
+                continue;
             }
+
+            if !is_action_version_ref(action_ref) {
+                violations.push(format!(
+                    "{filename}:{line_num}: Action ref is not an approved explicit-version format: {action_name}@{action_ref}\n  \
+                     Allowed formats: @vX, @vX.Y, @vX.Y.Z, optionally with prerelease/build suffix.\n  \
+                     Disallowed moving refs: @stable, @beta, @nightly, @main, @master, @latest."
+                ));
+                file_has_violation = true;
+                continue;
+            }
+
+            actions_with_valid_refs += 1;
         }
 
         if file_has_violation {
@@ -2426,30 +2508,20 @@ fn test_github_actions_are_pinned_to_sha() {
 
     if !violations.is_empty() {
         panic!(
-            "GitHub Actions must be pinned to SHA for security:\n\n{}\n\n\
+            "GitHub Actions must use explicit version refs and must not use commit hashes/moving channels:\n\n{}\n\n\
              Diagnostic Information:\n\
              - Workflow files checked: {}\n\
              - Total actions found: {}\n\
-             - Actions pinned correctly: {}\n\
+             - Actions with valid refs: {}\n\
+             - Malformed remote refs: {}\n\
              - Actions with violations: {}\n\
              - Workflows with violations: {}\n\n\
-             Workflows with violations:\n{}\n\n\
-             Why SHA pinning is required:\n\
-             - Tags (v1, v1.2.3) are mutable and can be changed by action maintainers\n\
-             - Attackers could compromise maintainer accounts and push malicious code to existing tags\n\
-             - SHA pinning ensures the exact code version is locked\n\n\
-             How to fix:\n\
-             1. Find the release/tag on GitHub: https://github.com/owner/repo/releases\n\
-             2. Click on the commit SHA for that tag\n\
-             3. Copy the full 40-character SHA\n\
-             4. Use format: uses: owner/repo@<SHA> # vX.Y.Z\n\n\
-             Example:\n\
-             - Bad:  uses: actions/checkout@v4.2.2\n\
-             - Good: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
+             Workflows with violations:\n{}",
             violations.join("\n"),
             total_files_checked,
             total_actions_found,
-            actions_pinned_correctly,
+            actions_with_valid_refs,
+            malformed_remote_refs,
             violations.len(),
             files_with_violations.len(),
             files_with_violations
@@ -2483,73 +2555,60 @@ fn test_cargo_deny_action_minimum_version() {
         let line_num = line_num + 1; // 1-indexed
         let trimmed = line.trim();
 
-        if trimmed.starts_with("uses:") && trimmed.contains("cargo-deny-action") {
+        let Some(uses_value) = extract_uses_value(trimmed) else {
+            continue;
+        };
+
+        if uses_value.contains("cargo-deny-action") {
             found_cargo_deny = true;
 
-            // Extract the SHA and check for version comment
-            let parts: Vec<&str> = trimmed.split('@').collect();
-            if parts.len() < 2 {
+            // Extract and validate action ref
+            let Some((_, action_ref)) = parse_remote_action_reference(uses_value) else {
                 violations.push(format!(
                     "Line {line_num}: cargo-deny-action reference is malformed: {trimmed}"
                 ));
                 continue;
-            }
+            };
 
-            let after_at = parts[1];
-
-            // Check if there's a version comment (# vX.Y.Z)
-            if !after_at.contains('#') {
+            // Parse version (must be vX.Y.Z for this minimum-version check)
+            if !action_ref.starts_with('v') {
                 violations.push(format!(
-                    "Line {line_num}: cargo-deny-action missing version comment\n  \
-                     Expected format: uses: EmbarkStudios/cargo-deny-action@<SHA> # vX.Y.Z"
+                    "Line {line_num}: cargo-deny-action must use an explicit version like @vX.Y.Z, found: @{action_ref}"
                 ));
                 continue;
             }
 
-            // Extract version from comment
-            if let Some(comment_part) = after_at.split('#').nth(1) {
-                let version_str = comment_part.trim();
+            let version_numbers = action_ref.trim_start_matches('v');
+            let version_parts: Vec<&str> = version_numbers.split('.').collect();
 
-                // Parse version (should be vX.Y.Z format)
-                if !version_str.starts_with('v') {
-                    violations.push(format!(
-                        "Line {line_num}: Version comment should start with 'v': {version_str}"
-                    ));
-                    continue;
-                }
+            if version_parts.len() < 3 {
+                violations.push(format!(
+                    "Line {line_num}: Invalid version format (expected vX.Y.Z): {action_ref}"
+                ));
+                continue;
+            }
 
-                let version_numbers = version_str.trim_start_matches('v');
-                let version_parts: Vec<&str> = version_numbers.split('.').collect();
+            // Parse major, minor, patch
+            let major: u32 = version_parts[0].parse().unwrap_or(0);
+            let minor: u32 = version_parts[1].parse().unwrap_or(0);
+            let patch: u32 = version_parts[2].parse().unwrap_or(0);
 
-                if version_parts.len() < 3 {
-                    violations.push(format!(
-                        "Line {line_num}: Invalid version format (expected vX.Y.Z): {version_str}"
-                    ));
-                    continue;
-                }
+            // Check against minimum version: v2.0.15
+            let min_major = 2;
+            let min_minor = 0;
+            let min_patch = 15;
 
-                // Parse major, minor, patch
-                let major: u32 = version_parts[0].parse().unwrap_or(0);
-                let minor: u32 = version_parts[1].parse().unwrap_or(0);
-                let patch: u32 = version_parts[2].parse().unwrap_or(0);
+            let is_sufficient = major > min_major
+                || (major == min_major && minor > min_minor)
+                || (major == min_major && minor == min_minor && patch >= min_patch);
 
-                // Check against minimum version: v2.0.15
-                let min_major = 2;
-                let min_minor = 0;
-                let min_patch = 15;
-
-                let is_sufficient = major > min_major
-                    || (major == min_major && minor > min_minor)
-                    || (major == min_major && minor == min_minor && patch >= min_patch);
-
-                if !is_sufficient {
-                    violations.push(format!(
-                        "Line {line_num}: cargo-deny-action version too old: {version_str}\n  \
-                         Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
-                         Found: v{major}.{minor}.{patch}\n  \
-                         Please update to v2.0.15 or newer for security and stability fixes."
-                    ));
-                }
+            if !is_sufficient {
+                violations.push(format!(
+                    "Line {line_num}: cargo-deny-action version too old: {action_ref}\n  \
+                     Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
+                     Found: v{major}.{minor}.{patch}\n  \
+                     Please update to v2.0.15 or newer for security and stability fixes."
+                ));
             }
         }
     }
@@ -2570,91 +2629,101 @@ fn test_cargo_deny_action_minimum_version() {
 }
 
 #[test]
-fn test_action_version_comments_exist() {
-    // This test validates that all GitHub Actions with SHA pinning have version comments
-    // Version comments make it easy to understand what version is being used without
-    // looking up the SHA on GitHub
-    //
-    // Required format: uses: owner/repo@<sha> # vX.Y.Z or # tag-name
-    // Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+fn test_action_reference_parsing_and_validation_data_driven() {
+    let parse_cases = [
+        (
+            "uses: actions/checkout@v6.0.2",
+            Some(("actions/checkout", "v6.0.2")),
+        ),
+        (
+            "- uses: actions/checkout@v6.0.2",
+            Some(("actions/checkout", "v6.0.2")),
+        ),
+        (
+            "uses: 'actions/checkout@v6.0.2'",
+            Some(("actions/checkout", "v6.0.2")),
+        ),
+        ("uses: ./.github/actions/custom", None),
+        ("- uses: docker://alpine:3.20", None),
+        ("uses: actions/checkout", None),
+        ("uses: actions/checkout@", None),
+        ("uses: checkout@v6.0.2", None),
+        ("run: echo hello", None),
+    ];
 
-    let root = repo_root();
-    let workflows_dir = root.join(".github/workflows");
-
-    let workflow_files = collect_workflow_files(&workflows_dir);
-
-    assert!(
-        !workflow_files.is_empty(),
-        "Workflows directory not found or empty at {}",
-        workflows_dir.display()
-    );
-
-    let mut violations = Vec::new();
-
-    for entry in workflow_files {
-        let path = entry.path();
-        let content = read_file(&path);
-        let filename = path.file_name().unwrap().to_string_lossy();
-
-        for (line_num, line) in content.lines().enumerate() {
-            let line_num = line_num + 1; // 1-indexed
-            let trimmed = line.trim();
-
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
-
-                // Skip local actions and docker references
-                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                // Extract the action reference
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    continue; // Already caught by SHA pinning test
-                }
-
-                let after_at = parts[1];
-                let action_ref = after_at.split_whitespace().next().unwrap_or("");
-
-                if is_sha_pinned(action_ref) {
-                    // SHA-pinned action should have a version comment
-                    if !after_at.contains('#') {
-                        violations.push(format!(
-                            "{}:{}: SHA-pinned action missing version comment: {}\n  \
-                             Add a comment with the version/tag for readability.\n  \
-                             Format: uses: {}@{} # vX.Y.Z or # tag-name",
-                            filename, line_num, parts[0], parts[0], action_ref
-                        ));
-                    } else {
-                        // Verify comment is not empty
-                        if let Some(comment_part) = after_at.split('#').nth(1) {
-                            let comment = comment_part.trim();
-                            if comment.is_empty() {
-                                violations.push(format!(
-                                    "{}:{}: Version comment is empty: {}\n  \
-                                     Provide the version/tag for this SHA (e.g., # v4.2.2)",
-                                    filename, line_num, parts[0]
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    for (line, expected) in parse_cases {
+        let parsed = extract_uses_value(line).and_then(parse_remote_action_reference);
+        assert_eq!(parsed, expected, "Unexpected parse result for line: {line}");
     }
 
-    if !violations.is_empty() {
-        panic!(
-            "GitHub Actions with SHA pinning must have version comments:\n\n{}\n\n\
-             Why version comments are required:\n\
-             - Makes it easy to understand which version is being used\n\
-             - Helps identify when updates are needed\n\
-             - Improves code review (reviewers can see version changes)\n\
-             - Enables automated version tracking tools\n\n\
-             Format: uses: owner/repo@<40-char-SHA> # vX.Y.Z\n\
-             Example: uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n",
-            violations.join("\n")
+    let classification_cases = [
+        (
+            "uses: actions/checkout@v6.0.2",
+            ActionReferenceParseResult::Remote {
+                action_name: "actions/checkout",
+                action_ref: "v6.0.2",
+            },
+        ),
+        (
+            "uses: ./.github/actions/custom",
+            ActionReferenceParseResult::LocalOrDocker,
+        ),
+        (
+            "uses: docker://alpine:3.20",
+            ActionReferenceParseResult::LocalOrDocker,
+        ),
+        (
+            "uses: actions/checkout",
+            ActionReferenceParseResult::MalformedRemote {
+                reason: "missing '@' separator",
+            },
+        ),
+        (
+            "uses: actions/checkout@",
+            ActionReferenceParseResult::MalformedRemote {
+                reason: "missing action ref after '@'",
+            },
+        ),
+        (
+            "uses: checkout@v6.0.2",
+            ActionReferenceParseResult::MalformedRemote {
+                reason: "remote action must use owner/repo@ref syntax",
+            },
+        ),
+    ];
+
+    for (line, expected) in classification_cases {
+        let actual = extract_uses_value(line)
+            .map(classify_action_reference)
+            .unwrap_or(ActionReferenceParseResult::MalformedRemote {
+                reason: "empty uses value",
+            });
+        assert_eq!(
+            actual, expected,
+            "Unexpected action reference classification for line: {line}"
+        );
+    }
+
+    let ref_cases = [
+        ("v2", true),
+        ("v2.7", true),
+        ("v2.7.5", true),
+        ("v2.7.5-beta.1", true),
+        ("stable", false),
+        ("beta", false),
+        ("nightly", false),
+        ("main", false),
+        ("master", false),
+        ("latest", false),
+        ("", false),
+        ("de0fac2e4500dabe0009e67214ff5f5447ce83dd", false),
+    ];
+
+    for (action_ref, expected) in ref_cases {
+        assert_eq!(
+            is_action_version_ref(action_ref),
+            expected,
+            "Unexpected action ref policy result for: {action_ref}"
         );
     }
 }
@@ -3352,6 +3421,174 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
     files
 }
 
+fn markdown_is_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return false;
+    }
+
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+
+    trimmed
+        .chars()
+        .nth(hashes)
+        .map(|c| c == ' ' || c == '\t')
+        .unwrap_or(true)
+}
+
+fn collect_markdown_heading_blank_line_violations(file: &Path, content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut violations = Vec::new();
+    let mut in_fenced_code = vec![false; lines.len()];
+    let mut in_code_block = false;
+    let mut opening_fence_char = '\0';
+    let mut opening_fence_count = 0usize;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let first_char = trimmed.chars().next().unwrap_or('\0');
+        let is_fence_char = first_char == '`' || first_char == '~';
+
+        if is_fence_char {
+            let fence_count = trimmed.chars().take_while(|&c| c == first_char).count();
+            if fence_count >= 3 {
+                in_fenced_code[idx] = true;
+                let fence_suffix = trimmed[fence_count..].trim();
+                if in_code_block {
+                    if first_char == opening_fence_char
+                        && fence_count >= opening_fence_count
+                        && fence_suffix.is_empty()
+                    {
+                        in_code_block = false;
+                        opening_fence_char = '\0';
+                        opening_fence_count = 0;
+                    }
+                } else {
+                    in_code_block = true;
+                    opening_fence_char = first_char;
+                    opening_fence_count = fence_count;
+                }
+                continue;
+            }
+        }
+
+        in_fenced_code[idx] = in_code_block;
+    }
+
+    let mut is_html_comment_line = vec![false; lines.len()];
+    let mut in_html_comment_block = false;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if in_fenced_code[idx] {
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        if in_html_comment_block {
+            is_html_comment_line[idx] = true;
+            if trimmed.contains("-->") {
+                in_html_comment_block = false;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("<!--") {
+            is_html_comment_line[idx] = true;
+            if !trimmed.contains("-->") {
+                in_html_comment_block = true;
+            }
+        }
+    }
+
+    for (idx, line) in lines.iter().enumerate() {
+        if in_fenced_code[idx] || !markdown_is_heading(line) {
+            continue;
+        }
+
+        if idx > 0 {
+            let previous = lines[idx - 1];
+            if !previous.trim().is_empty() && !is_html_comment_line[idx - 1] {
+                violations.push(format!(
+                    "{}:{}: heading must be preceded by a blank line (MD022).\n  \
+                     Heading: {}\n  \
+                     Previous: {}",
+                    file.display(),
+                    idx + 1,
+                    line.trim(),
+                    previous.trim()
+                ));
+            }
+        }
+
+        if idx + 1 < lines.len() {
+            let next = lines[idx + 1];
+            if !next.trim().is_empty() && !is_html_comment_line[idx + 1] {
+                violations.push(format!(
+                    "{}:{}: heading must be followed by a blank line (MD022).\n  \
+                     Heading: {}\n  \
+                     Next: {}",
+                    file.display(),
+                    idx + 1,
+                    line.trim(),
+                    next.trim()
+                ));
+            }
+        }
+    }
+
+    violations
+}
+
+#[test]
+fn test_markdown_headings_have_surrounding_blank_lines() {
+    // Regression guard for markdownlint MD022 failures caused by headings that
+    // touch list/paragraph content without a separating blank line.
+    let root = repo_root();
+
+    // Data-driven input set: markdown files that follow repository lint policy.
+    let file_sets = [(
+        "repository markdown",
+        find_files_with_extension(
+            &root,
+            "md",
+            &["target", "third_party", "node_modules", "test-fixtures"],
+        ),
+    )];
+
+    let mut violations = Vec::new();
+    let mut checked_files = 0usize;
+
+    for (set_name, files) in file_sets {
+        assert!(
+            !files.is_empty(),
+            "{set_name}: expected at least one markdown file to validate"
+        );
+
+        for file in files {
+            checked_files += 1;
+            let content = read_file(&file);
+            violations.extend(collect_markdown_heading_blank_line_violations(
+                &file, &content,
+            ));
+        }
+    }
+
+    assert!(
+        checked_files > 0,
+        "Expected to validate at least one markdown file for heading spacing rules"
+    );
+
+    assert!(
+        violations.is_empty(),
+        "Markdown heading spacing violations found (MD022):\n\n{}\n\n\
+         Fix by inserting a blank line before and after each heading outside fenced code blocks.",
+        violations.join("\n\n")
+    );
+}
+
 /// Collect all YAML workflow files from the given directory.
 ///
 /// Returns a sorted list of directory entries for `.yml` and `.yaml` files.
@@ -3376,12 +3613,142 @@ fn collect_workflow_files(workflows_dir: &Path) -> Vec<std::fs::DirEntry> {
     files
 }
 
-/// Return `true` if `reference` is a valid 40-character lowercase hex SHA.
-///
-/// GitHub Actions require full-length SHA pinning (not tags) to prevent
-/// supply-chain attacks where a mutable tag could be silently updated.
-fn is_sha_pinned(reference: &str) -> bool {
+/// Return `true` if `reference` is a 40-character hexadecimal commit hash.
+fn is_commit_hash(reference: &str) -> bool {
     reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Extract `uses:` value from either `uses: ...` or `- uses: ...` YAML styles.
+fn extract_uses_value(trimmed_line: &str) -> Option<&str> {
+    trimmed_line
+        .strip_prefix("uses:")
+        .or_else(|| trimmed_line.strip_prefix("- uses:"))
+        .map(str::trim)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionReferenceParseResult<'a> {
+    LocalOrDocker,
+    Remote {
+        action_name: &'a str,
+        action_ref: &'a str,
+    },
+    MalformedRemote {
+        reason: &'static str,
+    },
+}
+
+/// Parse and classify a `uses:` value.
+///
+/// Distinguishes local/docker actions from malformed remote references so policy
+/// tests can fail on invalid `owner/repo@ref` syntax.
+fn classify_action_reference(uses_value: &str) -> ActionReferenceParseResult<'_> {
+    // Keep only the first token to ignore trailing inline comments.
+    let token = uses_value
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+
+    if token.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "empty uses value",
+        };
+    }
+
+    if token.starts_with("./") || token.starts_with("docker://") {
+        return ActionReferenceParseResult::LocalOrDocker;
+    }
+
+    let Some((action_name, action_ref)) = token.split_once('@') else {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "missing '@' separator",
+        };
+    };
+
+    let action_name = action_name.trim();
+    let action_ref = action_ref.trim();
+
+    if action_name.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "missing action name before '@'",
+        };
+    }
+
+    if action_ref.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "missing action ref after '@'",
+        };
+    }
+
+    // Require `owner/repo` minimum shape, allowing optional subpaths.
+    let mut segments = action_name.split('/');
+    let owner = segments.next().unwrap_or("");
+    let repo = segments.next().unwrap_or("");
+    if owner.is_empty() || repo.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "remote action must use owner/repo@ref syntax",
+        };
+    }
+
+    ActionReferenceParseResult::Remote {
+        action_name,
+        action_ref,
+    }
+}
+
+/// Parse remote action reference from a `uses` value.
+///
+/// Returns `(action_name, action_ref)` for valid remote actions and `None` for
+/// local/docker actions or malformed references.
+fn parse_remote_action_reference(uses_value: &str) -> Option<(&str, &str)> {
+    match classify_action_reference(uses_value) {
+        ActionReferenceParseResult::Remote {
+            action_name,
+            action_ref,
+        } => Some((action_name, action_ref)),
+        ActionReferenceParseResult::LocalOrDocker
+        | ActionReferenceParseResult::MalformedRemote { .. } => None,
+    }
+}
+
+/// Return `true` if the action reference uses an approved explicit-version format.
+///
+/// Allowed:
+/// - `vX`, `vX.Y`, `vX.Y.Z`, optional prerelease/build suffixes
+///
+/// Disallowed:
+/// - moving channels/branches: `stable`, `beta`, `nightly`, `main`, `master`, `latest`
+/// - commit hashes (40-char hex)
+fn is_action_version_ref(reference: &str) -> bool {
+    if reference.is_empty() || is_commit_hash(reference) {
+        return false;
+    }
+
+    if matches!(
+        reference,
+        "stable" | "beta" | "nightly" | "main" | "master" | "latest"
+    ) {
+        return false;
+    }
+
+    let Some(version) = reference.strip_prefix('v') else {
+        return false;
+    };
+
+    let mut chars = version.chars();
+    let Some(first_char) = chars.next() else {
+        return false;
+    };
+    if !first_char.is_ascii_digit() {
+        return false;
+    }
+
+    version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
 /// Truncate a semver string to `major.minor` format.
@@ -5502,25 +5869,21 @@ fn test_validate_ci_script_exists() {
 // Each test documents the root cause and expected fix.
 
 #[test]
-fn test_cargo_deny_has_rustup_toolchain_override() {
-    // This test prevents regression of the cargo-deny Docker container toolchain issue.
+fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
+    // This test prevents regression of cargo-deny toolchain selection in the
+    // Dockerized action runtime.
     //
-    // Root cause: The cargo-deny-action runs inside a Docker container that ships its
-    // own Rust toolchain. When our repo has rust-toolchain.toml pinning a specific
-    // version (e.g., 1.88.0), rustup inside the container tries to use that version
-    // but fails because it's not installed in the container image.
+    // Root cause: relying on env overrides like RUSTUP_TOOLCHAIN=stable can fail
+    // when that alias is not preinstalled inside the action container.
     //
-    // Fix: Set RUSTUP_TOOLCHAIN=stable as an env var on the cargo-deny step.
-    // RUSTUP_TOOLCHAIN takes precedence over rust-toolchain.toml, so the container
-    // uses its pre-installed stable toolchain instead of trying to download our
-    // pinned version. This is safe because cargo-deny only inspects metadata and
-    // Cargo.lock — it does not compile code, so the exact Rust version is irrelevant.
+    // Fix: Extract MSRV from Cargo.toml in a dedicated step and pass it via the
+    // action's `rust-version` input, so the action installs the exact toolchain
+    // before running cargo-deny.
 
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
     let content = read_file(&ci_workflow);
 
-    // Find the deny job section
     assert!(
         content.contains("  deny:"),
         "CI workflow must have a 'deny' job for dependency auditing.\n\
@@ -5528,62 +5891,49 @@ fn test_cargo_deny_has_rustup_toolchain_override() {
         ci_workflow.display()
     );
 
-    // Find the "Run cargo-deny" step and verify it has RUSTUP_TOOLCHAIN env var
-    let mut in_deny_step = false;
-    let mut found_rustup_toolchain = false;
-    let mut deny_step_line = 0;
+    // Data-driven expectations for required deny job fragments.
+    let required_fragments = [
+        ("deny-msrv step id", "id: deny-msrv"),
+        (
+            "MSRV extraction from Cargo.toml",
+            "MSRV=$(grep '^rust-version = ' Cargo.toml",
+        ),
+        (
+            "deny-msrv output export",
+            "echo \"version=$MSRV\" >> \"$GITHUB_OUTPUT\"",
+        ),
+        (
+            "cargo-deny rust-version input wired to deny-msrv output",
+            "rust-version: ${{ steps.deny-msrv.outputs.version }}",
+        ),
+    ];
 
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-
-        // Detect the cargo-deny step (by name or uses)
-        if trimmed.contains("cargo-deny")
-            && (trimmed.starts_with("uses:") || trimmed.starts_with("- name:"))
-        {
-            in_deny_step = true;
-            deny_step_line = line_num + 1;
-        }
-
-        // Check for RUSTUP_TOOLCHAIN within the step's env block
-        if in_deny_step && trimmed.starts_with("RUSTUP_TOOLCHAIN:") {
-            found_rustup_toolchain = true;
-            let value = trimmed
-                .strip_prefix("RUSTUP_TOOLCHAIN:")
-                .unwrap_or("")
-                .trim();
-            assert!(
-                !value.is_empty(),
-                "RUSTUP_TOOLCHAIN env var in cargo-deny step must have a value (e.g., 'stable').\n\
-                 Line: {}\n\
-                 File: {}",
-                line_num + 1,
-                ci_workflow.display()
-            );
-            break;
-        }
-
-        // If we hit the next step or job after the deny step, stop searching
-        if in_deny_step
-            && (trimmed.starts_with("- name:") || trimmed.starts_with("- uses:"))
-            && deny_step_line != 0
-            && line_num + 1 > deny_step_line + 1
-        {
-            break;
+    let mut missing = Vec::new();
+    for (label, fragment) in required_fragments {
+        if !content.contains(fragment) {
+            missing.push(format!("Missing {label}: expected fragment `{fragment}`"));
         }
     }
 
     assert!(
-        found_rustup_toolchain,
-        "The cargo-deny step in ci.yml must have RUSTUP_TOOLCHAIN env var set.\n\
-         Without it, the cargo-deny Docker container fails when rust-toolchain.toml\n\
-         pins a Rust version not installed in the container image.\n\n\
-         Fix: Add to the cargo-deny step:\n\
-           env:\n\
-             RUSTUP_TOOLCHAIN: stable\n\n\
-         File: {}\n\
-         Deny step found at line: {}",
-        ci_workflow.display(),
-        deny_step_line
+        missing.is_empty(),
+        "cargo-deny workflow configuration is incomplete:\n\n{}\n\n\
+         The deny job must extract MSRV and pass it to cargo-deny via \
+         `with.rust-version` to avoid container-specific toolchain alias failures.\n\
+         File: {}",
+        missing.join("\n"),
+        ci_workflow.display()
+    );
+
+    // Guard against regressing back to env-based alias overrides that caused
+    // container-specific failures in CI.
+    assert!(
+        !content.contains("RUSTUP_TOOLCHAIN:"),
+        "ci.yml deny job should not set RUSTUP_TOOLCHAIN directly.\n\
+         Use cargo-deny `rust-version` input instead to ensure installation\n\
+         and deterministic toolchain selection inside the action container.\n\
+         File: {}",
+        ci_workflow.display()
     );
 }
 
@@ -6131,8 +6481,8 @@ fn test_workflow_script_references_exist() {
 #[test]
 fn test_release_workflow_conventions() {
     // This test validates that the release workflow follows the same conventions
-    // as the other CI workflows (SHA pinning is checked separately by
-    // test_github_actions_are_pinned_to_sha which covers all workflows).
+    // as the other CI workflows (action ref policy is checked separately by
+    // test_github_actions_use_version_refs_not_commit_hashes which covers all workflows).
     //
     // Specific checks for release.yml:
     //   1. Has a timeout-minutes to prevent runaway builds
@@ -7708,6 +8058,209 @@ fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
 }
 
 #[test]
+fn test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("git diff --cached --name-only -z --diff-filter=ACM -- \\")
+            && content.contains("xargs -0 scripts/validate-workflow-awk.sh"),
+        "Pre-commit Check 5 must pass workflow filenames via NUL-delimited git diff + xargs -0.\n\
+         This prevents filename splitting bugs when paths contain spaces."
+    );
+
+    assert!(
+        content.contains("git diff --cached --name-only -z --diff-filter=ACM -- '*.md'")
+            && content.contains("xargs -0 lychee --offline --quiet --config .lychee.toml"),
+        "Pre-commit Check 11 must pass markdown filenames via NUL-delimited git diff + xargs -0.\n\
+         This prevents filename splitting bugs when markdown paths contain spaces."
+    );
+}
+
+#[test]
+fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-push");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-push must exist to enforce workflow policy checks before push."
+    );
+
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("scripts/check-workflow-hygiene.sh"),
+        "pre-push hook must run scripts/check-workflow-hygiene.sh when workflow policy files change."
+    );
+
+    assert!(
+        content.contains("cargo test")
+            && content.contains("--locked")
+            && content.contains("--test ci_config_tests")
+            && content.contains("test_github_actions_use_version_refs_not_commit_hashes")
+            && content.contains("test_workflow_toolchain_fields_do_not_use_moving_aliases"),
+        "pre-push hook must run CI policy tests with --locked for action refs and toolchain alias pinning."
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_pre_push_hook_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-push");
+
+    assert!(
+        hook_path.exists(),
+        ".githooks/pre-push must exist to validate executable permissions."
+    );
+
+    let metadata = std::fs::metadata(&hook_path)
+        .unwrap_or_else(|e| panic!("Failed to read metadata for {}: {}", hook_path.display(), e));
+    let mode = metadata.permissions().mode();
+    let is_executable = mode & 0o111 != 0;
+
+    assert!(
+        is_executable,
+        "{} is not executable.\n\
+         Fix: chmod +x .githooks/pre-push && git update-index --chmod=+x .githooks/pre-push",
+        hook_path.display()
+    );
+}
+
+#[test]
+fn test_git_hook_cargo_test_invocations_use_locked_and_separator() {
+    // Validates that all `cargo test` invocations in .githooks/ files:
+    //   1. Use --locked (project policy: all cargo build/test/check must use --locked)
+    //   2. Use `--` separator before test filter names when multiple filters are passed
+    //
+    // Background: A bug in .githooks/pre-push passed two TESTNAME positional args
+    // directly to `cargo test` without a `--` separator. Cargo only accepts one
+    // positional TESTNAME; multiple filters must follow `--`. Without `--`, the
+    // second name causes an 'unexpected argument' error.
+
+    let root = repo_root();
+    let hooks_dir = root.join(".githooks");
+
+    let hook_files: Vec<_> = fs::read_dir(&hooks_dir)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", hooks_dir.display()))
+        .filter_map(|entry| {
+            let path = entry
+                .unwrap_or_else(|e| panic!("Failed to read hook entry: {e}"))
+                .path();
+            if path.is_file() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !hook_files.is_empty(),
+        ".githooks/ directory must contain at least one hook file."
+    );
+
+    let mut violations = Vec::new();
+
+    for hook_path in &hook_files {
+        let content = read_file(hook_path);
+        let hook_name = hook_path.file_name().unwrap_or_default().to_string_lossy();
+
+        // Join continuation lines (backslash-newline) so that a single logical
+        // `cargo test` command split across multiple lines is analyzed as one unit.
+        let joined = content.replace("\\\n", " ");
+
+        for (line_idx, line) in joined.lines().enumerate() {
+            let trimmed = line.trim();
+
+            // Skip comments
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Find lines that invoke `cargo test`
+            let Some(cargo_test_pos) = trimmed.find("cargo test") else {
+                continue;
+            };
+
+            let after_cargo_test = &trimmed[cargo_test_pos + "cargo test".len()..];
+
+            // Check 1: --locked must be present
+            if !after_cargo_test.contains("--locked") {
+                violations.push(format!(
+                    ".githooks/{hook_name}:{}: `cargo test` missing --locked flag.\n  \
+                     Found: {trimmed}\n  \
+                     Fix: Add --locked to the cargo test invocation \
+                     (project policy requires --locked on all cargo build/test/check commands).",
+                    line_idx + 1
+                ));
+            }
+
+            // Check 2: When multiple test filter names are passed, they must
+            // appear after a `--` separator.
+            //
+            // Strategy: find the `--test <name>` flag (if present) and then
+            // check if there are multiple bare words after it that are NOT
+            // preceded by `--`.
+            //
+            // We split on `--` to get the part before and after the separator.
+            // If there's no `--`, all args are in the "cargo side".
+            // Test filter names on the cargo side (positional TESTNAME) can only
+            // be one; if we find multiple bare words that look like test names
+            // after `--test <crate>`, that's a violation.
+
+            // Split at the first ` -- ` (with surrounding spaces to avoid matching --locked etc.)
+            let has_double_dash = after_cargo_test.contains(" -- ");
+
+            // Count what look like test filter names (bare words starting with test_)
+            // in the cargo-args portion (before `--`).
+            let cargo_args = if has_double_dash {
+                // Everything before ` -- `
+                after_cargo_test
+                    .split(" -- ")
+                    .next()
+                    .unwrap_or(after_cargo_test)
+            } else {
+                after_cargo_test
+            };
+
+            // After stripping known flags and their values, count remaining
+            // bare words that look like test function names (start with test_).
+            let test_name_args: Vec<&str> = cargo_args
+                .split_whitespace()
+                .filter(|word| word.starts_with("test_"))
+                .collect();
+
+            if test_name_args.len() > 1 {
+                violations.push(format!(
+                    ".githooks/{hook_name}:{}: `cargo test` has multiple test filter names \
+                     as positional args without `--` separator.\n  \
+                     Found: {trimmed}\n  \
+                     Problem: cargo only accepts one positional TESTNAME; additional names \
+                     cause an 'unexpected argument' error.\n  \
+                     Fix: Place all test filter names after `--`, e.g.:\n  \
+                     cargo test --locked --test <crate> -- filter1 filter2",
+                    line_idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Found cargo test invocation issues in git hooks:\n\n{}\n\n\
+         All `cargo test` commands in .githooks/ must:\n\
+         1. Use --locked (ensures dependencies match Cargo.lock)\n\
+         2. Place multiple test filter names after `--` (cargo only accepts one positional TESTNAME)",
+        violations.join("\n\n")
+    );
+}
+
+#[test]
 fn test_pre_commit_hook_includes_llm_file_size_check_18() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-commit");
@@ -7983,20 +8536,42 @@ fn test_scripts_pass_basic_syntax_check() {
 }
 
 #[test]
-fn test_action_sha_references_are_valid_length() {
-    // Validates that every SHA-pinned GitHub Action reference uses exactly 40
-    // hexadecimal characters. A previous CI failure was caused by a SHA that was
-    // only 39 characters (taiki-e/install-action with a truncated SHA), which
-    // passed the "is it hex?" check but failed at runtime because GitHub requires
-    // exactly 40-character commit SHAs.
-    //
-    // The existing test_github_actions_are_pinned_to_sha validates that actions
-    // ARE pinned, but this test specifically targets length validity to catch
-    // truncation or copy-paste errors.
+fn test_check_workflow_toolchain_fix_guidance_uses_pinned_version_not_stable_alias() {
+    let root = repo_root();
+    let script_path = root.join("scripts/check-workflow-toolchain.sh");
+    let content = read_file(&script_path);
 
+    let guidance_lines: Vec<&str> = content
+        .lines()
+        .filter(|line| line.contains("echo \"      toolchain:"))
+        .collect();
+
+    assert!(
+        !guidance_lines.is_empty(),
+        "check-workflow-toolchain.sh must print remediation guidance with a `toolchain:` example."
+    );
+
+    for line in &guidance_lines {
+        assert!(
+            !line.contains("toolchain: stable"),
+            "check-workflow-toolchain.sh remediation must not suggest moving aliases like `stable`.\n\
+             Found guidance line: {line}"
+        );
+    }
+
+    assert!(
+        guidance_lines
+            .iter()
+            .any(|line| line.contains("toolchain: $PINNED_TOOLCHAIN")),
+        "check-workflow-toolchain.sh remediation should suggest a pinned toolchain example.\n\
+         Expected guidance to use `$PINNED_TOOLCHAIN` derived from rust-toolchain.toml."
+    );
+}
+
+#[test]
+fn test_no_workflow_action_uses_commit_hash_ref() {
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
-
     let workflow_files = collect_workflow_files(&workflows_dir);
 
     assert!(
@@ -8007,7 +8582,6 @@ fn test_action_sha_references_are_valid_length() {
     );
 
     let mut violations = Vec::new();
-    let mut total_sha_refs = 0;
 
     for entry in &workflow_files {
         let path = entry.path();
@@ -8015,87 +8589,145 @@ fn test_action_sha_references_are_valid_length() {
         let filename = path.file_name().unwrap().to_string_lossy();
 
         for (line_num, line) in content.lines().enumerate() {
-            let line_num = line_num + 1; // 1-indexed for human readability
+            let line_num = line_num + 1;
             let trimmed = line.trim();
 
-            // Look for "uses:" lines that reference actions
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
+            let Some(uses_value) = extract_uses_value(trimmed) else {
+                continue;
+            };
+            let Some((action_name, action_ref)) = parse_remote_action_reference(uses_value) else {
+                continue;
+            };
 
-                // Skip local actions (e.g., ./.github/actions/setup)
-                if uses_value.starts_with("./") {
-                    continue;
-                }
-
-                // Skip docker:// references (different security model)
-                if uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                // Extract the action reference (owner/repo@ref)
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    continue; // Missing @ is caught by test_github_actions_are_pinned_to_sha
-                }
-
-                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
-
-                // Only check references that look like hex SHAs (skip tag references like v4)
-                if action_ref.chars().all(|c| c.is_ascii_hexdigit()) && !action_ref.is_empty() {
-                    total_sha_refs += 1;
-                    let sha_len = action_ref.len();
-                    if sha_len != 40 {
-                        violations.push(format!(
-                            "{}:{}: SHA reference has {} characters (expected 40): {}\n  \
-                             Action: {}\n  \
-                             SHA: {}\n  \
-                             This is likely a truncation or copy-paste error.\n  \
-                             GitHub requires exactly 40-character hexadecimal commit SHAs.\n  \
-                             Fix: Look up the correct full SHA at https://github.com/{}/releases\n  \
-                             and replace with the complete 40-character SHA.",
-                            filename, line_num, sha_len, uses_value, parts[0], action_ref, parts[0]
-                        ));
-                    }
-                }
+            if is_commit_hash(action_ref) {
+                violations.push(format!(
+                    "{filename}:{line_num}: {action_name}@{action_ref}\n  \
+                     Commit hashes are not allowed for workflow action refs."
+                ));
             }
         }
     }
 
-    if !violations.is_empty() {
-        panic!(
-            "GitHub Action SHA references must be exactly 40 hexadecimal characters:\n\n\
-             {}\n\n\
-             Diagnostic Information:\n\
-             - Workflow files checked: {}\n\
-             - Total SHA references found: {}\n\
-             - Invalid SHA references: {}\n\n\
-             Why this matters:\n\
-             - GitHub commit SHAs are always exactly 40 hex characters\n\
-             - A truncated SHA (e.g., 39 characters) will fail with a cryptic GitHub error\n\
-             - This was an actual CI failure: taiki-e/install-action had a 39-character SHA\n\n\
-             How to fix:\n\
-             1. Go to https://github.com/owner/repo/releases and find the release tag\n\
-             2. Click on the commit hash to see the full 40-character SHA\n\
-             3. Copy the complete SHA and update the workflow file\n\
-             4. Verify with: echo -n '<sha>' | wc -c  (should output 40)",
-            violations.join("\n\n"),
-            workflow_files.len(),
-            total_sha_refs,
-            violations.len()
-        );
-    }
+    assert!(
+        violations.is_empty(),
+        "Workflow actions must not use commit hash refs:\n\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
-fn test_same_action_uses_consistent_sha_across_workflows() {
-    // Validates that every unique GitHub Action (e.g., taiki-e/install-action)
-    // uses the same SHA across ALL workflow files. A previous CI failure was
-    // caused by updating the taiki-e/install-action SHA in one workflow but
-    // missing another, leading to version inconsistency and unexpected behavior.
-    //
-    // This test collects all SHA-pinned action references, groups them by
-    // action name (owner/repo), and verifies that each action uses exactly
-    // one unique SHA across all workflow files.
+fn test_workflow_toolchain_fields_do_not_use_moving_aliases() {
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        for (line_num, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("toolchain:") else {
+                continue;
+            };
+
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if matches!(value, "stable" | "beta" | "nightly") {
+                violations.push(format!(
+                    "{filename}:{}: toolchain: {value}\n  \
+                     Moving toolchain aliases are not allowed.\n  \
+                     Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-02-01),\n  \
+                     or omit toolchain to use rust-toolchain.toml.",
+                    line_num + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Workflow toolchain fields must not use moving aliases:\n\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_dtolnay_rust_toolchain_v1_has_explicit_toolchain_input() {
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    let mut violations = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let lines: Vec<&str> = content.lines().collect();
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.contains("dtolnay/rust-toolchain@v") {
+                continue;
+            }
+
+            // Look at the next 5 lines for a `toolchain:` field
+            let mut found_toolchain = false;
+            let lookahead_end = (i + 6).min(lines.len());
+            for next_line in lines.iter().take(lookahead_end).skip(i + 1) {
+                let next_trimmed = next_line.trim();
+
+                // Stop early if we hit another step marker
+                if next_trimmed.starts_with("- name:") || next_trimmed.starts_with("- uses:") {
+                    break;
+                }
+
+                if next_trimmed.starts_with("toolchain:") {
+                    found_toolchain = true;
+                    break;
+                }
+            }
+
+            if !found_toolchain {
+                violations.push(format!(
+                    "{filename}:{}: uses: dtolnay/rust-toolchain@v1\n  \
+                     Missing explicit `toolchain:` input in the `with:` block.\n  \
+                     Every dtolnay/rust-toolchain@v1 invocation must specify a \
+                     pinned toolchain version.",
+                    i + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "dtolnay/rust-toolchain@v1 invocations missing explicit toolchain input:\n\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_same_action_uses_consistent_ref_across_workflows() {
+    // Every action should resolve to a single reference value across workflows
+    // to prevent version drift (e.g., one file uses @v2 while another uses @v1).
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -8106,8 +8738,8 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
         return;
     }
 
-    // Map of action name -> Vec<(sha, filename, line_num)>
-    let mut action_shas: std::collections::HashMap<String, Vec<(String, String, usize)>> =
+    // Map of action name -> Vec<(reference, filename, line_num)>
+    let mut action_refs: std::collections::HashMap<String, Vec<(String, String, usize)>> =
         std::collections::HashMap::new();
 
     for entry in &workflow_files {
@@ -8119,51 +8751,39 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
             let line_num = line_num + 1; // 1-indexed for human readability
             let trimmed = line.trim();
 
-            if trimmed.starts_with("uses:") {
-                let uses_value = trimmed.trim_start_matches("uses:").trim();
+            let Some(uses_value) = extract_uses_value(trimmed) else {
+                continue;
+            };
+            let Some((action_name, action_ref)) = parse_remote_action_reference(uses_value) else {
+                continue;
+            };
 
-                // Skip local actions and docker references
-                if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
-                    continue;
-                }
-
-                let parts: Vec<&str> = uses_value.split('@').collect();
-                if parts.len() < 2 {
-                    continue;
-                }
-
-                let action_name = parts[0].to_string();
-                let action_ref = parts[1].split_whitespace().next().unwrap_or("");
-
-                // Only track SHA-pinned references (40-char hex)
-                if action_ref.len() == 40 && action_ref.chars().all(|c| c.is_ascii_hexdigit()) {
-                    action_shas.entry(action_name).or_default().push((
-                        action_ref.to_string(),
-                        filename.clone(),
-                        line_num,
-                    ));
-                }
-            }
+            action_refs
+                .entry(action_name.to_string())
+                .or_default()
+                .push((action_ref.to_string(), filename.clone(), line_num));
         }
     }
 
     let mut inconsistencies = Vec::new();
 
-    for (action_name, refs) in &action_shas {
-        let unique_shas: std::collections::HashSet<&str> =
-            refs.iter().map(|(sha, _, _)| sha.as_str()).collect();
+    for (action_name, refs) in &action_refs {
+        let unique_refs: std::collections::HashSet<&str> = refs
+            .iter()
+            .map(|(action_ref, _, _)| action_ref.as_str())
+            .collect();
 
-        if unique_shas.len() > 1 {
+        if unique_refs.len() > 1 {
             let mut details = format!(
-                "Action '{}' uses {} different SHAs across workflow files:",
+                "Action '{}' uses {} different refs across workflow files:",
                 action_name,
-                unique_shas.len()
+                unique_refs.len()
             );
-            for (sha, filename, line_num) in refs {
-                details.push_str(&format!("\n    {filename}:{line_num}: {sha}"));
+            for (action_ref, filename, line_num) in refs {
+                details.push_str(&format!("\n    {filename}:{line_num}: {action_ref}"));
             }
             details.push_str(&format!(
-                "\n  Fix: Update all references to '{action_name}' to use the same SHA.\n  \
+                "\n  Fix: Update all references to '{action_name}' to use the same ref.\n  \
                  Pick the most recent version and apply it to every workflow file.\n  \
                  Search with: grep -rn '{action_name}' .github/workflows/"
             ));
@@ -8172,25 +8792,22 @@ fn test_same_action_uses_consistent_sha_across_workflows() {
     }
 
     if !inconsistencies.is_empty() {
-        let total_actions = action_shas.len();
+        let total_actions = action_refs.len();
         let consistent_actions = total_actions - inconsistencies.len();
         panic!(
-            "GitHub Action SHA references must be consistent across all workflow files:\n\n\
+            "GitHub Action refs must be consistent across all workflow files:\n\n\
              {}\n\n\
              Diagnostic Information:\n\
              - Unique actions found: {}\n\
-             - Actions with consistent SHAs: {}\n\
-             - Actions with inconsistent SHAs: {}\n\n\
+             - Actions with consistent refs: {}\n\
+             - Actions with inconsistent refs: {}\n\n\
              Why this matters:\n\
-             - Different SHAs for the same action mean different code versions are running\n\
-             - This was an actual CI failure: taiki-e/install-action was updated in one \
-             workflow but missed in another\n\
+             - Different refs for the same action mean different code versions are running\n\
              - Version drift can cause subtle behavior differences across workflows\n\n\
              How to fix:\n\
-             1. Identify the latest desired SHA for each action\n\
-             2. Update ALL workflow files to use that SHA\n\
-             3. Verify with: grep -rn 'action-name@' .github/workflows/\n\
-             4. Ensure the version comment (# vX.Y.Z) matches the SHA",
+             1. Identify the desired ref for each action (e.g., @v2.7.5)\n\
+             2. Update ALL workflow files to use that same ref\n\
+             3. Verify with: grep -rn 'action-name@' .github/workflows/",
             inconsistencies.join("\n\n"),
             total_actions,
             consistent_actions,
@@ -8591,8 +9208,8 @@ fn test_proptest_tests_ignored_under_miri() {
                     // for blank lines and other attributes between them).
                     let mut found_miri_ignore = false;
                     let search_start = line_idx.saturating_sub(5);
-                    for check_idx in (search_start..line_idx).rev() {
-                        let check_line = lines[check_idx].trim();
+                    for check_line in lines[search_start..line_idx].iter().rev() {
+                        let check_line = check_line.trim();
                         if check_line.is_empty() || check_line.starts_with('#') {
                             if check_line.contains("cfg_attr(miri, ignore)") {
                                 found_miri_ignore = true;
@@ -8676,67 +9293,85 @@ fn test_proptest_tests_ignored_under_miri() {
 }
 
 #[test]
-fn test_protocol_wall_clock_tests_ignored_under_miri() {
-    // Regression guard: tests in src/protocol/mod.rs that call Room::new() or
-    // use Utc::now() must be ignored under Miri. Those code paths invoke
-    // clock_gettime(CLOCK_REALTIME), which Miri blocks in isolation mode.
+fn test_wall_clock_tests_ignored_under_miri() {
+    // Regression guard: tests that use wall-clock APIs (Room::new, Utc::now,
+    // SystemTime::now) must opt out of Miri with #[cfg_attr(miri, ignore)].
+    // Miri blocks clock_gettime(CLOCK_REALTIME) in isolation mode.
     let root = repo_root();
-    let protocol_mod = root.join("src/protocol/mod.rs");
-    let content = read_file(&protocol_mod);
-    let lines: Vec<&str> = content.lines().collect();
-
-    let required_miri_ignored_tests = [
-        "test_room_creation",
-        "test_player_management",
-        "test_authority_management",
-        "test_authority_management_disabled",
-        "test_player_name_uniqueness",
-        "test_authority_protocol_basic_rules",
-        "test_authority_protocol_single_authority_rule",
-        "test_authority_protocol_no_auto_reassignment",
-        "test_authority_protocol_room_support_validation",
-        "test_lobby_state_transitions",
-        "test_lobby_ready_state_changes",
-        "test_peer_connections",
-        "test_lobby_edge_cases",
+    let required_miri_ignored_tests: [(&str, &[&str]); 2] = [
+        (
+            "src/protocol/mod.rs",
+            &[
+                "test_room_creation",
+                "test_player_management",
+                "test_authority_management",
+                "test_authority_management_disabled",
+                "test_player_name_uniqueness",
+                "test_authority_protocol_basic_rules",
+                "test_authority_protocol_single_authority_rule",
+                "test_authority_protocol_no_auto_reassignment",
+                "test_authority_protocol_room_support_validation",
+                "test_lobby_state_transitions",
+                "test_lobby_ready_state_changes",
+                "test_peer_connections",
+                "test_lobby_edge_cases",
+            ],
+        ),
+        (
+            "src/reconnection.rs",
+            &[
+                "test_reconnection_token_creation",
+                "test_reconnection_token_validation",
+                "test_event_buffer_push",
+                "test_event_buffer_get_events_after",
+                "test_reconnection_manager_flow",
+                "test_event_buffering",
+            ],
+        ),
     ];
 
     let mut violations = Vec::new();
 
-    for test_name in required_miri_ignored_tests {
-        let marker = format!("fn {test_name}(");
-        let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
-            violations.push(format!(
-                "{}: missing expected test function `{}`",
-                protocol_mod.display(),
-                test_name
-            ));
-            continue;
-        };
+    for (relative_file, test_names) in required_miri_ignored_tests {
+        let source_file = root.join(relative_file);
+        let content = read_file(&source_file);
+        let lines: Vec<&str> = content.lines().collect();
 
-        let search_start = line_idx.saturating_sub(4);
-        let has_miri_ignore = lines
-            .iter()
-            .take(line_idx)
-            .skip(search_start)
-            .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
+        for test_name in test_names {
+            let marker = format!("fn {test_name}(");
+            let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
+                violations.push(format!(
+                    "{}: missing expected test function `{}`",
+                    source_file.display(),
+                    test_name
+                ));
+                continue;
+            };
 
-        if !has_miri_ignore {
-            violations.push(format!(
-                "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
-                 Miri clock_gettime isolation failures",
-                protocol_mod.display(),
-                line_idx + 1,
-                test_name
-            ));
+            let search_start = line_idx.saturating_sub(4);
+            let has_miri_ignore = lines
+                .iter()
+                .take(line_idx)
+                .skip(search_start)
+                .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
+
+            if !has_miri_ignore {
+                violations.push(format!(
+                    "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
+                     Miri clock_gettime isolation failures",
+                    source_file.display(),
+                    line_idx + 1,
+                    test_name
+                ));
+            }
         }
     }
 
     assert!(
         violations.is_empty(),
-        "Protocol tests missing Miri ignore for wall-clock-dependent code:\n\n{}\n\n\
-         Fix: add #[cfg_attr(miri, ignore)] above the listed #[test] functions \
-         in src/protocol/mod.rs.",
+        "Wall-clock-dependent tests missing Miri ignore annotations:\n\n{}\n\n\
+         Fix: add #[cfg_attr(miri, ignore)] above each listed #[test] or \
+         #[tokio::test] function.",
         violations.join("\n")
     );
 }
@@ -9001,4 +9636,416 @@ fn detect_non_bash_syntax(lines: &[&str]) -> Option<String> {
     }
 
     None
+}
+
+#[test]
+fn test_windows_matrix_jobs_specify_shell_bash_for_bash_syntax() {
+    // Regression guard: CI workflows that run on Windows via a matrix with
+    // `os:` containing a `windows-*` variant must specify `shell: bash` on
+    // any `run:` step that uses Bash-specific syntax.  Without this, the
+    // step executes under PowerShell (the Windows default), which cannot
+    // interpret `$(...)`, `${...}`, `[[`, or other Bash constructs.
+    //
+    // Background: The "Read Rust toolchain" steps originally used `$(grep …)`
+    // without `shell: bash`, causing failures on Windows runners.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    // Bash-specific syntax patterns that are incompatible with PowerShell.
+    // Each pattern is checked against every line in a `run:` block.
+    fn line_has_bash_syntax(line: &str) -> bool {
+        let trimmed = line.trim();
+
+        // Skip empty lines and pure comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+
+        // $(...) command substitution (but not ${{ ... }} which is GitHub Actions expression)
+        if trimmed.contains("$(") && !trimmed.contains("${{") {
+            return true;
+        }
+
+        // ${...} parameter expansion (but not ${{ ... }})
+        // Look for ${ not followed by {
+        let bytes = trimmed.as_bytes();
+        for i in 0..bytes.len().saturating_sub(2) {
+            if bytes[i] == b'$' && bytes[i + 1] == b'{' && bytes[i + 2] != b'{' {
+                return true;
+            }
+        }
+
+        // [[ ... ]] Bash conditional
+        if trimmed.starts_with("[[") || trimmed.contains(" [[ ") || trimmed.contains("]] ") {
+            return true;
+        }
+
+        // Bash array syntax: VAR=( or ${VAR[@]} or ${VAR[*]}
+        if trimmed.contains("=(") || trimmed.contains("[@]}") || trimmed.contains("[*]}") {
+            return true;
+        }
+
+        // Bash built-ins that don't exist in PowerShell
+        let bash_builtins = [
+            "set -e", "set -u", "set -o", "set -x", "set -euo", "set -eux", "shopt ", "export ",
+            "source ",
+        ];
+        for builtin in &bash_builtins {
+            if trimmed.starts_with(builtin) {
+                return true;
+            }
+        }
+
+        // Bash-specific redirections: 2>&1, &>, /dev/null
+        if trimmed.contains("/dev/null") || trimmed.contains("2>&1") || trimmed.contains("&>") {
+            return true;
+        }
+
+        // Pipe through grep/sed/awk (common Bash idiom, not PowerShell)
+        if trimmed.contains("| grep ")
+            || trimmed.contains("| sed ")
+            || trimmed.contains("| awk ")
+            || trimmed.contains("|grep ")
+            || trimmed.contains("|sed ")
+            || trimmed.contains("|awk ")
+        {
+            return true;
+        }
+
+        false
+    }
+
+    let mut violations = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Phase 1: Identify jobs whose matrix includes a windows OS variant.
+        //
+        // We look for the `os: [...]` line inside `matrix:` sections.  The
+        // typical YAML structure is:
+        //
+        //     jobs:
+        //       job_key:            (indent 2)
+        //         strategy:         (indent 4)
+        //           matrix:         (indent 6)
+        //             os: [...]     (indent 8)
+        //         steps:            (indent 4)
+        //           - name: ...     (indent 6)
+        //             run: ...      (indent 8)
+        //             shell: bash   (indent 8)
+        //
+        // We track the current job key by watching for non-indented keys under
+        // `jobs:`.
+
+        // Collect job keys that include windows in their matrix os list.
+        let mut windows_jobs: Vec<String> = Vec::new();
+        let mut in_jobs = false;
+        let mut current_job: Option<String> = None;
+
+        for line in &lines {
+            let trimmed = line.trim();
+
+            // Detect the `jobs:` section
+            if trimmed == "jobs:" {
+                in_jobs = true;
+                continue;
+            }
+
+            if !in_jobs {
+                continue;
+            }
+
+            // A non-empty line at indent 0 that isn't `jobs:` ends the jobs section
+            if !line.starts_with(' ') && !trimmed.is_empty() {
+                break;
+            }
+
+            // Job key: exactly 2 spaces of indent, ending with ':'
+            let indent = line.len() - line.trim_start().len();
+            if indent == 2 && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                current_job = Some(trimmed.trim_end_matches(':').to_string());
+                continue;
+            }
+
+            // Look for os: [...] lines that contain a windows variant
+            if trimmed.starts_with("os:") && trimmed.contains("windows") {
+                if let Some(ref job) = current_job {
+                    windows_jobs.push(job.clone());
+                }
+            }
+        }
+
+        if windows_jobs.is_empty() {
+            continue;
+        }
+
+        // Phase 2: For each windows-matrix job, scan its steps for `run:`
+        // blocks that contain Bash syntax but lack `shell: bash`.
+
+        in_jobs = false;
+        current_job = None;
+        let mut in_steps = false;
+        let mut current_step_name = String::new();
+        let mut current_step_has_shell_bash = false;
+        let mut current_step_run_lines: Vec<(usize, String)> = Vec::new();
+        let mut in_run_block = false;
+        let mut run_block_indent: usize = 0;
+
+        // We need to collect all step info then check at step boundaries.
+        // A step boundary is a new `- ` at the step indent level, or end of
+        // the steps section.
+
+        let check_step = |step_name: &str,
+                          has_shell_bash: bool,
+                          run_lines: &[(usize, String)],
+                          job_key: &str,
+                          filename: &str,
+                          violations: &mut Vec<String>| {
+            if run_lines.is_empty() || has_shell_bash {
+                return;
+            }
+
+            let bash_lines: Vec<&(usize, String)> = run_lines
+                .iter()
+                .filter(|(_, line)| line_has_bash_syntax(line))
+                .collect();
+
+            if bash_lines.is_empty() {
+                return;
+            }
+
+            let examples: Vec<String> = bash_lines
+                .iter()
+                .take(3)
+                .map(|(line_num, content)| format!("    line {}: {}", line_num, content.trim()))
+                .collect();
+
+            let step_desc = if step_name.is_empty() {
+                "unnamed step".to_string()
+            } else {
+                format!("step \"{step_name}\"")
+            };
+
+            violations.push(format!(
+                "{filename}: job \"{job_key}\", {step_desc} uses Bash syntax without \
+                     `shell: bash`:\n{}",
+                examples.join("\n")
+            ));
+        };
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Detect the `jobs:` section
+            if trimmed == "jobs:" {
+                in_jobs = true;
+                continue;
+            }
+
+            if !in_jobs {
+                continue;
+            }
+
+            // End of jobs section
+            if !line.starts_with(' ') && !trimmed.is_empty() {
+                // Flush last step
+                if let Some(ref job) = current_job {
+                    if windows_jobs.contains(job) {
+                        check_step(
+                            &current_step_name,
+                            current_step_has_shell_bash,
+                            &current_step_run_lines,
+                            job,
+                            &filename,
+                            &mut violations,
+                        );
+                    }
+                }
+                break;
+            }
+
+            // Job key at indent 2
+            if indent == 2 && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                // Flush last step from previous job
+                if let Some(ref job) = current_job {
+                    if windows_jobs.contains(job) {
+                        check_step(
+                            &current_step_name,
+                            current_step_has_shell_bash,
+                            &current_step_run_lines,
+                            job,
+                            &filename,
+                            &mut violations,
+                        );
+                    }
+                }
+                current_job = Some(trimmed.trim_end_matches(':').to_string());
+                in_steps = false;
+                in_run_block = false;
+                current_step_run_lines.clear();
+                current_step_name.clear();
+                current_step_has_shell_bash = false;
+                continue;
+            }
+
+            // Only process steps for windows-matrix jobs
+            let is_windows_job = current_job
+                .as_ref()
+                .map(|j| windows_jobs.contains(j))
+                .unwrap_or(false);
+            if !is_windows_job {
+                continue;
+            }
+
+            // Detect `steps:` section (indent 4)
+            if indent == 4 && trimmed == "steps:" {
+                in_steps = true;
+                continue;
+            }
+
+            if !in_steps {
+                continue;
+            }
+
+            // End of steps section: a line at indent <= 4 that is a new job-level key
+            if indent <= 4
+                && !trimmed.is_empty()
+                && trimmed != "steps:"
+                && !trimmed.starts_with('-')
+            {
+                // Flush last step
+                if let Some(ref job) = current_job {
+                    check_step(
+                        &current_step_name,
+                        current_step_has_shell_bash,
+                        &current_step_run_lines,
+                        job,
+                        &filename,
+                        &mut violations,
+                    );
+                }
+                in_steps = false;
+                in_run_block = false;
+                current_step_run_lines.clear();
+                current_step_name.clear();
+                current_step_has_shell_bash = false;
+                continue;
+            }
+
+            // New step: `- name:` or `- uses:` at indent 6
+            if indent == 6 && trimmed.starts_with("- ") {
+                // Flush the previous step
+                if let Some(ref job) = current_job {
+                    check_step(
+                        &current_step_name,
+                        current_step_has_shell_bash,
+                        &current_step_run_lines,
+                        job,
+                        &filename,
+                        &mut violations,
+                    );
+                }
+                current_step_run_lines.clear();
+                current_step_has_shell_bash = false;
+                in_run_block = false;
+
+                // Extract step name if present
+                if let Some(name) = trimmed.strip_prefix("- name:") {
+                    current_step_name = name.trim().to_string();
+                } else {
+                    current_step_name.clear();
+                }
+                continue;
+            }
+
+            // Step-level properties at indent 8
+            if indent == 8 && !in_run_block {
+                if let Some(name) = trimmed.strip_prefix("name:") {
+                    current_step_name = name.trim().to_string();
+                }
+
+                if trimmed == "shell: bash" {
+                    current_step_has_shell_bash = true;
+                }
+
+                // Single-line run: value
+                if let Some(rest) = trimmed.strip_prefix("run:") {
+                    let value = rest.trim();
+                    if value == "|" || value == "|-" || value == "|+" {
+                        // Multi-line block follows
+                        in_run_block = true;
+                        run_block_indent = 8;
+                    } else if !value.is_empty() {
+                        // Single-line run
+                        current_step_run_lines.push((line_idx + 1, value.to_string()));
+                    }
+                }
+                continue;
+            }
+
+            // Collect multi-line run block content
+            if in_run_block {
+                if indent <= run_block_indent && !trimmed.is_empty() {
+                    // End of multi-line block
+                    in_run_block = false;
+                    // Re-process this line as a step property
+                    if indent == 8 {
+                        if trimmed == "shell: bash" {
+                            current_step_has_shell_bash = true;
+                        }
+                        if let Some(name) = trimmed.strip_prefix("name:") {
+                            current_step_name = name.trim().to_string();
+                        }
+                    }
+                } else if !trimmed.is_empty() {
+                    current_step_run_lines.push((line_idx + 1, line.to_string()));
+                }
+            }
+        }
+
+        // Flush final step at end of file
+        if let Some(ref job) = current_job {
+            if windows_jobs.contains(job) {
+                check_step(
+                    &current_step_name,
+                    current_step_has_shell_bash,
+                    &current_step_run_lines,
+                    job,
+                    &filename,
+                    &mut violations,
+                );
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Windows-matrix jobs have `run:` steps with Bash syntax but no `shell: bash`:\n\n\
+         {}\n\n\
+         Why this matters:\n\
+         - Windows runners default to PowerShell, which cannot interpret Bash syntax\n\
+         - Patterns like `$(...)`, `${{...}}`, `[[`, `set -euo pipefail` will fail\n\
+         - This caused CI failures in \"Read Rust toolchain\" steps\n\n\
+         Fix: add `shell: bash` to each flagged step, e.g.:\n\
+         \n\
+         \x20   - name: My Step\n\
+         \x20     shell: bash\n\
+         \x20     run: |\n\
+         \x20       CHANNEL=$(grep ... | sed ...)\n",
+        violations.join("\n\n")
+    );
 }

@@ -1,5 +1,4 @@
 # Skill: GitHub Actions Workflow Configuration
-
 <!--
   trigger: GitHub actions, workflow, lychee, link checker,
   case sensitive, smoke test, Docker smoke test, permissions,
@@ -57,7 +56,7 @@ include = [
 ```yaml
 # ✅ CORRECT: File patterns as CLI args
 - name: Link Checker
-  uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
+  uses: lycheeverse/lychee-action@v2.7.0
   with:
     args: >-
       --verbose --no-progress --cache --max-cache-age 7d
@@ -105,44 +104,11 @@ See [testing guide](skills/testing-core-patterns.md)
 
 ## 2. Case-Sensitive Filesystem Issues
 
-### The Problem
+Windows/macOS are case-insensitive but Linux CI is case-sensitive. `Skills/foo.md`
+works locally but fails in CI if the actual path is `skills/foo.md`.
 
-Windows and macOS default to case-insensitive filesystems, but Linux CI runners are case-sensitive.
-Links and imports that work locally may break in CI.
-
-```bash
-# Local (Windows/macOS): Works
-ls Skills/testing.md    # Finds skills/testing.md
-
-# CI (Linux): Fails
-ls Skills/testing.md    # No such file or directory
-```
-
-### Prevention Checklist
-
-- [ ] All file paths use consistent casing (prefer lowercase)
-- [ ] All Markdown links match actual filename case exactly
-- [ ] All `mod` statements in Rust match file case exactly
-- [ ] Tested on Linux before pushing (WSL, Docker, or CI)
-
-### Fix Script: Case Audit
-
-```bash
-# Find all Markdown links and verify targets exist (case-sensitive)
-find . -name "*.md" -not -path "./target/*" | while read -r md_file; do
-  grep -oE '\[([^]]+)\]\(([^)]+)\)' "$md_file" | while read -r link; do
-    url=$(echo "$link" | sed -E 's/.*\(([^)]+)\).*/\1/')
-    [[ "$url" =~ ^https?:// ]] && continue  # Skip external URLs
-    file_part="${url%%#*}"
-    [ -z "$file_part" ] && continue
-    base_dir=$(dirname "$md_file")
-    full_path=$(realpath -m "$base_dir/$file_part")
-    if [ ! -f "$full_path" ]; then
-      echo "Broken link in $md_file: $url"
-    fi
-  done
-done
-```
+**Prevention:** Use consistent lowercase paths, verify Markdown links and Rust `mod`
+statements match actual file case, test on Linux before pushing.
 
 ---
 
@@ -192,22 +158,14 @@ exit 1
 
 ## 4. Minimal Permissions (Security)
 
-### Default to Read-Only
+Always declare permissions explicitly (defaults vary by org settings). Start with
+`contents: read` and grant only what is needed:
 
 ```yaml
-# NEVER omit permissions — defaults vary by repo/org settings and may be broader than intended
 permissions:
   contents: read
-```
-
-### Grant Only What Is Needed
-
-```yaml
-# If workflow creates issues or comments:
-permissions:
-  contents: read
-  issues: write
-  pull-requests: write
+  issues: write        # Only if workflow creates issues/comments
+  pull-requests: write # Only if workflow comments on PRs
 ```
 
 ---
@@ -254,23 +212,29 @@ Prevents duplicate runs on rapid pushes to the same branch.
 
 ### The Problem
 
-Some GitHub Actions (e.g., `cargo-deny-action`, `cargo-audit-action`) run inside their own Docker
-container with a pre-installed Rust toolchain. If the repository's `rust-toolchain.toml` pins a
-specific version, rustup inside the container tries to install that version — which may not be
-available, causing the action to fail.
+Some GitHub Actions (e.g., `cargo-deny-action`, `cargo-audit-action`) run inside
+their own Docker container with a pre-installed Rust toolchain. If the repo's
+`rust-toolchain.toml` pins a specific version, rustup inside the container tries
+to install it — which may not be available, causing the action to fail.
 
-### Solution: `RUSTUP_TOOLCHAIN` Environment Variable
+### Solution: Explicit `rust-version` Input
 
-Override `rust-toolchain.toml` inside the container by setting `RUSTUP_TOOLCHAIN`:
+Prefer the action input `rust-version` so the container installs a concrete
+toolchain before executing:
 
 ```yaml
-# ✅ CORRECT: Override toolchain for Docker-based actions
+# ✅ CORRECT: install an explicit toolchain for Docker-based actions
+- name: Extract MSRV
+  id: deny-msrv
+  run: |
+    MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+    echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+
 - name: Run cargo-deny
-  uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
-  env:
-    RUSTUP_TOOLCHAIN: stable  # Use container's stable toolchain
+  uses: EmbarkStudios/cargo-deny-action@v2.0.15
   with:
     arguments: --all-features
+    rust-version: ${{ steps.deny-msrv.outputs.version }}
 ```
 
 ### When to Use This Pattern
@@ -282,17 +246,55 @@ Override `rust-toolchain.toml` inside the container by setting `RUSTUP_TOOLCHAIN
 | Linting actions (clippy)                 | No              | Lint results depend on Rust version    |
 | Formatting actions (rustfmt)             | Depends         | Format output may vary by version      |
 
-**Key Insight:** Actions that only inspect dependency metadata and lock files (not compile code)
-do not need the project's exact Rust version. Overriding with `stable` avoids toolchain
-installation failures in Docker containers.
+**Key Insight:** Metadata-only actions still need a deterministic toolchain setup.
+`with.rust-version` is more reliable than environment alias overrides
+(`RUSTUP_TOOLCHAIN=stable`), which can fail when `stable` is not preinstalled.
+
+---
+
+## 7. Schedule Trigger Guards
+
+Workflows with `schedule:` triggers run all jobs by default on cron events. The
+pre-commit hook validates that every scheduled workflow either:
+
+1. Contains `# all-jobs-run-on-schedule` within the first 30 lines, **or**
+2. Has per-job `if: github.event_name != 'schedule'` guards on non-scheduled jobs
+
+### Adding the Directive
+
+Place `# all-jobs-run-on-schedule` in the workflow header comment when **all**
+jobs should run on the cron schedule:
+
+```yaml
+name: CI Safety
+# all-jobs-run-on-schedule
+on:
+  schedule:
+    - cron: '30 6 * * 1'
+  # ...other triggers
+```
+
+If only some jobs should run on schedule, add per-job guards instead:
+
+```yaml
+jobs:
+  build:
+    if: github.event_name != 'schedule'
+    # ...
+  scheduled-audit:
+    # Runs on all triggers including schedule
+```
+
+The hook also recognizes per-job comments: `# runs-on-schedule`, `# schedule`,
+`# security`, `# audit`, `# daily` — jobs with these are treated as
+schedule-intended and do not need an `if:` guard.
 
 ---
 
 ## Related Skills
 
-- [GitHub Actions Caching](./github-actions-caching.md) —
-  Ecosystem-specific caching, SHA pinning, Docker version formats
+- [GitHub Actions Caching](./github-actions-caching.md) — Caching, action ref policy, Docker version formats
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck, Bash best practices
-- [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, proactive monitoring
+- [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, monitoring
 - [GitHub Actions Release](./github-actions-release.md) — Release gating, preflight hardening
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI Troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

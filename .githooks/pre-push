@@ -1,0 +1,73 @@
+#!/bin/sh
+# Pre-push hook for Signal Fish Server
+#
+# Purpose:
+# - Add an extra policy gate for workflow/action-reference hygiene before push.
+# - Run only when CI/workflow-policy files changed in the commits being pushed.
+
+set -eu
+
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+if [ ! -t 1 ]; then
+    BLUE=''
+    GREEN=''
+    YELLOW=''
+    RED=''
+    NC=''
+fi
+
+echo "${BLUE}[pre-push]${NC} Evaluating pushed changes for CI/workflow policy checks..."
+
+ALL_ZERO_SHA='0000000000000000000000000000000000000000'
+CHANGED_FILES=$(
+    while read -r local_ref local_sha remote_ref remote_sha; do
+        [ -n "${local_sha:-}" ] || continue
+
+        # Skip deletions (nothing to push).
+        if [ "$local_sha" = "$ALL_ZERO_SHA" ]; then
+            continue
+        fi
+
+        if [ "$remote_sha" = "$ALL_ZERO_SHA" ]; then
+            # New branch/tag push: compare against local commit itself.
+            git show --name-only --pretty="" "$local_sha"
+        else
+            git diff --name-only "$remote_sha..$local_sha"
+        fi
+    done | sort -u
+)
+
+if [ -z "$CHANGED_FILES" ]; then
+    echo "${YELLOW}[pre-push]${NC} No changed files detected from push refs; skipping."
+    exit 0
+fi
+
+if ! echo "$CHANGED_FILES" | grep -Eq '^(\.github/workflows/.*\.ya?ml|scripts/check-workflow-hygiene\.sh|tests/ci_config_tests\.rs)$'; then
+    echo "${YELLOW}[pre-push]${NC} No workflow policy files changed; skipping policy checks."
+    exit 0
+fi
+
+echo "${BLUE}[pre-push]${NC} Running workflow hygiene script..."
+if ! scripts/check-workflow-hygiene.sh; then
+    echo "${RED}[pre-push] ERROR:${NC} Workflow hygiene validation failed."
+    echo "${YELLOW}Tip:${NC} Fix issues and rerun: ./scripts/check-workflow-hygiene.sh"
+    exit 1
+fi
+
+echo "${BLUE}[pre-push]${NC} Running workflow action-ref policy tests..."
+if ! cargo test --locked --test ci_config_tests -- \
+    test_github_actions_use_version_refs_not_commit_hashes \
+    test_workflow_toolchain_fields_do_not_use_moving_aliases \
+    test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks; then
+    echo "${RED}[pre-push] ERROR:${NC} CI action-ref policy tests failed."
+    echo "${YELLOW}Tip:${NC} Fix workflow refs/toolchain pins, then rerun the tests above."
+    exit 1
+fi
+
+echo "${GREEN}[pre-push]${NC} Workflow policy checks passed."
+exit 0

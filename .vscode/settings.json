@@ -62,5 +62,6 @@
     },
     // Code spell checker
     "cSpell.enabled": true,
-    "cSpell.diagnosticLevel": "Information"
+    "cSpell.diagnosticLevel": "Information",
+    "claudeCode.selectedModel": "opus"
 }

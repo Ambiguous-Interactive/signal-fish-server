@@ -1,9 +1,9 @@
-# Skill: GitHub Actions Caching & Action Pinning
+# Skill: GitHub Actions Caching & Action Versioning
 
 <!--
-  trigger: GitHub actions, caching, cache, rust-cache, sha pinning,
-  action versions, dockerfile, Docker version, msrv
-  | Patterns for language-specific caching, SHA-pinned action versions, and Docker version formats | Infrastructure
+  trigger: GitHub actions, caching, cache, rust-cache, action versions,
+  dockerfile, Docker version, msrv
+  | Patterns for language-specific caching, explicit-version action refs, and Docker version formats | Infrastructure
 -->
 
 **Trigger**: When configuring caching in workflows, pinning action versions,
@@ -14,7 +14,7 @@ or dealing with Docker Hub image tag formats.
 ## When to Use
 
 - Setting up or auditing caching in GitHub Actions workflows
-- Pinning action versions to SHA digests
+- Pinning action versions to explicit version tags
 - Dealing with `rust:X.Y` vs `rust:X.Y.Z` format in Dockerfiles
 - Validating MSRV consistency between `Cargo.toml` and `Dockerfile`
 - Debugging cache misses or wrong-ecosystem caching
@@ -27,7 +27,7 @@ or dealing with Docker Hub image tag formats.
 ## TL;DR
 
 - Match cache configuration to project language (Python cache on Rust project = silent failure)
-- Always pin actions with SHA256 digests and a version comment (e.g., `# v4.2.2`)
+- Always use explicit action version tags (for example `@v4.2.2`), never moving refs
 - Docker Hub official images use X.Y tags (`rust:1.88`), not X.Y.Z — normalize when comparing
 
 ---
@@ -137,36 +137,32 @@ grep -r "cargo\|Cargo\.toml\|rust-cache" .github/workflows/
 
 ---
 
-## 2. SHA Pinning for Actions
+## 2. Explicit Version Refs for Actions
 
-### Always Pin Actions with SHA256 Digests
+### Always Use Explicit Version Tags
 
 ```yaml
-# ❌ WRONG: Mutable tags can change between runs
-- uses: actions/checkout@v4
-- uses: Swatinem/rust-cache@v2
+# ❌ WRONG: Moving refs can change between runs
+- uses: dtolnay/rust-toolchain@stable
+- uses: taiki-e/install-action@v2
 
-# ✅ CORRECT: SHA256 digest is cryptographically immutable
-- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-- uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+# ✅ CORRECT: Explicit version tags are readable and auditable
+- uses: actions/checkout@v6.0.2
+- uses: Swatinem/rust-cache@v2.8.2
 ```
 
-**Benefits:** Reproducible builds, prevents tag hijacking, auditable via version comment.
+**Trade-off:** Version tags are not immutable like SHAs.
+**Compensating controls:** ban moving refs (`stable/main/master/latest`), keep refs
+consistent across workflows, and use Dependabot + CI checks for updates.
 
-**How to get SHA digests:**
-
-```bash
-gh api repos/actions/checkout/commits/v4.2.2 --jq .sha
-```
-
-### Enforcing SHA Pinning with Tests
+### Enforcing Explicit-Version Policy with Tests
 
 ```rust
 // tests/ci_config_tests.rs
 #[test]
-fn test_all_github_actions_are_sha_pinned() {
+fn test_github_actions_use_version_refs_not_commit_hashes() {
     let workflows_dir = std::path::Path::new(".github/workflows");
-    let mut unpinned_actions = Vec::new();
+    let mut violations = Vec::new();
 
     for entry in std::fs::read_dir(workflows_dir).unwrap() {
         let path = entry.unwrap().path();
@@ -181,13 +177,17 @@ fn test_all_github_actions_are_sha_pinned() {
                     let action_ref = line.split('@').nth(1);
                     if let Some(ref_part) = action_ref {
                         let ref_value = ref_part.split_whitespace().next().unwrap_or("");
-                        let is_sha = ref_value.len() == 40
+                        let is_commit_hash = ref_value.len() == 40
                             && ref_value.chars().all(|c| c.is_ascii_hexdigit());
-                        if !is_sha {
-                            unpinned_actions.push(format!(
-                                "{}:{}: {}",
-                                path.display(), line_num + 1, line.trim()
-                            ));
+                        let is_moving_ref = matches!(
+                            ref_value,
+                            "stable" | "beta" | "nightly" | "main" | "master" | "latest"
+                        );
+                        let is_version_tag =
+                            ref_value.starts_with('v') && ref_value.len() > 1;
+
+                        if is_commit_hash || is_moving_ref || !is_version_tag {
+                            violations.push(format!("{}:{}: {}", path.display(), line_num + 1, line.trim()));
                         }
                     }
                 }
@@ -196,11 +196,11 @@ fn test_all_github_actions_are_sha_pinned() {
     }
 
     assert!(
-        unpinned_actions.is_empty(),
-        "All GitHub Actions must be pinned to SHA hashes.\n\
-         Unpinned actions:\n{}\n\
-         Fix: uses: actions/checkout@<40-char-sha> # v4.2.2",
-        unpinned_actions.join("\n")
+        violations.is_empty(),
+        "GitHub Actions must use explicit version tags and disallow commit hashes/moving refs.\n\
+         Violations:\n{}\n\
+         Fix: uses: owner/repo@vX.Y.Z",
+        violations.join("\n")
     );
 }
 ```
