@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped `tempfile` dev-dependency from 3.25.0 to 3.26.0.
+
 ## [0.2.0] - 2026-02-24
 
 ### Changed
