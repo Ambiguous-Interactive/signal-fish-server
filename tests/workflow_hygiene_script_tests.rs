@@ -266,6 +266,37 @@ jobs:
 }
 
 #[test]
+fn test_workflow_hygiene_allows_first_party_latest_image_usage() {
+    let workflow = r#"name: Minimal Workflow
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo "ok"
+"#;
+
+    let (success, output) = run_hygiene_with_fixture(
+        "first-party-latest.yml",
+        workflow,
+        &[(
+            "scripts/check-docs.sh",
+            "#!/usr/bin/env bash\ndocker run ghcr.io/ambiguous-interactive/signal-fish-server:latest --help\n",
+        )],
+    );
+
+    assert!(
+        success,
+        "Workflow hygiene script should allow first-party image ':latest' tags.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("Uses mutable Docker tag ':latest'"),
+        "Did not expect external-latest policy error for first-party image usage.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_workflow_hygiene_fails_on_malformed_remote_action_reference() {
     let workflow = r#"name: Malformed Uses
 on: [push]

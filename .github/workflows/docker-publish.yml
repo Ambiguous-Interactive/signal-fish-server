@@ -7,7 +7,7 @@
 #   - Push to main branch (publishes the :latest tag)
 #   - Tag pushes matching v* (publishes semver tags, e.g. :1.2.3, :v1.2.3)
 #
-# Published image: ghcr.io/ambiguousinteractive/signal-fish-server
+# Published image: ghcr.io/<repository_owner>/<repository_name>
 #
 # Tags published:
 #   - :latest      — always points to the most recent push to main
@@ -74,11 +74,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Derive GHCR image name
+        id: image
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          repo="${repo,,}"
+          echo "name=ghcr.io/${owner}/${repo}" >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5.10.0
         with:
-          images: ghcr.io/ambiguousinteractive/signal-fish-server
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}

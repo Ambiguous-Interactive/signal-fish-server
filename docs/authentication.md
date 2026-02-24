@@ -191,7 +191,7 @@ Better approaches for production secrets management:
 version: '3.8'
 services:
   signal-fish:
-    image: ghcr.io/ambiguousinteractive/signal-fish-server:latest
+    image: ghcr.io/ambiguous-interactive/signal-fish-server:latest
     secrets:
 
       - signal_fish_config
@@ -224,7 +224,7 @@ spec:
 
       - name: signal-fish
 
-        image: ghcr.io/ambiguousinteractive/signal-fish-server:latest
+        image: ghcr.io/ambiguous-interactive/signal-fish-server:latest
         volumeMounts:
 
         - name: config

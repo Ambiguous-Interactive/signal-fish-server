@@ -54,7 +54,7 @@ The server starts on port 3536 by default.
 ### Docker
 
 ```bash
-docker run -p 3536:3536 ghcr.io/ambiguousinteractive/signal-fish-server:latest
+docker run -p 3536:3536 ghcr.io/ambiguous-interactive/signal-fish-server:latest
 ```
 
 ### Docker Compose

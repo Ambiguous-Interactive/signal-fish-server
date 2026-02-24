@@ -6,9 +6,7 @@
   | Patterns for configuring GitHub Actions workflows: link checking, path
   filters, permissions, smoke tests | Infrastructure
 -->
-
 **Trigger**: When configuring workflow triggers, permissions, link checkers, smoke tests, or path filters.
-
 ---
 
 ## When to Use
@@ -32,6 +30,7 @@
 - All file/link paths are case-sensitive on Linux CI; verify exact case matches
 - Docker smoke tests need retry loops with `docker logs` on failure, not bare `sleep`
 - Default permissions to `contents: read`; grant only what is needed
+- For GHCR publishing, derive `images:` from repository owner/name; do not hard-code org names
 - Always include the workflow file itself in `paths:` triggers
 
 ---
@@ -158,8 +157,7 @@ exit 1
 
 ## 4. Minimal Permissions (Security)
 
-Always declare permissions explicitly (defaults vary by org settings). Start with
-`contents: read` and grant only what is needed:
+Always declare permissions explicitly (defaults vary by org settings). Start with `contents: read` and grant only what is needed:
 
 ```yaml
 permissions:
@@ -167,6 +165,8 @@ permissions:
   issues: write        # Only if workflow creates issues/comments
   pull-requests: write # Only if workflow comments on PRs
 ```
+
+For GHCR publish workflows, derive `images:` from repository context (owner/name) via step outputs instead of hard-coded org paths.
 
 ---
 

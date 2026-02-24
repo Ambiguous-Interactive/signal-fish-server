@@ -237,7 +237,7 @@ docker build -t signal-fish-server .
 
 ```bash
 
-docker build -t signal-fish-server --cache-from ghcr.io/ambiguousinteractive/signal-fish-server:latest .
+docker build -t signal-fish-server --cache-from ghcr.io/ambiguous-interactive/signal-fish-server:latest .
 
 ```
 
