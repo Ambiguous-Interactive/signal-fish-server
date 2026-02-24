@@ -239,6 +239,16 @@ if [ -f scripts/check-readme-badges.sh ]; then
         scripts/check-readme-badges.sh README.md
 fi
 
+# Check 13: Documentation + changelog consistency
+if [ -f scripts/check-doc-consistency.sh ]; then
+    run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
+        scripts/check-doc-consistency.sh
+else
+    echo -e "${RED}✗ FAIL${NC}: doc-consistency (scripts/check-doc-consistency.sh not found)"
+    echo ""
+    FAILED_CHECKS+=("doc-consistency")
+fi
+
 # Summary
 echo "=========================================="
 echo -e "${BOLD}Summary${NC}"

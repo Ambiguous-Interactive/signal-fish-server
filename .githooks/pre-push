@@ -2,8 +2,9 @@
 # Pre-push hook for Signal Fish Server
 #
 # Purpose:
-# - Add an extra policy gate for workflow/action-reference hygiene before push.
-# - Run only when CI/workflow-policy files changed in the commits being pushed.
+# - Add extra policy gates before push.
+# - Run workflow/action-reference hygiene checks when workflow-policy files changed.
+# - Run documentation/changelog consistency checks when user-facing policy files changed.
 
 set -eu
 
@@ -21,7 +22,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-echo "${BLUE}[pre-push]${NC} Evaluating pushed changes for CI/workflow policy checks..."
+echo "${BLUE}[pre-push]${NC} Evaluating pushed changes for push-time policy checks..."
 
 ALL_ZERO_SHA='0000000000000000000000000000000000000000'
 CHANGED_FILES=$(
@@ -47,28 +48,58 @@ if [ -z "$CHANGED_FILES" ]; then
     exit 0
 fi
 
-if ! echo "$CHANGED_FILES" | grep -Eq '^(\.github/workflows/.*\.ya?ml|scripts/check-workflow-hygiene\.sh|tests/ci_config_tests\.rs)$'; then
-    echo "${YELLOW}[pre-push]${NC} No workflow policy files changed; skipping policy checks."
+WORKFLOW_POLICY_CHANGED=0
+DOC_POLICY_CHANGED=0
+
+if echo "$CHANGED_FILES" | grep -Eq '^(\.github/workflows/.*\.ya?ml|scripts/check-workflow-hygiene\.sh|tests/ci_config_tests\.rs)$'; then
+    WORKFLOW_POLICY_CHANGED=1
+fi
+
+if echo "$CHANGED_FILES" | grep -Eq '^(README\.md|CHANGELOG\.md|Cargo\.toml|docs/.*\.md|\.llm/context\.md|scripts/check-doc-consistency\.sh|tests/doc_consistency_.*\.rs|\.githooks/pre-(commit|push)|\.github/workflows/ci\.yml)$'; then
+    DOC_POLICY_CHANGED=1
+fi
+
+if [ "$WORKFLOW_POLICY_CHANGED" -ne 1 ] && [ "$DOC_POLICY_CHANGED" -ne 1 ]; then
+    echo "${YELLOW}[pre-push]${NC} No relevant policy files changed; skipping push-time policy checks."
     exit 0
 fi
 
-echo "${BLUE}[pre-push]${NC} Running workflow hygiene script..."
-if ! scripts/check-workflow-hygiene.sh; then
-    echo "${RED}[pre-push] ERROR:${NC} Workflow hygiene validation failed."
-    echo "${YELLOW}Tip:${NC} Fix issues and rerun: ./scripts/check-workflow-hygiene.sh"
-    exit 1
+if [ "$WORKFLOW_POLICY_CHANGED" -eq 1 ]; then
+    echo "${BLUE}[pre-push]${NC} Running workflow hygiene script..."
+    if ! scripts/check-workflow-hygiene.sh; then
+        echo "${RED}[pre-push] ERROR:${NC} Workflow hygiene validation failed."
+        echo "${YELLOW}Tip:${NC} Fix issues and rerun: ./scripts/check-workflow-hygiene.sh"
+        exit 1
+    fi
+
+    echo "${BLUE}[pre-push]${NC} Running workflow action-ref policy tests..."
+    if ! cargo test --locked --test ci_config_tests -- \
+        test_github_actions_use_version_refs_not_commit_hashes \
+        test_workflow_toolchain_fields_do_not_use_moving_aliases \
+        test_docker_publish_workflow_uses_owner_derived_ghcr_image_name \
+        test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks; then
+        echo "${RED}[pre-push] ERROR:${NC} CI action-ref policy tests failed."
+        echo "${YELLOW}Tip:${NC} Fix workflow refs/toolchain pins/image naming, then rerun the tests above."
+        exit 1
+    fi
 fi
 
-echo "${BLUE}[pre-push]${NC} Running workflow action-ref policy tests..."
-if ! cargo test --locked --test ci_config_tests -- \
-    test_github_actions_use_version_refs_not_commit_hashes \
-    test_workflow_toolchain_fields_do_not_use_moving_aliases \
-    test_docker_publish_workflow_uses_owner_derived_ghcr_image_name \
-    test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks; then
-    echo "${RED}[pre-push] ERROR:${NC} CI action-ref policy tests failed."
-    echo "${YELLOW}Tip:${NC} Fix workflow refs/toolchain pins/image naming, then rerun the tests above."
-    exit 1
+if [ "$DOC_POLICY_CHANGED" -eq 1 ]; then
+    echo "${BLUE}[pre-push]${NC} Running docs/changelog consistency checks..."
+    if ! printf '%s\n' "$CHANGED_FILES" | awk 'NF' | tr '\n' '\0' \
+        | xargs -0 scripts/check-doc-consistency.sh --changed-files; then
+        echo "${RED}[pre-push] ERROR:${NC} Documentation/changelog consistency validation failed."
+        echo "${YELLOW}Tip:${NC} Fix issues and rerun: ./scripts/check-doc-consistency.sh --staged"
+        exit 1
+    fi
+
+    echo "${BLUE}[pre-push]${NC} Running doc consistency policy tests..."
+    if ! cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests; then
+        echo "${RED}[pre-push] ERROR:${NC} Doc consistency policy tests failed."
+        echo "${YELLOW}Tip:${NC} Rerun: cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests"
+        exit 1
+    fi
 fi
 
-echo "${GREEN}[pre-push]${NC} Workflow policy checks passed."
+echo "${GREEN}[pre-push]${NC} Push-time policy checks passed."
 exit 0

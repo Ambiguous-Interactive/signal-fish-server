@@ -107,7 +107,8 @@ Rooms transition through three states based on player ready status:
 
 ### Waiting
 
-Initial state. Waiting for players to join and mark ready.
+Initial state. Waiting for players to join until the room reaches
+`max_players`. No ready-state toggles happen in this state.
 
 ### Lobby
 
@@ -145,7 +146,7 @@ Clients are notified of state changes:
 
 ## Player Ready State
 
-Players signal their ready state:
+Players toggle their own ready state by sending `PlayerReady`:
 
 ```json
 
@@ -155,7 +156,9 @@ Players signal their ready state:
 
 ```
 
-When all players are ready, the lobby transitions to Finalized.
+Each `PlayerReady` send flips that player's ready/unready status and broadcasts
+`LobbyStateChanged`. When all players are ready, the server sends
+`GameStarting`.
 
 ## Authority Management
 
@@ -208,7 +211,7 @@ Join rooms as a spectator without participating in gameplay:
 Spectators:
 
 - Don't count toward max_players
-- Can't mark ready
+- Can't send `PlayerReady` (cannot toggle readiness)
 - Receive all game data
 - Don't participate in authority decisions
 

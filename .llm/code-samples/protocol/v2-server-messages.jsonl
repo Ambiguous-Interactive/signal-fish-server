@@ -1,0 +1,10 @@
+{"type": "Authenticated", "data": {"app_name": "my-game", "organization": "Ambiguous Interactive", "rate_limits": {"per_minute": 60, "per_hour": 3600, "per_day": 86400}}}
+{"type": "ProtocolInfo", "data": {"capabilities": ["reconnection", "spectators", "authority"], "game_data_formats": ["json", "message_pack"]}}
+{"type": "RoomJoined", "data": {"room_id": "...", "room_code": "ABC123"}}
+{"type": "PlayerJoined", "data": {"player": {"id": "...", "name": "..."}}}
+{"type": "PlayerLeft", "data": {"player_id": "..."}}
+{"type": "GameData", "data": {"from_player": "...", "data": {}}}
+{"type": "LobbyStateChanged", "data": {"lobby_state": "lobby", "all_ready": false}}
+{"type": "AuthorityResponse", "data": {"granted": true, "reason": "Authority granted"}}
+{"type": "Error", "data": {"message": "Room is full", "error_code": "ROOM_FULL"}}
+{"type": "Pong"}

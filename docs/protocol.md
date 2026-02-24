@@ -30,7 +30,13 @@ Optional fields:
 
 ### JoinRoom
 
-Join or create a room for a specific game. If no `room_code` is provided, a new room will be created.
+Join or create a room for a specific game. There is no separate room-creation
+message. `JoinRoom` behavior depends on `room_code`:
+
+1. Omit `room_code`: create a new room with a generated room code.
+2. Provide `room_code` and room exists for that `game_name`: join that room.
+3. Provide `room_code` and no room exists for that `game_name`: create a new
+   room with that room code.
 
 ```json
 
@@ -51,9 +57,9 @@ Required fields:
 
 Optional fields:
 
-- `room_code` - Code of existing room to join (if not provided, creates new room)
-- `max_players` - Maximum players for the room (only used when creating new room)
-- `supports_authority` - Whether the room supports authority system (only used when creating new room)
+- `room_code` - Code used to join/create a room for this `game_name`
+- `max_players` - Maximum players (applied only when a new room is created)
+- `supports_authority` - Authority support (applied only when a new room is created)
 - `relay_transport` - Preferred relay transport protocol (TCP, UDP, or Auto)
 
 ### GameData
@@ -80,7 +86,14 @@ field and can be any JSON-serializable object.
 
 ### PlayerReady
 
-Signal readiness to start the game in lobby. Drives lobby state transitions.
+Toggle your own ready state in the lobby. This message has no payload.
+
+Behavior:
+
+1. First send in `lobby` state marks the player ready.
+2. Sending again in `lobby` state marks the player unready.
+3. The server broadcasts `LobbyStateChanged` after each toggle.
+4. When all players are ready, the server sends `GameStarting`.
 
 ```json
 
@@ -91,6 +104,9 @@ Signal readiness to start the game in lobby. Drives lobby state transitions.
 ```
 
 This message has no data payload.
+
+If sent while not in a joinable lobby state, the server returns an `Error`
+with `INVALID_ROOM_STATE`.
 
 ### AuthorityRequest
 
@@ -268,8 +284,9 @@ Authentication failed.
 
 ### RoomJoined
 
-Successfully joined or created a room. This message is sent both when creating a new room and when joining an
-existing room.
+Successfully joined or created a room. This message is sent both when creating
+a new room and when joining an existing room. There is no separate
+room-created response type.
 
 ```json
 

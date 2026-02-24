@@ -13,6 +13,8 @@ See also:
 - [markdown-best-practices-linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
 - [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation
 - [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
+- [markdown-best-practices-code-block-validation](./markdown-best-practices-code-block-validation.md)
+  — Bash fence safety and mixed-language splitting
 
 ---
 
@@ -23,6 +25,7 @@ See also:
 - For plain text examples, use ` ```text`
 - JSON with comments must use ` ```jsonc`, not ` ```json`
 - Only use ` ```bash` for actual valid shell script
+- For large/reusable examples, store canonical samples in `.llm/code-samples/` and link to them
 
 ---
 
@@ -180,82 +183,52 @@ placeholder with valid JSON.
 
 ---
 
-## Pitfall: Bash Code Block Validation
+## Pitfall: Overlong JSON Lines (MD013 in Code Fences)
 
-Content tagged with ` ```bash` may be validated as bash syntax. Only use the
-`bash` fence tag for content that is actually valid shell script.
+Single-line JSON message examples can easily exceed markdownlint MD013
+(`line_length`/`code_block_line_length`), and markdown auto-fix usually
+cannot split these safely.
 
-**Common mistakes:**
-
-1. **Angle bracket placeholders are invalid bash** — `<foo>` is parsed as
-   redirection. Use `"$FOO"` (variable) or `your-foo` (literal) instead.
-
-2. **Wrong fence tag for non-bash content** — Error messages, Rust compiler
-   output, Dockerfile instructions, AWK scripts, and YAML fragments are not
-   bash. Use `text`, `rust`, `dockerfile`, `awk`, or `yaml` respectively.
-
-3. **Empty if-blocks** — A bash `if` or `else` branch with only a comment
-   and no command is a syntax error. Use `:` (the colon no-op builtin) as a
-   placeholder.
-
-4. **AWK code with unmatched quotes** — AWK snippets inside single-quoted
-   bash strings can cause syntax errors when the AWK content contains
-   unmatched quotes (e.g., `won't`). Either use a separate `awk` code block
-   or escape carefully.
+Prefer manual wrapping for nested objects:
 
 ````markdown
-❌ WRONG: Angle bracket placeholder in bash block
-```bash
-curl https://example.com/api/<your-token>
+❌ WRONG: Single compact line (hard to keep under MD013 limits)
+```json
+{"type":"Authenticated","data":{"app_name":"game","org":"Acme","rate_limits":{"per_minute":60,"per_hour":3600}}}
 ```
 
-✅ CORRECT: Use a variable or literal placeholder
-```bash
-curl "https://example.com/api/${YOUR_TOKEN}"
-```
-
-❌ WRONG: Error output tagged as bash
-```bash
-error[E0308]: mismatched types
-  --> src/main.rs:3:5
-```
-
-✅ CORRECT: Use text for non-bash output
-```text
-error[E0308]: mismatched types
-  --> src/main.rs:3:5
-```
-
-❌ WRONG: Empty else branch (syntax error)
-```bash
-if [ -f "$file" ]; then
-    process "$file"
-else
-    # nothing to do
-fi
-```
-
-✅ CORRECT: Use colon no-op
-```bash
-if [ -f "$file" ]; then
-    process "$file"
-else
-    : # nothing to do
-fi
+✅ CORRECT: Wrap nested fields to keep each line <= 120
+```json
+{"type":"Authenticated","data":{"app_name":"my-game","organization":"Ambiguous Interactive",
+"rate_limits":{"per_minute":60,"per_hour":3600,"per_day":86400}}}
 ```
 ````
 
 ---
 
-## Pitfall: Mixed-Content Blocks Must Be Split
+## Pitfall: Bash + Mixed-Language Validation
 
-A single code block must contain only one language. When documentation shows a
-sequence that spans multiple languages (e.g., shell commands that produce YAML
-output, or a setup guide mixing bash and YAML), split the content into separate
-fenced blocks with the correct tag for each.
+Bash-fenced blocks are validated as shell syntax, and mixed-language content
+must be split into separate fenced blocks. For full patterns and examples, see:
+[markdown-best-practices-code-block-validation](./markdown-best-practices-code-block-validation.md).
 
-**Rule of thumb:** If content switches languages mid-block, add a closing fence
-and open a new block with the correct tag.
+---
+
+## Pattern: Canonical Sample Files for Reusable Examples
+
+If the same example appears in multiple markdown files, or if the block is long
+and drifts often, move it to `.llm/code-samples/` and reference it from docs.
+
+Example references:
+
+- `README.md` -> `.llm/code-samples/protocol/v2-client-messages.jsonl`
+- `.llm/context.md` -> `code-samples/protocol/v2-client-messages.jsonl`
+
+Benefits:
+
+- One source of truth for shared examples
+- Fewer markdownlint MD013/formatting regressions
+- Easier consistency checks in scripts/tests
 
 ---
 
@@ -293,3 +266,5 @@ an exact `/^```$/` pattern.
 - [markdown-best-practices-linting](./markdown-best-practices-linting.md) — MD040, MD041 rules and CI integration
 - [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation patterns
 - [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns, spell checking
+- [markdown-best-practices-code-block-validation](./markdown-best-practices-code-block-validation.md)
+  — Bash validation and mixed-content split patterns

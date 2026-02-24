@@ -10,6 +10,7 @@
 - **Repository:** `signal-fish-server` — extracted from the matchbox-signaling-server
   with production-ready signaling stripped down to a single self-contained binary
 - **Crate name:** Binary: `signal-fish-server` | Library: `signal_fish_server`
+- **Version:** 0.2.0
 - **Code name:** Signal Fish
 - **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team.
   The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon,
@@ -167,6 +168,7 @@ Key rules (details in skills above):
 > **Full standards -> [skills/documentation-standards.md](skills/documentation-standards.md)**
 
 Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, README updates if user-facing.
+Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/changelog/protocol doc drift.
 
 ### Code Fence and CI Pitfalls
 
@@ -199,24 +201,11 @@ Key files at a glance: `src/main.rs` (entry), `src/server.rs` (room/player logic
 
 ### v2 Client Messages (JSON/MessagePack)
 
-```json
-{"type": "Authenticate", "data": {"app_id": "..."}}
-{"type": "JoinRoom", "data": {"game_name": "...", "room_code": "ABC123"}}
-{"type": "GameData", "data": {"action": "move", "x": 10}}
-{"type": "AuthorityRequest", "data": {"become_authority": true}}
-{"type": "LeaveRoom"}
-{"type": "Ping"}
-```
+Canonical sample: [v2-client-messages.jsonl](code-samples/protocol/v2-client-messages.jsonl)
 
 ### v2 Server Messages
 
-```json
-{"type": "Authenticated", "data": {"server_version": "2.0.0"}}
-{"type": "RoomJoined", "data": {"room_id": "...", "room_code": "ABC123"}}
-{"type": "PlayerJoined", "data": {"player": {"id": "...", "name": "..."}}}
-{"type": "GameData", "data": {"from_player": "...", "data": {}}}
-{"type": "Error", "data": {"reason": "Room is full"}}
-```
+Canonical sample: [v2-server-messages.jsonl](code-samples/protocol/v2-server-messages.jsonl)
 
 ---
 

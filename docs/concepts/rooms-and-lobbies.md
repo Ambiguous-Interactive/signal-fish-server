@@ -57,6 +57,21 @@ A room is created when a player sends a `JoinRoom` message **without** a
 Alice now shares the room code `HK7T3W` with other players (via your
 game's UI, a chat message, or any other channel).
 
+## `JoinRoom` Resolution Rules
+
+`JoinRoom` is used for both creation and joining. The server resolves each
+request using the `(game_name, room_code)` pair:
+
+| `JoinRoom` payload | Server behavior | Result |
+| --- | --- | --- |
+| `room_code` omitted | Implicit room creation | New room + generated code in `RoomJoined` |
+| `room_code` provided and room exists for `game_name` | Join existing room | `RoomJoined` + `PlayerJoined` broadcast to others |
+| `room_code` provided and room does not exist for `game_name` | Explicit room creation | New room using requested `room_code` |
+
+Creation-specific fields such as `max_players` and `supports_authority`
+apply only when a room is created (implicit or explicit). When joining an
+existing room, current room settings remain unchanged.
+
 ## Joining an Existing Room
 
 Other players join by including the `room_code` in their `JoinRoom`
@@ -125,7 +140,7 @@ shows the three states and the transitions between them.
              | Room fills up (players == max_players)
              v
       +-----------+
-      |   Lobby   | <--- Players mark ready via PlayerReady
+      |   Lobby   | <--- Players toggle ready/unready via PlayerReady
       +-----------+
          |     |
          |     | All players ready
@@ -155,7 +170,7 @@ The initial state. The room is open and accepting players.
 The room is full. All `max_players` slots are occupied and players can
 coordinate readiness.
 
-- Players send `PlayerReady` to mark themselves as ready.
+- Players send `PlayerReady` to toggle their ready/unready status.
 - Each readiness change triggers a `LobbyStateChanged` broadcast so
   everyone sees who is ready.
 - If a player **leaves** during the Lobby state, the room reverts to
@@ -179,7 +194,7 @@ coordinate readiness.
 
 ### Finalized
 
-All players in the lobby have marked ready. The server finalizes the game:
+All players in the lobby are ready. The server finalizes the game:
 
 - Records a finalization timestamp.
 - Sends a `GameStarting` message to every player with peer connection

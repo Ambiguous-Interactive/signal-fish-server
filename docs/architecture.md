@@ -139,37 +139,33 @@ Metrics collection and export.
 
 ## Data Flow
 
-### Room Creation
+### JoinRoom Resolution
+
+`JoinRoom` is the only room-entry message. `EnhancedGameServer` resolves each
+request by `(game_name, room_code)`:
+
+1. Validate/rate-limit the request.
+2. If `room_code` is omitted, generate one and create a new room.
+3. If `room_code` is provided:
+   - If room exists for that `game_name`, add player to existing room.
+   - If room does not exist for that `game_name`, create a new room with the
+     requested `room_code`.
+4. Send `RoomJoined` to the caller. If they joined an existing room, broadcast
+   `PlayerJoined` to other room members.
 
 ```text
 Client                    WebSocket Handler         EnhancedGameServer        Database
   |                              |                         |                      |
-  |-- CreateRoom -------------->|                         |                      |
-  |                              |-- handle_message ------>|                      |
-  |                              |                         |-- create_room ------>|
-  |                              |                         |<-- store room -------|
-  |                              |<-- RoomCreated ---------|                      |
-  |<-- RoomCreated --------------|                         |                      |
-
-```
-
-### Player Join
-
-```text
-
-Client                    WebSocket Handler         EnhancedGameServer        Database
-  |                              |                         |                      |
-  |-- JoinRoom ---------------->|                         |                      |
+  |-- JoinRoom ----------------->|                         |                      |
   |                              |-- handle_message ------>|                      |
   |                              |                         |-- get_room --------->|
-  |                              |                         |<-- room --------------|
-  |                              |                         |-- add_player ------->|
+  |                              |                         |<-- hit or miss ------|
+  |                              |                         |-- add_player/create->|
   |                              |<-- RoomJoined ----------|                      |
   |<-- RoomJoined ---------------|                         |                      |
   |                              |                         |                      |
-  |<-- PlayerJoined -------------|<-- broadcast to room ---|                      |
+  |<-- PlayerJoined -------------|<-- broadcast (join only)                       |
 (other clients)                                                                   |
-
 ```
 
 ### Game Data Relay

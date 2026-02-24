@@ -31,6 +31,7 @@
 
 - Every feature/bugfix requires documentation updates across all relevant locations.
 - Code samples in docs must compile and run correctly.
+- Move long/reusable examples to `.llm/code-samples/` and reference them from markdown.
 - CHANGELOG uses [Keep a Changelog](https://keepachangelog.com/) format under `[Unreleased]`.
 - Doc comments explain "why", include examples, and use `@since`/`Added in v2.x` annotations.
 - Use changelog workflow skills in order: classify -> update -> review.
@@ -133,6 +134,9 @@ Tables must have consistent column alignment:
 
 # Auto-fix issues where possible
 ./scripts/check-markdown.sh fix
+
+# Validate version/changelog/protocol doc consistency
+./scripts/check-doc-consistency.sh
 ```
 
 Install the pinned markdownlint version for local checks:
@@ -201,6 +205,7 @@ After every feature/bugfix:
 - [ ] README updated if user-facing
 - [ ] New behavior clearly marked as new
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)
+- [ ] Version/changelog/protocol docs pass consistency checks (`./scripts/check-doc-consistency.sh`)
 - [ ] README Shields badges include `style=for-the-badge` (`./scripts/check-readme-badges.sh README.md`)
 - [ ] If enforcing a minimum badge count, run strict mode (`./scripts/check-readme-badges.sh --require-at-least-one README.md`)
 - [ ] All code blocks have language identifiers

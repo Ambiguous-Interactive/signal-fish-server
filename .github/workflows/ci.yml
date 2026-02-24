@@ -11,6 +11,7 @@
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
+#   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
 #   - docker: Docker image build and smoke test with health check
 #   - coverage: Linux code coverage gate via cargo-llvm-cov
@@ -112,6 +113,52 @@ jobs:
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: cargo nextest run --locked --all-features
+
+  doc-consistency:
+    name: Doc Consistency
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Collect changed files
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+
+          # For initial pushes, github.event.before can be all zeros.
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-list --max-parents=0 HEAD | tail -n1)"
+          fi
+
+          HEAD_SHA="${{ github.sha }}"
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > changed-files.txt
+
+          COUNT=$(wc -l < changed-files.txt | tr -d ' ')
+          echo "Changed files count: $COUNT"
+          cat changed-files.txt || true
+
+      - name: Run documentation/changelog consistency checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t CHANGED_FILES < changed-files.txt
+          if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
+            ./scripts/check-doc-consistency.sh --changed-files "${CHANGED_FILES[@]}"
+          else
+            ./scripts/check-doc-consistency.sh
+          fi
 
   deny:
     name: Dependency Audit

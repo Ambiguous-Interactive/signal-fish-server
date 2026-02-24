@@ -60,6 +60,7 @@ cargo deny --all-features check            # Advisories, licenses, bans, sources
 # Always run before pushing
 scripts/check-ci-config.sh           # Catch CI configuration issues
 scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related changes)
+scripts/check-doc-consistency.sh     # Version sync + changelog + docs accuracy guard
 
 ```
 
@@ -70,6 +71,11 @@ scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related 
 - `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
 
   `Cargo.toml` (see [msrv-management](./msrv-management.md))
+
+- `check-doc-consistency.sh`: Enforces Cargo version reference sync, Keep a Changelog
+
+  structure/link validity, and protocol/documentation anti-drift checks (see
+  [doc-accuracy-guarantees](./doc-accuracy-guarantees.md))
 
 ---
 
@@ -127,6 +133,7 @@ chore: update MSRV from 1.87.0 to 1.88.0
 - [ ] `cargo deny --all-features check` — supply chain checks pass
 - [ ] `scripts/check-ci-config.sh` — CI config validated
 - [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
+- [ ] `scripts/check-doc-consistency.sh` — version/changelog/docs consistency validated
 - [ ] New code has exhaustive tests (see [testing-strategies](./testing-core-patterns.md))
 - [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
 - [ ] CHANGELOG decision documented via [classify-user-visible-changes](./classify-user-visible-changes.md)
