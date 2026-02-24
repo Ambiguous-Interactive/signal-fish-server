@@ -62,7 +62,8 @@ fi
 echo "${BLUE}[pre-push]${NC} Running workflow action-ref policy tests..."
 if ! cargo test --locked --test ci_config_tests -- \
     test_github_actions_use_version_refs_not_commit_hashes \
-    test_workflow_toolchain_fields_do_not_use_moving_aliases; then
+    test_workflow_toolchain_fields_do_not_use_moving_aliases \
+    test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks; then
     echo "${RED}[pre-push] ERROR:${NC} CI action-ref policy tests failed."
     echo "${YELLOW}Tip:${NC} Fix workflow refs/toolchain pins, then rerun the tests above."
     exit 1

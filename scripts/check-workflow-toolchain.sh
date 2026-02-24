@@ -165,6 +165,21 @@ if [ "$TOTAL_USAGES" -eq 0 ]; then
 fi
 
 if [ "$ERRORS" -gt 0 ]; then
+    # Prefer the exact pinned toolchain from rust-toolchain.toml for remediation text.
+    # This avoids suggesting moving aliases like `stable`, which violate policy tests.
+    PINNED_TOOLCHAIN=$(awk -F'=' '
+        /^[[:space:]]*channel[[:space:]]*=/ {
+            value = $2
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            gsub(/"/, "", value)
+            print value
+            exit
+        }
+    ' rust-toolchain.toml 2>/dev/null || true)
+    if [ -z "$PINNED_TOOLCHAIN" ]; then
+        PINNED_TOOLCHAIN="1.88.0"
+    fi
+
     echo ""
     error "Toolchain input check found $ERRORS violation(s) ($VALID_USAGES/$TOTAL_USAGES valid)"
     echo ""
@@ -175,7 +190,7 @@ if [ "$ERRORS" -gt 0 ]; then
     echo "Fix by adding a 'with:' block:"
     echo "  - uses: dtolnay/rust-toolchain@v1"
     echo "    with:"
-    echo "      toolchain: stable  # or 1.88.0, nightly-2026-02-01, etc."
+    echo "      toolchain: $PINNED_TOOLCHAIN  # use an exact pinned version"
     exit 1
 else
     success "All $TOTAL_USAGES dtolnay/rust-toolchain usage(s) have an explicit 'toolchain:' input"

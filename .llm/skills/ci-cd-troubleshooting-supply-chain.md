@@ -26,6 +26,8 @@ See also: [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md),
 - **Stale Dockerfile COPY**: Audit all `COPY`/`ADD` instructions when removing directories
 - **Action refs policy**: All `uses:` references must use explicit version tags
   (for example `@v6.0.2`), not commit SHAs and not moving refs (`@stable`, `@main`)
+- **Action syntax policy**: Treat malformed remote refs (missing `@ref`, empty ref,
+  or missing `owner/repo`) as violations, not as ignorable lines
 - **Stale script references**: Audit workflow `run:` steps when deleting scripts;
   `continue-on-error: true` silently masks these
 - **Action ref drift**: floating refs (`@stable`, `@v2`) change unexpectedly; pin to an explicit release tag
@@ -119,7 +121,9 @@ fn test_dockerfile_copy_sources_exist() {
 ```yaml
 # Workflow uses moving references
 - uses: taiki-e/install-action@v2        # Floating major tag
-- uses: dtolnay/rust-toolchain@stable    # Moving channel alias
+- uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: stable                    # Moving toolchain alias
 ```
 
 ### Root Cause
@@ -142,11 +146,15 @@ Dependabot updates, least-privilege permissions, and CI validation tests.
 ```yaml
 # WRONG: Moving refs
 - uses: taiki-e/install-action@v2
-- uses: dtolnay/rust-toolchain@stable
+- uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: stable
 
 # CORRECT: Explicit version tags
 - uses: taiki-e/install-action@v2.68.8
 - uses: dtolnay/rust-toolchain@v1
+  with:
+    toolchain: 1.88.0  # exact pinned value (for example from rust-toolchain.toml)
 ```
 
 **Audit existing workflows for moving refs:**
@@ -162,17 +170,6 @@ grep -rnE 'uses: .+@v[0-9]+$' .github/workflows/   # floating major tags
 ./scripts/check-workflow-hygiene.sh
 cargo test --test ci_config_tests test_github_actions_use_version_refs_not_commit_hashes
 ```
-
-### Prevention
-
-Use a clear workflow header comment to document policy:
-
-```yaml
-# All action references MUST use explicit version tags.
-# Disallowed: commit SHAs and moving refs (stable/main/master/latest).
-```
-
----
 
 ## Pattern 23: Workflow Script References to Non-Existent Files
 
@@ -230,7 +227,7 @@ Workflow uses a disallowed ref type:
 
 - moving ref (`@stable`, `@main`, `@v2`)
 - commit hash (`@<40-char-sha>`)
-- malformed version ref
+- malformed remote reference (for example missing `@ref`, empty `@`, or `uses: checkout@v1`)
 
 ### Solution
 

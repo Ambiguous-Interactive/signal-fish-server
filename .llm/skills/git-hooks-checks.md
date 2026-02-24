@@ -21,15 +21,14 @@ performance, debugging hook failures, or validating hook permissions in CI.
 - Debugging hook failures
 
 ## When NOT to Use
-
 - Initial hook setup and permissions (see [Hook Installation](./git-hooks-installation.md))
 
 ---
 
 ## TL;DR
-
 - Target execution time: < 5 seconds per hook
 - Check only staged files (`git diff --cached --name-only`)
+- Use NUL-delimited file lists (`git diff -z` + `xargs -0`) for path-safe tooling
 - Gracefully skip checks if optional tools not installed
 - Always document `git commit --no-verify` for emergencies
 - Run all checks even on failure, report summary at end
@@ -91,8 +90,8 @@ if command -v lychee >/dev/null 2>&1; then
   echo "[pre-commit] Checking links (offline mode)..."
   STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
   if [ -n "$STAGED_MD" ]; then
-    # shellcheck disable=SC2086
-    if ! lychee --offline --config .lychee.toml $STAGED_MD >/dev/null 2>&1; then
+    if ! git diff --cached --name-only -z --diff-filter=ACM -- '*.md' \
+      | xargs -0 lychee --offline --config .lychee.toml >/dev/null 2>&1; then
       echo "[pre-commit] ERROR: Link checking failed"
       echo "[pre-commit] Fix: ./scripts/check-links-fast.sh"
       FAILURES=$((FAILURES + 1))
@@ -126,8 +125,9 @@ fi
 # 1. Check only staged files
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
 
-# 2. Use offline mode when possible
-lychee --offline $STAGED_FILES
+# 2. Use offline mode and NUL-safe path passing
+git diff --cached --name-only -z --diff-filter=ACM -- '*.md' \
+  | xargs -0 lychee --offline --config .lychee.toml
 
 # 3. Skip slow checks if tool not installed
 if command -v slow_tool >/dev/null 2>&1; then

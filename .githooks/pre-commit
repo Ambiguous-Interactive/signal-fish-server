@@ -179,8 +179,11 @@ WORKFLOW_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.gi
 
 if [ -n "$WORKFLOW_FILES" ]; then
     if [ -x scripts/validate-workflow-awk.sh ]; then
-        # Pass the specific workflow files to check
-        if echo "$WORKFLOW_FILES" | xargs scripts/validate-workflow-awk.sh 2>&1 | grep -q "FAILED"; then
+        # Pass workflow files as NUL-delimited values to preserve spaces in paths.
+        if git diff --cached --name-only -z --diff-filter=ACM -- \
+            ':(glob).github/workflows/*.yml' \
+            ':(glob).github/workflows/*.yaml' \
+            | xargs -0 scripts/validate-workflow-awk.sh 2>&1 | grep -q "FAILED"; then
             check_fail "AWK validation" "AWK script syntax errors in workflow files."
             echo "${YELLOW}Tip:${NC} ./scripts/validate-workflow-awk.sh"
             echo ""
@@ -390,8 +393,9 @@ echo "${BLUE}[11/${TOTAL_CHECKS}]${NC} Checking links in markdown files..."
 if [ -n "$STAGED_MD_FILES" ]; then
     if command -v lychee >/dev/null 2>&1; then
         # Run lychee with fast settings (offline mode for pre-commit speed)
-        # Pipe file list via stdin to avoid GNU-only xargs -a flag
-        if ! printf '%s\n' "$STAGED_MD_FILES" | xargs lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
+        # Use NUL-delimited file lists so paths with spaces are handled safely.
+        if ! git diff --cached --name-only -z --diff-filter=ACM -- '*.md' \
+            | xargs -0 lychee --offline --quiet --config .lychee.toml 2>/dev/null; then
             check_warn "Link checking (offline)" "Link issues found (offline mode). Run 'lychee --config .lychee.toml <file>' for full check."
         else
             check_pass "Link checking (offline)"

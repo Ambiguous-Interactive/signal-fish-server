@@ -334,33 +334,64 @@ VALID_REF_COUNT=0
 HASH_REF_COUNT=0
 FLOATING_REF_COUNT=0
 INVALID_REF_COUNT=0
+MALFORMED_REF_COUNT=0
 
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
     [ -f "$workflow" ] || continue
 
     WORKFLOW_NAME=$(basename "$workflow")
 
+    line_num=0
     while IFS= read -r line; do
-        # Match both "uses:" and "- uses:" syntaxes, excluding trailing comments.
-        if [[ "$line" =~ ^[[:space:]-]*uses:[[:space:]]*([^@[:space:]]+)@([^#[:space:]]+) ]]; then
-            ACTION_NAME="${BASH_REMATCH[1]}"
-            REF="${BASH_REMATCH[2]}"
+        line_num=$((line_num + 1))
+
+        # Match both "uses:" and "- uses:" syntaxes and keep the first token.
+        if [[ "$line" =~ ^[[:space:]-]*uses:[[:space:]]*([^#[:space:]]+) ]]; then
+            USES_VALUE="${BASH_REMATCH[1]}"
+            USES_VALUE="${USES_VALUE%\"}"
+            USES_VALUE="${USES_VALUE#\"}"
+            USES_VALUE="${USES_VALUE%\'}"
+            USES_VALUE="${USES_VALUE#\'}"
 
             # Skip local and docker actions.
-            if [[ "$ACTION_NAME" == ./* ]] || [[ "$ACTION_NAME" == docker://* ]]; then
+            if [[ "$USES_VALUE" == ./* ]] || [[ "$USES_VALUE" == docker://* ]]; then
+                continue
+            fi
+
+            if [[ "$USES_VALUE" != *@* ]]; then
+                error "$WORKFLOW_NAME:$line_num: Malformed remote action reference: $USES_VALUE"
+                error "  Expected owner/repo@ref (for example actions/checkout@v6.0.2)."
+                MALFORMED_REF_COUNT=$((MALFORMED_REF_COUNT + 1))
+                continue
+            fi
+
+            ACTION_NAME="${USES_VALUE%%@*}"
+            REF="${USES_VALUE#*@}"
+
+            if [ -z "$ACTION_NAME" ] || [ -z "$REF" ]; then
+                error "$WORKFLOW_NAME:$line_num: Malformed remote action reference: $USES_VALUE"
+                error "  Expected non-empty owner/repo and ref in owner/repo@ref."
+                MALFORMED_REF_COUNT=$((MALFORMED_REF_COUNT + 1))
+                continue
+            fi
+
+            if [[ ! "$ACTION_NAME" =~ ^[^/]+/[^/]+(/[^/]+)*$ ]]; then
+                error "$WORKFLOW_NAME:$line_num: Malformed remote action reference: $USES_VALUE"
+                error "  Expected owner/repo@ref (owner/repo may include an optional action subpath)."
+                MALFORMED_REF_COUNT=$((MALFORMED_REF_COUNT + 1))
                 continue
             fi
 
             # Disallow commit-hash refs.
             if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
-                error "$WORKFLOW_NAME: Action uses commit hash ref (disallowed): $ACTION_NAME@$REF"
+                error "$WORKFLOW_NAME:$line_num: Action uses commit hash ref (disallowed): $ACTION_NAME@$REF"
                 HASH_REF_COUNT=$((HASH_REF_COUNT + 1))
                 continue
             fi
 
             # Disallow moving channels/branches.
             if [[ "$REF" =~ ^(stable|beta|nightly|main|master|latest)$ ]]; then
-                error "$WORKFLOW_NAME: Action uses moving channel/branch ref (disallowed): $ACTION_NAME@$REF"
+                error "$WORKFLOW_NAME:$line_num: Action uses moving channel/branch ref (disallowed): $ACTION_NAME@$REF"
                 error "  Use an explicit version tag instead (for example @v2.5.0)."
                 FLOATING_REF_COUNT=$((FLOATING_REF_COUNT + 1))
                 continue
@@ -370,7 +401,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
             if [[ "$REF" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
                 VALID_REF_COUNT=$((VALID_REF_COUNT + 1))
             else
-                error "$WORKFLOW_NAME: Action uses invalid ref format: $ACTION_NAME@$REF"
+                error "$WORKFLOW_NAME:$line_num: Action uses invalid ref format: $ACTION_NAME@$REF"
                 error "  Allowed refs: vX, vX.Y, vX.Y.Z (optionally with prerelease/build suffix)."
                 INVALID_REF_COUNT=$((INVALID_REF_COUNT + 1))
             fi
@@ -378,7 +409,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
     done < "$workflow"
 done
 
-if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$FLOATING_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ]; then
+if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$FLOATING_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ] && [ "$MALFORMED_REF_COUNT" -eq 0 ]; then
     success "All $VALID_REF_COUNT GitHub Actions use explicit version tags"
 fi
 echo ""

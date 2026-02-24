@@ -2398,6 +2398,7 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
     let mut total_files_checked = 0;
     let mut total_actions_found = 0;
     let mut actions_with_valid_refs = 0;
+    let mut malformed_remote_refs = 0;
     let mut files_with_violations = std::collections::HashSet::new();
 
     for entry in &workflow_files {
@@ -2415,8 +2416,23 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
                 continue;
             };
 
-            let Some((action_name, action_ref)) = parse_remote_action_reference(uses_value) else {
-                continue;
+            let parse_result = classify_action_reference(uses_value);
+            let (action_name, action_ref) = match parse_result {
+                ActionReferenceParseResult::LocalOrDocker => continue,
+                ActionReferenceParseResult::MalformedRemote { reason } => {
+                    violations.push(format!(
+                        "{filename}:{line_num}: Malformed remote action reference in uses: {uses_value}\n  \
+                         Reason: {reason}\n  \
+                         Expected format: owner/repo@ref (for example actions/checkout@v6.0.2)."
+                    ));
+                    malformed_remote_refs += 1;
+                    file_has_violation = true;
+                    continue;
+                }
+                ActionReferenceParseResult::Remote {
+                    action_name,
+                    action_ref,
+                } => (action_name, action_ref),
             };
 
             total_actions_found += 1;
@@ -2455,6 +2471,7 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
              - Workflow files checked: {}\n\
              - Total actions found: {}\n\
              - Actions with valid refs: {}\n\
+             - Malformed remote refs: {}\n\
              - Actions with violations: {}\n\
              - Workflows with violations: {}\n\n\
              Workflows with violations:\n{}",
@@ -2462,6 +2479,7 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
             total_files_checked,
             total_actions_found,
             actions_with_valid_refs,
+            malformed_remote_refs,
             violations.len(),
             files_with_violations.len(),
             files_with_violations
@@ -2579,14 +2597,69 @@ fn test_action_reference_parsing_and_validation_data_driven() {
             "- uses: actions/checkout@v6.0.2",
             Some(("actions/checkout", "v6.0.2")),
         ),
+        (
+            "uses: 'actions/checkout@v6.0.2'",
+            Some(("actions/checkout", "v6.0.2")),
+        ),
         ("uses: ./.github/actions/custom", None),
         ("- uses: docker://alpine:3.20", None),
+        ("uses: actions/checkout", None),
+        ("uses: actions/checkout@", None),
+        ("uses: checkout@v6.0.2", None),
         ("run: echo hello", None),
     ];
 
     for (line, expected) in parse_cases {
         let parsed = extract_uses_value(line).and_then(parse_remote_action_reference);
         assert_eq!(parsed, expected, "Unexpected parse result for line: {line}");
+    }
+
+    let classification_cases = [
+        (
+            "uses: actions/checkout@v6.0.2",
+            ActionReferenceParseResult::Remote {
+                action_name: "actions/checkout",
+                action_ref: "v6.0.2",
+            },
+        ),
+        (
+            "uses: ./.github/actions/custom",
+            ActionReferenceParseResult::LocalOrDocker,
+        ),
+        (
+            "uses: docker://alpine:3.20",
+            ActionReferenceParseResult::LocalOrDocker,
+        ),
+        (
+            "uses: actions/checkout",
+            ActionReferenceParseResult::MalformedRemote {
+                reason: "missing '@' separator",
+            },
+        ),
+        (
+            "uses: actions/checkout@",
+            ActionReferenceParseResult::MalformedRemote {
+                reason: "missing action ref after '@'",
+            },
+        ),
+        (
+            "uses: checkout@v6.0.2",
+            ActionReferenceParseResult::MalformedRemote {
+                reason: "remote action must use owner/repo@ref syntax",
+            },
+        ),
+    ];
+
+    for (line, expected) in classification_cases {
+        let actual = extract_uses_value(line)
+            .map(classify_action_reference)
+            .unwrap_or(ActionReferenceParseResult::MalformedRemote {
+                reason: "empty uses value",
+            });
+        assert_eq!(
+            actual, expected,
+            "Unexpected action reference classification for line: {line}"
+        );
     }
 
     let ref_cases = [
@@ -3343,26 +3416,92 @@ fn extract_uses_value(trimmed_line: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-/// Parse remote action reference from a `uses` value.
-///
-/// Returns `(action_name, action_ref)` for remote actions and `None` for local actions,
-/// docker references, or malformed lines.
-fn parse_remote_action_reference(uses_value: &str) -> Option<(&str, &str)> {
-    if uses_value.starts_with("./") || uses_value.starts_with("docker://") {
-        return None;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionReferenceParseResult<'a> {
+    LocalOrDocker,
+    Remote {
+        action_name: &'a str,
+        action_ref: &'a str,
+    },
+    MalformedRemote {
+        reason: &'static str,
+    },
+}
 
-    let (action_name, ref_and_comment) = uses_value.split_once('@')?;
-    let action_ref = ref_and_comment
+/// Parse and classify a `uses:` value.
+///
+/// Distinguishes local/docker actions from malformed remote references so policy
+/// tests can fail on invalid `owner/repo@ref` syntax.
+fn classify_action_reference(uses_value: &str) -> ActionReferenceParseResult<'_> {
+    // Keep only the first token to ignore trailing inline comments.
+    let token = uses_value
         .split_whitespace()
         .next()
         .unwrap_or("")
-        .trim();
-    if action_name.trim().is_empty() || action_ref.is_empty() {
-        return None;
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+
+    if token.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "empty uses value",
+        };
     }
 
-    Some((action_name.trim(), action_ref))
+    if token.starts_with("./") || token.starts_with("docker://") {
+        return ActionReferenceParseResult::LocalOrDocker;
+    }
+
+    let Some((action_name, action_ref)) = token.split_once('@') else {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "missing '@' separator",
+        };
+    };
+
+    let action_name = action_name.trim();
+    let action_ref = action_ref.trim();
+
+    if action_name.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "missing action name before '@'",
+        };
+    }
+
+    if action_ref.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "missing action ref after '@'",
+        };
+    }
+
+    // Require `owner/repo` minimum shape, allowing optional subpaths.
+    let mut segments = action_name.split('/');
+    let owner = segments.next().unwrap_or("");
+    let repo = segments.next().unwrap_or("");
+    if owner.is_empty() || repo.is_empty() {
+        return ActionReferenceParseResult::MalformedRemote {
+            reason: "remote action must use owner/repo@ref syntax",
+        };
+    }
+
+    ActionReferenceParseResult::Remote {
+        action_name,
+        action_ref,
+    }
+}
+
+/// Parse remote action reference from a `uses` value.
+///
+/// Returns `(action_name, action_ref)` for valid remote actions and `None` for
+/// local/docker actions or malformed references.
+fn parse_remote_action_reference(uses_value: &str) -> Option<(&str, &str)> {
+    match classify_action_reference(uses_value) {
+        ActionReferenceParseResult::Remote {
+            action_name,
+            action_ref,
+        } => Some((action_name, action_ref)),
+        ActionReferenceParseResult::LocalOrDocker
+        | ActionReferenceParseResult::MalformedRemote { .. } => None,
+    }
 }
 
 /// Return `true` if the action reference uses an approved explicit-version format.
@@ -7709,6 +7848,27 @@ fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
 }
 
 #[test]
+fn test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("git diff --cached --name-only -z --diff-filter=ACM -- \\")
+            && content.contains("xargs -0 scripts/validate-workflow-awk.sh"),
+        "Pre-commit Check 5 must pass workflow filenames via NUL-delimited git diff + xargs -0.\n\
+         This prevents filename splitting bugs when paths contain spaces."
+    );
+
+    assert!(
+        content.contains("git diff --cached --name-only -z --diff-filter=ACM -- '*.md'")
+            && content.contains("xargs -0 lychee --offline --quiet --config .lychee.toml"),
+        "Pre-commit Check 11 must pass markdown filenames via NUL-delimited git diff + xargs -0.\n\
+         This prevents filename splitting bugs when markdown paths contain spaces."
+    );
+}
+
+#[test]
 fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-push");
@@ -8162,6 +8322,39 @@ fn test_scripts_pass_basic_syntax_check() {
         failures.is_empty(),
         "Shell scripts have syntax errors:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn test_check_workflow_toolchain_fix_guidance_uses_pinned_version_not_stable_alias() {
+    let root = repo_root();
+    let script_path = root.join("scripts/check-workflow-toolchain.sh");
+    let content = read_file(&script_path);
+
+    let guidance_lines: Vec<&str> = content
+        .lines()
+        .filter(|line| line.contains("echo \"      toolchain:"))
+        .collect();
+
+    assert!(
+        !guidance_lines.is_empty(),
+        "check-workflow-toolchain.sh must print remediation guidance with a `toolchain:` example."
+    );
+
+    for line in &guidance_lines {
+        assert!(
+            !line.contains("toolchain: stable"),
+            "check-workflow-toolchain.sh remediation must not suggest moving aliases like `stable`.\n\
+             Found guidance line: {line}"
+        );
+    }
+
+    assert!(
+        guidance_lines
+            .iter()
+            .any(|line| line.contains("toolchain: $PINNED_TOOLCHAIN")),
+        "check-workflow-toolchain.sh remediation should suggest a pinned toolchain example.\n\
+         Expected guidance to use `$PINNED_TOOLCHAIN` derived from rust-toolchain.toml."
     );
 }
 

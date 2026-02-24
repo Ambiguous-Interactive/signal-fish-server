@@ -214,6 +214,7 @@ to a directory is valid but `[ ! -f ]` alone will falsely flag it as broken.
 - [ ] Path validation checks both files (`-f`) and directories (`-d`)
 - [ ] AWK is preferred over `grep` for pattern extraction
 - [ ] Fence tracking handles nested fences (4+ backtick outer fences)
+- [ ] File-list tooling is path-safe (`git diff -z` + `xargs -0`, or `while read -r`)
 - [ ] Use `[[:space:]]` not `\s`; avoid `tac` on macOS
 
 ---
