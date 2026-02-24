@@ -223,6 +223,16 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_contain: vec!["non-keep-a-changelog section"],
         },
         ScriptCase {
+            name: "fails_when_release_compare_link_references_unknown_previous_version",
+            overrides: vec![(
+                "CHANGELOG.md",
+                "# Changelog\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n## [0.2.0] - 2026-02-24\n\n### Added\n- Release notes.\n\n## [0.1.0] - 2026-02-15\n\n### Added\n- Initial release.\n\n[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...HEAD\n[0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.0...v0.2.0\n[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["compare link references unknown previous version"],
+        },
+        ScriptCase {
             name: "fails_changed_files_gate_when_non_internal_without_changelog",
             overrides: vec![],
             args: vec!["--changed-files", "src/main.rs"],

@@ -43,6 +43,10 @@ exclude = [
     # Placeholder server URLs used in test strings
     "^https?://your-server",
 
+    # CHANGELOG compare links can temporarily 404 before a release tag is pushed.
+    # We validate their format/consistency in scripts/check-doc-consistency.sh.
+    "^https://github\\.com/Ambiguous-Interactive/signal-fish-server/compare/v[0-9]+\\.[0-9]+\\.[0-9]+\\.\\.\\.(HEAD|v[0-9]+\\.[0-9]+\\.[0-9]+)$",
+
     # Truncated URLs extracted by lychee from regex patterns in .lychee.toml itself.
     # These are a safety net in case the exclude_path for .lychee.toml doesn't take effect
     # (see known lychee bug: TOML exclude_path may not apply to glob-expanded paths).

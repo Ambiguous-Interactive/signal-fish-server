@@ -267,19 +267,33 @@ validate_changelog() {
         fi
     fi
 
-    local latest_ref
-    latest_ref=$(grep -E "^\[$latest_version\]:" "$file" | sed -E "s/^\[$latest_version\]:[[:space:]]*(\\S+).*$/\\1/" || true)
-    if [ -z "$latest_ref" ]; then
-        action_error "CHANGELOG.md must define a [$latest_version]: link reference"
-    else
-        if [[ "$latest_ref" =~ /releases/tag/v${latest_version}([#?].*)?$ ]]; then
-            :
-        elif [[ "$latest_ref" =~ /compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.v${latest_version}([#?].*)?$ ]]; then
-            :
-        else
-            action_error "[$latest_version] link must point to /releases/tag/v$latest_version or /compare/vPREV...v$latest_version (found: $latest_ref)"
+    # Validate link references for every released version section.
+    local version
+    while IFS= read -r version; do
+        [ -z "$version" ] && continue
+
+        local release_ref
+        release_ref=$(grep -E "^\[$version\]:" "$file" | sed -E "s/^\[$version\]:[[:space:]]*(\\S+).*$/\\1/" || true)
+        if [ -z "$release_ref" ]; then
+            action_error "CHANGELOG.md must define a [$version]: link reference"
+            continue
         fi
-    fi
+
+        if [[ "$release_ref" =~ /releases/tag/v${version}([#?].*)?$ ]]; then
+            continue
+        fi
+
+        if [[ "$release_ref" =~ /compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.v${version}([#?].*)?$ ]]; then
+            local previous_version
+            previous_version="${BASH_REMATCH[1]}"
+            if ! printf '%s\n' "$versions" | grep -Fxq "$previous_version"; then
+                action_error "[$version] compare link references unknown previous version v$previous_version (link: $release_ref)"
+            fi
+            continue
+        fi
+
+        action_error "[$version] link must point to /releases/tag/v$version or /compare/vPREV...v$version (found: $release_ref)"
+    done < <(printf '%s\n' "$versions")
 }
 
 validate_changelog

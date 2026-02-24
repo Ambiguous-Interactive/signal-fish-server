@@ -4047,6 +4047,14 @@ fn test_lychee_excludes_placeholder_urls() {
             "https://github.com/%7Buser%7D",
             "URL-encoded brace placeholder should be excluded",
         ),
+        (
+            "https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...HEAD",
+            "Unreleased compare links may exist before tags are pushed",
+        ),
+        (
+            "https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...v0.2.0",
+            "Release compare links may briefly 404 during release cutover",
+        ),
     ];
 
     let mut missing_exclusions = Vec::new();
@@ -6110,79 +6118,159 @@ fn test_lychee_version_pinned_above_v0_22() {
     // binary version.
 
     let root = repo_root();
-    let link_check = root.join(".github/workflows/link-check.yml");
-    let content = read_file(&link_check);
+    let workflows = vec![
+        root.join(".github/workflows/link-check.yml"),
+        root.join(".github/workflows/doc-validation.yml"),
+    ];
 
-    // Find the lycheeVersion setting
-    let mut found_version = false;
-    let mut version_value = String::new();
-    let mut version_line = 0;
+    for workflow in workflows {
+        let content = read_file(&workflow);
 
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("lycheeVersion:") {
-            found_version = true;
-            version_value = trimmed
-                .strip_prefix("lycheeVersion:")
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            version_line = line_num + 1;
-            break;
+        // Find the lycheeVersion setting
+        let mut found_version = false;
+        let mut version_value = String::new();
+        let mut version_line = 0;
+
+        for (line_num, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("lycheeVersion:") {
+                found_version = true;
+                version_value = trimmed
+                    .strip_prefix("lycheeVersion:")
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                version_line = line_num + 1;
+                break;
+            }
         }
+
+        assert!(
+            found_version,
+            "{} must set lycheeVersion to override the bundled lychee binary.\n\
+             Without this, the action uses lychee v0.21.0 which has a hidden file matcher bug\n\
+             (lycheeverse/lychee#1936) that scans .lychee.toml as input.\n\n\
+             Fix: Add 'lycheeVersion: v0.22.0' (or newer) to the lychee-action step's 'with:' block.\n\
+             File: {}",
+            workflow
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workflow"),
+            workflow.display()
+        );
+
+        // Parse the version: strip leading 'v' and split into components
+        let version_str = version_value.trim_start_matches('v');
+        let parts: Vec<u32> = version_str
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect();
+
+        assert!(
+            parts.len() >= 2,
+            "lycheeVersion must be a valid semver version (e.g., v0.22.0).\n\
+             Found: '{}' at line {} in {}\n\
+             Expected format: vMAJOR.MINOR.PATCH",
+            version_value,
+            version_line,
+            workflow.display()
+        );
+
+        let major = parts[0];
+        let minor = parts[1];
+
+        // Version must be >= 0.22.0 (where the hidden file matcher bug was fixed)
+        let min_major = 0;
+        let min_minor = 22;
+
+        let is_sufficient = major > min_major || (major == min_major && minor >= min_minor);
+
+        assert!(
+            is_sufficient,
+            "lycheeVersion must be >= v0.22.0 to include the hidden file matcher fix.\n\
+             Found: {} (parsed as {}.{}) at line {} in {}\n\
+             Minimum required: v0.22.0\n\n\
+             Background: lychee v0.21.0 scans dotfiles like .lychee.toml as input,\n\
+             extracting truncated URLs from regex patterns and causing false failures.\n\
+             This was fixed in v0.22.0 via lycheeverse/lychee#1936.\n\n\
+             Fix: Update lycheeVersion to v0.22.0 or newer.",
+            version_value,
+            major,
+            minor,
+            version_line,
+            workflow.display()
+        );
     }
+}
 
-    assert!(
-        found_version,
-        "link-check.yml must set lycheeVersion to override the bundled lychee binary.\n\
-         Without this, the action uses lychee v0.21.0 which has a hidden file matcher bug\n\
-         (lycheeverse/lychee#1936) that scans .lychee.toml as input.\n\n\
-         Fix: Add 'lycheeVersion: v0.22.0' (or newer) to the lychee-action step's 'with:' block.\n\
-         File: {}",
-        link_check.display()
-    );
+#[test]
+fn test_lychee_workflows_use_hardened_args_data_driven() {
+    // Data-driven guard against config drift between workflows that run lychee.
+    // Both workflows should use the shared .lychee.toml policy and critical
+    // CLI --exclude-path flags (defense-in-depth for lychee glob behavior).
 
-    // Parse the version: strip leading 'v' and split into components
-    let version_str = version_value.trim_start_matches('v');
-    let parts: Vec<u32> = version_str
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
+    let root = repo_root();
+    let cases: Vec<(std::path::PathBuf, Vec<&str>)> = vec![
+        (
+            root.join(".github/workflows/link-check.yml"),
+            vec![
+                "--config .lychee.toml",
+                "--exclude-path tests/",
+                "--exclude-path target/",
+                "--exclude-path third_party/",
+                "--exclude-path '\\.github/test-fixtures/'",
+                "--exclude-path 'test-fixtures/'",
+                "--exclude-path '\\.lychee\\.toml'",
+                "--",
+            ],
+        ),
+        (
+            root.join(".github/workflows/doc-validation.yml"),
+            vec![
+                "--config .lychee.toml",
+                "--exclude-path './target/*'",
+                "--exclude-path './third_party/*'",
+                "--exclude-path './.github/test-fixtures/*'",
+                "--exclude-path './test-fixtures/*'",
+                "--exclude-path '\\.lychee\\.toml'",
+                "--",
+            ],
+        ),
+    ];
 
-    assert!(
-        parts.len() >= 2,
-        "lycheeVersion must be a valid semver version (e.g., v0.22.0).\n\
-         Found: '{}' at line {} in {}\n\
-         Expected format: vMAJOR.MINOR.PATCH",
-        version_value,
-        version_line,
-        link_check.display()
-    );
+    for (workflow, required_fragments) in cases {
+        let content = read_file(&workflow);
 
-    let major = parts[0];
-    let minor = parts[1];
+        assert!(
+            content.contains("lycheeverse/lychee-action"),
+            "{} must use lycheeverse/lychee-action.\nFile: {}",
+            workflow
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workflow"),
+            workflow.display()
+        );
 
-    // Version must be >= 0.22.0 (where the hidden file matcher bug was fixed)
-    let min_major = 0;
-    let min_minor = 22;
+        let mut missing = Vec::new();
+        for fragment in required_fragments {
+            if !content.contains(fragment) {
+                missing.push(format!("  - Missing fragment: `{fragment}`"));
+            }
+        }
 
-    let is_sufficient = major > min_major || (major == min_major && minor >= min_minor);
-
-    assert!(
-        is_sufficient,
-        "lycheeVersion must be >= v0.22.0 to include the hidden file matcher fix.\n\
-         Found: {} (parsed as {}.{}) at line {} in {}\n\
-         Minimum required: v0.22.0\n\n\
-         Background: lychee v0.21.0 scans dotfiles like .lychee.toml as input,\n\
-         extracting truncated URLs from regex patterns and causing false failures.\n\
-         This was fixed in v0.22.0 via lycheeverse/lychee#1936.\n\n\
-         Fix: Update lycheeVersion to v0.22.0 or newer.",
-        version_value,
-        major,
-        minor,
-        version_line,
-        link_check.display()
-    );
+        assert!(
+            missing.is_empty(),
+            "{} is missing required lychee hardening fragments:\n\n{}\n\n\
+             These settings keep link checking consistent and resilient across workflows.\n\
+             File: {}",
+            workflow
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workflow"),
+            missing.join("\n"),
+            workflow.display()
+        );
+    }
 }
 
 #[test]
