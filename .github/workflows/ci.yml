@@ -60,6 +60,7 @@ jobs:
         uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
         id: toolchain
+        shell: bash
         run: |
           CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
@@ -92,6 +93,7 @@ jobs:
         uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
         id: toolchain
+        shell: bash
         run: |
           CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
@@ -299,6 +301,7 @@ jobs:
         uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
         id: toolchain
+        shell: bash
         run: |
           CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
@@ -339,6 +342,7 @@ jobs:
         uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
         id: toolchain
+        shell: bash
         run: |
           CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
@@ -364,6 +368,7 @@ jobs:
         uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
         id: toolchain
+        shell: bash
         run: |
           CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"

@@ -27,7 +27,8 @@
 
 ## Severity Rubric
 
-- `CRITICAL`: Wrong section, missing required entry, non-user-facing noise for internal-only changes, or broken structure under `[Unreleased]`.
+- `CRITICAL`: Wrong section, missing required entry, non-user-facing noise
+  for internal-only changes, or broken structure under `[Unreleased]`.
 - `WARNING`: Vague wording, missing breaking label, duplicate or conflicting bullets.
 - `SUGGESTION`: Clarity or concision improvements.
 

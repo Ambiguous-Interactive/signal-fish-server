@@ -36,6 +36,7 @@ CI Failure
     +-- Supply chain risk ------> Check action refs use explicit version tags (no moving refs)
     +-- Action ref failure -----> Invalid/moving action ref or policy mismatch
     +-- Docker warning ---------> BuildKit false positive on ENV variable names
+    +-- PowerShell parse error -> Bash syntax without shell: bash on Windows
 ```
 
 ### Step 2: Check Recent Changes
@@ -150,10 +151,11 @@ Before committing workflow changes, verify:
 | `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV with security-related names | Add `# check=skip=SecretsUsedInArgOrEnv` as first line |
 | AlignedVec alignment lost after Bytes conversion | rkyv serialize() drops alignment via into_vec() | Use serialize_aligned() for zero-copy access |
 | WSL bash has no installed distributions (Windows CI) | Command::new("bash") resolves to WSL not Git Bash | Use Git Bash path on Windows CI runners |
+| `The module 'CHANNEL=$(grep...' could not be loaded` | Bash syntax in `run:` step without `shell: bash` on Windows | Add `shell: bash` to step |
 
 ---
 
-## Summary: The Twelve Categories
+## Summary: CI/CD Failure Categories
 
 ### Category 1: Configuration Mismatch
 
@@ -211,6 +213,12 @@ Before committing workflow changes, verify:
 
 **Example:** `#[cfg(test)]` on standalone function instead of `mod tests` block
 **Prevention:** Apply `#[cfg(test)]` to `mod tests`; use `cargo clippy --lib --bins`
+
+### Category 13: Windows Shell Compatibility
+
+**Example:** `run:` step uses `$(grep ...)` Bash syntax without `shell: bash` on Windows
+**Prevention:** Always add `shell: bash` to `run:` steps in cross-OS matrix jobs;
+hygiene script section 12 validates this; CI config test catches regressions
 
 ---
 

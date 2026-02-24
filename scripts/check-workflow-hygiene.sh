@@ -668,6 +668,207 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# 12. Check Windows jobs for Bash syntax without shell: bash
+# ---------------------------------------------------------------------------
+info "Checking Windows jobs for Bash syntax without explicit shell: bash..."
+
+WINDOWS_BASH_VIOLATIONS=0
+
+for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$workflow" ] || continue
+    WORKFLOW_NAME=$(basename "$workflow")
+
+    # Use awk to identify jobs that target Windows (matrix os containing "windows"
+    # or runs-on containing "windows"), then for each run: step inside those jobs,
+    # check whether it uses Bash-specific syntax and whether it has shell: bash.
+    while IFS= read -r violation; do
+        [ -n "$violation" ] || continue
+        error "$WORKFLOW_NAME: $violation"
+        WINDOWS_BASH_VIOLATIONS=$((WINDOWS_BASH_VIOLATIONS + 1))
+    done < <(awk '
+        function indent_of(s,    i, n) {
+            n = 0
+            for (i = 1; i <= length(s); i++) {
+                if (substr(s, i, 1) == " ") n++
+                else break
+            }
+            return n
+        }
+
+        # Track whether we are inside a job that can run on Windows.
+        # Strategy: detect job-level indent, look for matrix os or runs-on
+        # containing "windows", then scan steps for run: blocks.
+
+        /^jobs:/ { in_jobs = 1; next }
+
+        in_jobs && /^[^ ]/ && !/^jobs:/ { in_jobs = 0 }
+
+        # Detect job start (two-space indent under jobs:)
+        in_jobs && /^  [a-zA-Z_-]+:/ {
+            job_name = $0
+            sub(/:.*/, "", job_name)
+            sub(/^[[:space:]]+/, "", job_name)
+            job_indent = 2
+            in_job = 1
+            is_windows_job = 0
+            in_steps = 0
+            in_step = 0
+            step_has_shell_bash = 0
+            step_run_line = 0
+            step_run_content = ""
+            step_name = ""
+            in_run_block = 0
+            run_block_indent = -1
+            next
+        }
+
+        # If we are inside a job, check for windows
+        in_job {
+            cur_indent = indent_of($0)
+
+            # Left of job indent means we left the job
+            if (cur_indent <= job_indent && $0 !~ /^[[:space:]]*$/) {
+                # Before leaving, check any pending step
+                if (in_step && step_run_content != "" && !step_has_shell_bash) {
+                    if (match(step_run_content, /\$\(|\$\{|\[\[|;;|>&[0-9]/) || \
+                        match(step_run_content, /if[[:space:]].*;.*then/) || \
+                        match(step_run_content, /esac/) || \
+                        match(step_run_content, /set -[euo]/) || \
+                        match(step_run_content, /[|][[:space:]]*(grep|sed|awk) /) || \
+                        match(step_run_content, /\/dev\/null/)) {
+                        label = (step_name != "") ? step_name : ("line " step_run_line)
+                        print "Step \"" label "\" uses Bash syntax without shell: bash (line " step_run_line ")"
+                    }
+                }
+                in_job = 0
+                next
+            }
+
+            # Detect matrix os with windows
+            if ($0 ~ /os:.*windows/) {
+                is_windows_job = 1
+            }
+            # Detect runs-on with windows
+            if ($0 ~ /runs-on:.*windows/) {
+                is_windows_job = 1
+            }
+
+            # Detect steps: section
+            if ($0 ~ /^[[:space:]]*steps:/) {
+                in_steps = 1
+                next
+            }
+
+            if (!in_steps || !is_windows_job) next
+
+            # Detect step start (- name: or - uses: or - run:)
+            if ($0 ~ /^[[:space:]]*- /) {
+                # Flush previous step
+                if (in_step && step_run_content != "" && !step_has_shell_bash) {
+                    if (match(step_run_content, /\$\(|\$\{|\[\[|;;|>&[0-9]/) || \
+                        match(step_run_content, /if[[:space:]].*;.*then/) || \
+                        match(step_run_content, /esac/) || \
+                        match(step_run_content, /set -[euo]/) || \
+                        match(step_run_content, /[|][[:space:]]*(grep|sed|awk) /) || \
+                        match(step_run_content, /\/dev\/null/)) {
+                        label = (step_name != "") ? step_name : ("line " step_run_line)
+                        print "Step \"" label "\" uses Bash syntax without shell: bash (line " step_run_line ")"
+                    }
+                }
+
+                in_step = 1
+                step_has_shell_bash = 0
+                step_run_line = 0
+                step_run_content = ""
+                step_name = ""
+                in_run_block = 0
+                run_block_indent = -1
+                step_indent = indent_of($0)
+
+                # Extract step name if present
+                if ($0 ~ /- name:/) {
+                    step_name = $0
+                    sub(/.*- name:[[:space:]]*/, "", step_name)
+                }
+                # Check if this line itself is a run: line
+                if ($0 ~ /run:[[:space:]]*[|>]/) {
+                    in_run_block = 1
+                    step_run_line = NR
+                    run_block_indent = -1
+                } else if ($0 ~ /run:[[:space:]]*[^|>]/) {
+                    step_run_line = NR
+                    step_run_content = $0
+                    sub(/.*run:[[:space:]]*/, "", step_run_content)
+                }
+                next
+            }
+
+            if (!in_step) next
+
+            # Inside a step: collect properties
+            if (!in_run_block) {
+                if ($0 ~ /^[[:space:]]*name:/) {
+                    step_name = $0
+                    sub(/.*name:[[:space:]]*/, "", step_name)
+                }
+                if ($0 ~ /^[[:space:]]*shell:[[:space:]]*bash/) {
+                    step_has_shell_bash = 1
+                }
+                if ($0 ~ /^[[:space:]]*run:[[:space:]]*[|>]/) {
+                    in_run_block = 1
+                    step_run_line = NR
+                    run_block_indent = -1
+                } else if ($0 ~ /^[[:space:]]*run:[[:space:]]*[^|>]/) {
+                    step_run_line = NR
+                    step_run_content = $0
+                    sub(/.*run:[[:space:]]*/, "", step_run_content)
+                }
+            } else {
+                # Collecting multiline run block content
+                if ($0 ~ /^[[:space:]]*$/) {
+                    # blank line inside run block
+                    step_run_content = step_run_content "\n"
+                    next
+                }
+                if (run_block_indent < 0) {
+                    run_block_indent = indent_of($0)
+                }
+                if (indent_of($0) < run_block_indent && $0 !~ /^[[:space:]]*$/) {
+                    # Exited the run block; this line is a new step property
+                    in_run_block = 0
+                    # Process this line as a step property
+                    if ($0 ~ /^[[:space:]]*shell:[[:space:]]*bash/) {
+                        step_has_shell_bash = 1
+                    }
+                } else {
+                    step_run_content = step_run_content "\n" $0
+                }
+            }
+        }
+
+        END {
+            # Flush last step of last job
+            if (in_step && step_run_content != "" && !step_has_shell_bash && is_windows_job) {
+                if (match(step_run_content, /\$\(|\$\{|\[\[|;;|>&[0-9]/) || \
+                    match(step_run_content, /if[[:space:]].*;.*then/) || \
+                    match(step_run_content, /esac/) || \
+                    match(step_run_content, /set -[euo]/) || \
+                    match(step_run_content, /[|][[:space:]]*(grep|sed|awk) /) || \
+                    match(step_run_content, /\/dev\/null/)) {
+                    label = (step_name != "") ? step_name : ("line " step_run_line)
+                    print "Step \"" label "\" uses Bash syntax without shell: bash (line " step_run_line ")"
+                }
+            }
+        }
+    ' "$workflow")
+done
+
+if [ "$WINDOWS_BASH_VIOLATIONS" -eq 0 ]; then
+    success "All Windows job steps with Bash syntax specify shell: bash"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "=========================================="

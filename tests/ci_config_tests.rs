@@ -9234,3 +9234,415 @@ fn detect_non_bash_syntax(lines: &[&str]) -> Option<String> {
 
     None
 }
+
+#[test]
+fn test_windows_matrix_jobs_specify_shell_bash_for_bash_syntax() {
+    // Regression guard: CI workflows that run on Windows via a matrix with
+    // `os:` containing a `windows-*` variant must specify `shell: bash` on
+    // any `run:` step that uses Bash-specific syntax.  Without this, the
+    // step executes under PowerShell (the Windows default), which cannot
+    // interpret `$(...)`, `${...}`, `[[`, or other Bash constructs.
+    //
+    // Background: The "Read Rust toolchain" steps originally used `$(grep …)`
+    // without `shell: bash`, causing failures on Windows runners.
+
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
+
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
+
+    // Bash-specific syntax patterns that are incompatible with PowerShell.
+    // Each pattern is checked against every line in a `run:` block.
+    fn line_has_bash_syntax(line: &str) -> bool {
+        let trimmed = line.trim();
+
+        // Skip empty lines and pure comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+
+        // $(...) command substitution (but not ${{ ... }} which is GitHub Actions expression)
+        if trimmed.contains("$(") && !trimmed.contains("${{") {
+            return true;
+        }
+
+        // ${...} parameter expansion (but not ${{ ... }})
+        // Look for ${ not followed by {
+        let bytes = trimmed.as_bytes();
+        for i in 0..bytes.len().saturating_sub(2) {
+            if bytes[i] == b'$' && bytes[i + 1] == b'{' && bytes[i + 2] != b'{' {
+                return true;
+            }
+        }
+
+        // [[ ... ]] Bash conditional
+        if trimmed.starts_with("[[") || trimmed.contains(" [[ ") || trimmed.contains("]] ") {
+            return true;
+        }
+
+        // Bash array syntax: VAR=( or ${VAR[@]} or ${VAR[*]}
+        if trimmed.contains("=(") || trimmed.contains("[@]}") || trimmed.contains("[*]}") {
+            return true;
+        }
+
+        // Bash built-ins that don't exist in PowerShell
+        let bash_builtins = [
+            "set -e", "set -u", "set -o", "set -x", "set -euo", "set -eux", "shopt ", "export ",
+            "source ",
+        ];
+        for builtin in &bash_builtins {
+            if trimmed.starts_with(builtin) {
+                return true;
+            }
+        }
+
+        // Bash-specific redirections: 2>&1, &>, /dev/null
+        if trimmed.contains("/dev/null") || trimmed.contains("2>&1") || trimmed.contains("&>") {
+            return true;
+        }
+
+        // Pipe through grep/sed/awk (common Bash idiom, not PowerShell)
+        if trimmed.contains("| grep ")
+            || trimmed.contains("| sed ")
+            || trimmed.contains("| awk ")
+            || trimmed.contains("|grep ")
+            || trimmed.contains("|sed ")
+            || trimmed.contains("|awk ")
+        {
+            return true;
+        }
+
+        false
+    }
+
+    let mut violations = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Phase 1: Identify jobs whose matrix includes a windows OS variant.
+        //
+        // We look for the `os: [...]` line inside `matrix:` sections.  The
+        // typical YAML structure is:
+        //
+        //     jobs:
+        //       job_key:            (indent 2)
+        //         strategy:         (indent 4)
+        //           matrix:         (indent 6)
+        //             os: [...]     (indent 8)
+        //         steps:            (indent 4)
+        //           - name: ...     (indent 6)
+        //             run: ...      (indent 8)
+        //             shell: bash   (indent 8)
+        //
+        // We track the current job key by watching for non-indented keys under
+        // `jobs:`.
+
+        // Collect job keys that include windows in their matrix os list.
+        let mut windows_jobs: Vec<String> = Vec::new();
+        let mut in_jobs = false;
+        let mut current_job: Option<String> = None;
+
+        for line in &lines {
+            let trimmed = line.trim();
+
+            // Detect the `jobs:` section
+            if trimmed == "jobs:" {
+                in_jobs = true;
+                continue;
+            }
+
+            if !in_jobs {
+                continue;
+            }
+
+            // A non-empty line at indent 0 that isn't `jobs:` ends the jobs section
+            if !line.starts_with(' ') && !trimmed.is_empty() {
+                break;
+            }
+
+            // Job key: exactly 2 spaces of indent, ending with ':'
+            let indent = line.len() - line.trim_start().len();
+            if indent == 2 && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                current_job = Some(trimmed.trim_end_matches(':').to_string());
+                continue;
+            }
+
+            // Look for os: [...] lines that contain a windows variant
+            if trimmed.starts_with("os:") && trimmed.contains("windows") {
+                if let Some(ref job) = current_job {
+                    windows_jobs.push(job.clone());
+                }
+            }
+        }
+
+        if windows_jobs.is_empty() {
+            continue;
+        }
+
+        // Phase 2: For each windows-matrix job, scan its steps for `run:`
+        // blocks that contain Bash syntax but lack `shell: bash`.
+
+        in_jobs = false;
+        current_job = None;
+        let mut in_steps = false;
+        let mut current_step_name = String::new();
+        let mut current_step_has_shell_bash = false;
+        let mut current_step_run_lines: Vec<(usize, String)> = Vec::new();
+        let mut in_run_block = false;
+        let mut run_block_indent: usize = 0;
+
+        // We need to collect all step info then check at step boundaries.
+        // A step boundary is a new `- ` at the step indent level, or end of
+        // the steps section.
+
+        let check_step = |step_name: &str,
+                          has_shell_bash: bool,
+                          run_lines: &[(usize, String)],
+                          job_key: &str,
+                          filename: &str,
+                          violations: &mut Vec<String>| {
+            if run_lines.is_empty() || has_shell_bash {
+                return;
+            }
+
+            let bash_lines: Vec<&(usize, String)> = run_lines
+                .iter()
+                .filter(|(_, line)| line_has_bash_syntax(line))
+                .collect();
+
+            if bash_lines.is_empty() {
+                return;
+            }
+
+            let examples: Vec<String> = bash_lines
+                .iter()
+                .take(3)
+                .map(|(line_num, content)| format!("    line {}: {}", line_num, content.trim()))
+                .collect();
+
+            let step_desc = if step_name.is_empty() {
+                "unnamed step".to_string()
+            } else {
+                format!("step \"{step_name}\"")
+            };
+
+            violations.push(format!(
+                "{filename}: job \"{job_key}\", {step_desc} uses Bash syntax without \
+                     `shell: bash`:\n{}",
+                examples.join("\n")
+            ));
+        };
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Detect the `jobs:` section
+            if trimmed == "jobs:" {
+                in_jobs = true;
+                continue;
+            }
+
+            if !in_jobs {
+                continue;
+            }
+
+            // End of jobs section
+            if !line.starts_with(' ') && !trimmed.is_empty() {
+                // Flush last step
+                if let Some(ref job) = current_job {
+                    if windows_jobs.contains(job) {
+                        check_step(
+                            &current_step_name,
+                            current_step_has_shell_bash,
+                            &current_step_run_lines,
+                            job,
+                            &filename,
+                            &mut violations,
+                        );
+                    }
+                }
+                break;
+            }
+
+            // Job key at indent 2
+            if indent == 2 && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                // Flush last step from previous job
+                if let Some(ref job) = current_job {
+                    if windows_jobs.contains(job) {
+                        check_step(
+                            &current_step_name,
+                            current_step_has_shell_bash,
+                            &current_step_run_lines,
+                            job,
+                            &filename,
+                            &mut violations,
+                        );
+                    }
+                }
+                current_job = Some(trimmed.trim_end_matches(':').to_string());
+                in_steps = false;
+                in_run_block = false;
+                current_step_run_lines.clear();
+                current_step_name.clear();
+                current_step_has_shell_bash = false;
+                continue;
+            }
+
+            // Only process steps for windows-matrix jobs
+            let is_windows_job = current_job
+                .as_ref()
+                .map(|j| windows_jobs.contains(j))
+                .unwrap_or(false);
+            if !is_windows_job {
+                continue;
+            }
+
+            // Detect `steps:` section (indent 4)
+            if indent == 4 && trimmed == "steps:" {
+                in_steps = true;
+                continue;
+            }
+
+            if !in_steps {
+                continue;
+            }
+
+            // End of steps section: a line at indent <= 4 that is a new job-level key
+            if indent <= 4
+                && !trimmed.is_empty()
+                && trimmed != "steps:"
+                && !trimmed.starts_with('-')
+            {
+                // Flush last step
+                if let Some(ref job) = current_job {
+                    check_step(
+                        &current_step_name,
+                        current_step_has_shell_bash,
+                        &current_step_run_lines,
+                        job,
+                        &filename,
+                        &mut violations,
+                    );
+                }
+                in_steps = false;
+                in_run_block = false;
+                current_step_run_lines.clear();
+                current_step_name.clear();
+                current_step_has_shell_bash = false;
+                continue;
+            }
+
+            // New step: `- name:` or `- uses:` at indent 6
+            if indent == 6 && trimmed.starts_with("- ") {
+                // Flush the previous step
+                if let Some(ref job) = current_job {
+                    check_step(
+                        &current_step_name,
+                        current_step_has_shell_bash,
+                        &current_step_run_lines,
+                        job,
+                        &filename,
+                        &mut violations,
+                    );
+                }
+                current_step_run_lines.clear();
+                current_step_has_shell_bash = false;
+                in_run_block = false;
+
+                // Extract step name if present
+                if let Some(name) = trimmed.strip_prefix("- name:") {
+                    current_step_name = name.trim().to_string();
+                } else {
+                    current_step_name.clear();
+                }
+                continue;
+            }
+
+            // Step-level properties at indent 8
+            if indent == 8 && !in_run_block {
+                if let Some(name) = trimmed.strip_prefix("name:") {
+                    current_step_name = name.trim().to_string();
+                }
+
+                if trimmed == "shell: bash" {
+                    current_step_has_shell_bash = true;
+                }
+
+                // Single-line run: value
+                if let Some(rest) = trimmed.strip_prefix("run:") {
+                    let value = rest.trim();
+                    if value == "|" || value == "|-" || value == "|+" {
+                        // Multi-line block follows
+                        in_run_block = true;
+                        run_block_indent = 8;
+                    } else if !value.is_empty() {
+                        // Single-line run
+                        current_step_run_lines.push((line_idx + 1, value.to_string()));
+                    }
+                }
+                continue;
+            }
+
+            // Collect multi-line run block content
+            if in_run_block {
+                if indent <= run_block_indent && !trimmed.is_empty() {
+                    // End of multi-line block
+                    in_run_block = false;
+                    // Re-process this line as a step property
+                    if indent == 8 {
+                        if trimmed == "shell: bash" {
+                            current_step_has_shell_bash = true;
+                        }
+                        if let Some(name) = trimmed.strip_prefix("name:") {
+                            current_step_name = name.trim().to_string();
+                        }
+                    }
+                } else if !trimmed.is_empty() {
+                    current_step_run_lines.push((line_idx + 1, line.to_string()));
+                }
+            }
+        }
+
+        // Flush final step at end of file
+        if let Some(ref job) = current_job {
+            if windows_jobs.contains(job) {
+                check_step(
+                    &current_step_name,
+                    current_step_has_shell_bash,
+                    &current_step_run_lines,
+                    job,
+                    &filename,
+                    &mut violations,
+                );
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Windows-matrix jobs have `run:` steps with Bash syntax but no `shell: bash`:\n\n\
+         {}\n\n\
+         Why this matters:\n\
+         - Windows runners default to PowerShell, which cannot interpret Bash syntax\n\
+         - Patterns like `$(...)`, `${{...}}`, `[[`, `set -euo pipefail` will fail\n\
+         - This caused CI failures in \"Read Rust toolchain\" steps\n\n\
+         Fix: add `shell: bash` to each flagged step, e.g.:\n\
+         \n\
+         \x20   - name: My Step\n\
+         \x20     shell: bash\n\
+         \x20     run: |\n\
+         \x20       CHANNEL=$(grep ... | sed ...)\n",
+        violations.join("\n\n")
+    );
+}
