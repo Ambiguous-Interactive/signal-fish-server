@@ -179,6 +179,9 @@ Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, READ
 - **Lychee self-scans `.toml` files** -- use `--exclude-path .lychee.toml` or add exclusions.
 - **TOML/JSON/YAML "before/after" examples need separate blocks** -- duplicate table headers
   (e.g., two `[dependencies]`) in one block is invalid and will fail CI validation.
+- **Avoid accidental setext headings in skills** -- keep a blank line between
+  `**Trigger**: ...` and a following `---` separator, or markdownlint will treat
+  the trigger line as a heading (MD003/MD026).
 
 ---
 

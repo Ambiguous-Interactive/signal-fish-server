@@ -2150,6 +2150,52 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
 }
 
 #[test]
+fn test_pre_commit_hook_fails_closed_when_markdownlint_is_unavailable() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains(
+            "check_fail \"Markdown linting\" \"markdownlint-cli2 unavailable or wrong pinned version.\"",
+        ),
+        ".githooks/pre-commit must fail closed when markdownlint-cli2 is unavailable for staged markdown.\n\
+         This prevents CI-only markdownlint failures.\n\
+         Missing fail-closed handling in {}",
+        hook_path.display()
+    );
+
+    assert!(
+        !content.contains(
+            "check_skip \"Markdown linting\" \"pinned markdownlint-cli2 unavailable (see .markdownlint-version)\"",
+        ),
+        ".githooks/pre-commit should not skip markdown linting when the pinned tool is unavailable.\n\
+         Skipping allows markdown regressions to reach CI."
+    );
+}
+
+#[test]
+fn test_run_local_ci_fails_closed_when_markdownlint_is_unavailable() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains(
+            "FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)",
+        ),
+        "scripts/run-local-ci.sh must mark markdown as FAIL when markdownlint-cli2 is unavailable.\n\
+         Missing fail-closed markdown status in {}",
+        script_path.display()
+    );
+
+    assert!(
+        !content.contains("SKIP${NC}: markdown (pinned markdownlint-cli2 unavailable)"),
+        "scripts/run-local-ci.sh should not skip markdown checks when pinned markdownlint-cli2 is unavailable."
+    );
+}
+
+#[test]
 fn test_markdownlint_install_guidance_includes_local_and_global_options() {
     let root = repo_root();
     let guidance_files = [
@@ -2378,6 +2424,46 @@ fn test_permissions_guidance_avoids_incorrect_default_claim() {
         !content.contains("defaults to full write access"),
         "github-actions-workflow-config.md should not claim omitted permissions always default to full write access.\n\
          Repo/org defaults vary; guidance should recommend explicit least-privilege permissions."
+    );
+}
+
+#[test]
+fn test_skill_trigger_lines_do_not_form_accidental_setext_headings() {
+    // Regression guard: a Trigger line immediately followed by `---` is parsed
+    // as a setext heading, causing markdownlint MD003/MD026 failures.
+    let root = repo_root();
+    let skills_dir = root.join(".llm/skills");
+    let files = find_files_with_extension(&skills_dir, "md", &[]);
+    assert!(
+        !files.is_empty(),
+        "Expected at least one markdown skill file in {}",
+        skills_dir.display()
+    );
+
+    let mut violations = Vec::new();
+    for file in files {
+        let content = read_file(&file);
+        let lines: Vec<&str> = content.lines().collect();
+
+        for idx in 0..lines.len().saturating_sub(1) {
+            let current = lines[idx].trim_start();
+            let next = lines[idx + 1].trim();
+            if current.starts_with("**Trigger**:") && next == "---" {
+                violations.push(format!(
+                    "{}:{}: `**Trigger**:` is immediately followed by `---`.\n\
+                     Add a blank line between them to avoid accidental setext headings.",
+                    file.display(),
+                    idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Skill trigger formatting violations detected:\n\n{}\n\n\
+         Fix by adding a blank line between `**Trigger**:` and a subsequent `---` separator.",
+        violations.join("\n\n")
     );
 }
 

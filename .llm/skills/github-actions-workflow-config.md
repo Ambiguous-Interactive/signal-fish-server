@@ -7,6 +7,7 @@
   filters, permissions, smoke tests | Infrastructure
 -->
 **Trigger**: When configuring workflow triggers, permissions, link checkers, smoke tests, or path filters.
+
 ---
 
 ## When to Use
@@ -103,8 +104,7 @@ See [testing guide](skills/testing-core-patterns.md)
 
 ## 2. Case-Sensitive Filesystem Issues
 
-Windows/macOS are case-insensitive but Linux CI is case-sensitive. `Skills/foo.md`
-works locally but fails in CI if the actual path is `skills/foo.md`.
+Windows/macOS may ignore case locally, but Linux CI does not: `Skills/foo.md` fails if the real path is `skills/foo.md`.
 
 **Prevention:** Use consistent lowercase paths, verify Markdown links and Rust `mod`
 statements match actual file case, test on Linux before pushing.
@@ -157,7 +157,7 @@ exit 1
 
 ## 4. Minimal Permissions (Security)
 
-Always declare permissions explicitly (defaults vary by org settings). Start with `contents: read` and grant only what is needed:
+Declare permissions explicitly (org defaults vary). Start with `contents: read` and grant only what is needed:
 
 ```yaml
 permissions:
@@ -166,7 +166,7 @@ permissions:
   pull-requests: write # Only if workflow comments on PRs
 ```
 
-For GHCR publish workflows, derive `images:` from repository context (owner/name) via step outputs instead of hard-coded org paths.
+For GHCR publish workflows, derive `images:` from repository context via step outputs instead of hard-coded org paths.
 
 ---
 
