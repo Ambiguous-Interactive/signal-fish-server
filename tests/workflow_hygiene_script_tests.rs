@@ -293,3 +293,58 @@ jobs:
         "Expected remediation guidance to include owner/repo@ref syntax.\nOutput:\n{output}"
     );
 }
+
+#[test]
+fn test_workflow_hygiene_fails_on_commit_hash_action_reference() {
+    let workflow = r#"name: Commit Hash Uses
+on: [push]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - run: echo ok
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("commit-hash-uses.yml", workflow);
+
+    assert!(
+        !success,
+        "Workflow hygiene script must fail on commit-hash action refs.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("Action uses commit hash ref (disallowed)"),
+        "Expected commit-hash policy violation message.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_accepts_explicit_version_action_references() {
+    let workflow = r#"name: Versioned Uses
+on: [push]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: docker/build-push-action@v6.19.2
+      - run: echo ok
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("versioned-uses.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed when remote actions use explicit version tags.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("Action uses commit hash ref (disallowed)"),
+        "Did not expect commit-hash policy violations for explicit version tags.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("Action uses invalid ref format"),
+        "Did not expect invalid-ref errors for explicit version tags.\nOutput:\n{output}"
+    );
+}

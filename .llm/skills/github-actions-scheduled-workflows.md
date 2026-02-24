@@ -114,10 +114,10 @@ jobs:
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v6.0.2
 
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+        uses: EmbarkStudios/cargo-deny-action@v2.0.15
         with:
           arguments: --all-features
 ```
