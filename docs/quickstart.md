@@ -236,14 +236,15 @@ application needs.
 ## Step 5: Ready Up and Start
 
 Signal Fish Server includes a lobby system that tracks when players are
-ready. Once all players send `PlayerReady`, the lobby transitions through
+ready. `PlayerReady` is a toggle (ready/unready for the sending player). Once
+all players are ready at the same time, the lobby transitions through
 `Lobby` to `Finalized` and the server sends a `GameStarting` event
 with peer connection information.
 
 After both clients have joined the room, send the ready signal:
 
 ```rust
-// Signal that this player is ready
+// Toggle this player's ready state (first send marks ready)
 let ready_msg = serde_json::json!({
     "type": "PlayerReady"
 });
@@ -274,7 +275,8 @@ while let Some(Ok(Message::Text(text))) = ws.next().await {
 }
 ```
 
-When both players send `PlayerReady`, you will see the lobby transition:
+When both players send `PlayerReady` once (becoming ready), you will see the
+lobby transition:
 
 ```text
 Lobby state: lobby

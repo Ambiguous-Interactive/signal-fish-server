@@ -660,8 +660,9 @@ let msg = ClientMessage::GameData {
 
 ## Ready Up Flow
 
-Players signal readiness by sending `PlayerReady`. The lobby transitions
-through three states: `waiting`, `lobby`, and `finalized`.
+Players toggle readiness by sending `PlayerReady`. In `lobby` state, the first
+send marks a player ready and the next send marks them unready. The lobby
+transitions through three states: `waiting`, `lobby`, and `finalized`.
 
 ```rust
 use futures_util::{SinkExt, StreamExt};
@@ -748,11 +749,11 @@ async fn ready_up_and_wait(
         >,
     >,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Send ready signal
+    // Toggle ready state (first send typically marks ready)
     let ready = ClientMessage::PlayerReady;
     let json = serde_json::to_string(&ready)?;
     write.send(Message::Text(json)).await?;
-    println!("Marked as ready");
+    println!("Toggled ready state");
 
     // Listen for lobby state transitions
     while let Some(Ok(Message::Text(text))) = read.next().await
@@ -887,8 +888,8 @@ After the window expires, you must join as a new player.
 
 ## Spectator Mode
 
-Spectators observe a room without participating. They receive all game data
-but cannot mark ready or send game data.
+Spectators observe a room without participating. They receive room events
+but cannot send `PlayerReady` (cannot toggle readiness) or `GameData`.
 
 ```rust
 use futures_util::{SinkExt, StreamExt};
@@ -1469,7 +1470,7 @@ impl SignalFishClient {
         self.send(&ClientMessage::GameData { data }).await
     }
 
-    /// Signal readiness to start the game.
+    /// Toggle this player's readiness in lobby state.
     pub async fn ready_up(
         &self,
     ) -> Result<(), Box<dyn std::error::Error>> {

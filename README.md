@@ -254,16 +254,39 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
 | `Authenticate`     | Authenticate with app ID (required when auth is enabled)                         |
-| `JoinRoom`         | Join an existing room by game name and room code                                 |
+| `JoinRoom`         | Join or create a room (implicit create with no `room_code`, explicit join/create with `room_code`) |
 | `GameData`         | Send arbitrary game data to other players in the room                            |
 | `AuthorityRequest` | Request or release game authority                                                |
-| `PlayerReady`      | Signal lobby readiness before game start                                         |
+| `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
 | `ProvideConnectionInfo` | Share peer connection information for P2P establishment                     |
 | `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`       |
 | `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
 | `LeaveSpectator`   | Leave spectator mode                                                             |
 | `LeaveRoom`        | Leave the current room                                                           |
 | `Ping`             | Heartbeat ping (server responds with `Pong`)                                     |
+
+#### `JoinRoom` Behavior (Implicit vs Explicit)
+
+`JoinRoom` is the only room-entry message. The server resolves it using
+`game_name` and `room_code`:
+
+1. Omit `room_code`: create a new room with a generated room code.
+2. Provide `room_code` and room exists for that `game_name`: join that room.
+3. Provide `room_code` and no room exists for that `game_name`: create a new
+   room with that room code.
+
+In all successful cases, the caller receives `RoomJoined`. When joining an
+existing room, current members also receive `PlayerJoined`.
+
+#### `PlayerReady` Behavior
+
+`PlayerReady` has no payload and works as a toggle:
+
+1. Send once in `lobby` state: you become ready.
+2. Send again in `lobby` state: you become unready.
+3. Each toggle broadcasts `LobbyStateChanged` with `ready_players` and
+   `all_ready`.
+4. When `all_ready` becomes `true`, the server sends `GameStarting`.
 
 ### Server Messages
 
@@ -291,7 +314,7 @@ Client                              Server
   |<-- Authenticated ------------------|
   |<-- ProtocolInfo -------------------|
   |                                    |
-  |--- JoinRoom ---------------------->|
+  |--- JoinRoom (no room_code) ------->|
   |<-- RoomJoined ---------------------|
   |                                    |
   |         (other client joins)       |
