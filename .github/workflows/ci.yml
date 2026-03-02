@@ -373,7 +373,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v7.0.0
         with:
           name: coverage-report
           path: lcov.info
@@ -435,7 +435,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: success()
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v7.0.0
         with:
           name: sbom-cyclonedx-${{ github.sha }}
           path: sbom.cdx.json
