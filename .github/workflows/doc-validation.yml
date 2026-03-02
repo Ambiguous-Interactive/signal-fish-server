@@ -779,7 +779,7 @@ jobs:
       - uses: actions/checkout@v6.0.2
       # Use lychee for comprehensive link checking (external + internal + anchors)
       - name: Check all links with lychee
-        uses: lycheeverse/lychee-action@v2.7.0
+        uses: lycheeverse/lychee-action@v2.8.0
         with:
           # Override bundled lychee version (v0.21.0) to include hidden-file matcher
           # fixes from v0.22.0+ and keep behavior aligned with link-check.yml.
