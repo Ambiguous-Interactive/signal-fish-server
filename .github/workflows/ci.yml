@@ -106,7 +106,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.68.16
+        uses: taiki-e/install-action@v2.68.25
         with:
           tool: cargo-nextest
 
@@ -361,7 +361,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.68.16
+        uses: taiki-e/install-action@v2.68.25
         with:
           tool: cargo-llvm-cov
 
@@ -426,7 +426,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.8.2
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.68.16
+        uses: taiki-e/install-action@v2.68.25
         with:
           tool: cargo-sbom
 
