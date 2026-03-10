@@ -154,10 +154,20 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t CHANGED_FILES < changed-files.txt
-          if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
-            ./scripts/check-doc-consistency.sh --changed-files "${CHANGED_FILES[@]}"
+          # Automated dependency-bump PRs (e.g. dependabot) are not expected to
+          # include a CHANGELOG entry; skip only the changelog gate for them.
+          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
+            if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
+              ./scripts/check-doc-consistency.sh --skip-changelog-gate --changed-files "${CHANGED_FILES[@]}"
+            else
+              ./scripts/check-doc-consistency.sh --skip-changelog-gate
+            fi
           else
-            ./scripts/check-doc-consistency.sh
+            if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
+              ./scripts/check-doc-consistency.sh --changed-files "${CHANGED_FILES[@]}"
+            else
+              ./scripts/check-doc-consistency.sh
+            fi
           fi
 
   deny:
