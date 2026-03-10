@@ -40,7 +40,7 @@ rkyv = { version = "0.8", default-features = true, features = [
 ] }
 
 # Identifiers & time
-uuid = { version = "1.21", features = ["v4", "serde"] }
+uuid = { version = "1.22", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 semver = "1.0"
 
