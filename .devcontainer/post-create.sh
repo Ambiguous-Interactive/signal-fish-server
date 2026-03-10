@@ -19,7 +19,7 @@ echo "[setup] Build cache warmed."
 
 # Make project scripts executable
 if [ -d "scripts" ]; then
-    chmod +x scripts/*.sh
+    find scripts -name '*.sh' -exec chmod +x {} +
     echo "[setup] Made scripts/*.sh executable."
 fi
 

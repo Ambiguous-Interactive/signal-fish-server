@@ -198,7 +198,7 @@ use axum_test::TestServer;
 #[tokio::test]
 async fn test_health_endpoint() {
     let app = create_app();
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app);
     let response = server.get("/health").await;
     response.assert_status_ok();
 }

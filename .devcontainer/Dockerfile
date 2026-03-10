@@ -31,7 +31,14 @@ RUN cargo install --locked \
     cargo-watch \
     cargo-expand \
     cargo-llvm-cov \
-    cargo-nextest
+    cargo-nextest \
+    && rm -rf /usr/local/cargo/registry/{cache,src}
+
+# Fix ownership so the non-root "vscode" user (set via remoteUser in
+# devcontainer.json) can write to the cargo registry and rustup toolchains.
+# Without this, cargo fetch / cargo check in postCreateCommand fails with
+# "Permission denied" because the directories above were populated by root.
+RUN chown -R vscode:vscode /usr/local/cargo /usr/local/rustup
 
 # Mold linker configuration — works on both x86_64 and aarch64
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang

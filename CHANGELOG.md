@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bumped `axum-test` dev-dependency from 18.7.0 to 19.1.1 (adapted test code for 19.x API changes).
 - Bumped `tempfile` dev-dependency from 3.25.0 to 3.26.0.
 - Bumped `tokio` from 1.49.0 to 1.50.0.
+- Updated all transitive dependencies to latest compatible versions.
 
 ## [0.2.0] - 2026-02-24
 
