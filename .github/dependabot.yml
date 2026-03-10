@@ -38,7 +38,7 @@ updates:
     rebase-strategy: "auto"
     # Use distinct prefix to differentiate from third_party dependencies
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "chore"
       include: "scope"
     # Higher limit for primary dependencies as they're critical to monitor
     open-pull-requests-limit: 10
