@@ -11,6 +11,7 @@
 #   ./scripts/check-doc-consistency.sh
 #   ./scripts/check-doc-consistency.sh --staged
 #   ./scripts/check-doc-consistency.sh --changed-files <file1> <file2> ...
+#   ./scripts/check-doc-consistency.sh [--skip-changelog-gate] [--staged|--changed-files ...]
 
 set -euo pipefail
 
@@ -32,6 +33,7 @@ fi
 ERRORS=0
 WARNINGS=0
 CHANGED_MODE=none
+SKIP_CHANGELOG_GATE=0
 
 declare -a CHANGED_FILES=()
 
@@ -59,6 +61,13 @@ Usage:
   ./scripts/check-doc-consistency.sh
   ./scripts/check-doc-consistency.sh --staged
   ./scripts/check-doc-consistency.sh --changed-files <file1> <file2> ...
+  ./scripts/check-doc-consistency.sh --skip-changelog-gate [--staged|--changed-files ...]
+
+Options:
+  --skip-changelog-gate  Skip the changelog-required gate (check 3). All other
+                         consistency checks still run. Intended for automated
+                         PRs (e.g. dependabot) where changelog entries are not
+                         expected.
 USAGE
 }
 
@@ -67,6 +76,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --staged)
             CHANGED_MODE=staged
+            shift
+            ;;
+        --skip-changelog-gate)
+            SKIP_CHANGELOG_GATE=1
             shift
             ;;
         --changed-files)
@@ -389,7 +402,9 @@ collect_changed_files() {
 
 collect_changed_files
 
-if [ "$CHANGED_MODE" != "none" ]; then
+if [ "$SKIP_CHANGELOG_GATE" -eq 1 ]; then
+    action_info "Changelog gate skipped (--skip-changelog-gate)"
+elif [ "$CHANGED_MODE" != "none" ]; then
     action_info "Evaluating changelog gate for changed files mode: $CHANGED_MODE"
 
     local_has_changelog=0
