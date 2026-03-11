@@ -56,6 +56,7 @@ if git config --local core.hooksPath "$DESIRED" 2>/dev/null; then
     log "   9. Markdown linting (when .md files change)"
     log "  10. Link checking (when .md files change, warning only)"
     log "  11. Documentation + changelog consistency (version sync/protocol drift)"
+    log "  12. Dockerfile shell portability (bash-isms in RUN, find without -type f)"
     log ""
     log "Additional push-time checks run when policy files change:"
     log "  - Workflow hygiene script (scripts/check-workflow-hygiene.sh)"

@@ -32,7 +32,7 @@ RUN cargo install --locked \
     cargo-expand \
     cargo-llvm-cov \
     cargo-nextest \
-    && rm -rf /usr/local/cargo/registry/{cache,src}
+    && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
 
 # Fix ownership so the non-root "vscode" user (set via remoteUser in
 # devcontainer.json) can write to the cargo registry and rustup toolchains.

@@ -33,12 +33,20 @@
 
 ## Non-Internal Change Gate
 
-Treat these as internal-only by default:
+The following paths are classified as internal (no CHANGELOG entry required):
 
-- `.github/`, `.githooks/`, `scripts/`, `tests/`, `test-fixtures/`, `.llm/`
-- `Cargo.lock`, lint/config dotfiles, generated/build artifacts
+- **Dot-directories:** `.github/`, `.githooks/`, `.devcontainer/`, `.config/`, `.vscode/`, `.claude/`, `.llm/`
+- **Dev/build directories:** `scripts/`, `tests/`, `test-fixtures/`, `target/`, `progress/`
+- **Standalone files:** `Cargo.lock`, `PLAN.md`, `AGENTS.md`, `pre-push.txt`, `logs_*.zip`
+- **Lint/tool configs:** `.markdownlint*`, `.lychee.toml`, `.lycheecache`, `.typos.toml`, `.yamllint.yml`
+- **VCS/Docker ignores:** `.gitignore`, `.dockerignore`
+- **Build tool configs:** `clippy.toml`, `deny.toml`, `tarpaulin.toml`, `rust-toolchain.toml`, `mkdocs.yml`, `requirements-docs.txt`
 
 Any changed file outside internal-only scope requires a `CHANGELOG.md` update.
+
+When adding a new internal path category, update both `is_internal_path()` in
+`scripts/check-doc-consistency.sh` and the test fixture at
+`.github/test-fixtures/test-doc-consistency.sh`.
 
 ---
 

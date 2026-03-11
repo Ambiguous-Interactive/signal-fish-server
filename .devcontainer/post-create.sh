@@ -19,8 +19,8 @@ echo "[setup] Build cache warmed."
 
 # Make project scripts executable
 if [ -d "scripts" ]; then
-    find scripts -name '*.sh' -exec chmod +x {} +
-    echo "[setup] Made scripts/*.sh executable."
+    find scripts -type f -name '*.sh' -exec chmod +x {} +
+    echo "[setup] Made scripts/**/*.sh executable."
 fi
 
 # Install git hooks if the script exists

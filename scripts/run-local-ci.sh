@@ -239,7 +239,13 @@ if [ -f scripts/check-readme-badges.sh ]; then
         scripts/check-readme-badges.sh README.md
 fi
 
-# Check 13: Documentation + changelog consistency
+# Check 13: Dockerfile shell portability
+if [ -f scripts/check-dockerfile-portability.sh ]; then
+    run_check_quiet "dockerfile-portability" "Checking Dockerfile shell portability" \
+        scripts/check-dockerfile-portability.sh --quiet
+fi
+
+# Check 14: Documentation + changelog consistency
 if [ -f scripts/check-doc-consistency.sh ]; then
     run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
         scripts/check-doc-consistency.sh

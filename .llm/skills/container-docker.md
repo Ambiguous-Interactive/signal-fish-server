@@ -64,26 +64,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
 | **Layer cache** | Copy `Cargo.toml` + `Cargo.lock` before source for dependency caching |
 | **Single binary** | COPY only the compiled binary — no source, no build artifacts |
 
-### Scratch Alternative (Fully Static)
-
-For a statically linked binary (using musl):
-
-```dockerfile
-FROM rust:1.88-bookworm AS builder
-RUN rustup target add x86_64-unknown-linux-musl
-WORKDIR /app
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY src/ src/
-RUN cargo build --release --locked --target x86_64-unknown-linux-musl
-
-FROM scratch
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/signal-fish-server /server
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-USER 65534:65534
-EXPOSE 3536
-ENTRYPOINT ["/server"]
-```
-
 ---
 
 ## Container Hardening
@@ -149,39 +129,6 @@ services:
     image: signal-fish-server:${{ github.sha }}
     format: spdx-json
     output-file: sbom.spdx.json
-```
-
----
-
-## CI/CD Image Pipeline (Full)
-
-```yaml
-jobs:
-  build-and-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Cargo audit
-        run: cargo audit --deny warnings
-      - name: Cargo deny
-        run: cargo deny check
-      - name: Build image
-        run: docker build -t signal-fish-server:${{ github.sha }} .
-      - name: Scan with Trivy
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          image-ref: signal-fish-server:${{ github.sha }}
-          exit-code: 1
-          severity: CRITICAL,HIGH
-      - name: Sign image with Cosign
-        uses: sigstore/cosign-installer@v3
-      - run: cosign sign --yes ghcr.io/example/signal-fish-server@${{ steps.push.outputs.digest }}
-      - name: Push with digest tag
-        id: push
-        run: |
-          docker tag signal-fish-server:${{ github.sha }} \
-            ghcr.io/example/signal-fish-server:${{ github.sha }}
-          docker push ghcr.io/example/signal-fish-server:${{ github.sha }}
 ```
 
 ---
@@ -277,9 +224,55 @@ fn test_docker_default_config_passes_validation() {
 
 ---
 
+## Dockerfile Shell Portability
+
+Docker `RUN` commands use `/bin/sh` (dash on Debian) by default, **not bash**.
+Bash-specific features silently fail or produce unexpected results.
+
+### Common Pitfalls
+
+```dockerfile
+# ❌ WRONG: Brace expansion is bash-only — /bin/sh treats it as a literal string
+RUN rm -rf /path/{cache,src}
+
+# ✅ CORRECT: Spell out each path explicitly
+RUN rm -rf /path/cache /path/src
+```
+
+```dockerfile
+# ❌ WRONG: [[ ]] is bash-only
+RUN if [[ -f /app/config.json ]]; then echo "found"; fi
+
+# ✅ CORRECT: Use single brackets (POSIX)
+RUN if [ -f /app/config.json ]; then echo "found"; fi
+```
+
+### Validation
+
+Run `scripts/check-dockerfile-portability.sh` to catch bash-isms in Dockerfiles.
+This check runs automatically in the pre-commit hook when Dockerfiles are staged.
+
+### If You Need Bash
+
+If a RUN command genuinely requires bash, set the shell explicitly:
+
+```dockerfile
+SHELL ["/bin/bash", "-c"]
+RUN echo "Now bash features like {a,b} work"
+```
+
+Or use `bash -c` for a single command:
+
+```dockerfile
+RUN bash -c 'rm -rf /path/{cache,src}'
+```
+
+---
+
 ## Related Skills
 
 - [deployment-strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
 - [container-security](./container-security.md) — Secrets management, immutable tags
 - [msrv-management](./msrv-management.md) — Matching Dockerfile Rust version to MSRV
 - [dependency-management](./dependency-management-cargo.md) — `cargo audit`, `cargo deny`
+- [shell-scripting-patterns](./shell-scripting-patterns.md) — Shell portability, POSIX vs bash
