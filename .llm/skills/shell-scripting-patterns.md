@@ -261,6 +261,11 @@ echo "Made scripts/**/*.sh executable."
 
 ---
 
+Quiet/silent flag behavior lives in [Validation Script Output Modes](./validation-script-output-modes.md);
+use that when adding `--quiet` or deciding which messages must still print on warnings or failures.
+
+---
+
 ## Prevention Checklist
 
 - [ ] Uses `set -euo pipefail`; all variables quoted: `"$var"`
@@ -271,16 +276,7 @@ echo "Made scripts/**/*.sh executable."
 - [ ] No bash-isms in `/bin/sh` scripts or Dockerfile `RUN` commands
 - [ ] `find` commands use `-type f` when targeting files
 - [ ] Log messages match actual search scope (recursive vs. non-recursive)
-
----
-
-## Lessons Learned
-
-- `IFS=':::'` splits on each char independently (equivalent to `IFS=':'`). Use single-char delimiters.
-- Use `#!/usr/bin/env bash` not `#!/bin/bash` (portable across macOS, Linux, BSD).
-- `grep -c` with fallback: use `COUNT=$(grep -c ... 2>/dev/null) || COUNT=0` not `$(grep -c ... || echo "0")`.
-- Run `scripts/validate-ci.sh` before pushing (AWK, shellcheck, markdown links).
-- `cargo test` takes one positional TESTNAME; use `-- test_a test_b` for multiple filters.
+- [ ] `--quiet` suppresses banner, info, success, and summary — never errors or warnings
 
 ---
 
@@ -289,4 +285,4 @@ echo "Made scripts/**/*.sh executable."
 - [AWK Text Processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
 - [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
-- [Defensive Programming](./defensive-programming.md) — Error handling principles
+- [Validation Script Output Modes](./validation-script-output-modes.md) — `--quiet` behavior and failure-summary rules

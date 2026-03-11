@@ -68,6 +68,7 @@
 - [Nightly Rust Toolchain for CI Tools](./toolchain-nightly.md)
 - [Rust Toolchain Pinning and MSRV Testing](./toolchain-pinning.md)
 - [Update Changelog in Keep a Changelog Format](./update-changelog-keep-a-changelog.md)
+- [Validation Script Output Modes](./validation-script-output-modes.md)
 - [Version Sync and Changelog Gates](./version-sync-and-changelog-gates.md)
 - [Web Service Security — Input Validation and Authentication](./web-service-security-auth.md)
 - [Web Service Security — Hardening and Operational Security](./web-service-security-hardening.md)

@@ -377,9 +377,11 @@ check_dockerfile() {
 # Main
 # -----------------------------------------------------------------------
 
-echo -e "${BOLD}${BLUE}Dockerfile Shell Portability Checker${NC}"
-echo "Repository: $REPO_ROOT"
-echo ""
+if [ "$QUIET" = false ]; then
+    echo -e "${BOLD}${BLUE}Dockerfile Shell Portability Checker${NC}"
+    echo "Repository: $REPO_ROOT"
+    echo ""
+fi
 
 # Find Dockerfiles to check
 dockerfiles=()
@@ -403,27 +405,33 @@ fi
 
 if [ ${#dockerfiles[@]} -eq 0 ]; then
     info "No Dockerfiles found in the repository"
-    echo ""
-    echo "=========================================="
-    printf '%b%bALL PASSED%b: No Dockerfiles to check\n' "$BOLD" "$GREEN" "$NC"
+    if [ "$QUIET" = false ]; then
+        echo ""
+        echo "=========================================="
+        printf '%b%bALL PASSED%b: No Dockerfiles to check\n' "$BOLD" "$GREEN" "$NC"
+    fi
     exit 0
 fi
 
 info "Found ${#dockerfiles[@]} Dockerfile(s)"
-echo ""
+if [ "$QUIET" = false ]; then
+    echo ""
+fi
 
 for dockerfile in "${dockerfiles[@]}"; do
     FILES_CHECKED=$((FILES_CHECKED + 1))
     check_dockerfile "$dockerfile"
-    echo ""
+    if [ "$QUIET" = false ]; then
+        echo ""
+    fi
 done
 
 # -----------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------
 
-echo "=========================================="
 if [ "$ERRORS" -gt 0 ]; then
+    echo "=========================================="
     printf '%b%bFAILED%b: %d error(s), %d warning(s), %d passed (%d file(s) checked)\n' \
         "$BOLD" "$RED" "$NC" "$ERRORS" "$WARNINGS" "$CHECKS_PASSED" "$FILES_CHECKED"
     echo ""
@@ -432,12 +440,13 @@ if [ "$ERRORS" -gt 0 ]; then
     echo "  SHELL [\"/bin/bash\", \"-c\"]"
     echo "before the RUN commands that require bash."
     exit 1
-elif [ "$WARNINGS" -gt 0 ]; then
-    printf '%b%bPASSED with warnings%b: %d warning(s), %d passed (%d file(s) checked)\n' \
-        "$BOLD" "$YELLOW" "$NC" "$WARNINGS" "$CHECKS_PASSED" "$FILES_CHECKED"
-    exit 0
-else
-    printf '%b%bALL PASSED%b: %d check(s) passed (%d file(s) checked)\n' \
-        "$BOLD" "$GREEN" "$NC" "$CHECKS_PASSED" "$FILES_CHECKED"
-    exit 0
+elif [ "$QUIET" = false ]; then
+    echo "=========================================="
+    if [ "$WARNINGS" -gt 0 ]; then
+        printf '%b%bPASSED with warnings%b: %d warning(s), %d passed (%d file(s) checked)\n' \
+            "$BOLD" "$YELLOW" "$NC" "$WARNINGS" "$CHECKS_PASSED" "$FILES_CHECKED"
+    else
+        printf '%b%bALL PASSED%b: %d check(s) passed (%d file(s) checked)\n' \
+            "$BOLD" "$GREEN" "$NC" "$CHECKS_PASSED" "$FILES_CHECKED"
+    fi
 fi

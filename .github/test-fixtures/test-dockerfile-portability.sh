@@ -282,6 +282,52 @@ else
     TESTS_PASSED=$((TESTS_PASSED + 1))
 fi
 
+# --- --quiet suppresses banner and summary for passing files ---
+echo ""
+echo "--- --quiet output suppression tests ---"
+
+# --quiet should produce zero output for a clean Dockerfile
+clean_dockerfile="FROM debian:bookworm
+RUN apt-get update && apt-get install -y curl"
+echo "$clean_dockerfile" > "$TEMP_DIR/Dockerfile"
+quiet_output=$("$CHECKER" --quiet --files "$TEMP_DIR/Dockerfile" 2>&1)
+if [ -z "$quiet_output" ]; then
+    echo -e "${GREEN}[PASS]${NC} --quiet produces no output for clean Dockerfile"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}[FAIL]${NC} --quiet produced unexpected output for clean Dockerfile"
+    echo "  Output: $quiet_output"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# --quiet should still show errors for failing Dockerfile
+bad_dockerfile="FROM debian:bookworm
+RUN rm -rf /path/{cache,src}"
+echo "$bad_dockerfile" > "$TEMP_DIR/Dockerfile"
+quiet_error_output=$("$CHECKER" --quiet --files "$TEMP_DIR/Dockerfile" 2>&1) || true
+if [ -n "$quiet_error_output" ]; then
+    echo -e "${GREEN}[PASS]${NC} --quiet still shows errors for failing Dockerfile"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}[FAIL]${NC} --quiet suppressed error output for failing Dockerfile"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# --quiet should still show warnings and exit 0
+warn_dockerfile="FROM debian:bookworm
+RUN find /usr -name '*.so' -exec ls {} +"
+echo "$warn_dockerfile" > "$TEMP_DIR/Dockerfile"
+quiet_warn_exit=0
+quiet_warn_output=$("$CHECKER" --quiet --files "$TEMP_DIR/Dockerfile" 2>&1) || quiet_warn_exit=$?
+if echo "$quiet_warn_output" | grep -qi "WARN" && [ "$quiet_warn_exit" -eq 0 ]; then
+    echo -e "${GREEN}[PASS]${NC} --quiet still shows warnings and exits 0"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}[FAIL]${NC} --quiet warning test failed (exit=$quiet_warn_exit)"
+    echo "  Output: $quiet_warn_output"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
 echo ""
 echo "=========================================="
 if [ "$TESTS_FAILED" -gt 0 ]; then
