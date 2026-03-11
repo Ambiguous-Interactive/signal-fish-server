@@ -89,8 +89,10 @@ fn test_ci_workflow_runs_doc_consistency_check_with_changed_files() {
         "ci.yml must define a doc consistency job or step."
     );
     assert!(
-        workflow.contains("check-doc-consistency.sh") && workflow.contains("--changed-files"),
-        "ci.yml must invoke scripts/check-doc-consistency.sh with --changed-files for PR/push diff-aware changelog gating."
+        workflow.lines().any(|line| {
+            line.contains("check-doc-consistency.sh") && line.contains("--changed-files")
+        }),
+        "ci.yml must have a line that invokes check-doc-consistency.sh with --changed-files for PR/push diff-aware changelog gating."
     );
 }
 

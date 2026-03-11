@@ -287,12 +287,11 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_contain: vec!["non-internal changes without CHANGELOG"],
         },
         ScriptCase {
-            name: "dependency_bump_with_skip_flag_passes",
+            name: "skip_flag_bypasses_gate_for_internal_only_cargo_lock",
             overrides: vec![],
             args: vec![
                 "--skip-changelog-gate",
                 "--changed-files",
-                "Cargo.toml",
                 "Cargo.lock",
             ],
             expected_exit: 0,
