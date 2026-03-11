@@ -96,7 +96,7 @@ rustls-pki-types = { version = "1.14", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.26"
+tempfile = "3.27"
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 futures = "0.3"
