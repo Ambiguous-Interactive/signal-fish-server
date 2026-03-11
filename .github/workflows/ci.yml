@@ -149,25 +149,62 @@ jobs:
           echo "Changed files count: $COUNT"
           cat changed-files.txt || true
 
+      - name: Detect dependency-only changes
+        id: dep-detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          SKIP_CHANGELOG="false"
+
+          # Skip for dependabot actor (direct dependabot PRs)
+          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
+            SKIP_CHANGELOG="true"
+          fi
+
+          # Skip if all non-internal changed files are only Cargo.toml/Cargo.lock
+          # AND the commit message looks like a dependency bump (handles squash-merged
+          # dependabot PRs where the actor is the human who merged).
+          if [ "$SKIP_CHANGELOG" = "false" ] && [ -f changed-files.txt ]; then
+            NON_INTERNAL="false"
+            while IFS= read -r f; do
+              # SYNC: Internal path patterns below must match is_internal_path() in scripts/check-doc-consistency.sh.
+              # Cargo.toml, Cargo.lock, and CHANGELOG.md are additionally non-triggering for dependency detection.
+              case "$f" in
+                Cargo.toml|Cargo.lock) ;;
+                .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
+                scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
+                .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
+                .gitignore|.dockerignore) ;;
+                clippy.toml|deny.toml|tarpaulin.toml|rust-toolchain.toml|mkdocs.yml|requirements-docs.txt) ;;
+                CHANGELOG.md) ;;
+                *) NON_INTERNAL="true"; break ;;
+              esac
+            done < changed-files.txt
+
+            if [ "$NON_INTERNAL" = "false" ]; then
+              COMMIT_MSG=$(git log -1 --format='%s' "${{ github.sha }}")
+              if echo "$COMMIT_MSG" | grep -qiE '(^bump |^chore\(deps\)|dependabot|dependency.bump|update.*dependencies)'; then
+                SKIP_CHANGELOG="true"
+              fi
+            fi
+          fi
+
+          echo "skip_changelog=$SKIP_CHANGELOG" >> "$GITHUB_OUTPUT"
+          echo "Dependency-only skip: $SKIP_CHANGELOG"
+
       - name: Run documentation/changelog consistency checks
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t CHANGED_FILES < changed-files.txt
-          # Automated dependency-bump PRs (e.g. dependabot) are not expected to
-          # include a CHANGELOG entry; skip only the changelog gate for them.
-          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
-            if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
-              ./scripts/check-doc-consistency.sh --skip-changelog-gate --changed-files "${CHANGED_FILES[@]}"
-            else
-              ./scripts/check-doc-consistency.sh --skip-changelog-gate
-            fi
+          SKIP_FLAG=""
+          if [ "${{ steps.dep-detect.outputs.skip_changelog }}" = "true" ]; then
+            SKIP_FLAG="--skip-changelog-gate"
+          fi
+          if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
+            ./scripts/check-doc-consistency.sh $SKIP_FLAG --changed-files "${CHANGED_FILES[@]}"
           else
-            if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
-              ./scripts/check-doc-consistency.sh --changed-files "${CHANGED_FILES[@]}"
-            else
-              ./scripts/check-doc-consistency.sh
-            fi
+            ./scripts/check-doc-consistency.sh $SKIP_FLAG
           fi
 
   deny:

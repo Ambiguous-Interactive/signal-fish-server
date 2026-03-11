@@ -257,6 +257,55 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_contain: vec!["No non-internal changed files detected"],
         },
         ScriptCase {
+            name: "skip_changelog_gate_passes_with_non_internal_changes",
+            overrides: vec![],
+            args: vec![
+                "--skip-changelog-gate",
+                "--changed-files",
+                "src/main.rs",
+            ],
+            expected_exit: 0,
+            must_contain: vec!["Changelog gate skipped"],
+        },
+        ScriptCase {
+            name: "skip_changelog_gate_passes_with_cargo_toml_change",
+            overrides: vec![],
+            args: vec![
+                "--skip-changelog-gate",
+                "--changed-files",
+                "Cargo.toml",
+                "Cargo.lock",
+            ],
+            expected_exit: 0,
+            must_contain: vec!["Changelog gate skipped"],
+        },
+        ScriptCase {
+            name: "cargo_toml_is_non_internal_without_skip_flag",
+            overrides: vec![],
+            args: vec!["--changed-files", "Cargo.toml"],
+            expected_exit: 1,
+            must_contain: vec!["non-internal changes without CHANGELOG"],
+        },
+        ScriptCase {
+            name: "dependency_bump_with_skip_flag_passes",
+            overrides: vec![],
+            args: vec![
+                "--skip-changelog-gate",
+                "--changed-files",
+                "Cargo.toml",
+                "Cargo.lock",
+            ],
+            expected_exit: 0,
+            must_contain: vec!["Changelog gate skipped"],
+        },
+        ScriptCase {
+            name: "cargo_lock_is_internal",
+            overrides: vec![],
+            args: vec!["--changed-files", "Cargo.lock"],
+            expected_exit: 0,
+            must_contain: vec!["No non-internal changed files detected"],
+        },
+        ScriptCase {
             name: "fails_on_stale_protocol_token_in_readme",
             overrides: vec![
                 (

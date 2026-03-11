@@ -376,6 +376,10 @@ validate_protocol_sample_reference ".llm/context.md" "code-samples/protocol/v2-s
 # ---------------------------------------------------------------------------
 # 4) Changelog-required gate for non-internal changed files
 # ---------------------------------------------------------------------------
+
+# SYNC: Internal path patterns must match the dep-detect step in .github/workflows/ci.yml.
+# The CI step additionally treats Cargo.toml/Cargo.lock/CHANGELOG.md as non-triggering
+# for dependency-only detection; those are intentionally NOT internal here.
 is_internal_path() {
     local path="$1"
     case "$path" in
