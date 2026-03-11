@@ -1033,7 +1033,14 @@ STAGED_DOCKERFILES=$(git diff --cached --name-only --diff-filter=ACM | grep -iE 
 
 if [ -n "$STAGED_DOCKERFILES" ]; then
     if [ -x scripts/check-dockerfile-portability.sh ]; then
-        if scripts/check-dockerfile-portability.sh --quiet > /dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        if (
+            # Preserve spaces in staged file paths by splitting only on newlines.
+            IFS='
+'
+            set -f
+            scripts/check-dockerfile-portability.sh --quiet --files $STAGED_DOCKERFILES
+        ) > /dev/null 2>&1; then
             check_pass "Dockerfile portability"
         else
             check_fail "Dockerfile portability" "Run './scripts/check-dockerfile-portability.sh' and fix reported issues."

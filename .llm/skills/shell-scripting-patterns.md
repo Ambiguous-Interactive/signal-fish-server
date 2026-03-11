@@ -237,6 +237,16 @@ find scripts -name '*.sh' -exec chmod +x {} +
 find scripts -type f -name '*.sh' -exec chmod +x {} +
 ```
 
+**When validating `find` commands, check for `-type f` specifically — not just any `-type` flag:**
+
+```bash
+# ❌ WRONG: Matches -type d, -type l, etc. — still not restricting to files
+if ! echo "$cmd" | grep -qE 'find.*-type[[:space:]]'; then warn "missing -type f"; fi
+
+# ✅ CORRECT: Matches only -type f
+if ! echo "$cmd" | grep -qE 'find.*-type[[:space:]]+f([[:space:]]|$)'; then warn "missing -type f"; fi
+```
+
 Also ensure log messages match the actual search scope:
 
 ```bash

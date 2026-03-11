@@ -37,6 +37,37 @@ performance, debugging hook failures, or validating hook permissions in CI.
 
 ---
 
+## Scope Matching: Staged Detection vs. Script Execution
+
+When a pre-commit check gates on staged files, the script invocation MUST also
+be scoped to those same files. Detecting staged files but running the checker
+on ALL repository files is a scope mismatch bug.
+
+**Pattern (CORRECT):**
+
+```bash
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.ext$' || true)
+if [ -n "$STAGED_FILES" ]; then
+    # shellcheck disable=SC2086
+    scripts/check-foo.sh --files $STAGED_FILES
+fi
+```
+
+**Anti-pattern (WRONG):**
+
+```bash
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.ext$' || true)
+if [ -n "$STAGED_FILES" ]; then
+    scripts/check-foo.sh  # Runs on ALL files, not just staged!
+fi
+```
+
+**Exceptions:** Cross-file consistency checks (MSRV sync, workflow hygiene) legitimately
+need to scan all relevant files because inconsistency between staged and unstaged files
+is itself a bug.
+
+---
+
 ## Canonical Code Samples
 
 - Full pre-commit reference implementation:

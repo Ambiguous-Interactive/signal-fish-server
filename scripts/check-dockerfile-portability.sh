@@ -15,8 +15,9 @@
 #   7. SHELL directive verification when bash features are present
 #
 # Usage:
-#   ./scripts/check-dockerfile-portability.sh           # Check all Dockerfiles
-#   ./scripts/check-dockerfile-portability.sh --quiet   # Suppress success messages
+#   ./scripts/check-dockerfile-portability.sh                    # Check all Dockerfiles
+#   ./scripts/check-dockerfile-portability.sh --quiet            # Suppress success messages
+#   ./scripts/check-dockerfile-portability.sh --files FILE...    # Check specific files only
 #
 # Exit codes:
 #   0 = All Dockerfiles pass portability checks
@@ -54,25 +55,41 @@ fi
 # -----------------------------------------------------------------------
 
 QUIET=false
+FILES_MODE=false
+declare -a FILE_LIST=()
 
-for arg in "$@"; do
-    case "$arg" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --quiet|-q)
             QUIET=true
+            shift
+            ;;
+        --files)
+            FILES_MODE=true
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --files requires at least one file argument"
+                exit 2
+            fi
+            while [ "$#" -gt 0 ]; do
+                FILE_LIST+=("$1")
+                shift
+            done
             ;;
         --help|-h)
-            echo "Usage: $0 [--quiet]"
+            echo "Usage: $0 [--quiet] [--files FILE...]"
             echo ""
             echo "Options:"
-            echo "  --quiet    Suppress success messages"
-            echo "  --help     Show this help"
+            echo "  --quiet         Suppress success messages"
+            echo "  --files FILE... Check only the specified files (must be last option)"
+            echo "  --help          Show this help"
             echo ""
-            echo "Checks all Dockerfiles in the repository for shell portability"
+            echo "Checks Dockerfiles in the repository for shell portability"
             echo "issues in RUN commands."
             exit 0
             ;;
         *)
-            echo "Unknown option: $arg"
+            echo "Unknown option: $1"
             echo "Use --help for usage information"
             exit 2
             ;;
@@ -246,7 +263,9 @@ check_find_missing_type() {
     local file="$1" line_num="$2" cmd="$3"
     # Look for: find ... -name '*.ext' without -type f
     if echo "$cmd" | grep -qE 'find[[:space:]].*-name[[:space:]]'; then
-        if ! echo "$cmd" | grep -qE 'find[[:space:]].*-type[[:space:]]'; then
+        # Check specifically for -type f, not just any -type flag.
+        # e.g., -type d or -type l should still trigger the warning.
+        if ! echo "$cmd" | grep -qE 'find[[:space:]].*-type[[:space:]]+f([[:space:]]|$)'; then
             # Check if the -name pattern looks like a file extension
             if echo "$cmd" | grep -qE -- "-name[[:space:]]+['\"]?\*\\."; then
                 warn "$file:$line_num: find command with -name '*.ext' pattern but no -type f"
@@ -362,15 +381,25 @@ echo -e "${BOLD}${BLUE}Dockerfile Shell Portability Checker${NC}"
 echo "Repository: $REPO_ROOT"
 echo ""
 
-# Find all Dockerfiles in the repository
+# Find Dockerfiles to check
 dockerfiles=()
-while IFS= read -r -d '' df; do
-    dockerfiles+=("$df")
-done < <(find . -type f \( -name "Dockerfile" -o -name "Dockerfile.*" -o -name "*.Dockerfile" \) \
-    -not -path "./target/*" \
-    -not -path "./.git/*" \
-    -not -path "./third_party/*" \
-    -print0)
+if [ "$FILES_MODE" = true ]; then
+    for df in "${FILE_LIST[@]}"; do
+        if [ -f "$df" ]; then
+            dockerfiles+=("$df")
+        else
+            warn "File not found (skipped): $df"
+        fi
+    done
+else
+    while IFS= read -r -d '' df; do
+        dockerfiles+=("$df")
+    done < <(find . -type f \( -name "Dockerfile" -o -name "Dockerfile.*" -o -name "*.Dockerfile" \) \
+        -not -path "./target/*" \
+        -not -path "./.git/*" \
+        -not -path "./third_party/*" \
+        -print0)
+fi
 
 if [ ${#dockerfiles[@]} -eq 0 ]; then
     info "No Dockerfiles found in the repository"

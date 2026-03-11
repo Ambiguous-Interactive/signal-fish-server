@@ -86,6 +86,24 @@ assert_warns() {
     fi
 }
 
+assert_no_warn() {
+    local test_name="$1"
+    local dockerfile="$2"
+    local unwanted_pattern="$3"
+
+    echo "$dockerfile" > "$TEMP_DIR/Dockerfile"
+    local output
+    output=$("$CHECKER" --quiet 2>&1) || true
+    if echo "$output" | grep -qiE "$unwanted_pattern"; then
+        echo -e "${RED}[FAIL]${NC} $test_name: found unwanted pattern '$unwanted_pattern'"
+        echo "  Output: $output"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    else
+        echo -e "${GREEN}[PASS]${NC} $test_name"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    fi
+}
+
 # Override the checker to search in TEMP_DIR
 cd "$TEMP_DIR"
 git init --quiet .
@@ -138,6 +156,30 @@ assert_warns "find without -type f" \
 RUN find /usr -name '*.so' -exec ls {} +" \
     "find.*-type f"
 
+# find with -type d should still warn (not restricting to regular files)
+assert_warns "find with -type d still warns" \
+    "FROM debian:bookworm
+RUN find /usr -type d -name '*.so' -exec ls {} +" \
+    "find.*-type f"
+
+# find with -type l should still warn
+assert_warns "find with -type l still warns" \
+    "FROM debian:bookworm
+RUN find /usr -type l -name '*.conf'" \
+    "find.*-type f"
+
+# find with -type f should NOT warn
+assert_no_warn "find with -type f does not warn" \
+    "FROM debian:bookworm
+RUN find /usr -type f -name '*.so' -exec ls {} +" \
+    "find.*-type f"
+
+# find with -type f at end of command (no trailing flags)
+assert_no_warn "find with -type f at end of line" \
+    "FROM debian:bookworm
+RUN find /usr -name '*.so' -type f" \
+    "find.*-type f"
+
 # --- SHELL directive suppresses errors ---
 assert_passes "SHELL bash makes brace expansion valid" \
     'FROM debian:bookworm
@@ -173,6 +215,72 @@ RUN bash -c "rm -rf /path/{cache,src}"'
 assert_passes "Dockerfile with no RUN commands" \
     "FROM debian:bookworm
 CMD [\"echo\", \"hello\"]"
+
+# --- --files flag tests ---
+echo ""
+echo "--- --files flag tests ---"
+
+# Create a clean Dockerfile in a subdirectory
+mkdir -p "$TEMP_DIR/subdir"
+echo "FROM debian:bookworm
+RUN echo hello" > "$TEMP_DIR/subdir/Dockerfile.clean"
+
+# Create a bad Dockerfile in the main dir
+echo "FROM debian:bookworm
+RUN rm -rf /path/{cache,src}" > "$TEMP_DIR/Dockerfile"
+
+# --files with a specific clean file should pass
+if output=$("$CHECKER" --quiet --files "$TEMP_DIR/subdir/Dockerfile.clean" 2>&1); then
+    echo -e "${GREEN}[PASS]${NC} --files with clean file passes"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "${RED}[FAIL]${NC} --files with clean file: expected pass"
+    echo "  Output: $output"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# --files with a bad file should fail
+if output=$("$CHECKER" --quiet --files "$TEMP_DIR/Dockerfile" 2>&1); then
+    echo -e "${RED}[FAIL]${NC} --files with bad file: expected failure"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+    echo -e "${GREEN}[PASS]${NC} --files with bad file correctly fails"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+
+# --files with no arguments should fail with exit 2
+if output=$("$CHECKER" --files 2>&1); then
+    echo -e "${RED}[FAIL]${NC} --files with no args: expected failure"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+    echo -e "${GREEN}[PASS]${NC} --files with no args correctly fails"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+
+# --files with multiple files: clean + bad should fail
+if output=$("$CHECKER" --quiet --files "$TEMP_DIR/subdir/Dockerfile.clean" "$TEMP_DIR/Dockerfile" 2>&1); then
+    echo -e "${RED}[FAIL]${NC} --files with mixed clean+bad: expected failure"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+else
+    echo -e "${GREEN}[PASS]${NC} --files with mixed clean+bad correctly fails"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
+
+# --files with nonexistent file should warn
+if output=$("$CHECKER" --quiet --files "/nonexistent/Dockerfile" 2>&1); then
+    if echo "$output" | grep -qi "not found"; then
+        echo -e "${GREEN}[PASS]${NC} --files with nonexistent file warns"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}[FAIL]${NC} --files with nonexistent file: expected warning"
+        echo "  Output: $output"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+else
+    # Also acceptable: exit with warning
+    echo -e "${GREEN}[PASS]${NC} --files with nonexistent file warns"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+fi
 
 echo ""
 echo "=========================================="
