@@ -189,38 +189,80 @@ done
 
 ---
 
-## Real-World Example: Rust Code Block Extraction
+## 6. Shell Portability — `/bin/sh` vs `/bin/bash`
+
+**Docker RUN commands and POSIX scripts use `/bin/sh` (dash on Debian), not bash.**
+Bash-specific features silently fail or behave differently under `/bin/sh`.
+
+### Brace Expansion Does Not Work in `/bin/sh`
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
+# ❌ WRONG: Brace expansion is a bash-ism — /bin/sh ignores it silently
+rm -rf /path/{cache,src}          # Removes literal "{cache,src}" or nothing
 
-TEMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TEMP_DIR"' EXIT
-echo "0 0 0 0" > "$TEMP_DIR/counters"  # total validated skipped failed
-
-# AWK extracts Rust code blocks as NUL-delimited records
-awk '
-  /^```[Rr]ust/ { in_block=1; start=NR; content=""; next }
-  /^```$/ && in_block { printf "%s:::%s%c",start,content,0; in_block=0; next }
-  in_block { content = (content=="" ? $0 : content "\n" $0) }
-' "$@" | while IFS= read -r -d '' record; do
-  block_start="${record%%:::*}"; content="${record#*:::}"
-  read -r total validated skipped failed < "$TEMP_DIR/counters"
-  total=$((total + 1))
-  if echo "$content" | rustfmt --check --edition 2021 >/dev/null 2>&1; then
-    validated=$((validated + 1))
-  else
-    failed=$((failed + 1))
-    echo "ERROR: line $block_start: Invalid Rust code"
-  fi
-  echo "$total $validated $skipped $failed" > "$TEMP_DIR/counters"
-done
-
-read -r total validated skipped failed < "$TEMP_DIR/counters"
-echo "Summary: total=$total validated=$validated skipped=$skipped failed=$failed"
-[ "$failed" -eq 0 ]
+# ✅ CORRECT: Use explicit paths
+rm -rf /path/cache /path/src      # Works in all POSIX shells
 ```
+
+This is especially dangerous in Dockerfiles, where `RUN` uses `/bin/sh` by default:
+
+```dockerfile
+# ❌ WRONG: Brace expansion won't work — cargo registry not cleaned
+RUN cargo install cargo-deny && rm -rf /usr/local/cargo/registry/{cache,src}
+
+# ✅ CORRECT: Two explicit paths
+RUN cargo install cargo-deny \
+    && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
+```
+
+### Other Bash-isms That Fail in `/bin/sh`
+
+| Feature | Bash | POSIX sh Equivalent |
+|---------|------|---------------------|
+| `[[ ]]` | Double brackets | `[ ]` (single brackets) |
+| `{a,b}` | Brace expansion | Spell out each path |
+| `source file` | Source a file | `. file` |
+| `<(cmd)` | Process substitution | Temporary file or pipe |
+| `function f()` | Function keyword | `f()` (no `function` keyword) |
+| `$'...'` | ANSI-C quoting | `printf` |
+| `declare -a` | Arrays | Not available in POSIX sh |
+
+### `find` Commands — Always Use `-type f` for Files
+
+```bash
+# ❌ WRONG: Matches directories named "*.sh" too (unlikely but possible)
+find scripts -name '*.sh' -exec chmod +x {} +
+
+# ✅ CORRECT: Restrict to regular files
+find scripts -type f -name '*.sh' -exec chmod +x {} +
+```
+
+**When validating `find` commands, check for `-type f` specifically — not just any `-type` flag:**
+
+```bash
+# ❌ WRONG: Matches -type d, -type l, etc. — still not restricting to files
+if ! echo "$cmd" | grep -qE 'find.*-type[[:space:]]'; then warn "missing -type f"; fi
+
+# ✅ CORRECT: Matches only -type f
+if ! echo "$cmd" | grep -qE 'find.*-type[[:space:]]+f([[:space:]]|$)'; then warn "missing -type f"; fi
+```
+
+Also ensure log messages match the actual search scope:
+
+```bash
+# ❌ WRONG: Log says non-recursive, but find IS recursive
+find scripts -type f -name '*.sh' -exec chmod +x {} +
+echo "Made scripts/*.sh executable."
+
+# ✅ CORRECT: Log reflects recursive behavior
+find scripts -type f -name '*.sh' -exec chmod +x {} +
+echo "Made scripts/**/*.sh executable."
+```
+
+---
+
+Quiet/silent flag behavior lives in [Validation Script Output Modes](./validation-script-output-modes.md);
+use that when adding `--quiet` or deciding which messages must still print on warnings or failures.
 
 ---
 
@@ -231,53 +273,10 @@ echo "Summary: total=$total validated=$validated skipped=$skipped failed=$failed
 - [ ] Pipeline counters use file-based approach or process substitution
 - [ ] `IFS` uses single-character delimiter (not multi-char like `:::`)
 - [ ] Shellcheck passes; tested locally before pushing to CI
-
----
-
-## Lessons Learned
-
-### Bash IFS is a Character Set, Not a String
-
-`IFS=':::'` does NOT split on the string `:::`. Bash `IFS` treats each character
-independently — `IFS=':::'` is equivalent to `IFS=':'`. Use `IFS=$'\t'` (tab) or
-another single character that won't appear in content.
-
-### Use `#!/usr/bin/env bash` Not `#!/bin/bash`
-
-`/bin/bash` may not exist on all systems (e.g., FreeBSD uses `/usr/local/bin/bash`).
-`#!/usr/bin/env bash` works on macOS, Linux, and BSD.
-
-### `grep -c` Fallback Produces Multi-Line Output
-
-`grep -c` outputs "0" with exit code 1 when no matches found. Wrapping it as
-`$(grep -c ... || echo "0")` produces "0\n0" — grep emits "0", then the
-fallback echo also emits "0", both inside the same command substitution.
-
-```bash
-# BAD: Multi-line output when grep finds 0 matches
-COUNT=$(grep -c "pattern" file.txt || echo "0")
-
-# GOOD: Separate the fallback from command substitution
-COUNT=$(grep -c "pattern" file.txt 2>/dev/null) || COUNT=0
-```
-
-### Run `scripts/validate-ci.sh` Before Pushing
-
-Validates AWK syntax, shellcheck on `scripts/` and `.githooks/`, and Markdown links.
-
-### `cargo test` Accepts Only One Positional TESTNAME
-
-`cargo test [TESTNAME] [-- [ARGS]]` takes at most one positional filter before `--`.
-To run multiple named tests, pass them after the `--` separator. Forgetting `--`
-causes the second name to be rejected as an unexpected argument.
-
-```bash
-# BAD: Two positional args — second is rejected by cargo
-cargo test --test suite test_a test_b
-
-# GOOD: Multiple filters after --
-cargo test --locked --test suite -- test_a test_b
-```
+- [ ] No bash-isms in `/bin/sh` scripts or Dockerfile `RUN` commands
+- [ ] `find` commands use `-type f` when targeting files
+- [ ] Log messages match actual search scope (recursive vs. non-recursive)
+- [ ] `--quiet` suppresses banner, info, success, and summary — never errors or warnings
 
 ---
 
@@ -286,4 +285,4 @@ cargo test --locked --test suite -- test_a test_b
 - [AWK Text Processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
 - [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
-- [Defensive Programming](./defensive-programming.md) — Error handling principles
+- [Validation Script Output Modes](./validation-script-output-modes.md) — `--quiet` behavior and failure-summary rules

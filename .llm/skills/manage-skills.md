@@ -90,11 +90,13 @@ Every skill file MUST follow this structure:
 | Lines | Status | Action |
 |-------|--------|--------|
 | < 200 | Ideal | Focused, easy to consume |
-| 200–300 | Good | Acceptable for complex topics |
-| = 300 | At limit | Warnings issued; trim soon |
+| 200–294 | Good | Acceptable for complex topics |
+| 295–299 | Warning zone | Trim before adding more content |
+| = 300 | At limit | Allowed, but the next added line will fail checks |
 | > 300 | **MUST Split** | `check-llm-file-sizes.sh` blocks commit |
 
 Run the size linter: `./scripts/check-llm-file-sizes.sh`
+Aim to keep at least 2–5 lines of headroom in actively edited skills.
 
 ---
 
@@ -111,19 +113,23 @@ Run the size linter: `./scripts/check-llm-file-sizes.sh`
 2. **Inline code examples** — Under 20 lines stay in the skill file
 3. **External code examples** — Longer examples go in `.llm/code-samples/`
 4. **Reference tables** — Reusable tables go in `.llm/references/`
+5. **Prefer focused extensions** — If a new section mostly adds one distinct topic, create a new skill
+   or move the detail into an existing focused skill instead of growing a general-purpose file
 
 ---
 
 ## Editing Workflow
 
 1. Edit the skill file
-2. Run size linter: `./scripts/check-llm-file-sizes.sh`
-3. Run regression guard: `cargo test --test llm_file_size_script_tests`
-4. If > 300 lines: **STOP** — must split before committing
-5. Regenerate index: `./scripts/generate-skills-index.sh`
+2. Check related skills for overlap before adding large new sections
+3. Run size linter: `./scripts/check-llm-file-sizes.sh`
+4. Run regression guard: `cargo test --test llm_file_size_script_tests`
+5. If the file is at 300 lines, trim it before adding anything else
+6. If > 300 lines: **STOP** — must split before committing
+7. Regenerate index: `./scripts/generate-skills-index.sh`
    - Index ordering: deterministic `LC_ALL=C` sort by file path/filename (not by title)
-6. Ensure `.llm/skills/index.md` is updated and staged
-7. Verify `.llm/context.md` references `skills/index.md`
+8. Ensure `.llm/skills/index.md` is updated and staged
+9. Verify `.llm/context.md` references `skills/index.md`
 
 ---
 

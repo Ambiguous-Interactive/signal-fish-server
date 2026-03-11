@@ -379,13 +379,22 @@ validate_protocol_sample_reference ".llm/context.md" "code-samples/protocol/v2-s
 is_internal_path() {
     local path="$1"
     case "$path" in
-        .github/*|.githooks/*|scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
+        .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*)
             return 0
             ;;
-        Cargo.lock|PLAN.md|pre-push.txt|logs_*.zip)
+        scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
             return 0
             ;;
-        .markdownlint*|.lychee.toml|.typos.toml|.yamllint.yml)
+        Cargo.lock|PLAN.md|AGENTS.md|pre-push.txt|logs_*.zip)
+            return 0
+            ;;
+        .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml)
+            return 0
+            ;;
+        .gitignore|.dockerignore)
+            return 0
+            ;;
+        clippy.toml|deny.toml|tarpaulin.toml|rust-toolchain.toml|mkdocs.yml|requirements-docs.txt)
             return 0
             ;;
         *)

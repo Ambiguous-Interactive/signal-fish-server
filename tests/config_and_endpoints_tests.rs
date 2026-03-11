@@ -194,7 +194,7 @@ async fn test_health_endpoint_returns_ok() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
     let response = test_server.get("/health").await;
 
     response.assert_status_ok();
@@ -218,7 +218,7 @@ async fn test_metrics_endpoint_no_auth_required() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
 
     let response = test_server.get("/metrics").await;
     response.assert_status_ok();
@@ -249,7 +249,7 @@ async fn test_metrics_endpoint_requires_auth_when_configured() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
 
     // Without auth header, should fail
     let response = test_server.get("/metrics").await;
@@ -269,7 +269,7 @@ async fn test_metrics_endpoint_accepts_valid_bearer_token() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
 
     let response = test_server
         .get("/metrics")
@@ -297,7 +297,7 @@ async fn test_metrics_endpoint_rejects_invalid_bearer_token() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
 
     let response = test_server
         .get("/metrics")
@@ -328,7 +328,7 @@ async fn test_prometheus_metrics_endpoint_returns_text() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
 
     let response = test_server.get("/metrics/prom").await;
     response.assert_status_ok();
@@ -348,7 +348,7 @@ async fn test_websocket_route_exists() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
 
     // GET /ws without WebSocket upgrade should not return 404
     // (It will return 400 or similar since there's no upgrade header, but NOT 404)
@@ -366,7 +366,7 @@ async fn test_unknown_route_returns_404() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
     let response = test_server.get("/nonexistent").await;
     response.assert_status(axum::http::StatusCode::NOT_FOUND);
 }
@@ -380,7 +380,7 @@ async fn test_permissive_cors_with_wildcard() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
     let response = test_server.get("/health").await;
     response.assert_status_ok();
 }
@@ -390,7 +390,7 @@ async fn test_specific_cors_origins() {
     let server = create_test_server().await;
     let app = create_router("http://localhost:3000,http://example.com").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app).expect("test server should start");
+    let test_server = axum_test::TestServer::new(app);
     let response = test_server.get("/health").await;
     response.assert_status_ok();
 }

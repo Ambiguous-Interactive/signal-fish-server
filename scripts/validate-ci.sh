@@ -350,31 +350,39 @@ validate_markdown_links() {
 # Main
 # -----------------------------------------------------------------------
 
-echo -e "${BOLD}${BLUE}CI Configuration Validator${NC}"
-echo "Repository: $REPO_ROOT"
-echo ""
+if [ "$QUIET" = false ]; then
+    echo -e "${BOLD}${BLUE}CI Configuration Validator${NC}"
+    echo "Repository: $REPO_ROOT"
+    echo ""
+fi
 
 if [ "$RUN_AWK" = true ]; then
     validate_awk_files
-    echo ""
+    if [ "$QUIET" = false ]; then
+        echo ""
+    fi
 fi
 
 if [ "$RUN_SHELL" = true ]; then
     validate_shell_scripts
-    echo ""
+    if [ "$QUIET" = false ]; then
+        echo ""
+    fi
 fi
 
 if [ "$RUN_LINKS" = true ]; then
     validate_markdown_links
-    echo ""
+    if [ "$QUIET" = false ]; then
+        echo ""
+    fi
 fi
 
 # -----------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------
 
-echo "=========================================="
 if [ "$ERRORS" -gt 0 ]; then
+    echo "=========================================="
     printf '%b%bFAILED%b: %d error(s), %d warning(s), %d passed (%d checks)\n' \
         "$BOLD" "$RED" "$NC" "$ERRORS" "$WARNINGS" "$CHECKS_PASSED" "$CHECKS_RUN"
     echo ""
@@ -385,12 +393,13 @@ if [ "$ERRORS" -gt 0 ]; then
     echo "  ./scripts/validate-ci.sh --shell    # Re-check shell scripts"
     echo "  ./scripts/validate-ci.sh --links    # Re-check markdown links"
     exit 1
-elif [ "$WARNINGS" -gt 0 ]; then
-    printf '%b%bPASSED with warnings%b: %d warning(s), %d passed (%d checks)\n' \
-        "$BOLD" "$YELLOW" "$NC" "$WARNINGS" "$CHECKS_PASSED" "$CHECKS_RUN"
-    exit 0
-else
-    printf '%b%bALL PASSED%b: %d check(s) passed\n' \
-        "$BOLD" "$GREEN" "$NC" "$CHECKS_PASSED"
-    exit 0
+elif [ "$QUIET" = false ]; then
+    echo "=========================================="
+    if [ "$WARNINGS" -gt 0 ]; then
+        printf '%b%bPASSED with warnings%b: %d warning(s), %d passed (%d checks)\n' \
+            "$BOLD" "$YELLOW" "$NC" "$WARNINGS" "$CHECKS_PASSED" "$CHECKS_RUN"
+    else
+        printf '%b%bALL PASSED%b: %d check(s) passed\n' \
+            "$BOLD" "$GREEN" "$NC" "$CHECKS_PASSED"
+    fi
 fi
