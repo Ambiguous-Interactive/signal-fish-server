@@ -141,6 +141,26 @@ fn run_checker_with_fixture(files: &[(&str, String)], args: &[&str]) -> (i32, St
     )
 }
 
+fn run_checker_in_repo(args: &[&str]) -> (i32, String) {
+    let mut command = bash_command();
+    command.arg("scripts/check-llm-file-sizes.sh");
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run checker script in repo root: {e}"));
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    (
+        output.status.code().unwrap_or(-1),
+        combined.replace("\r\n", "\n"),
+    )
+}
+
 #[derive(Debug)]
 struct ScriptCase {
     name: &'static str,
@@ -169,7 +189,7 @@ fn test_llm_file_size_checker_data_driven_cases() {
             args: vec![],
             expected_exit: 0,
             must_contain: vec![
-                "[WARN] .llm/skills/near-limit.md: 300 lines",
+                "[WARN] .llm/skills/near-limit.md: 300 lines (at limit — next added line will fail)",
                 "[WARN] LLM file size check passed with 1 warning(s)",
             ],
         },
@@ -256,6 +276,20 @@ fn test_llm_file_size_checker_data_driven_cases() {
             );
         }
     }
+}
+
+#[test]
+fn test_repository_llm_file_size_checker_script_passes_on_current_repo() {
+    let (exit_code, output) = run_checker_in_repo(&[]);
+
+    assert_eq!(
+        exit_code, 0,
+        "Repository LLM size checker should pass on the current repo.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("[ERROR]"),
+        "Repository LLM size checker reported errors unexpectedly.\nOutput:\n{output}"
+    );
 }
 
 #[test]

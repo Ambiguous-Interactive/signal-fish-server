@@ -133,7 +133,12 @@ for file in "${FILES_TO_CHECK[@]}"; do
     else
         # Report files close to the limit as informational (within 10 lines)
         HEADROOM=$((MAX_LINES - LINE_COUNT))
-        if [ "$HEADROOM" -le 10 ] && [ "$LINE_COUNT" -gt 0 ]; then
+        if [ "$HEADROOM" -eq 0 ] && [ "$LINE_COUNT" -gt 0 ]; then
+            warn "$file: $LINE_COUNT lines (at limit — next added line will fail)"
+            if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+                echo "::warning file=$file::LLM file is at the ${MAX_LINES}-line limit"
+            fi
+        elif [ "$HEADROOM" -le 10 ] && [ "$LINE_COUNT" -gt 0 ]; then
             LINES_WORD="lines"; [ "$HEADROOM" -eq 1 ] && LINES_WORD="line"
             warn "$file: $LINE_COUNT lines (${HEADROOM} ${LINES_WORD} from limit — consider trimming)"
             if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
@@ -174,7 +179,7 @@ if [ "$VIOLATIONS" -gt 0 ]; then
     exit 1
 elif [ "$WARNINGS" -gt 0 ]; then
     echo -e "${YELLOW}[WARN]${NC} LLM file size check passed with $WARNINGS warning(s)"
-    echo "Files near the limit should be kept trim to prevent future violations."
+    echo "Files at or near the limit should be kept trim to prevent future violations."
     exit 0
 else
     success "All $CHECKED LLM file(s) are within the ${MAX_LINES}-line limit."
