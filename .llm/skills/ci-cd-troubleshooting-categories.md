@@ -37,6 +37,7 @@ CI Failure
     +-- Action ref failure -----> Invalid/moving action ref or policy mismatch
     +-- Docker warning ---------> BuildKit false positive on ENV variable names
     +-- PowerShell parse error -> Bash syntax without shell: bash on Windows
+    +-- Changelog gate error --> Check if dep-only change; verify actor vs commit msg detection
 ```
 
 ### Step 2: Check Recent Changes
@@ -152,6 +153,7 @@ Before committing workflow changes, verify:
 | AlignedVec alignment lost after Bytes conversion | rkyv serialize() drops alignment via into_vec() | Use serialize_aligned() for zero-copy access |
 | WSL bash has no installed distributions (Windows CI) | Command::new("bash") resolves to WSL not Git Bash | Use Git Bash path on Windows CI runners |
 | `The module 'CHANNEL=$(grep...' could not be loaded` | Bash syntax in `run:` step without `shell: bash` on Windows | Add `shell: bash` to step |
+| `Detected non-internal changes without CHANGELOG.md update: Cargo.toml` | Squash-merged Dependabot PR: actor is the human merger, not `dependabot[bot]` | Add dep-detect step: check if only Cargo.toml/Cargo.lock changed AND commit message matches dependency bump pattern |
 
 ---
 
@@ -220,6 +222,16 @@ Before committing workflow changes, verify:
 **Prevention:** Always add `shell: bash` to `run:` steps in cross-OS matrix jobs;
 hygiene script section 12 validates this; CI config test catches regressions
 
+### Category 14: Changelog Gate False Positives on Dependency Bumps
+
+**Example:** Squash-merged Dependabot PR triggers changelog gate because `Cargo.toml`
+is non-internal and the GitHub actor is the human who clicked "merge", not `dependabot[bot]`
+**Prevention:** Add dependency-only detection that checks if all non-internal changed files
+are `Cargo.toml`/`Cargo.lock` AND the commit message matches a dependency bump pattern
+(`^bump`, `^chore(deps)`, `dependabot`, `dependency.bump`, `update.*dependencies`).
+Test with data-driven commit message pattern matching. Guard `--changed-files` argument
+parsing against stray `--` flags with a rejection check.
+
 ---
 
 ## Real-World Examples
@@ -240,6 +252,19 @@ hygiene script section 12 validates this; CI config test catches regressions
 
 **Problem:** 15+ unused dependencies in Cargo.toml; no regular audit process.
 **Solution:** Added weekly CI job with `cargo machete`; removed unused deps in PR.
+
+### Example 4: Changelog Gate Blocked Dependabot Bump (RESOLVED)
+
+**Problem:** Squash-merged Dependabot PR for `tempfile 3.26.0 -> 3.27.0` triggered the
+doc consistency changelog gate. The actor was the human who merged the PR, not
+`dependabot[bot]`, so the actor-based skip did not trigger. `Cargo.toml` was flagged
+as a non-internal change requiring a CHANGELOG entry.
+**Symptoms:** `[ERROR] Detected non-internal changes without CHANGELOG.md update: Cargo.toml`
+on the `main` branch push; Docker Build cancelled as cascading failure.
+**Solution:** Added a dep-detect step in CI that checks if all non-internal changed files
+are only `Cargo.toml`/`Cargo.lock` AND the commit message matches dependency bump patterns.
+Added data-driven tests for commit message pattern matching, policy tests to guard against
+CI/script drift, and a `--changed-files` argument parsing guard.
 
 ---
 

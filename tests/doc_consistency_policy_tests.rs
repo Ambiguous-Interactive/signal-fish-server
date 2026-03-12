@@ -1,39 +1,8 @@
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn read_file(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
-}
-
-fn bash_command() -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        let candidates = [
-            Path::new("C:\\Program Files\\Git\\bin\\bash.exe"),
-            Path::new("C:\\Program Files (x86)\\Git\\bin\\bash.exe"),
-        ];
-        for path in &candidates {
-            if path.exists() {
-                return Command::new(path);
-            }
-        }
-        panic!(
-            "Git Bash not found at any known location ({candidates:?}). \
-             Cannot run bash scripts on Windows without Git Bash."
-        );
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("bash")
-    }
-}
+use common::{bash_command, read_file, repo_root};
 
 #[test]
 fn test_repository_passes_doc_consistency_script() {
@@ -89,9 +58,120 @@ fn test_ci_workflow_runs_doc_consistency_check_with_changed_files() {
         "ci.yml must define a doc consistency job or step."
     );
     assert!(
-        workflow.contains("scripts/check-doc-consistency.sh --changed-files"),
-        "ci.yml must invoke scripts/check-doc-consistency.sh with --changed-files for PR/push diff-aware changelog gating."
+        workflow.lines().any(|line| {
+            line.contains("check-doc-consistency.sh") && line.contains("--changed-files")
+        }),
+        "ci.yml must have a line that invokes check-doc-consistency.sh with --changed-files for PR/push diff-aware changelog gating."
     );
+}
+
+#[test]
+fn test_ci_workflow_has_dep_detect_step_with_commit_message_patterns() {
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        workflow.contains("Detect dependency-only changes"),
+        "ci.yml must contain a 'Detect dependency-only changes' step."
+    );
+    assert!(
+        workflow.contains("id: dep-detect"),
+        "ci.yml dependency detection step must have id 'dep-detect'."
+    );
+    assert!(
+        workflow.contains("skip_changelog"),
+        "ci.yml dep-detect step must set a skip_changelog output."
+    );
+    assert!(
+        workflow.contains("dependabot[bot]"),
+        "ci.yml dep-detect step must check for dependabot[bot] actor."
+    );
+
+    let expected_patterns = [
+        "^bump ",
+        "^chore\\(deps\\)",
+        "dependabot",
+        "dependency.bump",
+        "update.*dependencies",
+    ];
+    for pattern in expected_patterns {
+        assert!(
+            workflow.contains(pattern),
+            "ci.yml dep-detect commit message grep must include pattern '{pattern}'."
+        );
+    }
+
+    assert!(
+        workflow.contains("--skip-changelog-gate"),
+        "ci.yml must pass --skip-changelog-gate to the checker when dep-detect triggers."
+    );
+}
+
+#[test]
+fn test_ci_dep_detect_internal_paths_match_script() {
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let script = read_file(&root.join("scripts/check-doc-consistency.sh"));
+
+    // Both the CI dep-detect case statement and the script's is_internal_path()
+    // must classify the same directory prefixes as internal. Extract the
+    // directory-glob patterns from each and verify they match.
+    //
+    // The script uses patterns like: .github/*|.githooks/*|...
+    // The CI uses patterns like:     .github/*|.githooks/*|...
+    // We verify the shared directory prefixes are present in both.
+    let shared_directory_prefixes = [
+        ".github/*",
+        ".githooks/*",
+        ".devcontainer/*",
+        ".config/*",
+        ".vscode/*",
+        ".claude/*",
+        "scripts/*",
+        "tests/*",
+        "test-fixtures/*",
+        ".llm/*",
+        "target/*",
+        "progress/*",
+    ];
+
+    for prefix in shared_directory_prefixes {
+        assert!(
+            script.contains(prefix),
+            "scripts/check-doc-consistency.sh is_internal_path() must contain '{prefix}'."
+        );
+        assert!(
+            workflow.contains(prefix),
+            "ci.yml dep-detect case statement must contain '{prefix}' to stay in sync with the script."
+        );
+    }
+
+    // Standalone internal files that both should recognize.
+    let shared_standalone_files = [
+        "Cargo.lock",
+        "PLAN.md",
+        "AGENTS.md",
+        "pre-push.txt",
+        ".gitignore",
+        ".dockerignore",
+        "clippy.toml",
+        "deny.toml",
+        "tarpaulin.toml",
+        "rust-toolchain.toml",
+        "mkdocs.yml",
+        "requirements-docs.txt",
+    ];
+
+    for file in shared_standalone_files {
+        assert!(
+            script.contains(file),
+            "scripts/check-doc-consistency.sh is_internal_path() must list '{file}'."
+        );
+        assert!(
+            workflow.contains(file),
+            "ci.yml dep-detect case statement must list '{file}' to stay in sync with the script."
+        );
+    }
 }
 
 #[test]

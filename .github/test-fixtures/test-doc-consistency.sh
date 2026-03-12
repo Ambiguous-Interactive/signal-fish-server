@@ -230,6 +230,7 @@ done
 echo ""
 echo -e "${YELLOW}--- --skip-changelog-gate flag ---${NC}"
 
+assert_skip_passes "Skip gate: Cargo.toml + Cargo.lock (dependency bump scenario)" "Cargo.toml" "Cargo.lock"
 assert_skip_passes "Skip gate: non-internal without CHANGELOG" "src/main.rs"
 assert_skip_passes "Skip gate: multiple non-internal without CHANGELOG" "src/main.rs" "Cargo.toml" "README.md"
 assert_skip_passes "Skip gate: mix of internal + non-internal without CHANGELOG" "scripts/foo.sh" "src/main.rs"
