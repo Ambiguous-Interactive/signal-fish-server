@@ -10,20 +10,13 @@
 
 #![cfg(test)]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Get the repository root directory
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-/// Read a file to string, panicking with a helpful message on error
-fn read_file(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e))
-}
+use common::{read_file, repo_root};
 
 fn parse_github_slug_from_remote_url(remote_url: &str) -> Option<(String, String)> {
     let trimmed = remote_url.trim().trim_end_matches(".git");

@@ -1,50 +1,10 @@
 #![cfg(test)]
 
+mod common;
+
+use common::{bash_command, repo_root, unique_temp_dir, write_file};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn unique_temp_dir(prefix: &str) -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(&format!("signal-fish-{prefix}-"))
-        .tempdir()
-        .unwrap_or_else(|e| panic!("Failed to create temporary directory: {e}"))
-}
-
-fn write_file(path: &Path, content: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .unwrap_or_else(|e| panic!("Failed to create {}: {e}", parent.display()));
-    }
-    fs::write(path, content).unwrap_or_else(|e| panic!("Failed to write {}: {e}", path.display()));
-}
-
-fn bash_command() -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        let candidates = [
-            Path::new("C:\\Program Files\\Git\\bin\\bash.exe"),
-            Path::new("C:\\Program Files (x86)\\Git\\bin\\bash.exe"),
-        ];
-        for path in &candidates {
-            if path.exists() {
-                return Command::new(path);
-            }
-        }
-        panic!(
-            "Git Bash not found at any known location ({candidates:?}). \
-             Cannot run bash scripts on Windows without Git Bash."
-        );
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("bash")
-    }
-}
 
 fn make_lines(count: usize) -> String {
     let mut content = String::new();

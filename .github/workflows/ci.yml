@@ -186,6 +186,8 @@ jobs:
 
             if [ "$NON_INTERNAL" = "false" ]; then
               COMMIT_MSG=$(git log -1 --format='%s' "${{ github.sha }}")
+              # The `.` in `dependency.bump` is an intentional ERE wildcard so it
+              # matches both "dependency-bump" and "dependency bump" variants.
               if echo "$COMMIT_MSG" | grep -qiE '(^bump |^chore\(deps\)|dependabot|dependency.bump|update.*dependencies)'; then
                 SKIP_CHANGELOG="true"
               fi

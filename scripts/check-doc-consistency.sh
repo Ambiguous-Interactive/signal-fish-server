@@ -91,6 +91,11 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             while [ "$#" -gt 0 ]; do
+                if [[ "$1" == --* ]]; then
+                    action_error "Unexpected flag '$1' after --changed-files (flags like --skip-changelog-gate must come before --changed-files)"
+                    usage
+                    exit 2
+                fi
                 CHANGED_FILES+=("$1")
                 shift
             done
