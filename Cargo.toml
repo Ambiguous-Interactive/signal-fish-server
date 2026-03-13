@@ -83,7 +83,7 @@ rand = "0.10"
 fastrand = "2.3"
 
 # CLI
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 
 # Optional: legacy full-mesh mode
 matchbox_signaling = { version = "0.14", optional = true }
