@@ -73,7 +73,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -104,9 +104,9 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.68.25
+        uses: taiki-e/install-action@v2.68.33
         with:
           tool: cargo-nextest
 
@@ -345,7 +345,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
@@ -411,9 +411,9 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.68.25
+        uses: taiki-e/install-action@v2.68.33
         with:
           tool: cargo-llvm-cov
 
@@ -453,7 +453,7 @@ jobs:
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Run panic-policy check
         run: ./scripts/check-no-panics.sh
 
@@ -476,9 +476,9 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.68.25
+        uses: taiki-e/install-action@v2.68.33
         with:
           tool: cargo-sbom
 
