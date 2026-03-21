@@ -86,7 +86,7 @@ jobs:
           components: rustc
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Cache cargo-machete binary
         id: cache-machete
         uses: actions/cache@v5.0.3
@@ -114,7 +114,7 @@ jobs:
           toolchain: nightly-2026-02-01
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Cache cargo-udeps binary
         id: cache-udeps
         uses: actions/cache@v5.0.3
