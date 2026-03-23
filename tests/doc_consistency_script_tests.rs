@@ -150,6 +150,13 @@ struct ScriptCase {
     args: Vec<&'static str>,
     expected_exit: i32,
     must_contain: Vec<&'static str>,
+    /// Fragments that must NOT appear in the script output.
+    ///
+    /// Use error-line-specific prefixes (e.g., `"  - Cargo.lock"`) rather than
+    /// bare filenames to avoid false positives from diagnostic help text.
+    /// The `"  - "` prefix matches the error-listed file format produced by
+    /// `scripts/check-doc-consistency.sh` (see the format-stability comment
+    /// near its `is_internal_path` error loop).
     must_not_contain: Vec<&'static str>,
 }
 
@@ -367,7 +374,7 @@ fn test_doc_consistency_script_data_driven_cases() {
                 "non-internal changes without CHANGELOG",
                 "Cargo.toml",
             ],
-            must_not_contain: vec!["Cargo.lock"],
+            must_not_contain: vec!["  - Cargo.lock"],
         },
         ScriptCase {
             name: "cargo_toml_plus_src_fails_without_skip_flag",
@@ -388,6 +395,20 @@ fn test_doc_consistency_script_data_driven_cases() {
             expected_exit: 0,
             must_contain: vec!["CHANGELOG.md updated alongside non-internal changes"],
             must_not_contain: vec!["[ERROR]"],
+        },
+        // Regression test: the diagnostic help text that explains internal
+        // path patterns must never cause "  - Cargo.lock" to appear as if
+        // it were a non-internal error-listed file.
+        ScriptCase {
+            name: "cargo_toml_alone_does_not_list_lock_as_non_internal",
+            overrides: vec![],
+            args: vec!["--changed-files", "Cargo.toml"],
+            expected_exit: 1,
+            must_contain: vec![
+                "non-internal changes without CHANGELOG",
+                "Cargo.toml",
+            ],
+            must_not_contain: vec!["  - Cargo.lock"],
         },
         // ---------------------------------------------------------------
         // --skip-changelog-gate flag
@@ -473,7 +494,7 @@ fn test_doc_consistency_script_data_driven_cases() {
                 "non-internal changes without CHANGELOG",
                 "src/main.rs",
             ],
-            must_not_contain: vec!["scripts/foo.sh", ".github/workflows/ci.yml"],
+            must_not_contain: vec!["  - scripts/foo.sh", "  - .github/workflows/ci.yml"],
         },
         ScriptCase {
             name: "mix_internal_and_non_internal_with_changelog_passes",
@@ -550,13 +571,21 @@ fn test_doc_consistency_script_data_driven_cases() {
         ScriptCase {
             name: "dependabot_squash_merge_without_skip_flag_fails",
             overrides: vec![],
-            args: vec!["--changed-files", "Cargo.toml", "Cargo.lock"],
+            args: vec![
+                "--changed-files",
+                "Cargo.toml",
+                "Cargo.lock",
+                ".github/dependabot.yml",
+            ],
             expected_exit: 1,
             must_contain: vec![
                 "non-internal changes without CHANGELOG",
                 "Cargo.toml",
             ],
-            must_not_contain: vec![],
+            must_not_contain: vec![
+                "  - Cargo.lock",
+                "  - .github/dependabot.yml",
+            ],
         },
     ];
 

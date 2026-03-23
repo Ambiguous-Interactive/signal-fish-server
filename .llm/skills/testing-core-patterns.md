@@ -231,6 +231,13 @@ async fn test_no_data_race_on_room_state() {
 
 ---
 
+## Script Output Assertion Specificity
+
+For `must_not_contain` assertions, use error-line-specific prefixes (e.g.,
+`"  - Cargo.lock"`) not bare substrings. See [Pattern 18](./ci-cd-troubleshooting-scripts.md).
+
+---
+
 ## Regression Testing Discipline
 
 ```text
@@ -258,18 +265,7 @@ async fn regression_142_player_count_after_disconnect() {
 
 ## Serial Test Isolation
 
-Use `serial_test` (in dev-dependencies) for tests that share global state:
-
-```rust
-use serial_test::serial;
-
-#[tokio::test]
-#[serial]
-async fn test_database_migration() {
-    // This test modifies shared database state
-    // #[serial] ensures no parallel execution
-}
-```
+Use `serial_test` (dev-dependency) with `#[serial]` for tests sharing global state.
 
 ---
 

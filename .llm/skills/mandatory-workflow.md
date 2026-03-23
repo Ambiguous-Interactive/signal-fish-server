@@ -125,6 +125,33 @@ chore: update MSRV from 1.87.0 to 1.88.0
 
 ---
 
+## Session-End Verification (MANDATORY)
+
+Before ending any work session, **always** run the full validation gauntlet to
+ensure git hooks and CI will pass cleanly:
+
+```bash
+# 1. Core checks (must all pass)
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+
+# 2. Script-level policy checks
+scripts/check-doc-consistency.sh --staged   # or --changed-files <files>
+scripts/check-workflow-hygiene.sh
+
+# 3. Hook-specific test suites (these run during pre-push)
+cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
+cargo test --locked --test ci_config_tests
+```
+
+**Why this matters**: Git hooks run test suites that validate script output,
+internal path classifications, and CI config consistency. A change that passes
+`cargo test` alone may still fail pre-push hooks if script output or policy
+configuration changed. Always verify the full chain.
+
+---
+
 ## PR Checklist
 
 - [ ] `cargo fmt` — no formatting issues

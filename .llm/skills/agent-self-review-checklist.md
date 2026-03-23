@@ -188,6 +188,12 @@ Formatted? ─── NO ──► Run cargo fmt / npm run format
 New tests for new behavior? ─── NO ──► Add tests
     │ YES
     ▼
+Policy scripts pass? ─── NO ──► Fix doc-consistency / workflow-hygiene issues
+    │ YES
+    ▼
+Hook test suites pass? ─── NO ──► Run: cargo test --locked --test doc_consistency_*
+    │ YES                          --test ci_config_tests
+    ▼
 Deep review passed? ─── NO ──► Fix findings
     │ YES
     ▼
