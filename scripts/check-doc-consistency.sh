@@ -396,6 +396,9 @@ is_internal_path() {
         scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
             return 0
             ;;
+        docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md)
+            return 0
+            ;;
         Cargo.lock|PLAN.md|AGENTS.md|pre-push.txt|logs_*.zip)
             return 0
             ;;
@@ -448,9 +451,21 @@ elif [ "$CHANGED_MODE" != "none" ]; then
     if [ "${#NON_INTERNAL_CHANGED[@]}" -gt 0 ] && [ "$local_has_changelog" -ne 1 ]; then
         action_error "Detected non-internal changes without CHANGELOG.md update:"
         for path in "${NON_INTERNAL_CHANGED[@]}"; do
-            echo "  - $path"
+            echo "  - $path  (not matched by is_internal_path)"
         done
-        echo "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact."
+        echo ""
+        # SYNC: keep in sync with is_internal_path() above
+        echo "Internal path patterns (no changelog required):"
+        echo "  .github/* .githooks/* .devcontainer/* .config/* .vscode/* .claude/*"
+        echo "  scripts/* tests/* test-fixtures/* .llm/* target/* progress/*"
+        echo "  docs/ci-cd-* docs/test-* docs/git-hooks-* docs/hooks-* docs/pre-commit-* docs/development.md"
+        echo "  Cargo.lock PLAN.md AGENTS.md pre-push.txt logs_*.zip"
+        echo "  .markdownlint* .lychee.toml .lycheecache .typos.toml .yamllint.yml"
+        echo "  .gitignore .dockerignore"
+        echo "  clippy.toml deny.toml tarpaulin.toml rust-toolchain.toml mkdocs.yml requirements-docs.txt"
+        echo ""
+        echo "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact,"
+        echo "or add the path to is_internal_path() in scripts/check-doc-consistency.sh if truly internal."
     elif [ "${#NON_INTERNAL_CHANGED[@]}" -gt 0 ]; then
         action_ok "CHANGELOG.md updated alongside non-internal changes"
     else

@@ -74,6 +74,55 @@ reason = "Unmaintained - use std::io::IsTerminal instead (Rust 1.70+)"
 name = "instant"
 reason = "Deprecated - use std::time::Instant directly"
 
+# Proactive bans: prevent introduction of known-problematic crates
+
+# Security/TLS policy — enforce rustls-only TLS stack
+[[bans.deny]]
+name = "rustls-pemfile"
+reason = "Unmaintained (RUSTSEC-2025-0134) — use rustls-pki-types PEM parsing instead"
+
+[[bans.deny]]
+name = "openssl"
+reason = "Prefer rustls TLS stack — openssl has numerous CVEs and requires system libraries"
+
+[[bans.deny]]
+name = "openssl-sys"
+reason = "Transitive from openssl — prefer pure-Rust rustls TLS stack"
+
+[[bans.deny]]
+name = "native-tls"
+reason = "Uses platform TLS (openssl/schannel/security-framework) — prefer rustls for consistency and security"
+
+# Build system policy — prefer pure-Rust build chains
+[[bans.deny]]
+name = "gcc"
+reason = "Renamed to cc — use cc crate instead"
+
+# Unmaintained/deprecated crates — use modern replacements
+[[bans.deny]]
+name = "failure"
+reason = "Unmaintained — use thiserror or anyhow instead"
+
+[[bans.deny]]
+name = "failure_derive"
+reason = "Unmaintained — use thiserror derive instead"
+
+[[bans.deny]]
+name = "tempdir"
+reason = "Deprecated — use tempfile crate instead"
+
+[[bans.deny]]
+name = "term"
+reason = "Unmaintained — use crossterm or std::io::IsTerminal"
+
+[[bans.deny]]
+name = "net2"
+reason = "Deprecated — functionality absorbed into std::net and socket2"
+
+[[bans.deny]]
+name = "rustc-serialize"
+reason = "Deprecated — use serde instead"
+
 [sources]
 # Deny crates from unknown sources
 unknown-registry = "deny"

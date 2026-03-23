@@ -112,6 +112,43 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 - Use [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) to author entries
 - Use [review-changelog-entries](./review-changelog-entries.md) as final changelog QA gate
 
+### Changelog Gate Classification
+
+The changelog gate decides whether a PR requires a `CHANGELOG.md` entry.
+Files classified as **internal** (CI, tests, tooling) are exempt; all other
+files are **non-internal** and require a changelog entry.
+
+Classification is determined by `is_internal_path()` in
+`scripts/check-doc-consistency.sh`. The same pattern set is maintained in four
+locations for dependency-bump detection and drift prevention:
+
+| Location | Artifact |
+|------------------------------------------------|--------------------------------------------------|
+| `scripts/check-doc-consistency.sh`             | `is_internal_path()` shell function              |
+| `.github/workflows/ci.yml`                     | `dep-detect` step `case` statement               |
+| `tests/ci_config_tests.rs`                     | `SHARED_INTERNAL_PATH_PATTERNS` constant + test  |
+| `.github/test-fixtures/test-doc-consistency.sh` | `INTERNAL_PATHS` / `NON_INTERNAL_PATHS` arrays   |
+
+**All four must stay in sync.** The data-driven test in `ci_config_tests.rs`
+fails if the pattern sets in the script and CI workflow diverge.
+
+**Adding a new internal path pattern:**
+
+1. Add the pattern to `is_internal_path()` in `scripts/check-doc-consistency.sh`.
+2. Add the same pattern to the `dep-detect` case statement in `ci.yml`.
+3. Add the pattern to `SHARED_INTERNAL_PATH_PATTERNS` in `ci_config_tests.rs`.
+4. Add example paths to the test fixture's `INTERNAL_PATHS` array.
+5. Run `cargo test` — the sync test will catch any mismatch.
+
+**Pattern naming conventions for `docs/` prefixes:**
+
+- CI/infrastructure docs: `ci-cd-`, `test-`, `git-hooks-`, `hooks-`, `pre-commit-`
+- User-facing docs: product-relevant names (no special prefix)
+
+Only docs matching an infrastructure prefix are internal. A new `docs/` file
+with a product-relevant name (e.g., `docs/room-management.md`) is non-internal
+and will require a changelog entry.
+
 ---
 
 ## Markdown Quality Standards

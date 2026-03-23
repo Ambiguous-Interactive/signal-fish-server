@@ -17,7 +17,7 @@ rust-version = "1.88.0"
 [features]
 default = []
 legacy-fullmesh = ["matchbox_signaling"]
-tls = ["axum-server", "rustls", "rustls-pemfile", "rustls-pki-types"]
+tls = ["axum-server", "rustls", "rustls-pki-types"]
 
 [dependencies]
 # Async runtime
@@ -91,7 +91,6 @@ matchbox_signaling = { version = "0.14", optional = true }
 # Optional: TLS support
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 rustls = { version = "0.23", default-features = true, optional = true }
-rustls-pemfile = { version = "2.2", optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 
 [dev-dependencies]
