@@ -23,7 +23,7 @@
 ## When NOT to Use
 
 - Synchronous-only code paths with no I/O
-- Pure data structure design (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Pure data structure design (see [Rust Idioms And Patterns](./rust-idioms-and-patterns.md))
 - CPU-bound computation that should use `spawn_blocking`
 
 ---
@@ -258,7 +258,7 @@ match timeout(Duration::from_secs(5), database.query(&key)).await {
 
 ## Related Skills
 
-- [Rust-performance-optimization](./rust-performance-optimization.md) — Allocation reduction and profiling
-- [error-handling-guide](./error-handling-guide.md) — Async error propagation patterns
-- [observability-and-logging](./observability-and-logging.md) — Tracing spans for async functions
-- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — Async WebSocket handling
+- [Rust Performance Optimization](./rust-performance-optimization.md) — Allocation reduction and profiling
+- [Error Handling Guide](./error-handling-guide.md) — Async error propagation patterns
+- [Observability And Logging](./observability-and-logging.md) — Tracing spans for async functions
+- [WebSocket Protocol Patterns](./websocket-protocol-patterns.md) — Async WebSocket handling

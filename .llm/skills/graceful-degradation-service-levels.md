@@ -22,8 +22,8 @@ database failover patterns for the signaling server.
 ## When NOT to Use
 
 - Health check endpoints and Kubernetes probes
-  (see [graceful-degradation-deployment](./graceful-degradation-deployment.md))
-- Rate limiting or DDoS prevention (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
+  (see [Graceful Degradation Deployment](./graceful-degradation-deployment.md))
+- Rate limiting or DDoS prevention (see [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md))
 
 ## Rationalizations to Reject
 
@@ -269,8 +269,8 @@ async fn restore_room(redis: &redis::Client, room_id: &str) -> Result<Option<Roo
 
 ## Related Skills
 
-- [graceful-degradation-deployment](./graceful-degradation-deployment.md) — Health checks,
+- [Graceful Degradation Deployment](./graceful-degradation-deployment.md) — Health checks,
   graceful shutdown, Kubernetes deployment
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) — Rate limiting, connection caps, load shedding
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
-- [observability-and-logging](./observability-and-logging.md) — Health metrics, tracing spans, alert thresholds
+- [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md) — Rate limiting, connection caps, load shedding
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
+- [Observability And Logging](./observability-and-logging.md) — Health metrics, tracing spans, alert thresholds

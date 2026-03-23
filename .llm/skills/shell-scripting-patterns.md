@@ -282,7 +282,7 @@ use that when adding `--quiet` or deciding which messages must still print on wa
 
 ## See Also
 
-- [AWK Text Processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
+- [Awk Text Processing](./awk-text-processing.md) — AWK patterns, NUL delimiters, portability
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
-- [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
+- [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
 - [Validation Script Output Modes](./validation-script-output-modes.md) — `--quiet` behavior and failure-summary rules

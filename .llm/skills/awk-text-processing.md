@@ -266,6 +266,6 @@ anchor the end: `/^```[Rr]ust(,.*| .*)?$/`.
 
 ## See Also
 
-- [shell-scripting-patterns](./shell-scripting-patterns.md) — bash idioms, error handling, portable scripts
-- [GitHub-actions-awk](./github-actions-awk.md) — AWK examples in workflow YAML
-- [ci-cd-troubleshooting-scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
+- [Shell Scripting Patterns](./shell-scripting-patterns.md) — bash idioms, error handling, portable scripts
+- [GitHub Actions Awk](./github-actions-awk.md) — AWK examples in workflow YAML
+- [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures

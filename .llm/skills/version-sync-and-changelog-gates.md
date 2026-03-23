@@ -52,7 +52,7 @@ When adding a new internal path category, update both `is_internal_path()` in
 
 ## Related Skills
 
-- [classify-user-visible-changes](./classify-user-visible-changes.md)
-- [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md)
-- [review-changelog-entries](./review-changelog-entries.md)
-- [doc-accuracy-guarantees](./doc-accuracy-guarantees.md)
+- [Classify User Visible Changes](./classify-user-visible-changes.md)
+- [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md)
+- [Review Changelog Entries](./review-changelog-entries.md)
+- [Doc Accuracy Guarantees](./doc-accuracy-guarantees.md)

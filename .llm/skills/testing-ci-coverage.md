@@ -21,9 +21,9 @@
 
 ## When NOT to Use
 
-- Core application test patterns (see [testing-core-patterns](./testing-core-patterns.md))
-- Test error message design (see [testing-error-message-quality](./testing-error-message-quality.md))
-- CI/CD workflow configuration (see [GitHub-actions-best-practices](./github-actions-workflow-config.md))
+- Core application test patterns (see [Testing Core Patterns](./testing-core-patterns.md))
+- Test error message design (see [Testing Error Message Quality](./testing-error-message-quality.md))
+- CI/CD workflow configuration (see [GitHub Actions Workflow Config](./github-actions-workflow-config.md))
 
 ---
 
@@ -287,8 +287,8 @@ fn test_typos_config_has_required_sections() {
 
 ## Related Skills
 
-- [testing-core-patterns](./testing-core-patterns.md) — Core testing methodology and patterns
-- [testing-error-message-quality](./testing-error-message-quality.md) — Actionable test failure messages
-- [test-fixture-structure](./test-fixture-structure.md) — Data-driven CI configuration test fixtures
-- [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — GitHub Actions workflow patterns and debugging
+- [Testing Core Patterns](./testing-core-patterns.md) — Core testing methodology and patterns
+- [Testing Error Message Quality](./testing-error-message-quality.md) — Actionable test failure messages
+- [Test Fixture Structure](./test-fixture-structure.md) — Data-driven CI configuration test fixtures
+- [Clippy And Linting](./clippy-and-linting.md) — CI pipeline integration
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — GitHub Actions workflow patterns and debugging

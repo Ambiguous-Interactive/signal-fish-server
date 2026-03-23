@@ -115,6 +115,10 @@ Aim to keep at least 2–5 lines of headroom in actively edited skills.
 4. **Reference tables** — Reusable tables go in `.llm/references/`
 5. **Prefer focused extensions** — If a new section mostly adds one distinct topic, create a new skill
    or move the detail into an existing focused skill instead of growing a general-purpose file
+6. **One example per file** — Skills must link to dedicated `*-example-*.md` files instead of keeping
+   multi-example sections (no "mega examples" files)
+7. **Human-readable link labels** — Internal markdown links must use descriptive text, not raw
+   filenames (for example use `Core Testing Patterns` instead of `testing-core-patterns`)
 
 ---
 
@@ -126,15 +130,17 @@ Aim to keep at least 2–5 lines of headroom in actively edited skills.
 4. Run regression guard: `cargo test --test llm_file_size_script_tests`
 5. If the file is at 300 lines, trim it before adding anything else
 6. If > 300 lines: **STOP** — must split before committing
-7. Regenerate index: `./scripts/generate-skills-index.sh`
+7. Run example-extraction policy check: `./scripts/check-llm-example-files.sh`
+8. Run internal link text check: `./scripts/check-markdown-link-text.sh`
+9. Regenerate index: `./scripts/generate-skills-index.sh`
    - Index ordering: deterministic `LC_ALL=C` sort by file path/filename (not by title)
-8. Ensure `.llm/skills/index.md` is updated and staged
-9. Verify `.llm/context.md` references `skills/index.md`
+10. Ensure `.llm/skills/index.md` is updated and staged
+11. Verify `.llm/context.md` references `skills/index.md`
 
 ---
 
 ## Related Skills
 
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Patterns that skills should reference
-- [testing-strategies](./testing-core-patterns.md) — Testing methodology that all skills reference
-- [clippy-and-linting](./clippy-and-linting.md) — Linting workflow skills must follow
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Patterns that skills should reference
+- [Testing Core Patterns](./testing-core-patterns.md) — Testing methodology that all skills reference
+- [Clippy And Linting](./clippy-and-linting.md) — Linting workflow skills must follow

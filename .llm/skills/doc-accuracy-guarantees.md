@@ -47,6 +47,6 @@ This enforces:
 
 ## Related Skills
 
-- [documentation-standards](./documentation-standards.md)
-- [classify-user-visible-changes](./classify-user-visible-changes.md)
-- [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md)
+- [Documentation Standards](./documentation-standards.md)
+- [Classify User Visible Changes](./classify-user-visible-changes.md)
+- [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md)

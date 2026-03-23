@@ -16,10 +16,7 @@ use rustls::{
 };
 
 #[cfg(feature = "tls")]
-use rustls_pemfile::{certs, read_one, Item};
-
-#[cfg(feature = "tls")]
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 
 #[cfg(feature = "tls")]
 use crate::config::{ClientAuthMode, TlsServerConfig};
@@ -70,8 +67,7 @@ fn load_cert_chain(tls: &TlsServerConfig) -> Result<Vec<CertificateDer<'static>>
         .ok_or_else(|| anyhow!("security.transport.tls.certificate_path must be set"))?;
     let data = fs::read(cert_path)
         .with_context(|| format!("failed to read TLS certificate chain at {cert_path}"))?;
-    let mut reader = data.as_slice();
-    let certs: Vec<CertificateDer<'static>> = certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&data)
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("failed to parse TLS certificate chain at {cert_path}"))?;
 
@@ -93,22 +89,9 @@ fn load_private_key(tls: &TlsServerConfig) -> Result<PrivateKeyDer<'static>> {
     let key_bytes = fs::read(key_path)
         .with_context(|| format!("failed to read TLS private key at {key_path}"))?;
 
-    let mut reader = key_bytes.as_slice();
-    while let Some(item) = read_one(&mut reader)
-        .with_context(|| format!("failed to parse PEM entry inside TLS private key ({key_path})"))?
-    {
-        let der: PrivateKeyDer<'static> = match item {
-            Item::Pkcs8Key(key) => key.into(),
-            Item::Pkcs1Key(key) => key.into(),
-            Item::Sec1Key(key) => key.into(),
-            _ => continue,
-        };
-        return Ok(der);
-    }
-
-    anyhow::bail!(
-        "no supported private key (pkcs8/pkcs1/sec1) was found in security.transport.tls.private_key_path ({key_path})"
-    );
+    PrivateKeyDer::from_pem_slice(&key_bytes).with_context(|| {
+        format!("no supported private key (pkcs8/pkcs1/sec1) was found in security.transport.tls.private_key_path ({key_path})")
+    })
 }
 
 #[cfg(feature = "tls")]
@@ -125,10 +108,9 @@ fn build_client_verifier(tls: &TlsServerConfig) -> Result<Arc<dyn ClientCertVeri
     })?;
     let ca_bytes = fs::read(ca_path)
         .with_context(|| format!("failed to read client CA bundle at {ca_path}"))?;
-    let mut reader = ca_bytes.as_slice();
     let mut store = RootCertStore::empty();
     let mut loaded = 0usize;
-    for cert in certs(&mut reader) {
+    for cert in CertificateDer::pem_slice_iter(&ca_bytes) {
         let cert = cert.with_context(|| {
             format!("failed to parse a certificate from {ca_path} for client auth")
         })?;

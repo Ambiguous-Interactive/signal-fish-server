@@ -22,7 +22,7 @@ performance, debugging hook failures, or validating hook permissions in CI.
 
 ## When NOT to Use
 
-- Initial hook setup and permissions (see [Hook Installation](./git-hooks-installation.md))
+- Initial hook setup and permissions (see [Git Hooks Installation](./git-hooks-installation.md))
 
 ---
 
@@ -163,7 +163,7 @@ When to bypass: emergency hotfix, hook false positive, iterating on hook itself.
 
 ## See Also
 
-- [Hook Installation](./git-hooks-installation.md) — Setup, permissions, team onboarding
-- [Workflow Configuration](./github-actions-workflow-config.md) — CI/CD workflow patterns
-- [CI Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI failures
+- [Git Hooks Installation](./git-hooks-installation.md) — Setup, permissions, team onboarding
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI failures
 - [Mandatory Workflow](./mandatory-workflow.md) — Required validation steps

@@ -21,8 +21,8 @@ required workflows, or coding standards.
 
 ## When NOT to Use
 
-- Runtime test failures (see [testing-strategies](./testing-core-patterns.md))
-- Application code (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
+- Runtime test failures (see [Testing Core Patterns](./testing-core-patterns.md))
+- Application code (see [Rust Idioms And Patterns](./rust-idioms-and-patterns.md))
 
 ## TL;DR
 
@@ -271,4 +271,4 @@ Total time for all configuration tests: < 1 second.
 - [GitHub Actions Caching](./github-actions-caching.md) — Ecosystem-specific caching, action ref policy
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Schedule guard validation
 - [GitHub Actions Release](./github-actions-release.md) — Release preflight tests
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

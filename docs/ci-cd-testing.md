@@ -97,7 +97,7 @@ Tests that validate CI workflow configuration:
 | `test_markdownlint_workflow_exists_and_is_configured` | Validates markdownlint workflow setup | Missing or misconfigured markdown linting |
 | `test_doc_validation_workflow_has_shellcheck` | Ensures doc-validation validates its own scripts | AWK/bash syntax errors in workflows |
 | `test_workflow_hygiene_requirements` | Data-driven validation of concurrency, timeouts, and permissions | Wasted CI resources, hanging jobs, overly permissive workflows |
-| `test_ci_workflow_has_required_jobs` | Validates all required CI jobs exist (including panic-policy, SBOM) | Accidental removal of safety-critical CI checks |
+| `test_ci_workflow_has_required_jobs` | Validates all required CI jobs exist (including panic-policy, SBOM, audit) | Accidental removal of safety-critical CI checks |
 
 **Example:** Preventing AWK syntax errors
 
@@ -170,6 +170,29 @@ Key design decisions:
 | `test_release_workflow_attaches_sbom_to_release` | SBOM attached to GitHub release |
 | `test_release_sbom_has_continue_on_error` | Release SBOM step uses `continue-on-error: true` (regression guard) |
 
+#### Audit (cargo-audit)
+
+The CI workflow (`ci.yml`) includes an `audit` job that runs `cargo audit`
+as a second-opinion vulnerability scanner alongside `cargo-deny`. While
+cargo-deny provides broader policy checks (licenses, banned crates,
+source verification), cargo-audit queries the RustSec advisory database
+directly and may catch advisories at different cadences.
+
+Key design decisions:
+
+- **Complements cargo-deny**: Two independent scanners reduce the chance
+  of a missed advisory. cargo-deny and cargo-audit use the same RustSec
+  database but different detection logic and update schedules.
+- **Required check (hard gate)**: Unlike the staged safety jobs, cargo-audit
+  is stable and reliable enough to block merges via `continue-on-error: false`.
+- **Runs on schedule**: Like cargo-deny, the audit job runs on the daily
+  cron schedule to catch newly published advisories.
+- **Simple and focused**: The job runs only `cargo audit` with no extra flags,
+  keeping the failure mode easy to diagnose.
+
+**Test that enforces this:** `test_ci_workflow_has_required_jobs`
+(validates the audit job exists in ci.yml)
+
 #### 4. Documentation Validation Alignment Tests
 
 Tests that ensure the doc-validation workflow stays aligned with the naming contract and quality standards:
@@ -197,6 +220,18 @@ Tests that validate CI runtime optimizations and flake prevention measures:
 | `test_msrv_job_uses_single_verification_step` | Ensures MSRV doesn't redundantly compile | Wasted CI minutes from separate check+test steps |
 | `test_docker_health_check_uses_exponential_backoff` | Validates exponential backoff in Docker smoke test | Fixed-interval retries wasting time |
 | `test_release_sccache_failure_emits_warning` | Ensures sccache failures are visible | Silent build cache degradation |
+
+#### 7. Skill Documentation Sync Tests
+
+Tests that ensure LLM skill files stay in sync with tooling and policy:
+
+| Test | Purpose | What It Catches |
+|------|---------|-----------------|
+| `test_dep_skill_contains_watch_list_section` | Validates dependency-management-cargo.md has watch list and ban policy sections | Accidental removal of dependency monitoring documentation |
+| `test_dep_skill_contains_ban_policy_referencing_deny_toml` | Ensures ban policy references deny.toml and REQUIRED_DENY_BANS | Documentation drift from actual ban enforcement |
+| `test_dep_skill_watch_list_references_real_crates` | Validates watch list contains real crate names with known risks | Empty or placeholder watch list entries |
+| `test_audit_skill_contains_monitoring_obligations` | Validates supply-chain-audit-policy.md has monitoring, SLA, and escalation sections | Missing monitoring obligation documentation |
+| `test_audit_skill_monitoring_references_tools` | Ensures monitoring section references cargo-deny, cargo-audit, and project scripts | Incomplete tool coverage in monitoring docs |
 
 ## Pre-commit Hooks
 
@@ -387,6 +422,28 @@ on every push and pull request to `main`. The job uses `ubuntu-latest`
 with clippy and has a 15-minute timeout.
 
 **Test that enforces this:** `test_ci_workflow_has_required_jobs` (validates the panic-policy job exists in ci.yml)
+
+### 5. Outdated Dependency Checking: `scripts/check-outdated.sh`
+
+Report outdated dependencies (compatible and incompatible updates).
+This is an informational tool — it always exits 0 and is not a CI gate.
+
+**Usage:**
+
+```bash
+# Show all outdated dependencies
+./scripts/check-outdated.sh
+
+# Show only direct (root) dependencies
+./scripts/check-outdated.sh --root-only
+
+# JSON output
+./scripts/check-outdated.sh --json
+```
+
+**Requires:** `cargo-outdated` (`cargo install cargo-outdated`)
+
+**Test that enforces this:** `test_check_outdated_script_exists`
 
 ## Running Tests Locally
 
@@ -849,5 +906,5 @@ This testing infrastructure provides defense in depth against CI/CD issues:
 
 - [Lychee Configuration Documentation](https://github.com/lycheeverse/lychee#configuration)
 - [Markdownlint Rules](https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md)
-- [GitHub Actions Best Practices](../.llm/skills/github-actions-workflow-config.md)
-- [CI/CD Troubleshooting](../.llm/skills/ci-cd-troubleshooting-categories.md)
+- [GitHub Actions Workflow Config](../.llm/skills/github-actions-workflow-config.md)
+- [CI CD Troubleshooting Categories](../.llm/skills/ci-cd-troubleshooting-categories.md)

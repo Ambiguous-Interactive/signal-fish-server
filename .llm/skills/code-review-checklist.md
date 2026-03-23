@@ -161,7 +161,7 @@ async fn load_config() -> Result<Config, ConfigError> {
 | **I**SP | Is any implementor forced to stub out methods it doesn't need? |
 | **D**IP | Does high-level code depend on concrete types it shouldn't? |
 
-See [solid-principles-enforcement](./solid-principles-enforcement.md) for detailed guidance.
+See [Solid Principles Enforcement](./solid-principles-enforcement.md) for detailed guidance.
 
 ---
 
@@ -194,7 +194,7 @@ When reviewing your own code changes, simulate a fresh perspective:
 5. Report findings in structured format
 
 For agentic workflows, use a separate subagent for review.
-See [agentic-workflow-patterns](./agentic-workflow-patterns.md).
+See [Agentic Workflow Patterns](./agentic-workflow-patterns.md).
 
 ---
 
@@ -212,8 +212,8 @@ See [agentic-workflow-patterns](./agentic-workflow-patterns.md).
 
 ## Related Skills
 
-- [solid-principles-enforcement](./solid-principles-enforcement.md) — Detailed SOLID principle guidance
-- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflows
-- [defensive-programming](./defensive-programming.md) — Zero runtime panics
-- [error-handling-guide](./error-handling-guide.md) — Proper error propagation
-- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Subagent review workflows
+- [Solid Principles Enforcement](./solid-principles-enforcement.md) — Detailed SOLID principle guidance
+- [Rust Refactoring Guide](./rust-refactoring-guide.md) — Safe refactoring workflows
+- [Defensive Programming](./defensive-programming.md) — Zero runtime panics
+- [Error Handling Guide](./error-handling-guide.md) — Proper error propagation
+- [Agentic Workflow Patterns](./agentic-workflow-patterns.md) — Subagent review workflows

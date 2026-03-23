@@ -22,8 +22,8 @@
 
 ## When NOT to Use
 
-- Writing test documentation (see [testing-strategies](./testing-core-patterns.md))
-- Formatting/linting docs (see [mandatory-workflow](./mandatory-workflow.md))
+- Writing test documentation (see [Testing Core Patterns](./testing-core-patterns.md))
+- Formatting/linting docs (see [Mandatory Workflow](./mandatory-workflow.md))
 
 ---
 
@@ -108,9 +108,46 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 - Add entries under `[Unreleased]` during development
 - Use imperative mood ("Add feature X", not "Added feature X") — section headers use past tense per Keep a Changelog
 - Reference issue/PR numbers; mark breaking changes explicitly
-- Use [classify-user-visible-changes](./classify-user-visible-changes.md) before writing entries
-- Use [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) to author entries
-- Use [review-changelog-entries](./review-changelog-entries.md) as final changelog QA gate
+- Use [Classify User Visible Changes](./classify-user-visible-changes.md) before writing entries
+- Use [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) to author entries
+- Use [Review Changelog Entries](./review-changelog-entries.md) as final changelog QA gate
+
+### Changelog Gate Classification
+
+The changelog gate decides whether a PR requires a `CHANGELOG.md` entry.
+Files classified as **internal** (CI, tests, tooling) are exempt; all other
+files are **non-internal** and require a changelog entry.
+
+Classification is determined by `is_internal_path()` in
+`scripts/check-doc-consistency.sh`. The same pattern set is maintained in four
+locations for dependency-bump detection and drift prevention:
+
+| Location | Artifact |
+|------------------------------------------------|--------------------------------------------------|
+| `scripts/check-doc-consistency.sh`             | `is_internal_path()` shell function              |
+| `.github/workflows/ci.yml`                     | `dep-detect` step `case` statement               |
+| `tests/ci_config_tests.rs`                     | `SHARED_INTERNAL_PATH_PATTERNS` constant + test  |
+| `.github/test-fixtures/test-doc-consistency.sh` | `INTERNAL_PATHS` / `NON_INTERNAL_PATHS` arrays   |
+
+**All four must stay in sync.** The data-driven test in `ci_config_tests.rs`
+fails if the pattern sets in the script and CI workflow diverge.
+
+**Adding a new internal path pattern:**
+
+1. Add the pattern to `is_internal_path()` in `scripts/check-doc-consistency.sh`.
+2. Add the same pattern to the `dep-detect` case statement in `ci.yml`.
+3. Add the pattern to `SHARED_INTERNAL_PATH_PATTERNS` in `ci_config_tests.rs`.
+4. Add example paths to the test fixture's `INTERNAL_PATHS` array.
+5. Run `cargo test` — the sync test will catch any mismatch.
+
+**Pattern naming conventions for `docs/` prefixes:**
+
+- CI/infrastructure docs: `ci-cd-`, `test-`, `git-hooks-`, `hooks-`, `pre-commit-`
+- User-facing docs: product-relevant names (no special prefix)
+
+Only docs matching an infrastructure prefix are internal. A new `docs/` file
+with a product-relevant name (e.g., `docs/room-management.md`) is non-internal
+and will require a changelog entry.
 
 ---
 
@@ -199,9 +236,9 @@ After every feature/bugfix:
 
 - [ ] Updated relevant `///` doc comments with examples
 - [ ] Code samples compile and run correctly
-- [ ] User-visible scope classified (see [classify-user-visible-changes](./classify-user-visible-changes.md))
+- [ ] User-visible scope classified (see [Classify User Visible Changes](./classify-user-visible-changes.md))
 - [ ] CHANGELOG entry added under `[Unreleased]` using Keep a Changelog sections
-- [ ] CHANGELOG entry reviewed (see [review-changelog-entries](./review-changelog-entries.md))
+- [ ] CHANGELOG entry reviewed (see [Review Changelog Entries](./review-changelog-entries.md))
 - [ ] README updated if user-facing
 - [ ] New behavior clearly marked as new
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)

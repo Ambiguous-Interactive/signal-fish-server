@@ -20,9 +20,9 @@ workflow existence, or tool configuration.
 
 ## When NOT to Use
 
-- Fixture organization and structure (see [test-fixture-structure](./test-fixture-structure.md))
-- Application unit tests (see [testing-core-patterns](./testing-core-patterns.md))
-- CI smoke tests (see [testing-ci-coverage](./testing-ci-coverage.md))
+- Fixture organization and structure (see [Test Fixture Structure](./test-fixture-structure.md))
+- Application unit tests (see [Testing Core Patterns](./testing-core-patterns.md))
+- CI smoke tests (see [Testing CI Coverage](./testing-ci-coverage.md))
 
 ---
 
@@ -260,6 +260,13 @@ assert!(is_excluded("example.com"), "example.com should be excluded");
 - No network calls (use fixtures or offline mode)
 - No external tools (pure Rust file reading)
 
+### 4. External Tool Tests Must Skip Gracefully
+
+Tests that shell out to optional tools (e.g., `cargo-deny`) **must** skip when the
+tool is absent. Probe via `--version` (not string-matching), return early with a skip
+message, and centralize in a shared helper. See `cargo_deny_available()` and
+`run_cargo_deny()` in `tests/ci_config_tests.rs` for the canonical implementation.
+
 ---
 
 ## Prevention Checklist
@@ -269,7 +276,7 @@ Before committing new configuration tests:
 - [ ] Test validates intent (consistency), not specific values
 - [ ] Error messages include fix instructions
 - [ ] Test is data-driven (easy to add new cases)
-- [ ] Test executes in < 10ms (no external tools)
+- [ ] Test executes in < 10ms, or skips gracefully if external tool unavailable
 - [ ] Test has documentation comment explaining purpose
 - [ ] Test is organized in appropriate module
 - [ ] Test covers both positive and negative cases
@@ -278,9 +285,9 @@ Before committing new configuration tests:
 
 ## Related Skills
 
-- [test-fixture-structure](./test-fixture-structure.md) — Fixture directory layout, naming, and documentation
-- [testing-core-patterns](./testing-core-patterns.md) — Core testing methodology and patterns
-- [testing-error-message-quality](./testing-error-message-quality.md) — Actionable failure messages
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
-- [markdown-best-practices](./markdown-best-practices-formatting.md) — Markdown documentation standards
+- [Test Fixture Structure](./test-fixture-structure.md) — Fixture directory layout, naming, and documentation
+- [Testing Core Patterns](./testing-core-patterns.md) — Core testing methodology and patterns
+- [Testing Error Message Quality](./testing-error-message-quality.md) — Actionable failure messages
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Markdown documentation standards

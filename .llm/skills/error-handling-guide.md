@@ -23,7 +23,7 @@
 ## When NOT to Use
 
 - Test code where `.unwrap()` / `.expect()` is acceptable
-- Logging errors specifically (see [observability-and-logging](./observability-and-logging.md))
+- Logging errors specifically (see [Observability And Logging](./observability-and-logging.md))
 
 ---
 
@@ -206,13 +206,13 @@ match tokio::spawn(async move { process(msg).await }).await {
 }
 ```
 
-See [async-Rust-best-practices](./async-rust-best-practices.md) for structured concurrency with `JoinSet`.
+See [Async Rust Best Practices](./async-rust-best-practices.md) for structured concurrency with `JoinSet`.
 
 ---
 
 ## Error Types in Public APIs (axum Handlers)
 
-See [api-design-guidelines](./api-design-guidelines.md) for the full pattern.
+See [API Design Guidelines](./api-design-guidelines.md) for the full pattern.
 
 ```rust
 impl IntoResponse for RoomError {
@@ -235,7 +235,7 @@ impl IntoResponse for RoomError {
 
 ## Panic-Free Alternatives
 
-See [defensive-programming](./defensive-programming.md) for comprehensive safe alternatives.
+See [Defensive Programming](./defensive-programming.md) for comprehensive safe alternatives.
 
 | Panicking | Panic-Free |
 |-----------|------------|
@@ -263,7 +263,7 @@ See [defensive-programming](./defensive-programming.md) for comprehensive safe a
 
 ## Related Skills
 
-- [defensive-programming](./defensive-programming.md) — Panic-free patterns and safe alternatives
-- [api-design-guidelines](./api-design-guidelines.md) — Error design for public APIs
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Async error propagation
-- [observability-and-logging](./observability-and-logging.md) — Structured error logging
+- [Defensive Programming](./defensive-programming.md) — Panic-free patterns and safe alternatives
+- [API Design Guidelines](./api-design-guidelines.md) — Error design for public APIs
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Async error propagation
+- [Observability And Logging](./observability-and-logging.md) — Structured error logging

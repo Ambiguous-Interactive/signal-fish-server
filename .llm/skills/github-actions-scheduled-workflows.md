@@ -267,4 +267,4 @@ This ensures:
 - [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Permissions, path filters, smoke tests
 - [GitHub Actions Release](./github-actions-release.md) — Release gating and preflight hardening
 - [GitHub Actions Config Tests](./github-actions-config-tests.md) — Automated validation of CI configuration
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

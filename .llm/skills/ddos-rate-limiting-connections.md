@@ -19,9 +19,9 @@
 
 ## When NOT to Use
 
-- Infrastructure-layer DDoS protection (see [ddos-infrastructure-monitoring](./ddos-infrastructure-monitoring.md))
-- General authentication/authorization (see [web-service-security](./web-service-security-auth.md))
-- Non-security performance work (see [Rust-performance-optimization](./rust-performance-optimization.md))
+- Infrastructure-layer DDoS protection (see [DDoS Infrastructure Monitoring](./ddos-infrastructure-monitoring.md))
+- General authentication/authorization (see [Web Service Security Auth](./web-service-security-auth.md))
+- Non-security performance work (see [Rust Performance Optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -294,7 +294,7 @@ if tx.try_send(msg).is_err() {
 
 ## Related Skills
 
-- [ddos-infrastructure-monitoring](./ddos-infrastructure-monitoring.md) — WAF, monitoring, graceful degradation
-- [web-service-security](./web-service-security-auth.md) — Authentication, authorization, input validation, TLS
-- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message design, heartbeat
-- [observability-and-logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting
+- [DDoS Infrastructure Monitoring](./ddos-infrastructure-monitoring.md) — WAF, monitoring, graceful degradation
+- [Web Service Security Auth](./web-service-security-auth.md) — Authentication, authorization, input validation, TLS
+- [WebSocket Protocol Patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, message design, heartbeat
+- [Observability And Logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting

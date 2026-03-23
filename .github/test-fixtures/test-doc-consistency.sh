@@ -148,6 +148,13 @@ INTERNAL_PATHS=(
     # VCS/Docker ignore files
     ".gitignore"
     ".dockerignore"
+    # CI/infrastructure docs
+    "docs/ci-cd-testing.md"
+    "docs/test-suite-analysis-ci-config.md"
+    "docs/git-hooks-guide.md"
+    "docs/hooks-quick-reference.md"
+    "docs/pre-commit-hooks-summary.md"
+    "docs/development.md"
     # Tool configuration files
     "clippy.toml"
     "deny.toml"
@@ -181,6 +188,7 @@ NON_INTERNAL_PATHS=(
     "README.md"
     "docs/guide.md"
     "docs/library-usage.md"
+    "docs/testing-guide.md"
     # Deployment artifacts
     "Dockerfile"
     "docker-compose.yml"

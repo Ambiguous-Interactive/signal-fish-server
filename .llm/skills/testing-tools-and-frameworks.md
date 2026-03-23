@@ -23,8 +23,8 @@
 
 ## When NOT to Use
 
-- Core test methodology and patterns (see [testing-strategies](./testing-core-patterns.md))
-- Production error handling (see [error-handling-guide](./error-handling-guide.md))
+- Core test methodology and patterns (see [Testing Core Patterns](./testing-core-patterns.md))
+- Production error handling (see [Error Handling Guide](./error-handling-guide.md))
 
 ---
 
@@ -243,7 +243,7 @@ cargo llvm-cov --all-features --lcov --output-path lcov.info
 
 ## Related Skills
 
-- [testing-strategies](./testing-core-patterns.md) — Core testing methodology and patterns
-- [clippy-and-linting](./clippy-and-linting.md) — CI pipeline integration
-- [Rust-performance-optimization](./rust-performance-optimization.md) — Benchmark setup with criterion
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Async test patterns
+- [Testing Core Patterns](./testing-core-patterns.md) — Core testing methodology and patterns
+- [Clippy And Linting](./clippy-and-linting.md) — CI pipeline integration
+- [Rust Performance Optimization](./rust-performance-optimization.md) — Benchmark setup with criterion
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Async test patterns

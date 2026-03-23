@@ -21,8 +21,8 @@
 
 ## When NOT to Use
 
-- Cargo tooling and feature flags (see [dependency-management-cargo](./dependency-management-cargo.md))
-- Supply chain security audits (see [supply-chain-security](./supply-chain-audit-policy.md))
+- Cargo tooling and feature flags (see [Dependency Management Cargo](./dependency-management-cargo.md))
+- Supply chain security audits (see [Supply Chain Audit Policy](./supply-chain-audit-policy.md))
 
 ---
 
@@ -107,7 +107,7 @@ rand = "=0.9.0"  # Pin to version compatible with current MSRV
 
 **Option 3: Update project MSRV** (coordinated change)
 
-- Follow the MSRV update checklist in [msrv-management](./msrv-management.md)
+- Follow the MSRV update checklist in [MSRV Management](./msrv-management.md)
 - Update ALL configuration files: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, `Dockerfile`
 - Run `scripts/check-msrv-consistency.sh` to verify consistency
 - Document the MSRV bump in `CHANGELOG.md`
@@ -125,7 +125,7 @@ cargo tree --all-features | grep -i "requires rustc"
 ./scripts/check-msrv-consistency.sh
 ```
 
-See [msrv-management](./msrv-management.md) for comprehensive guidance.
+See [MSRV Management](./msrv-management.md) for comprehensive guidance.
 
 ---
 
@@ -219,8 +219,8 @@ After running audit tools, document findings:
 
 ## Related Skills
 
-- [dependency-management-cargo](./dependency-management-cargo.md) — Cargo tooling, feature flags, unused deps
-- [msrv-management](./msrv-management.md) — MSRV updates and consistency
-- [supply-chain-security](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
-- [Rust-performance-optimization](./rust-performance-optimization.md) — Alternative crate recommendations
-- [testing-strategies](./testing-core-patterns.md) — Testing with optional dependencies
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Cargo tooling, feature flags, unused deps
+- [MSRV Management](./msrv-management.md) — MSRV updates and consistency
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
+- [Rust Performance Optimization](./rust-performance-optimization.md) — Alternative crate recommendations
+- [Testing Core Patterns](./testing-core-patterns.md) — Testing with optional dependencies

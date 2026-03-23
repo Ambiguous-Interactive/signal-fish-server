@@ -21,7 +21,7 @@ loss, or fixing shellcheck warnings.
 
 ## When NOT to Use
 
-- AWK-specific portability issues (see [GitHub Actions AWK](./github-actions-awk.md))
+- AWK-specific portability issues (see [GitHub Actions Awk](./github-actions-awk.md))
 - Workflow-level configuration (see [GitHub Actions Workflow Config](./github-actions-workflow-config.md))
 
 ## TL;DR
@@ -270,6 +270,6 @@ echo "0 0 0 0" > "$COUNTER_FILE"
 
 ## Related Skills
 
-- [GitHub Actions AWK](./github-actions-awk.md) — AWK portability, multi-line content, NUL byte delimiters
+- [GitHub Actions Awk](./github-actions-awk.md) — AWK portability, multi-line content, NUL byte delimiters
 - [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Workflow structure and configuration
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

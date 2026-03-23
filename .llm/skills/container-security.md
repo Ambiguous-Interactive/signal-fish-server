@@ -12,8 +12,8 @@ or configuring security contexts for the signaling server.
 
 See also:
 
-- [container-Docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
-- [deployment-strategies](./deployment-strategies.md) — Kubernetes deployment patterns, health checks
+- [Container Docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
+- [Deployment Strategies](./deployment-strategies.md) — Kubernetes deployment patterns, health checks
 
 ---
 
@@ -190,7 +190,7 @@ spec:
 
 ## See Also
 
-- [container-Docker](./container-docker.md) — Dockerfile builds, multi-stage, image scanning, CI/CD pipelines
-- [deployment-strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
-- [web-service-security-auth](./web-service-security-auth.md) — TLS, auth, input validation
-- [supply-chain-audit-policy](./supply-chain-audit-policy.md) — cargo audit, cargo deny, dependency pinning
+- [Container Docker](./container-docker.md) — Dockerfile builds, multi-stage, image scanning, CI/CD pipelines
+- [Deployment Strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
+- [Web Service Security Auth](./web-service-security-auth.md) — TLS, auth, input validation
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — cargo audit, cargo deny, dependency pinning

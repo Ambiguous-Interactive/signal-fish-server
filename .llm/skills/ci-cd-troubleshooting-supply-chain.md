@@ -14,10 +14,10 @@
 GitHub Action refs, stale workflow script references, or Dockerfile BuildKit
 `SecretsUsedInArgOrEnv` false-positive warnings.
 
-See also: [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md),
-[Scripts Troubleshooting](./ci-cd-troubleshooting-scripts.md),
-[Links Troubleshooting](./ci-cd-troubleshooting-links.md),
-[Troubleshooting Categories](./ci-cd-troubleshooting-categories.md)
+See also: [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md),
+[CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md),
+[CI CD Troubleshooting Links](./ci-cd-troubleshooting-links.md),
+[CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md)
 
 ---
 
@@ -288,10 +288,10 @@ Treat `rustfmt` failures on doc snippets as **warnings**, not hard errors.
 
 ## Related Skills
 
-- [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [Linting Troubleshooting](./ci-cd-troubleshooting-linting.md) — Clippy, typos, markdown
-- [Scripts Troubleshooting](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [Links Troubleshooting](./ci-cd-troubleshooting-links.md) — Lychee, link checking
-- [Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
+- [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [CI CD Troubleshooting Linting](./ci-cd-troubleshooting-linting.md) — Clippy, typos, markdown
+- [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
+- [CI CD Troubleshooting Links](./ci-cd-troubleshooting-links.md) — Lychee, link checking
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick reference
 - [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — Security audits and scanning
-- [Workflow Configuration](./github-actions-workflow-config.md) — Workflow patterns
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Workflow patterns

@@ -98,6 +98,6 @@ Prefer data-driven tests that vary only:
 
 ## Related Skills
 
-- [shell-scripting-patterns](./shell-scripting-patterns.md) — Strict mode, quoting, traps, argument parsing
-- [GitHub-actions-bash-scripts](./github-actions-bash-scripts.md) — CI-focused Bash patterns and subshell pitfalls
-- [testing-error-message-quality](./testing-error-message-quality.md) — Diagnostic output expectations
+- [Shell Scripting Patterns](./shell-scripting-patterns.md) — Strict mode, quoting, traps, argument parsing
+- [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — CI-focused Bash patterns and subshell pitfalls
+- [Testing Error Message Quality](./testing-error-message-quality.md) — Diagnostic output expectations

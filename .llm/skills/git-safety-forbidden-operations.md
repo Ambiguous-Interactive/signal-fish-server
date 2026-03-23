@@ -188,6 +188,6 @@ If you see these patterns in your own thinking or prompts, **STOP IMMEDIATELY**:
 
 ## Related Skills
 
-- [git-safety-safe-operations](./git-safety-safe-operations.md) — What you CAN do and how to provide commit instructions
-- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Agent workflow that integrates with user commits
-- [mandatory-workflow](./mandatory-workflow.md) — User's mandatory workflow requirements
+- [Git Safety Safe Operations](./git-safety-safe-operations.md) — What you CAN do and how to provide commit instructions
+- [Agentic Workflow Patterns](./agentic-workflow-patterns.md) — Agent workflow that integrates with user commits
+- [Mandatory Workflow](./mandatory-workflow.md) — User's mandatory workflow requirements

@@ -22,8 +22,8 @@
 
 ## When NOT to Use
 
-- General HTTP API endpoints (see [api-design-guidelines](./api-design-guidelines.md))
-- Generic async patterns (see [async-Rust-best-practices](./async-rust-best-practices.md))
+- General HTTP API endpoints (see [API Design Guidelines](./api-design-guidelines.md))
+- Generic async patterns (see [Async Rust Best Practices](./async-rust-best-practices.md))
 
 ---
 
@@ -197,7 +197,7 @@ match receiver.next().await {
 }
 ```
 
-See [ADR-001: Reconnection Protocol](../../docs/adr/reconnection-protocol.md) for reconnection with session tokens.
+See [Reconnection Protocol](../../docs/adr/reconnection-protocol.md) for reconnection with session tokens.
 
 ### Close Frame Reasons
 
@@ -255,7 +255,7 @@ For load tests, measure: connections/sec, message throughput, P50/P95/P99 latenc
 
 ## Related Skills
 
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Async patterns for connection handling
-- [api-design-guidelines](./api-design-guidelines.md) — Message type design
-- [error-handling-guide](./error-handling-guide.md) — WebSocket error codes and handling
-- [observability-and-logging](./observability-and-logging.md) — Connection lifecycle tracing
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Async patterns for connection handling
+- [API Design Guidelines](./api-design-guidelines.md) — Message type design
+- [Error Handling Guide](./error-handling-guide.md) — WebSocket error codes and handling
+- [Observability And Logging](./observability-and-logging.md) — Connection lifecycle tracing

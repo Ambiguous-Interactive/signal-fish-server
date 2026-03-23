@@ -1728,6 +1728,6 @@ server configuration.
 
 ## Next Steps
 
-- [Protocol Reference](../protocol.md) -- complete message documentation
+- [Protocol](../protocol.md) -- complete message documentation
 - [Features](../features.md) -- full feature overview
 - [Authentication](../authentication.md) -- server-side auth configuration

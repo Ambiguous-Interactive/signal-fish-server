@@ -255,4 +255,4 @@ fi
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck, Bash best practices
 - [GitHub Actions Config Tests](./github-actions-config-tests.md) — Automated validation of CI configuration
 - [GitHub Actions Release](./github-actions-release.md) — Release gating, cargo --locked, preflight hardening
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures and cache errors
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures and cache errors

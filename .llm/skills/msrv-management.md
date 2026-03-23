@@ -11,8 +11,8 @@ consistency failures in CI.
 
 See also:
 
-- [toolchain-pinning](./toolchain-pinning.md) — `rust-toolchain.toml`, MSRV testing, developer workflow
-- [toolchain-nightly](./toolchain-nightly.md) — Nightly Rust for CI-only analysis tools
+- [Toolchain Pinning](./toolchain-pinning.md) — `rust-toolchain.toml`, MSRV testing, developer workflow
+- [Toolchain Nightly](./toolchain-nightly.md) — Nightly Rust for CI-only analysis tools
 
 ---
 
@@ -242,7 +242,7 @@ sed -i 's/FROM rust:1.87/FROM rust:1.88/' Dockerfile
 
 ## Related Skills
 
-- [toolchain-pinning](./toolchain-pinning.md) — `rust-toolchain.toml`, testing, developer workflow
-- [toolchain-nightly](./toolchain-nightly.md) — Nightly Rust for CI-only tools
-- [dependency-management](./dependency-management-cargo.md) — Choosing and auditing dependencies
-- [container-Docker](./container-docker.md) — Docker build configuration
+- [Toolchain Pinning](./toolchain-pinning.md) — `rust-toolchain.toml`, testing, developer workflow
+- [Toolchain Nightly](./toolchain-nightly.md) — Nightly Rust for CI-only tools
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Choosing and auditing dependencies
+- [Container Docker](./container-docker.md) — Docker build configuration

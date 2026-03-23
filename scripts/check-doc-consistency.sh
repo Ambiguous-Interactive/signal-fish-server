@@ -396,7 +396,10 @@ is_internal_path() {
         scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
             return 0
             ;;
-        Cargo.lock|PLAN.md|AGENTS.md|pre-push.txt|logs_*.zip)
+        docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md)
+            return 0
+            ;;
+        Cargo.lock|PLAN.md|AGENTS.md|pre-push.txt|pre-commit.txt|logs_*.zip)
             return 0
             ;;
         .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml)
@@ -448,9 +451,16 @@ elif [ "$CHANGED_MODE" != "none" ]; then
     if [ "${#NON_INTERNAL_CHANGED[@]}" -gt 0 ] && [ "$local_has_changelog" -ne 1 ]; then
         action_error "Detected non-internal changes without CHANGELOG.md update:"
         for path in "${NON_INTERNAL_CHANGED[@]}"; do
-            echo "  - $path"
+            # Format note: "  - path  (reason)" prefix is used by
+            # tests/doc_consistency_script_tests.rs must_not_contain assertions
+            # to distinguish error-listed files from diagnostic help text.
+            echo "  - $path  (not matched by is_internal_path)"
         done
-        echo "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact."
+        echo ""
+        echo "See is_internal_path() in scripts/check-doc-consistency.sh for internal path patterns."
+        echo ""
+        echo "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact,"
+        echo "or add the path to is_internal_path() in scripts/check-doc-consistency.sh if truly internal."
     elif [ "${#NON_INTERNAL_CHANGED[@]}" -gt 0 ]; then
         action_ok "CHANGELOG.md updated alongside non-internal changes"
     else

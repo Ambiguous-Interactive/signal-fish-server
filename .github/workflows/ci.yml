@@ -6,13 +6,14 @@
 # Runs on:
 #   - Push to main branch
 #   - Pull requests to main
-#   - Daily schedule (security audit only — the `deny` job)
+#   - Daily schedule (security audit only — the `deny` and `audit` jobs)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
+#   - audit: Second-opinion vulnerability scan via cargo-audit (RustSec)
 #   - docker: Docker image build and smoke test with health check
 #   - coverage: Linux code coverage gate via cargo-llvm-cov
 #   - panic-policy: Zero-panic production code enforcement
@@ -106,7 +107,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.68.33
+        uses: taiki-e/install-action@v2.69.6
         with:
           tool: cargo-nextest
 
@@ -174,6 +175,7 @@ jobs:
                 Cargo.toml|Cargo.lock) ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
+                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md) ;;
                 .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
                 .gitignore|.dockerignore) ;;
                 PLAN.md|AGENTS.md|pre-push.txt) ;;
@@ -240,6 +242,35 @@ jobs:
           # before executing cargo-deny. This avoids relying on preinstalled
           # aliases like `stable` that may be absent in the container image.
           rust-version: ${{ steps.deny-msrv.outputs.version }}
+
+  audit:
+    name: Audit (cargo-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Second-opinion vulnerability scanner using the RustSec advisory database directly.
+    # Complements cargo-deny which provides broader policy checks (licenses, bans, sources).
+    # Runs on push/PR and daily via schedule (see workflow triggers).
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2.69.6
+        with:
+          tool: cargo-audit
+      - name: Run cargo-audit
+        run: cargo audit
 
   msrv:
     name: MSRV Verification
@@ -413,7 +444,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.68.33
+        uses: taiki-e/install-action@v2.69.6
         with:
           tool: cargo-llvm-cov
 
@@ -478,7 +509,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.68.33
+        uses: taiki-e/install-action@v2.69.6
         with:
           tool: cargo-sbom
 

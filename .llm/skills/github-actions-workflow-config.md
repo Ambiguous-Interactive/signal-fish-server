@@ -297,4 +297,4 @@ schedule-intended and do not need an `if:` guard.
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck, Bash best practices
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, monitoring
 - [GitHub Actions Release](./github-actions-release.md) — Release gating, preflight hardening
-- [CI Troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

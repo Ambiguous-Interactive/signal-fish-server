@@ -245,7 +245,16 @@ if [ -f scripts/check-dockerfile-portability.sh ]; then
         scripts/check-dockerfile-portability.sh --quiet
 fi
 
-# Check 14: Documentation + changelog consistency
+# Check 14: Dependency Advisory Check
+if [ -f scripts/check-advisories.sh ]; then
+    run_check_quiet "advisories" "Checking for RUSTSEC dependency advisories" \
+        scripts/check-advisories.sh
+else
+    echo -e "${YELLOW}⚠ SKIP${NC}: advisories (scripts/check-advisories.sh not found)"
+    echo ""
+fi
+
+# Check 15: Documentation + changelog consistency
 if [ -f scripts/check-doc-consistency.sh ]; then
     run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
         scripts/check-doc-consistency.sh

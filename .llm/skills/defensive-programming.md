@@ -25,7 +25,7 @@
 
 - Test code where `.unwrap()` and `.expect()` are acceptable
 - Performance-critical inner loops already validated
-  (see [Rust-performance-optimization](./rust-performance-optimization.md))
+  (see [Rust Performance Optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -269,7 +269,7 @@ see [Rust Idioms and Patterns](rust-idioms-and-patterns.md) for the full typesta
 
 ## Related Skills
 
-- [error-handling-guide](./error-handling-guide.md) — Error type design and propagation
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Newtype and typestate patterns
-- [api-design-guidelines](./api-design-guidelines.md) — Input validation at API boundaries
-- [clippy-and-linting](./clippy-and-linting.md) — Restriction lints that enforce safety
+- [Error Handling Guide](./error-handling-guide.md) — Error type design and propagation
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Newtype and typestate patterns
+- [API Design Guidelines](./api-design-guidelines.md) — Input validation at API boundaries
+- [Clippy And Linting](./clippy-and-linting.md) — Restriction lints that enforce safety

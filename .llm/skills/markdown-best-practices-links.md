@@ -11,18 +11,42 @@ link failures on Linux.
 
 See also:
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Code block best practices
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
-- [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Code block best practices
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
 
 ---
 
 ## TL;DR
 
-- Use relative paths for internal documentation: `[guide](../docs/guide.md)`
+- Use relative paths for internal documentation: `[Guide](../docs/guide.md)`
+- Use human-readable internal link labels (for example `Core Testing Patterns`, not
+  `testing-core-patterns`)
 - Case sensitivity matters on Linux — verify exact filename case
 - Test links locally with lychee before pushing
 - Exclude placeholder URLs in `.lychee.toml`, not real documentation links
+
+---
+
+## Link Label Quality
+
+For internal markdown links, the visible label should describe the destination,
+not repeat the literal filename.
+
+```markdown
+❌ REDUNDANT
+See [testing-core-patterns](../.llm/skills/testing-core-patterns.md).
+
+✅ HUMAN-READABLE
+See [Core Testing Patterns](../.llm/skills/testing-core-patterns.md).
+```
+
+Enforce this rule with:
+
+```bash
+./scripts/check-markdown-link-text.sh
+./scripts/check-markdown-link-text.sh --fix
+```
 
 ---
 
@@ -263,7 +287,7 @@ link-check:
 
 ## Related Skills
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Code block best practices
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
-- [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Debugging link check failures
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Code block best practices
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Debugging link check failures

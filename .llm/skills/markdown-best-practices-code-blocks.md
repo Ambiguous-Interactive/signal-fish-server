@@ -10,10 +10,10 @@
 
 See also:
 
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
-- [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation
-- [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
-- [markdown-best-practices-code-block-validation](./markdown-best-practices-code-block-validation.md)
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
+- [Markdown Best Practices Links](./markdown-best-practices-links.md) — Link validation
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
+- [Markdown Best Practices Code Block Validation](./markdown-best-practices-code-block-validation.md)
   — Bash fence safety and mixed-language splitting
 
 ---
@@ -210,7 +210,7 @@ Prefer manual wrapping for nested objects:
 
 Bash-fenced blocks are validated as shell syntax, and mixed-language content
 must be split into separate fenced blocks. For full patterns and examples, see:
-[markdown-best-practices-code-block-validation](./markdown-best-practices-code-block-validation.md).
+[Markdown Best Practices Code Block Validation](./markdown-best-practices-code-block-validation.md).
 
 ---
 
@@ -263,8 +263,8 @@ an exact `/^```$/` pattern.
 
 ## Related Skills
 
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — MD040, MD041 rules and CI integration
-- [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation patterns
-- [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns, spell checking
-- [markdown-best-practices-code-block-validation](./markdown-best-practices-code-block-validation.md)
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — MD040, MD041 rules and CI integration
+- [Markdown Best Practices Links](./markdown-best-practices-links.md) — Link validation patterns
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Proper nouns, spell checking
+- [Markdown Best Practices Code Block Validation](./markdown-best-practices-code-block-validation.md)
   — Bash validation and mixed-content split patterns

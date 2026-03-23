@@ -18,6 +18,79 @@ use std::process::Command;
 
 use common::{read_file, repo_root};
 
+/// Check whether `cargo-deny` is installed by running `cargo deny --version`.
+/// Returns `true` when the subcommand is available, `false` otherwise.
+fn cargo_deny_available() -> bool {
+    Command::new("cargo")
+        .args(["deny", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `cargo deny <deny_args>` and return `(success, combined_output)`.
+/// Returns `None` (and prints a skip message) when cargo-deny is not installed.
+fn run_cargo_deny(deny_args: &[&str]) -> Option<(bool, String)> {
+    if !cargo_deny_available() {
+        eprintln!(
+            "Skipping: cargo-deny is not installed.\n\
+             Install with: cargo install cargo-deny"
+        );
+        return None;
+    }
+
+    let mut args = vec!["deny"];
+    args.extend_from_slice(deny_args);
+
+    let output = Command::new("cargo")
+        .args(&args)
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to execute cargo deny");
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    Some((output.status.success(), combined))
+}
+
+/// Build and run a nested `cargo check` for one optional feature in an isolated
+/// target directory with sanitizer-related environment variables removed.
+///
+/// This avoids false negatives in sanitizer jobs where nested Cargo invocations
+/// can conflict with instrumentation flags and cached artifacts.
+fn run_isolated_feature_check(feature: &str) -> (bool, String) {
+    let root = repo_root();
+    let target_dir = root
+        .join("target")
+        .join("ci-config-feature-check")
+        .join(feature.replace([',', ' '], "_"));
+
+    let output = Command::new("cargo")
+        .args(["check", "--features", feature, "--locked"])
+        .current_dir(&root)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTDOCFLAGS")
+        .env_remove("ASAN_OPTIONS")
+        .env_remove("LSAN_OPTIONS")
+        .env_remove("UBSAN_OPTIONS")
+        .env_remove("TSAN_OPTIONS")
+        .env_remove("MIRIFLAGS")
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run cargo check for feature `{feature}`: {e}"));
+
+    let mut combined = String::new();
+    combined.push_str(&format!(
+        "command: cargo check --features {feature} --locked\n"
+    ));
+    combined.push_str(&format!("CARGO_TARGET_DIR: {}\n\n", target_dir.display()));
+    combined.push_str(&String::from_utf8_lossy(&output.stdout));
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    (output.status.success(), combined)
+}
+
 fn parse_github_slug_from_remote_url(remote_url: &str) -> Option<(String, String)> {
     let trimmed = remote_url.trim().trim_end_matches(".git");
     let slug = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
@@ -243,6 +316,21 @@ fn extract_job_display_name(content: &str, job_key: &str) -> Option<String> {
     None
 }
 
+/// Extract the `audit:` job section from CI workflow YAML content.
+///
+/// Finds the `  audit:` job header and collects all lines belonging to that job
+/// block (4+-space-indented lines and blank lines) into a single string.
+fn extract_audit_section(ci_content: &str) -> String {
+    ci_content
+        .lines()
+        .skip_while(|line| !line.starts_with("  audit:"))
+        .take_while(|line| {
+            line.starts_with("  audit:") || line.starts_with("    ") || line.trim().is_empty()
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
 /// Extract the `sbom:` job section from CI workflow YAML content.
 ///
 /// Finds the `  sbom:` job header and collects all lines belonging to that job
@@ -393,6 +481,11 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
         "Security audits and license checks",
     ),
     (
+        "audit",
+        "Audit (cargo-audit)",
+        "Second-opinion vulnerability scan via cargo-audit",
+    ),
+    (
         "msrv",
         "MSRV Verification",
         "Minimum Supported Rust Version verification",
@@ -498,6 +591,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
     "CI / Nextest (windows-latest)",
     "CI / Nextest (macos-latest)",
     "CI / Dependency Audit",
+    "CI / Audit (cargo-audit)",
     "CI / MSRV Verification",
     "CI / Docker Build",
     "CI / Coverage (llvm-cov)",
@@ -524,7 +618,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
 const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "ci.yml",
-        "Main CI pipeline (lint, nextest, deny, MSRV, Docker, coverage, panic-policy, SBOM)",
+        "Main CI pipeline (lint, nextest, deny, audit, MSRV, Docker, coverage, panic-policy, SBOM)",
     ),
     (
         "doc-validation.yml",
@@ -2138,6 +2232,13 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
         content.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
         "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
          Update mismatch guidance in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("./scripts/check-markdown-link-text.sh"),
+        "check-markdown.sh must enforce human-readable internal markdown link text via scripts/check-markdown-link-text.sh.\n\
+         Missing link-text policy enforcement in {}",
         script.display()
     );
 }
@@ -5394,6 +5495,11 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
         content.contains("paths:") && content.contains("**.md"),
         "markdownlint.yml should have path filters to run only on .md changes"
     );
+
+    assert!(
+        content.contains("scripts/check-markdown-link-text.sh"),
+        "markdownlint.yml must include scripts/check-markdown-link-text.sh in path filters and execution steps."
+    );
 }
 
 #[test]
@@ -8547,6 +8653,23 @@ fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
 }
 
 #[test]
+fn test_pre_commit_hook_includes_llm_example_extraction_policy_check() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("scripts/check-llm-example-files.sh --files $STAGED_LLM_FILES"),
+        "Check 18 must invoke scripts/check-llm-example-files.sh with staged .llm files."
+    );
+    assert!(
+        content.contains("check_fail \"LLM example extraction\"")
+            && content.contains("Inline example sections are disallowed in skill files"),
+        "Check 18 must fail with actionable guidance when inline examples violate policy."
+    );
+}
+
+#[test]
 fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-commit");
@@ -9164,14 +9287,75 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
     );
 }
 
+#[test]
+fn test_audit_job_installs_cargo_audit() {
+    // Validates that the audit job installs cargo-audit via taiki-e/install-action,
+    // consistent with how other tools (cargo-nextest, cargo-llvm-cov, cargo-sbom)
+    // are installed in the CI workflow.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    let audit_section = extract_audit_section(&ci_content);
+
+    assert!(
+        audit_section.contains("tool: cargo-audit"),
+        "Audit job must install cargo-audit via taiki-e/install-action.\n\
+         Expected: tool: cargo-audit\n\
+         This is consistent with how cargo-nextest, cargo-llvm-cov, and \
+         cargo-sbom are installed."
+    );
+}
+
+#[test]
+fn test_audit_job_runs_cargo_audit() {
+    // Validates that the audit job actually runs `cargo audit` to scan for
+    // known vulnerabilities in the RustSec advisory database.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    let audit_section = extract_audit_section(&ci_content);
+
+    assert!(
+        audit_section.contains("cargo audit"),
+        "Audit job must run `cargo audit` to scan for vulnerabilities.\n\
+         The audit job should invoke cargo-audit against the RustSec advisory database."
+    );
+}
+
+#[test]
+fn test_audit_job_configuration() {
+    // Validates that the audit job has appropriate timeout and runs on ubuntu-latest,
+    // matching the project's convention for security-related CI jobs.
+
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    let audit_section = extract_audit_section(&ci_content);
+
+    assert!(
+        audit_section.contains("timeout-minutes: 10"),
+        "Audit job should have a 10-minute timeout.\n\
+         cargo-audit is a lightweight advisory database check and should complete quickly.\n\
+         A 10-minute budget provides margin without wasting CI resources on hangs."
+    );
+
+    assert!(
+        audit_section.contains("runs-on: ubuntu-latest"),
+        "Audit job should run on ubuntu-latest.\n\
+         Security advisory scanning is platform-independent and only needs a single runner."
+    );
+}
+
 /// The schedule guard condition that non-audit CI jobs must use.
-/// This ensures only the `deny` (security audit) job runs on the daily schedule trigger,
-/// preventing unnecessary CI resource consumption for scheduled runs.
+/// This ensures only the `deny` and `audit` (security audit) jobs run on the daily
+/// schedule trigger, preventing unnecessary CI resource consumption for scheduled runs.
 const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 
 /// CI jobs that must be excluded from scheduled runs via an `if:` guard.
-/// The `deny` job is intentionally absent — it is the only job that should
-/// run on the daily schedule trigger (for CVE detection).
+/// The `deny` and `audit` jobs are intentionally absent — they are the only
+/// jobs that should run on the daily schedule trigger (for CVE detection).
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
     "lint",
     "nextest",
@@ -9183,36 +9367,39 @@ const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
 ];
 
 #[test]
-fn test_ci_schedule_only_runs_audit() {
+fn test_ci_schedule_only_runs_security_jobs() {
     // Validates that the daily scheduled trigger only runs the security audit
-    // (deny) job, and all other CI jobs are excluded from schedule runs.
+    // jobs (`deny` and `audit`), and all other CI jobs are excluded from
+    // schedule runs.
     //
     // The ci.yml workflow has a daily cron schedule for catching new CVEs.
-    // Only the `deny` job should run on schedule — all other jobs waste CI
-    // resources when triggered by the cron schedule since they only need to
-    // run on push/PR events.
+    // Only the `deny` and `audit` jobs should run on schedule — all other
+    // jobs waste CI resources when triggered by the cron schedule since they
+    // only need to run on push/PR events.
     //
     // This test ensures:
     //   1. Every non-audit job has `if: github.event_name != 'schedule'`
-    //   2. The `deny` job does NOT have a schedule exclusion guard
+    //   2. The `deny` and `audit` jobs do NOT have a schedule exclusion guard
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    // Verify the deny job does NOT have a schedule exclusion guard
-    let deny_condition = extract_job_if_condition(&ci_content, "deny");
-    if let Some(ref condition) = deny_condition {
-        assert!(
-            !condition.contains("schedule"),
-            "The `deny` job must NOT exclude schedule runs.\n\
-             Found `if: {condition}` on the deny job, which would prevent the \
-             daily security audit from running.\n\n\
-             The deny job is the ONLY job that should run on the daily schedule \
-             trigger to catch new CVEs.\n\n\
-             To fix: Remove the `if:` guard from the deny job in ci.yml."
-        );
+    // Verify the deny and audit jobs do NOT have a schedule exclusion guard
+    for security_job in &["deny", "audit"] {
+        let condition = extract_job_if_condition(&ci_content, security_job);
+        if let Some(ref cond) = condition {
+            assert!(
+                !cond.contains("schedule"),
+                "The `{security_job}` job must NOT exclude schedule runs.\n\
+                 Found `if: {cond}` on the {security_job} job, which would prevent the \
+                 daily security audit from running.\n\n\
+                 The deny and audit jobs should run on the daily schedule \
+                 trigger to catch new CVEs.\n\n\
+                 To fix: Remove the `if:` guard from the {security_job} job in ci.yml."
+            );
+        }
+        // condition being None is fine — no `if:` means it runs on all triggers
     }
-    // deny_condition being None is fine — no `if:` means it runs on all triggers
 
     // Verify all non-audit jobs HAVE the schedule exclusion guard
     let mut missing_guard = Vec::new();
@@ -9246,7 +9433,7 @@ fn test_ci_schedule_only_runs_audit() {
     assert!(
         errors.is_empty(),
         "CI jobs are missing schedule exclusion guards.\n\n\
-         The daily schedule trigger should only run the `deny` (security audit) job.\n\
+         The daily schedule trigger should only run the `deny` and `audit` (security) jobs.\n\
          All other jobs must have `if: {SCHEDULE_EXCLUSION_GUARD}` to avoid wasting \
          CI resources on scheduled runs.\n\n\
          Issues:\n{}\n\n\
@@ -10297,5 +10484,1036 @@ fn test_windows_matrix_jobs_specify_shell_bash_for_bash_syntax() {
          \x20     run: |\n\
          \x20       CHANNEL=$(grep ... | sed ...)\n",
         violations.join("\n\n")
+    );
+}
+
+// ============================================================================
+// Supply Chain Advisory Prevention Tests
+// ============================================================================
+// These tests prevent recurrence of RUSTSEC advisory CI failures (e.g.,
+// RUSTSEC-2025-0134 for unmaintained rustls-pemfile) by validating that
+// deny.toml is correctly configured and that no active advisories exist.
+
+#[test]
+fn test_deny_toml_exists_and_has_required_sections() {
+    let root = repo_root();
+    let deny_path = root.join("deny.toml");
+
+    assert!(
+        deny_path.exists(),
+        "deny.toml must exist at the repository root for cargo-deny checks.\n\
+         This file configures advisory, license, ban, and source policies.\n\
+         Create it with: cargo deny init"
+    );
+
+    let content = read_file(&deny_path);
+
+    let required_sections = [
+        (
+            "[advisories]",
+            "vulnerability and unmaintained crate detection",
+        ),
+        ("[licenses]", "license compliance checking"),
+        ("[bans]", "banned crate enforcement"),
+        ("[sources]", "crate source restrictions"),
+    ];
+
+    for (section, purpose) in &required_sections {
+        assert!(
+            content.contains(section),
+            "deny.toml must contain a {section} section for {purpose}.\n\
+             File: {}",
+            deny_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_deny_toml_advisories_section_denies_yanked() {
+    let root = repo_root();
+    let content = read_file(&root.join("deny.toml"));
+
+    assert!(
+        content.contains("yanked = \"deny\""),
+        "deny.toml [advisories] must set yanked = \"deny\" to block yanked crates.\n\
+         Yanked crates have known issues and must not be used in production."
+    );
+}
+
+#[test]
+fn test_deny_toml_uses_version_2() {
+    let root = repo_root();
+    let content = read_file(&root.join("deny.toml"));
+
+    let in_advisories = content
+        .lines()
+        .skip_while(|line| !line.starts_with("[advisories]"))
+        .take_while(|line| !line.starts_with('[') || line.starts_with("[advisories]"))
+        .any(|line| line.trim() == "version = 2");
+
+    assert!(
+        in_advisories,
+        "deny.toml [advisories] must use version = 2 (cargo-deny v0.19+).\n\
+         Version 2 checks all advisory types (vulnerabilities and unmaintained)\n\
+         by default without needing explicit severity configuration."
+    );
+}
+
+#[test]
+fn test_no_rustls_pemfile_dependency() {
+    // Regression test for RUSTSEC-2025-0134: rustls-pemfile was flagged as
+    // unmaintained. The fix is to use rustls-pki-types built-in PEM parsing.
+    let root = repo_root();
+    let cargo_toml = read_file(&root.join("Cargo.toml"));
+
+    assert!(
+        !cargo_toml.contains("rustls-pemfile"),
+        "Cargo.toml must not depend on rustls-pemfile (RUSTSEC-2025-0134: unmaintained).\n\
+         Use rustls-pki-types built-in PEM parsing instead.\n\
+         Migration: replace rustls_pemfile::certs() with \
+         rustls_pki_types::pem::PemObject::pem_file_iter() or similar."
+    );
+}
+
+#[test]
+fn test_tls_feature_uses_rustls_pki_types() {
+    let root = repo_root();
+    let cargo_toml = read_file(&root.join("Cargo.toml"));
+
+    // The tls feature should include rustls-pki-types as the PEM parsing provider
+    let tls_line = cargo_toml
+        .lines()
+        .find(|line| line.starts_with("tls = ") || line.starts_with("tls="));
+
+    let tls_line = tls_line.expect(
+        "Cargo.toml must define a 'tls' feature.\n\
+         Expected: tls = [\"axum-server\", \"rustls\", \"rustls-pki-types\"]",
+    );
+
+    assert!(
+        tls_line.contains("rustls-pki-types"),
+        "The tls feature must include rustls-pki-types for PEM parsing.\n\
+         Found: {tls_line}\n\
+         rustls-pki-types replaces the unmaintained rustls-pemfile crate."
+    );
+}
+
+#[test]
+fn test_check_advisories_script_exists() {
+    let root = repo_root();
+    let script_path = root.join("scripts/check-advisories.sh");
+
+    assert!(
+        script_path.exists(),
+        "scripts/check-advisories.sh must exist for local advisory checking.\n\
+         This script runs cargo deny check advisories to catch RUSTSEC issues\n\
+         before pushing to CI."
+    );
+
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("cargo deny check advisories"),
+        "scripts/check-advisories.sh must run 'cargo deny check advisories'."
+    );
+
+    assert!(
+        content.contains("set -euo pipefail") || content.contains("set -eu"),
+        "scripts/check-advisories.sh must use strict error handling (set -euo pipefail)."
+    );
+}
+
+#[test]
+fn test_run_local_ci_includes_advisory_check() {
+    let root = repo_root();
+    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+
+    assert!(
+        script.contains("check-advisories.sh"),
+        "scripts/run-local-ci.sh must include scripts/check-advisories.sh\n\
+         as a local CI gate to catch RUSTSEC advisories before pushing."
+    );
+}
+
+#[test]
+fn test_cargo_deny_check_advisories_passes() {
+    // Run cargo deny check advisories to verify no active RUSTSEC advisories.
+    // This test mirrors the CI deny job locally.
+    let Some((success, output)) = run_cargo_deny(&["check", "advisories"]) else {
+        return;
+    };
+
+    assert!(
+        success,
+        "cargo deny check advisories failed.\n\
+         This means there are active RUSTSEC advisories in the dependency tree.\n\n\
+         To investigate:\n\
+         1. Run: cargo deny check advisories\n\
+         2. For each advisory, either:\n\
+            a. Update the dependency to a patched version\n\
+            b. Replace the dependency with a maintained alternative\n\
+            c. Add a documented ignore in deny.toml with justification and expiry\n\n\
+         Output:\n{output}",
+    );
+}
+
+#[test]
+fn test_optional_feature_compile_matrix() {
+    // Data-driven checks for optional features that are expected to compile in
+    // isolation. This prevents regressions from dependency migrations and
+    // feature-gating drift.
+    const FEATURE_CASES: &[(&str, &str)] = &[
+        ("TLS support", "tls"),
+        ("Legacy full-mesh compatibility", "legacy-fullmesh"),
+        (
+            "Combined optional feature compatibility",
+            "tls,legacy-fullmesh",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+
+    for &(label, feature) in FEATURE_CASES {
+        let (success, output) = run_isolated_feature_check(feature);
+        if !success {
+            failures.push(format!(
+                "{label} (feature `{feature}`) failed to compile:\n{output}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "One or more optional feature compile checks failed.\n\
+         These checks run in an isolated target directory with sanitizer env
+         scrubbed to avoid false positives in ASan/Miri contexts.\n\n{}",
+        failures.join("\n\n---\n\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dependency Health Hardening Tests
+//
+// Data-driven tests validating that deny.toml maintains a comprehensive
+// proactive ban list and that supply-chain policy settings remain strict.
+// These tests prevent regression of dependency health invariants.
+// ---------------------------------------------------------------------------
+
+/// Crates that must appear in deny.toml [[bans.deny]] entries.
+/// Each entry is (crate_name, reason_substring) — the reason substring is
+/// checked to ensure the ban has a meaningful justification, not just a name.
+const REQUIRED_DENY_BANS: &[(&str, &str)] = &[
+    // Original bans (pre-existing)
+    ("atty", "std::io::IsTerminal"),
+    ("instant", "std::time::Instant"),
+    // Security/TLS policy
+    ("rustls-pemfile", "RUSTSEC-2025-0134"),
+    ("openssl", "rustls"),
+    ("openssl-sys", "rustls"),
+    ("native-tls", "rustls"),
+    // Build system policy
+    ("gcc", "cc"),
+    // Unmaintained/deprecated
+    ("failure", "thiserror"),
+    ("failure_derive", "thiserror"),
+    ("tempdir", "tempfile"),
+    ("term", "crossterm"),
+    ("net2", "std::net"),
+    ("rustc-serialize", "serde"),
+];
+
+#[test]
+fn test_deny_toml_bans_known_problematic_crates() {
+    let root = repo_root();
+    let content = read_file(&root.join("deny.toml"));
+
+    let mut missing = Vec::new();
+    let mut bad_reason = Vec::new();
+
+    for &(crate_name, reason_substr) in REQUIRED_DENY_BANS {
+        if !content.contains(&format!("name = \"{crate_name}\"")) {
+            missing.push(crate_name);
+        } else if !content.contains(reason_substr) {
+            bad_reason.push((crate_name, reason_substr));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "deny.toml is missing [[bans.deny]] entries for known-problematic crates:\n\
+         {}\n\n\
+         Add [[bans.deny]] entries with name and reason fields for each.\n\
+         See .llm/skills/supply-chain-audit-policy.md for the proactive ban list policy.",
+        missing
+            .iter()
+            .map(|c| format!("  - {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    assert!(
+        bad_reason.is_empty(),
+        "deny.toml ban entries have missing or incorrect reasons:\n\
+         {}\n\n\
+         Each ban must include a reason that mentions the recommended replacement.",
+        bad_reason
+            .iter()
+            .map(|(c, r)| format!("  - {c}: reason must mention \"{r}\""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn test_deny_toml_bans_deny_wildcards() {
+    let root = repo_root();
+    let content = read_file(&root.join("deny.toml"));
+
+    assert!(
+        content.contains("wildcards = \"deny\""),
+        "deny.toml [bans] must set wildcards = \"deny\" to prevent wildcard version specs.\n\
+         Wildcard dependencies (e.g., version = \"*\") bypass reproducible builds."
+    );
+}
+
+#[test]
+fn test_deny_toml_sources_deny_unknown() {
+    let root = repo_root();
+    let content = read_file(&root.join("deny.toml"));
+
+    let required_settings = [
+        ("unknown-registry = \"deny\"", "unknown registries"),
+        ("unknown-git = \"deny\"", "unknown git sources"),
+        ("allow-git = []", "all git dependencies"),
+    ];
+
+    for (setting, description) in required_settings {
+        assert!(
+            content.contains(setting),
+            "deny.toml [sources] must contain `{setting}` to block {description}.\n\
+             Only crates.io should be allowed as a dependency source."
+        );
+    }
+}
+
+#[test]
+fn test_no_rustls_pemfile_in_cargo_lock() {
+    let root = repo_root();
+    let lock_content = read_file(&root.join("Cargo.lock"));
+
+    assert!(
+        !lock_content.contains("name = \"rustls-pemfile\""),
+        "Cargo.lock must not contain rustls-pemfile.\n\
+         This crate is unmaintained (RUSTSEC-2025-0134) and has been replaced\n\
+         by rustls-pki-types built-in PEM parsing.\n\n\
+         If this appeared after a dependency update, check which crate pulls it in:\n\
+         cargo tree -i rustls-pemfile"
+    );
+}
+
+#[test]
+fn test_cargo_deny_full_check_passes() {
+    let Some((success, output)) = run_cargo_deny(&["--all-features", "check"]) else {
+        return;
+    };
+
+    assert!(
+        success,
+        "cargo deny --all-features check failed.\n\
+         All four policy areas (advisories, licenses, bans, sources) must pass.\n\n\
+         To investigate:\n\
+         1. Run: cargo deny --all-features check\n\
+         2. Address each failure category separately:\n\
+            - advisories: update or replace affected dependency\n\
+            - licenses: add exception or replace dependency\n\
+            - bans: remove banned crate or add skip entry with justification\n\
+            - sources: ensure all deps come from crates.io\n\n\
+         Output:\n{output}",
+    );
+}
+
+#[test]
+fn test_check_outdated_script_exists() {
+    let root = repo_root();
+    let script_path = root.join("scripts/check-outdated.sh");
+
+    assert!(
+        script_path.exists(),
+        "scripts/check-outdated.sh must exist for local outdated dependency checking.\n\
+         This script runs cargo outdated to show which dependencies have newer versions\n\
+         available. It is informational only (not a CI gate)."
+    );
+
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("cargo outdated"),
+        "scripts/check-outdated.sh must run 'cargo outdated'."
+    );
+
+    assert!(
+        content.contains("set -euo pipefail") || content.contains("set -eu"),
+        "scripts/check-outdated.sh must use strict error handling (set -euo pipefail)."
+    );
+}
+
+#[test]
+fn test_check_outdated_script_has_shebang() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/check-outdated.sh"));
+
+    assert!(
+        content.starts_with("#!/usr/bin/env bash") || content.starts_with("#!/bin/bash"),
+        "scripts/check-outdated.sh must have a proper bash shebang line."
+    );
+}
+
+/// Data-driven test for flag and pattern presence in check-outdated.sh.
+///
+/// Consolidates individual flag-presence assertions into a table-driven structure
+/// so that new flags or patterns can be added with a single line.
+#[test]
+fn test_check_outdated_script_required_flags_and_patterns() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/check-outdated.sh"));
+
+    // (pattern, description) — each must appear in the script
+    let required_patterns: &[(&str, &str)] = &[
+        ("--help", "must support --help flag"),
+        (
+            "--root-only",
+            "must support --root-only flag to skip transitive deps",
+        ),
+        ("--json", "must support --json flag for JSON output"),
+        (
+            "--root-deps-only",
+            "must pass --root-deps-only to cargo outdated when --root-only is set",
+        ),
+        (
+            "--format json",
+            "must pass --format json to cargo outdated when --json is set",
+        ),
+    ];
+
+    let mut missing = Vec::new();
+    for (pattern, description) in required_patterns {
+        if !content.contains(pattern) {
+            missing.push(format!("  - '{pattern}': {description}"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "scripts/check-outdated.sh is missing required flags/patterns:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// Verify the script has a catch-all case for unknown options.
+#[test]
+fn test_check_outdated_script_handles_unknown_options() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/check-outdated.sh"));
+
+    assert!(
+        content.contains("*)") && content.contains("Unknown option"),
+        "scripts/check-outdated.sh must have a catch-all `*)` case that reports \
+         unknown options to the user."
+    );
+}
+
+/// Verify the script contains TTY color-detection using `[ -t 1 ]`.
+#[test]
+fn test_check_outdated_script_has_tty_color_detection() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/check-outdated.sh"));
+
+    assert!(
+        content.contains("[ -t 1 ]"),
+        "scripts/check-outdated.sh must include TTY detection ([ -t 1 ]) to disable \
+         color output when stdout is not a terminal."
+    );
+}
+
+#[test]
+fn test_check_outdated_script_is_informational_only() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/check-outdated.sh"));
+
+    // The script must always exit 0 (informational only).
+    // It should contain "exit 0" and NOT use a FAILED variable to gate exit codes.
+    assert!(
+        content.contains("exit 0"),
+        "scripts/check-outdated.sh must exit 0 (informational only — \
+         outdated deps are not errors)."
+    );
+
+    // Note: `exit 2` is intentionally allowed — it is used only for tool/usage
+    // errors (e.g., cargo-outdated not installed, unknown CLI option), NOT for
+    // outdated dependencies.  Only `exit 1` and `exit $FAILED` would indicate
+    // that the script treats outdated deps as failures.
+    assert!(
+        !content.contains("exit $FAILED") && !content.contains("exit 1"),
+        "scripts/check-outdated.sh must not exit non-zero for outdated dependencies.\n\
+         This is an informational tool, not a CI gate.\n\
+         (exit 2 is allowed for tool/usage errors, but exit 1 or exit $FAILED is not.)"
+    );
+}
+
+/// Verify check-outdated.sh has executable permission bits set.
+#[test]
+#[cfg(unix)]
+fn test_check_outdated_script_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = repo_root();
+    let script_path = root.join("scripts/check-outdated.sh");
+
+    assert!(
+        script_path.exists(),
+        "scripts/check-outdated.sh must exist to validate executable permissions."
+    );
+
+    let metadata = std::fs::metadata(&script_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read metadata for {}: {}",
+            script_path.display(),
+            e
+        )
+    });
+    let mode = metadata.permissions().mode();
+    let is_executable = mode & 0o111 != 0;
+
+    assert!(
+        is_executable,
+        "{} is not executable (mode: {:o}).\n\
+         Fix: chmod +x scripts/check-outdated.sh && git update-index --chmod=+x scripts/check-outdated.sh",
+        script_path.display(),
+        mode & 0o777
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Skill Documentation Sync Tests
+//
+// Data-driven tests ensuring that LLM skill files contain required sections
+// and that documentation stays in sync with tooling and policy.
+// ---------------------------------------------------------------------------
+
+/// Sections that must exist in dependency-management-cargo.md.
+const REQUIRED_DEP_SKILL_SECTIONS: &[(&str, &str)] = &[
+    (
+        "## Dependency Watch List and Ban Policy",
+        "Watch list and ban policy section",
+    ),
+    ("### Watch List", "Watch list table"),
+    ("### Ban List Policy", "Ban list policy criteria"),
+    ("### How to Add a Ban", "Ban addition process"),
+];
+
+/// Crate names that must appear in the watch list table.
+/// These are real crates with known deprecation or risk trends.
+const REQUIRED_WATCH_LIST_CRATES: &[(&str, &str)] = &[
+    ("once_cell", "LazyLock / OnceLock stabilized in std"),
+    ("async-trait", "native async fn in traits (Rust 1.75)"),
+    ("chrono", "past RUSTSEC advisories"),
+    (
+        "futures-util",
+        "large dependency tree overlapping with tokio",
+    ),
+    ("rmp-serde", "maintenance cadence monitoring"),
+];
+
+/// Sections that must exist in supply-chain-audit-policy.md.
+const REQUIRED_AUDIT_SKILL_SECTIONS: &[(&str, &str)] = &[
+    (
+        "## Monitoring Obligations",
+        "Monitoring obligations section",
+    ),
+    ("### Scheduled Checks", "Scheduled checks table"),
+    ("### Response SLAs", "Response SLA table"),
+    (
+        "### Escalation Path",
+        "Escalation path for RUSTSEC advisories",
+    ),
+];
+
+#[test]
+fn test_dep_skill_contains_watch_list_section() {
+    let root = repo_root();
+    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+
+    let mut missing = Vec::new();
+    for &(section, desc) in REQUIRED_DEP_SKILL_SECTIONS {
+        if !content.contains(section) {
+            missing.push(format!("  - {desc} (expected: \"{section}\")"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "dependency-management-cargo.md is missing required sections:\n{}\n\n\
+         These sections document the dependency watch list and ban policy.\n\
+         See ticket K-4 for the required content.",
+        missing.join("\n")
+    );
+
+    // Verify the watch list is in table format (has a table header row).
+    assert!(
+        content.contains("| Crate"),
+        "dependency-management-cargo.md watch list must be in markdown table format.\n\
+         Expected a table header row starting with '| Crate'."
+    );
+}
+
+#[test]
+fn test_dep_skill_contains_ban_policy_referencing_deny_toml() {
+    let root = repo_root();
+    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+
+    assert!(
+        content.contains("deny.toml"),
+        "dependency-management-cargo.md ban policy section must reference deny.toml.\n\
+         The ban policy documents when and how to add [[bans.deny]] entries."
+    );
+
+    assert!(
+        content.contains("REQUIRED_DENY_BANS"),
+        "dependency-management-cargo.md must reference the REQUIRED_DENY_BANS constant\n\
+         in ci_config_tests.rs so agents know to update the test when adding bans."
+    );
+}
+
+#[test]
+fn test_dep_skill_watch_list_references_real_crates() {
+    let root = repo_root();
+    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+
+    let mut missing = Vec::new();
+    let mut not_in_table = Vec::new();
+    for &(crate_name, reason) in REQUIRED_WATCH_LIST_CRATES {
+        let backtick_name = format!("`{crate_name}`");
+        if !content.contains(&backtick_name) {
+            missing.push(format!("  - {crate_name}: {reason}"));
+        } else {
+            // Verify the crate appears in a table row (line with pipe delimiters),
+            // not just mentioned in prose.
+            let in_table_row = content
+                .lines()
+                .any(|line| line.contains(&backtick_name) && line.contains('|'));
+            if !in_table_row {
+                not_in_table.push(format!(
+                    "  - {crate_name}: found in prose but not in a table row"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "dependency-management-cargo.md watch list is missing real crate entries:\n{}\n\n\
+         The watch list must contain actual crates with known risks, not placeholders.",
+        missing.join("\n")
+    );
+
+    assert!(
+        not_in_table.is_empty(),
+        "dependency-management-cargo.md watch list crates must appear in a table row (with | delimiters):\n{}\n\n\
+         Each watched crate must be in the markdown table, not just mentioned in prose.",
+        not_in_table.join("\n")
+    );
+}
+
+#[test]
+fn test_audit_skill_contains_monitoring_obligations() {
+    let root = repo_root();
+    let content = read_file(&root.join(".llm/skills/supply-chain-audit-policy.md"));
+
+    let mut missing = Vec::new();
+    for &(section, desc) in REQUIRED_AUDIT_SKILL_SECTIONS {
+        if !content.contains(section) {
+            missing.push(format!("  - {desc} (expected: \"{section}\")"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "supply-chain-audit-policy.md is missing required sections:\n{}\n\n\
+         These sections document monitoring obligations, SLAs, and escalation paths.\n\
+         See ticket K-4 for the required content.",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn test_audit_skill_monitoring_references_tools() {
+    let root = repo_root();
+    let content = read_file(&root.join(".llm/skills/supply-chain-audit-policy.md"));
+
+    let required_tool_refs = [
+        ("cargo deny check", "primary policy gate"),
+        ("cargo audit", "second-opinion vulnerability scanner"),
+        ("check-outdated.sh", "outdated dependency reporter"),
+        ("check-advisories.sh", "local advisory pre-check"),
+    ];
+
+    let mut missing = Vec::new();
+    for (tool, desc) in required_tool_refs {
+        if !content.contains(tool) {
+            missing.push(format!("  - {tool} ({desc})"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "supply-chain-audit-policy.md monitoring obligations must reference these tools:\n{}\n\n\
+         Agents need to know which tools to run and when.",
+        missing.join("\n")
+    );
+}
+
+/// Verify that check-outdated.sh is intentionally excluded from run-local-ci.sh.
+///
+/// check-outdated.sh is an informational developer tool that reports which
+/// dependencies have newer versions available. It always exits 0 and does not
+/// gate on any condition. Informational tools do not belong in CI gate scripts
+/// because they add noise without enforcing any quality bar. The advisory check
+/// (check-advisories.sh) IS included because it enforces a security policy.
+#[test]
+fn test_run_local_ci_excludes_check_outdated() {
+    let root = repo_root();
+    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+
+    assert!(
+        !script.contains("check-outdated.sh"),
+        "scripts/run-local-ci.sh must NOT include check-outdated.sh.\n\
+         check-outdated.sh is an informational tool (always exits 0) and does not \
+         enforce any policy. Informational tools do not belong in CI gate scripts — \
+         they add noise without enforcing a quality bar.\n\
+         Developers can run it manually: ./scripts/check-outdated.sh"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Internal Path Classification Tests
+//
+// Data-driven tests ensuring that the is_internal_path() function in
+// check-doc-consistency.sh and the dep-detect case statement in ci.yml
+// stay in sync, and that path classification is correct for known paths.
+// These tests prevent regression of the docs/ci-cd-* misclassification bug.
+// ---------------------------------------------------------------------------
+
+/// Glob-style patterns that MUST appear in BOTH scripts/check-doc-consistency.sh
+/// (is_internal_path function) and .github/workflows/ci.yml (dep-detect case).
+/// The CI workflow additionally has Cargo.toml and CHANGELOG.md for dependency
+/// bump detection (Cargo.lock is shared but grouped differently in ci.yml).
+/// See also .github/test-fixtures/test-doc-consistency.sh which tests these
+/// patterns via shell-level integration tests.
+const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
+    ".github/*",
+    ".githooks/*",
+    ".devcontainer/*",
+    ".config/*",
+    ".vscode/*",
+    ".claude/*",
+    "scripts/*",
+    "tests/*",
+    "test-fixtures/*",
+    ".llm/*",
+    "target/*",
+    "progress/*",
+    "docs/ci-cd-*",
+    "docs/test-*",
+    "docs/git-hooks-*",
+    "docs/hooks-*",
+    "docs/pre-commit-*",
+    "docs/development.md",
+    ".markdownlint*",
+    ".lychee.toml",
+    ".lycheecache",
+    ".typos.toml",
+    ".yamllint.yml",
+    ".gitignore",
+    ".dockerignore",
+    "PLAN.md",
+    "AGENTS.md",
+    "pre-push.txt",
+    "logs_*.zip",
+    "clippy.toml",
+    "deny.toml",
+    "tarpaulin.toml",
+    "rust-toolchain.toml",
+    "mkdocs.yml",
+    "requirements-docs.txt",
+];
+
+#[test]
+fn test_internal_path_patterns_synced_between_script_and_ci() {
+    let root = repo_root();
+    let script_content = read_file(&root.join("scripts/check-doc-consistency.sh"));
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    let mut missing_from_script = Vec::new();
+    let mut missing_from_ci = Vec::new();
+
+    for &pattern in SHARED_INTERNAL_PATH_PATTERNS {
+        if !script_content.contains(pattern) {
+            missing_from_script.push(pattern);
+        }
+        if !ci_content.contains(pattern) {
+            missing_from_ci.push(pattern);
+        }
+    }
+
+    assert!(
+        missing_from_script.is_empty(),
+        "scripts/check-doc-consistency.sh is_internal_path() is missing these patterns:\n\
+         {}\n\n\
+         The is_internal_path() function and the CI dep-detect case statement must \
+         share these patterns. Update is_internal_path() to include the missing patterns.",
+        missing_from_script
+            .iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    assert!(
+        missing_from_ci.is_empty(),
+        ".github/workflows/ci.yml dep-detect case is missing these patterns:\n\
+         {}\n\n\
+         The CI dep-detect case statement and is_internal_path() must share these \
+         patterns. Update the dep-detect case in ci.yml to include the missing patterns.",
+        missing_from_ci
+            .iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Test cases for internal path classification.
+/// Each entry is (path, should_be_internal, reason).
+const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
+    // Internal paths
+    (
+        ".github/workflows/ci.yml",
+        true,
+        "CI workflow files are internal infrastructure",
+    ),
+    (
+        "scripts/check-doc-consistency.sh",
+        true,
+        "scripts are internal tooling",
+    ),
+    ("tests/ci_config_tests.rs", true, "test files are internal"),
+    (
+        "docs/ci-cd-testing.md",
+        true,
+        "CI/CD docs are internal infrastructure docs",
+    ),
+    (
+        "docs/test-suite-analysis-ci-config.md",
+        true,
+        "test-related docs are internal",
+    ),
+    (
+        "docs/pre-commit-hooks-summary.md",
+        true,
+        "pre-commit docs are internal",
+    ),
+    ("docs/development.md", true, "development doc is internal"),
+    (
+        "docs/hooks-quick-reference.md",
+        true,
+        "hooks docs are internal",
+    ),
+    (
+        "docs/git-hooks-guide.md",
+        true,
+        "git-hooks docs are internal",
+    ),
+    ("Cargo.lock", true, "lockfile changes are internal"),
+    ("deny.toml", true, "deny.toml is internal tooling config"),
+    (".llm/context.md", true, "LLM context files are internal"),
+    (
+        ".markdownlint.yaml",
+        true,
+        "linter config files are internal",
+    ),
+    ("clippy.toml", true, "clippy config is internal"),
+    ("PLAN.md", true, "planning docs are internal"),
+    (".gitignore", true, "git config files are internal"),
+    // Non-internal paths (require CHANGELOG)
+    (
+        "src/main.rs",
+        false,
+        "source code changes require CHANGELOG",
+    ),
+    (
+        "src/security/tls.rs",
+        false,
+        "source code changes require CHANGELOG",
+    ),
+    ("Cargo.toml", false, "manifest changes require CHANGELOG"),
+    (
+        "docs/library-usage.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/getting-started.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/protocol.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/configuration.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/deployment.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/authentication.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/features.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/architecture.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    (
+        "docs/quickstart.md",
+        false,
+        "user-facing docs require CHANGELOG",
+    ),
+    ("docs/index.md", false, "user-facing docs require CHANGELOG"),
+    ("README.md", false, "README changes require CHANGELOG"),
+    // Edge case: docs/testing-guide.md must NOT match docs/test-* pattern
+    (
+        "docs/testing-guide.md",
+        false,
+        "docs/testing-* must NOT match docs/test-* pattern",
+    ),
+];
+
+/// Simple shell-glob matcher supporting `*` (matches any chars including `/`)
+/// and literal characters. This covers all patterns used in is_internal_path().
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    glob_matches_inner(pattern.as_bytes(), path.as_bytes())
+}
+
+fn glob_matches_inner(pattern: &[u8], path: &[u8]) -> bool {
+    let mut p = 0;
+    let mut s = 0;
+    let mut star_p = None;
+    let mut star_s = None;
+
+    while s < path.len() {
+        if p < pattern.len() && pattern[p] == b'*' {
+            star_p = Some(p);
+            star_s = Some(s);
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == path[s] {
+            p += 1;
+            s += 1;
+        } else if let (Some(sp), Some(ss)) = (star_p, star_s) {
+            let new_ss = ss + 1;
+            p = sp + 1;
+            s = new_ss;
+            star_s = Some(new_ss);
+        } else {
+            return false;
+        }
+    }
+
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+
+    p == pattern.len()
+}
+
+#[test]
+fn test_internal_path_classification_data_driven() {
+    let root = repo_root();
+    let script_content = read_file(&root.join("scripts/check-doc-consistency.sh"));
+
+    // Extract the case patterns from is_internal_path().
+    // Find the block between "case \"$path\" in" and the closing "esac".
+    let case_start = script_content
+        .find("case \"$path\" in")
+        .expect("is_internal_path() case statement not found in check-doc-consistency.sh");
+    let case_block = &script_content[case_start..];
+    let esac_offset = case_block
+        .find("\n    esac")
+        .or_else(|| case_block.find("\nesac"))
+        .expect("esac not found after case \"$path\" in");
+    let case_body = &case_block[..esac_offset];
+
+    // Parse individual glob patterns from lines like:
+    //   pattern1|pattern2|pattern3)
+    // Skip the *) catch-all line.
+    let mut patterns: Vec<&str> = Vec::new();
+    for line in case_body.lines() {
+        let trimmed = line.trim();
+        // Skip non-pattern lines (comments, return, case header, empty)
+        if !trimmed.ends_with(')') {
+            continue;
+        }
+        // Skip the catch-all wildcard
+        if trimmed == "*)" {
+            continue;
+        }
+        // Strip trailing )
+        let pat_str = trimmed.trim_end_matches(')');
+        for pat in pat_str.split('|') {
+            let pat = pat.trim();
+            if !pat.is_empty() {
+                patterns.push(pat);
+            }
+        }
+    }
+
+    assert!(
+        !patterns.is_empty(),
+        "Failed to extract any patterns from is_internal_path() in check-doc-consistency.sh"
+    );
+
+    let mut failures = Vec::new();
+
+    for &(path, should_be_internal, reason) in INTERNAL_PATH_CLASSIFICATION_CASES {
+        let matched = patterns.iter().any(|pat| glob_matches(pat, path));
+        if matched != should_be_internal {
+            let direction = if should_be_internal {
+                "expected INTERNAL but classified as non-internal"
+            } else {
+                "expected NON-INTERNAL but classified as internal"
+            };
+            failures.push(format!("  - {path}: {direction} ({reason})"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Internal path classification mismatches in is_internal_path():\n\
+         {}\n\n\
+         Update is_internal_path() in scripts/check-doc-consistency.sh or fix the \
+         test cases if the expected classification has changed.",
+        failures.join("\n")
     );
 }

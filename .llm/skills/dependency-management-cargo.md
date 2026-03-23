@@ -22,9 +22,9 @@
 
 ## When NOT to Use
 
-- Designing APIs for your own crate (see [api-design-guidelines](./api-design-guidelines.md))
-- MSRV compliance and version pinning (see [dependency-management-versioning](./dependency-management-versioning.md))
-- Supply chain security auditing (see [supply-chain-security](./supply-chain-audit-policy.md))
+- Designing APIs for your own crate (see [API Design Guidelines](./api-design-guidelines.md))
+- MSRV compliance and version pinning (see [Dependency Management Versioning](./dependency-management-versioning.md))
+- Supply chain security auditing (see [Supply Chain Audit Policy](./supply-chain-audit-policy.md))
 
 ---
 
@@ -55,6 +55,52 @@ etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
 
 ---
 
+## Dependency Watch List and Ban Policy
+
+### Watch List
+
+Crates on this list are not banned but carry known risks and should be
+monitored for migration opportunities. Review this list when upgrading
+dependencies or evaluating alternatives.
+
+| Crate | Risk / Reason | Action Trigger | Recommended Replacement |
+|-------|---------------|----------------|------------------------|
+| `once_cell` | `LazyLock` / `OnceLock` stabilized in std (Rust 1.80). Direct use is unnecessary; transitive use remains common. | When all transitive dependents drop it, or when adding new direct usage. | `std::sync::LazyLock` / `std::sync::OnceLock` |
+| `async-trait` | Native `async fn` in traits stabilized in Rust 1.75. The proc-macro adds compile time and allocations. | When updating a trait that uses `#[async_trait]` or adding a new async trait. | Native `async fn` in trait definitions |
+| `chrono` | Has had past RUSTSEC advisories (e.g., RUSTSEC-2020-0159 localtime_r segfault). Large dependency tree. | On any new RUSTSEC advisory, or when evaluating date/time needs. | `time` crate, or `jiff` for newer projects |
+| `futures-util` | Large dependency tree; many utilities overlap with tokio built-ins (`tokio::select!`, `tokio::pin!`). | When the only usage is a single combinator that tokio provides natively. | `tokio` built-in utilities, `futures-lite` |
+| `rmp-serde` | Vendored `rmp` decouples us from upstream, but `rmp-serde` itself could go unmaintained. Moderate maintenance cadence. | If `rmp-serde` goes unmaintained (>12 months without release) or a RUSTSEC advisory is filed. | `msgpacker`, `messagepack-rs`, or extend vendored `rmp` |
+
+### Ban List Policy
+
+A crate should be added to the `[[bans.deny]]` list in `deny.toml` when
+any of the following criteria are met:
+
+1. **RUSTSEC advisory with no fix** — an active advisory exists and the
+   crate author has not released a patched version.
+2. **Officially deprecated or unmaintained** — the crate README or
+   crates.io page states it is deprecated, or it has had no commits for
+   18+ months with open security issues.
+3. **Superseded by std** — the functionality has been absorbed into the
+   Rust standard library (e.g., `atty` replaced by `std::io::IsTerminal`).
+4. **Policy conflict** — the crate violates project security policy
+   (e.g., `openssl` when the project mandates `rustls`).
+5. **Transitive risk** — banning prevents accidental introduction via
+   new dependencies (e.g., `native-tls` pulling in `openssl`).
+
+### How to Add a Ban
+
+1. Edit `deny.toml` — add a new `[[bans.deny]]` entry with `name` and
+   `reason` fields. The reason must mention the recommended replacement.
+2. Update `REQUIRED_DENY_BANS` in `tests/ci_config_tests.rs` — add a
+   tuple `("crate_name", "reason_substring")` so the test enforces the
+   ban is present.
+3. Verify — run `cargo deny check bans` to confirm the ban is active.
+4. Run the full test suite — `cargo test --all-features --test ci_config_tests`
+   to confirm the new test entry passes.
+
+---
+
 ## Choosing Between Crates — Evaluation Criteria
 
 | Criterion         | Check                     | Red flag                             | Notes                                   |
@@ -65,7 +111,7 @@ etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
 | **License**       | Cargo.toml license field  | GPL/AGPL in MIT project              | Must be compatible with project license |
 | **Safety**        | `unsafe` usage            | Lots of unsafe without justification | Review unsafe code carefully            |
 | **Build time**    | `cargo build --timings`   | >10s for one crate                   | Impacts developer productivity          |
-| **MSRV**          | Minimum Rust version      | Higher than project MSRV             | **CRITICAL**: See [dependency-management-versioning](./dependency-management-versioning.md) |
+| **MSRV**          | Minimum Rust version      | Higher than project MSRV             | **CRITICAL**: See [Dependency Management Versioning](./dependency-management-versioning.md) |
 | **API stability** | Version number, changelog | Frequent breaking releases           | Check semver adherence                  |
 
 ### Decision Process
@@ -98,7 +144,7 @@ Don't put commonly-needed deps behind flags (if 90% of users need it, make it de
 **Native C dependencies:** If a feature pulls in a crate that requires native libraries (e.g., `rdkafka` needs `cmake`,
 `libcurl-dev`, `libssl-dev`),
 you must also update `.github/actions/install-build-deps/action.yml` and the `Dockerfile` builder stage.
-See [Container Docker § CI Native Build Dependencies](./container-docker.md) for details.
+See [Container Docker](./container-docker.md) for details.
 
 ### Testing All Feature Combinations
 
@@ -168,61 +214,11 @@ cargo +nightly udeps --all-targets
 | False positive (proc macro) | **Keep** | Add `# keep:` comment | Actually used, tool limitation |
 | Unused but API-stable | **Remove** | Delete | Stability doesn't justify keeping |
 
-### Commenting Dependencies to Keep
-
-```toml
-[dependencies]
-# Core runtime
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros"] }
-
-# keep: Used by serde derive macros (false positive from cargo-udeps)
-serde_derive = "1.0"
-
-# keep: Platform-specific, used on Windows only
-winapi = { version = "0.3", features = ["winuser"], optional = true }
-```
-
 ### Handling False Positives
 
-```bash
-# Search for usage in code
-rg "use.*dependency_name" src/
-rg "dependency_name::" src/
-
-# Check if it's a proc macro
-cargo metadata --format-version=1 | jq '.packages[] | select(.name == "dependency_name") | .targets[] | .kind'
-# If output includes "proc-macro", it's used at compile-time
-```
-
-For known false positives, configure tools to ignore them:
-
-```toml
-# .cargo/machete.toml
-[[skip]]
-package = "serde_derive"
-reason = "Used by serde derive macros"
-```
-
-### Regular Audit Schedule
-
-```yaml
-# .github/workflows/unused-deps.yml
-on:
-  schedule:
-    - cron: '0 0 * * 1'  # Weekly on Monday at 00:00 UTC
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  unused-deps:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo install cargo-machete
-      - run: cargo machete
-```
+For proc-macro false positives, add `# keep:` comments in Cargo.toml and configure
+`.cargo/machete.toml` with `[[skip]]` entries. Search for usage with `rg "use.*dep" src/`
+and `rg "dep::" src/` before removing. Check proc-macro status with `cargo metadata`.
 
 ---
 
@@ -243,9 +239,39 @@ This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "thi
 
 ---
 
+## Local Dependency Health Checks
+
+Before pushing dependency changes, run the advisory check script:
+
+```bash
+# Quick advisory check
+./scripts/check-advisories.sh
+
+# Full cargo-deny check (advisories + licenses + bans + sources)
+./scripts/check-advisories.sh --full
+```
+
+To see which dependencies have newer versions available (informational, not a CI gate):
+
+```bash
+# Show all outdated dependencies
+./scripts/check-outdated.sh
+
+# Direct dependencies only
+./scripts/check-outdated.sh --root-only
+```
+
+For unmaintained crate advisories, check if the functionality has been absorbed into
+another crate (e.g., `rustls-pemfile` was absorbed into `rustls-pki-types`). See
+[Supply Chain Audit Policy](./supply-chain-audit-policy.md) for the full resolution
+decision tree and migration examples.
+
+---
+
 ## Agent Checklist
 
 - [ ] `cargo deny check` passes before adding any dependency
+- [ ] `./scripts/check-advisories.sh` run before pushing dependency changes
 - [ ] `cargo audit` run regularly (weekly in CI)
 - [ ] New dependencies evaluated against criteria table (including MSRV)
 - [ ] Heavy/optional deps behind feature flags
@@ -253,12 +279,14 @@ This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "thi
 - [ ] Build times monitored with `cargo build --timings`
 - [ ] Duplicate versions investigated with `cargo tree -d`
 - [ ] Vendored crates documented with reason in `third_party/`
+- [ ] Watch list reviewed — no new direct usage of watch-listed crates without justification
+- [ ] Ban list policy checked — any newly deprecated or superseded crate added to deny.toml
 
 ---
 
 ## Related Skills
 
-- [dependency-management-versioning](./dependency-management-versioning.md) — MSRV, pinning, and recommended crates
-- [supply-chain-security](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
-- [msrv-management](./msrv-management.md) — MSRV updates and consistency
-- [clippy-and-linting](./clippy-and-linting.md) — CI integration for dependency checks
+- [Dependency Management Versioning](./dependency-management-versioning.md) — MSRV, pinning, and recommended crates
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
+- [MSRV Management](./msrv-management.md) — MSRV updates and consistency
+- [Clippy And Linting](./clippy-and-linting.md) — CI integration for dependency checks

@@ -272,7 +272,7 @@ Key room-related configuration options:
   Default: `3600`.
 
 For the full list of server configuration options, see the
-[Configuration Guide](../configuration.md).
+[Configuration](../configuration.md).
 
 ## Next Steps
 

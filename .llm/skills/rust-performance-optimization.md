@@ -24,7 +24,7 @@
 
 - Premature optimization before profiling
 - Code correctness issues (fix bugs first, then optimize)
-- API design decisions (see [api-design-guidelines](./api-design-guidelines.md))
+- API design decisions (see [API Design Guidelines](./api-design-guidelines.md))
 
 ---
 
@@ -78,7 +78,7 @@ let name: Arc<str> = "room_alpha".into();  // One fewer indirection vs Arc<Strin
 ```
 
 Use `tracing`/`log` macros (format lazily) instead of `format!()` in log calls.
-See [observability-and-logging](./observability-and-logging.md).
+See [Observability And Logging](./observability-and-logging.md).
 
 ---
 
@@ -219,7 +219,7 @@ let shared_msg = Bytes::from(message);
 for peer in peers { peer.send(shared_msg.clone()).await?; }  // Just bumps refcount
 ```
 
-See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for `clone_from()` and `Cow<str>` patterns.
+See [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) for `clone_from()` and `Cow<str>` patterns.
 
 ---
 
@@ -240,7 +240,7 @@ See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for `clone_from()`
 
 ## Related Skills
 
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Async performance and task management
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Iterator patterns and zero-cost abstractions
-- [dependency-management](./dependency-management-cargo.md) — Alternative crate recommendations
-- [observability-and-logging](./observability-and-logging.md) — Metrics for performance monitoring
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Async performance and task management
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Iterator patterns and zero-cost abstractions
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Alternative crate recommendations
+- [Observability And Logging](./observability-and-logging.md) — Metrics for performance monitoring

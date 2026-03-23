@@ -23,8 +23,8 @@
 ## When NOT to Use
 
 - Internal implementation details not exposed to consumers
-- Pure performance optimization (see [Rust-performance-optimization](./rust-performance-optimization.md))
-- Error type design specifically (see [error-handling-guide](./error-handling-guide.md))
+- Pure performance optimization (see [Rust Performance Optimization](./rust-performance-optimization.md))
+- Error type design specifically (see [Error Handling Guide](./error-handling-guide.md))
 
 ---
 
@@ -232,10 +232,10 @@ Maintain an OpenAPI specification for REST APIs with multiple endpoints.
 ## Signaling Server-Specific Guidance
 
 Use `#[serde(tag = "type", rename_all = "snake_case")]` on all client/server message enums.
-See [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) for full message design.
+See [WebSocket Protocol Patterns](./websocket-protocol-patterns.md) for full message design.
 
 Use the typestate pattern to prevent invalid operations.
-See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
+See [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) for the full typestate pattern.
 
 ---
 
@@ -258,7 +258,7 @@ See [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) for the full types
 
 ## Related Skills
 
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Rust naming conventions and canonical patterns
-- [error-handling-guide](./error-handling-guide.md) — Designing error types for APIs
-- [defensive-programming](./defensive-programming.md) — Input validation at API boundaries
-- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket-specific API patterns
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Rust naming conventions and canonical patterns
+- [Error Handling Guide](./error-handling-guide.md) — Designing error types for APIs
+- [Defensive Programming](./defensive-programming.md) — Input validation at API boundaries
+- [WebSocket Protocol Patterns](./websocket-protocol-patterns.md) — WebSocket-specific API patterns

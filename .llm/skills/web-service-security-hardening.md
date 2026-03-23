@@ -21,8 +21,8 @@ implementing security logging for the server.
 
 ## When NOT to Use
 
-- Input validation and authentication patterns (see [web-service-security-auth](./web-service-security-auth.md))
-- Rate limiting and connection caps (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
+- Input validation and authentication patterns (see [Web Service Security Auth](./web-service-security-auth.md))
+- Rate limiting and connection caps (see [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md))
 
 ---
 
@@ -246,9 +246,9 @@ Set alerting thresholds for security anomalies:
 
 ## Related Skills
 
-- [web-service-security-auth](./web-service-security-auth.md) — Input validation, authentication, WebSocket security
-- [observability-and-logging](./observability-and-logging.md) — Structured logging, tracing spans, log hygiene
-- [dependency-management-cargo](./dependency-management-cargo.md) — Cargo.lock, audit workflows
-- [supply-chain-security](./supply-chain-audit-policy.md) — Full supply chain audit pipeline
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+- [Web Service Security Auth](./web-service-security-auth.md) — Input validation, authentication, WebSocket security
+- [Observability And Logging](./observability-and-logging.md) — Structured logging, tracing spans, log hygiene
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Cargo.lock, audit workflows
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — Full supply chain audit pipeline
+- [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md) —
   Rate limiting, connection management, DDoS prevention

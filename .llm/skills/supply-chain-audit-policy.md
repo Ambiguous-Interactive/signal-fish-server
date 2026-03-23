@@ -20,19 +20,9 @@ or setting up reproducible builds.
 
 ## When NOT to Use
 
-- SBOM generation and update automation (see [supply-chain-sbom-updates](./supply-chain-sbom-updates.md))
-- Application-level security (see [web-service-security-auth](./web-service-security-auth.md))
-- Choosing between crates for functionality (see [dependency-management-cargo](./dependency-management-cargo.md))
-
-## Rationalizations to Reject
-
-| Excuse | Why It's Wrong | Required Action |
-|--------|---------------|-----------------|
-| "We only use well-known crates" | Popular crates get compromised too. Transitive deps hide risk. | Audit the full tree. Run `cargo deny check` on every PR. |
-| "We'll audit before release" | Vulnerabilities accumulate silently between audits. | Run `cargo audit` in CI on every push and on a daily schedule. |
-| "Pinning versions slows us down" | Unpinned deps can silently pull in breaking or malicious updates. | Pin security-critical deps exactly. Always commit `Cargo.lock`. Build with `--locked`. |
-
----
+- SBOM generation and update automation (see [Supply Chain Sbom Updates](./supply-chain-sbom-updates.md))
+- Application-level security (see [Web Service Security Auth](./web-service-security-auth.md))
+- Choosing between crates for functionality (see [Dependency Management Cargo](./dependency-management-cargo.md))
 
 ## TL;DR
 
@@ -52,23 +42,8 @@ cargo audit --json       # JSON output for CI parsing
 Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`),
 or **Deny** (replace the crate).
 
-```rust
-// BAD: Silently ignoring an advisory with no justification
-// Just add RUSTSEC-2024-0001 to the ignore list and move on
-
-// GOOD: Documented ignore with expiry and rationale in audit.toml
-// ignore RUSTSEC-2024-0001: "Utc-only usage, not exploitable", expires 2026-06-01
-```
-
-### `audit.toml` Configuration
-
-```toml
-[advisories]
-ignore = [
-    # RUSTSEC-2024-0001: Utc-only, not exploitable. Revisit by 2026-06-01.
-    "RUSTSEC-2024-0001",
-]
-```
+Document ignored advisories in `audit.toml` with rationale and expiry dates.
+Never silently ignore — every ignore must have a justification and a revisit date.
 
 ---
 
@@ -87,19 +62,8 @@ unmaintained = "workspace"
 
 ### `[licenses]` — allowlist of permissive licenses
 
-```toml
-[licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
-         "BSD-2-Clause", "BSD-3-Clause", "ISC", "OpenSSL",
-         "Unicode-DFS-2016", "Unicode-3.0", "Zlib", "0BSD", "CC0-1.0"]
-```
-
-```rust
-// BAD: Adding a GPL-licensed crate to a permissive project
-// Cargo.toml: my-gpl-dep = "1.0"  # License: GPL-3.0
-
-// GOOD: Verify license before adding: cargo deny check licenses
-```
+Allows MIT, Apache-2.0, BSD, ISC, OpenSSL, Unicode, Zlib, 0BSD, CC0-1.0.
+Always run `cargo deny check licenses` before adding a new dependency.
 
 ### `[bans]` — block problematic crates, detect duplicates
 
@@ -194,22 +158,8 @@ strip = "symbols"
 overflow-checks = true
 ```
 
-### Docker Multi-Stage with Locked Deps
-
-```dockerfile
-FROM rust:1.83-slim AS builder
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY crates/ crates/
-RUN mkdir src && echo "fn main() {}" > src/main.rs \
-    && cargo build --release --locked && rm -rf src
-COPY src/ src/
-RUN cargo build --release --locked
-
-FROM gcr.io/distroless/cc-debian12
-COPY --from=builder /app/target/release/matchbox-server /
-ENTRYPOINT ["/matchbox-server"]
-```
+Docker multi-stage builds must also use `--locked`. See [Container Docker](./container-docker.md)
+for the full Dockerfile pattern.
 
 ---
 
@@ -217,26 +167,96 @@ ENTRYPOINT ["/matchbox-server"]
 
 - Do not execute third-party CLIs via `npx` in CI scripts, hooks, or repo automation.
 - Do not use external Docker images with mutable `:latest` tags in automation.
-- Pin tool versions explicitly (for example, via `.markdownlint-version`) and validate versions at runtime.
+- Pin tool versions explicitly and validate versions at runtime.
 - Prefer preinstalled/pinned tools over on-demand network downloads.
 
+---
+
+## 6. Handling RUSTSEC Unmaintained Advisories
+
+Unmaintained advisories (e.g., RUSTSEC-2025-0134 for `rustls-pemfile`) indicate a crate
+is no longer maintained and may accumulate unpatched vulnerabilities over time.
+
+### Local Detection
+
 ```bash
-# BAD: On-demand execution from registry
-npx --yes markdownlint-cli2
+# Check for advisories (requires cargo-deny)
+cargo deny check advisories
 
-# BAD: Mutable Docker tag for third-party image
-docker run davidanson/markdownlint-cli2:latest
+# Or use the project script
+./scripts/check-advisories.sh
 
-# GOOD: Pinned local/global install and explicit version check
-markdownlint-cli2 --version
+# Full audit including licenses, bans, sources
+./scripts/check-advisories.sh --full
 ```
+
+### Resolution Decision Tree
+
+```text
+Unmaintained advisory detected:
+    |
+    +-- Functionality absorbed into another crate? --> Migrate to replacement
+    |   (e.g., rustls-pemfile -> rustls-pki-types)
+    |
+    +-- Drop-in replacement available? --> Update Cargo.toml dependency
+    |
+    +-- No replacement, <100 lines? --> Vendor the functionality inline
+    |
+    +-- No replacement, complex? --> Fork and maintain, or add documented
+        ignore with expiry in deny.toml
+```
+
+See dedicated migration example:
+[Supply Chain Example Rustls Pemfile To Rustls Pki Types](./supply-chain-example-rustls-pemfile-to-rustls-pki-types.md).
+
+---
+
+## Monitoring Obligations
+
+### Scheduled Checks
+
+| Cadence | Check | Tool / Script | CI or Manual |
+|---------|-------|---------------|--------------|
+| Every PR | Policy compliance (advisories, licenses, bans, sources) | `cargo deny check` | CI — hard gate |
+| Every PR | Vulnerability scan (second opinion) | `cargo audit` | CI — hard gate |
+| Daily (cron) | New RUSTSEC advisories | `cargo-deny` + `cargo-audit` in CI schedule | CI — scheduled |
+| Weekly | Outdated dependency report | `./scripts/check-outdated.sh` | Manual / informational |
+| Per dependency change | Advisory pre-check | `./scripts/check-advisories.sh` | Manual before push |
+
+### Response SLAs
+
+| Severity | Examples | Response Time | Action |
+|----------|----------|---------------|--------|
+| **Critical** | RCE, auth bypass, data exfiltration | Same business day | Patch, update, or ban immediately. Open a PR within 4 hours. |
+| **High** | Denial of service, privilege escalation, memory corruption | 3 business days | Update to patched version or add to ban list with replacement. |
+| **Medium** | Information disclosure, unmaintained crate with no exploit | 2 weeks | Plan migration. Add documented ignore with expiry if needed. |
+| **Low / Informational** | Deprecation notice, unmaintained but no known vulnerability | Next dependency update cycle | Track on watch list. Migrate opportunistically. |
+
+### Escalation Path
+
+When a new RUSTSEC advisory is discovered:
+
+1. **Triage** — determine severity using the table above. Check if the
+   advisory affects this project's usage (e.g., UTC-only usage of chrono
+   may not be affected by a localtime vulnerability).
+2. **Check for patch** — run `cargo update -p <crate>` to see if a fixed
+   version is available. If yes, update and open a PR.
+3. **No patch available** — follow the Resolution Decision Tree in
+   section 6 above (migrate, vendor, or document ignore with expiry).
+4. **Add ban if warranted** — if the crate should never be used again,
+   add it to `deny.toml` `[[bans.deny]]` following the ban policy in
+   [Dependency Management Cargo](./dependency-management-cargo.md).
+5. **Verify** — run `cargo deny check` and `cargo audit` to confirm the
+   advisory is resolved or properly ignored.
 
 ---
 
 ## Agent Checklist
 
 - [ ] `cargo deny check` passes on every PR (advisories, licenses, bans, sources)
+- [ ] `./scripts/check-advisories.sh` run locally before pushing dependency changes
 - [ ] `cargo audit` runs in CI and on a daily schedule
+- [ ] No unmaintained crate advisories — migrate to maintained alternatives
 - [ ] `Cargo.lock` committed; `--locked` used for all CI build/test commands
 - [ ] Security-critical deps pinned with exact versions (`=x.y.z`)
 - [ ] No git dependencies — `[sources] allow-git = []`
@@ -245,15 +265,17 @@ markdownlint-cli2 --version
 - [ ] `audit.toml` ignores documented with rationale and expiry dates
 - [ ] Docker builds use `--locked` and multi-stage pattern
 - [ ] Automation scripts avoid `npx` runtime downloads and external `:latest` image tags
+- [ ] Monitoring obligations followed — scheduled checks running, SLAs observed
+- [ ] New RUSTSEC advisories triaged per escalation path within SLA
 
 ---
 
 ## Related Skills
 
-- [supply-chain-sbom-updates](./supply-chain-sbom-updates.md) — SBOM generation, update policy,
+- [Supply Chain Sbom Updates](./supply-chain-sbom-updates.md) — SBOM generation, update policy,
   CI pipeline, action compatibility
-- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
   workspace dependency patterns
-- [web-service-security-hardening](./web-service-security-hardening.md) —
+- [Web Service Security Hardening](./web-service-security-hardening.md) —
   Application-level security, auth, input validation, TLS
 - [Container Docker](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines

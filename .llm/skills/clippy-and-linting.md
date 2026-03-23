@@ -22,8 +22,8 @@
 
 ## When NOT to Use
 
-- Writing code patterns (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
-- Understanding error handling (see [error-handling-guide](./error-handling-guide.md))
+- Writing code patterns (see [Rust Idioms And Patterns](./rust-idioms-and-patterns.md))
+- Understanding error handling (see [Error Handling Guide](./error-handling-guide.md))
 
 ---
 
@@ -191,7 +191,7 @@ let re = Regex::new(r"^\d+$").unwrap();
 
 ## `cargo clippy --fix`
 
-See [Rust-refactoring-guide](./rust-refactoring-guide.md) for the full `cargo clippy --fix` workflow.
+See [Rust Refactoring Guide](./rust-refactoring-guide.md) for the full `cargo clippy --fix` workflow.
 
 ```bash
 cargo clippy --all-targets --all-features --fix --allow-dirty
@@ -292,7 +292,7 @@ mod tests {
 
 ## Related Skills
 
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Code patterns that satisfy lints
-- [defensive-programming](./defensive-programming.md) — Patterns enforced by restriction lints
-- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Using `cargo clippy --fix` for automated fixes
-- [testing-strategies](./testing-core-patterns.md) — CI pipeline integration
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Code patterns that satisfy lints
+- [Defensive Programming](./defensive-programming.md) — Patterns enforced by restriction lints
+- [Rust Refactoring Guide](./rust-refactoring-guide.md) — Using `cargo clippy --fix` for automated fixes
+- [Testing Core Patterns](./testing-core-patterns.md) — CI pipeline integration

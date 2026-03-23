@@ -11,8 +11,8 @@ dependencies, or deciding whether to use nightly for a CI tool.
 
 See also:
 
-- [msrv-management](./msrv-management.md) — MSRV definition and consistent config files
-- [toolchain-pinning](./toolchain-pinning.md) — Stable toolchain pinning and MSRV testing
+- [MSRV Management](./msrv-management.md) — MSRV definition and consistent config files
+- [Toolchain Pinning](./toolchain-pinning.md) — Stable toolchain pinning and MSRV testing
 
 ---
 
@@ -158,21 +158,8 @@ CI Analysis Tools (Nightly)
 - [ ] Test in CI (push to branch, verify workflow succeeds)
 - [ ] Document in commit (explain reason for nightly update)
 
-### Example Update Script
-
-```bash
-# 1. Check current nightly version
-grep -n "nightly-" .github/workflows/unused-deps.yml
-
-# 2. Update workflow file (all occurrences)
-sed -i 's/nightly-2025-02-21/nightly-2026-01-15/g' .github/workflows/unused-deps.yml
-
-# 3. Update "Last Updated" comment
-sed -i 's/Last Updated: .*/Last Updated: 2026-02-16/' .github/workflows/unused-deps.yml
-
-# 4. Verify changes
-git diff .github/workflows/unused-deps.yml
-```
+See dedicated example:
+[Toolchain Nightly Example Update Script](./toolchain-nightly-example-update-script.md).
 
 ---
 
@@ -215,7 +202,8 @@ Every nightly usage **must** be documented in the workflow file:
 
 ## Related Skills
 
-- [msrv-management](./msrv-management.md) — MSRV definition and config file consistency
-- [toolchain-pinning](./toolchain-pinning.md) — Stable toolchain pinning and testing
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — Workflow patterns
-- [dependency-management](./dependency-management-cargo.md) — Dependency auditing and pinning
+- [MSRV Management](./msrv-management.md) — MSRV definition and config file consistency
+- [Toolchain Pinning](./toolchain-pinning.md) — Stable toolchain pinning and testing
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Workflow patterns
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Dependency auditing and pinning
+- [Toolchain Nightly Example Update Script](./toolchain-nightly-example-update-script.md) — Nightly update script example

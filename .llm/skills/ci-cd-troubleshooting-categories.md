@@ -11,11 +11,11 @@
 prevention checklist before committing workflow changes, or the quick-reference error
 message table. This is the "meta" guide for CI/CD troubleshooting.
 
-See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md),
-[ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md),
-[ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md),
-[ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md),
-[ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md)
+See also: [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md),
+[CI CD Troubleshooting Linting](./ci-cd-troubleshooting-linting.md),
+[CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md),
+[CI CD Troubleshooting Links](./ci-cd-troubleshooting-links.md),
+[CI CD Troubleshooting Supply Chain](./ci-cd-troubleshooting-supply-chain.md)
 
 ---
 
@@ -38,6 +38,7 @@ CI Failure
     +-- Docker warning ---------> BuildKit false positive on ENV variable names
     +-- PowerShell parse error -> Bash syntax without shell: bash on Windows
     +-- Changelog gate error --> Check if dep-only change; verify actor vs commit msg detection
+    +-- Missing ext tool -----> Test shells out to optional tool; must skip gracefully
 ```
 
 ### Step 2: Check Recent Changes
@@ -145,6 +146,7 @@ Before committing workflow changes, verify:
 | Action behavior changes without workflow edit | `uses:` uses a moving ref (`@stable`, `@main`, `@v2`) | Pin to explicit version tag |
 | `No such file or directory` (exit code 127) | `run:` step calls a deleted script | Remove stale script reference |
 | `toolchain 'X.Y.Z' is not installed` in cargo-deny | Docker action uses own toolchain | Set cargo-deny `with.rust-version` (prefer MSRV from Cargo.toml) |
+| `error[E0463]: can't find crate for tokio_macros` (or `tracing_attributes`) during `cargo check --features ...` in ASan runs | Nested cargo invocation inherits/contends with sanitizer environment and artifacts | For nested cargo checks, remove sanitizer env vars (`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `ASAN_OPTIONS`, etc.) and set an isolated `CARGO_TARGET_DIR` |
 | Lychee scans dotfiles despite config | lychee v0.21.0 bug #1936 | Pin `lycheeVersion: v0.22.0` |
 | `exclude_path` in `.lychee.toml` has no effect | Confirmed bug for glob-expanded paths | Use `--exclude-path` CLI flags |
 | TOML validator fails on "before/after" example | Duplicate `[dependencies]` headers in one block | Split into separate fenced code blocks |
@@ -232,39 +234,28 @@ are `Cargo.toml`/`Cargo.lock` AND the commit message matches a dependency bump p
 Test with data-driven commit message pattern matching. Guard `--changed-files` argument
 parsing against stray `--` flags with a rejection check.
 
+### Category 15: Nested Cargo Checks Under Sanitizer Jobs
+
+**Example:** A test shells out to `cargo check --features tls --locked` while the
+outer CI job runs `cargo test` with `RUSTFLAGS="-Z sanitizer=address"`.
+The nested compile fails with `error[E0463]: can't find crate for tokio_macros`
+or `tracing_attributes`.
+
+**Prevention:** Treat nested cargo invocations as environment boundaries in tests:
+scrub sanitizer-related variables (`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+`RUSTDOCFLAGS`, `ASAN_OPTIONS`, `LSAN_OPTIONS`, `UBSAN_OPTIONS`, `TSAN_OPTIONS`,
+`MIRIFLAGS`) and run in isolated target directories via `CARGO_TARGET_DIR`.
+
 ---
 
-## Real-World Examples
+## Incident Links
 
-### Example 1: Python Cache on Rust Project (RESOLVED)
+Each incident example is maintained as a dedicated file:
 
-**Problem:** CI had `actions/cache@v4` with `~/.cache/pip` path on a Rust project.
-**Symptoms:** Cache deserialization failures; `pip` executable not found; CI slower.
-**Solution:** Replaced with `Swatinem/rust-cache@v2.7.5`.
-
-### Example 2: 360-Day-Old Nightly Toolchain (RESOLVED)
-
-**Problem:** `toolchain: nightly-2025-02-21` (360 days old).
-**Symptoms:** Dependencies fail to compile; security vulnerabilities.
-**Solution:** Updated to `toolchain: nightly-2026-02-01`.
-
-### Example 3: Accumulated Unused Dependencies (RESOLVED)
-
-**Problem:** 15+ unused dependencies in Cargo.toml; no regular audit process.
-**Solution:** Added weekly CI job with `cargo machete`; removed unused deps in PR.
-
-### Example 4: Changelog Gate Blocked Dependabot Bump (RESOLVED)
-
-**Problem:** Squash-merged Dependabot PR for `tempfile 3.26.0 -> 3.27.0` triggered the
-doc consistency changelog gate. The actor was the human who merged the PR, not
-`dependabot[bot]`, so the actor-based skip did not trigger. `Cargo.toml` was flagged
-as a non-internal change requiring a CHANGELOG entry.
-**Symptoms:** `[ERROR] Detected non-internal changes without CHANGELOG.md update: Cargo.toml`
-on the `main` branch push; Docker Build cancelled as cascading failure.
-**Solution:** Added a dep-detect step in CI that checks if all non-internal changed files
-are only `Cargo.toml`/`Cargo.lock` AND the commit message matches dependency bump patterns.
-Added data-driven tests for commit message pattern matching, policy tests to guard against
-CI/script drift, and a `--changed-files` argument parsing guard.
+- [CI CD Troubleshooting Example Python Cache Mismatch](./ci-cd-troubleshooting-example-python-cache-mismatch.md)
+- [CI CD Troubleshooting Example Stale Nightly Toolchain](./ci-cd-troubleshooting-example-stale-nightly-toolchain.md)
+- [CI CD Troubleshooting Example Unused Dependencies](./ci-cd-troubleshooting-example-unused-dependencies.md)
+- [CI CD Troubleshooting Example Changelog Dependabot Bump](./ci-cd-troubleshooting-example-changelog-dependabot-bump.md)
 
 ---
 
@@ -275,25 +266,13 @@ Self-service troubleshooting should resolve 90% of CI issues. Escalate when:
 1. **Persistent cache corruption** (bust cache doesn't fix)
 2. **GitHub Actions platform issues** (outage, service degradation)
 3. **Upstream action breaking change** (action author made incompatible change)
-4. **Security vulnerability** in pinned version (needs immediate attention)
+4. **Security vulnerability** in pinned version
+  (needs immediate attention)
 5. **Resource limits hit** (workflow timeout, out of disk space, etc.)
 
 ---
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Patterns 1-6:
-  ecosystem, cache, toolchain, Docker
-- [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md) — Patterns 7-9:
-  Clippy, typos, markdown
-- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Patterns 9-16:
-  locked, Miri, shell scripts, YAML
-- [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Patterns 10-20:
-  lychee, regex, cargo-deny
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) —
-  Patterns 21-25: action ref policy, Dockerfile
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — Writing new
-  workflows
-- [msrv-management](./msrv-management.md) — MSRV updates and consistency
-- [supply-chain-security](./supply-chain-audit-policy.md) — Security audits and vulnerability scanning
-- [agent-self-review-checklist](./agent-self-review-checklist.md) — Pre-commit verification checklist
+See [CI CD Troubleshooting Index](./ci-cd-troubleshooting-index.md) for the
+full related-skills map and incident cross-links.

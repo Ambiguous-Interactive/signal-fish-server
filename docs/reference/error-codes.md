@@ -254,6 +254,6 @@ supports spectators, and has not reached its spectator capacity limit.
 
 ## See Also
 
-- [Protocol Reference](../protocol.md) -- full message format documentation
+- [Protocol](../protocol.md) -- full message format documentation
 - [Getting Started](../getting-started.md) -- basic usage examples
 - [Features](../features.md) -- complete feature overview

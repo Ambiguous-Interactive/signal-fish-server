@@ -21,8 +21,8 @@ abuse detection monitoring and circuit breakers.
 ## When NOT to Use
 
 - Rate limiting middleware or connection caps
-  (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
-- General authentication/authorization (see [web-service-security](./web-service-security-auth.md))
+  (see [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md))
+- General authentication/authorization (see [Web Service Security Auth](./web-service-security-auth.md))
 
 ---
 
@@ -221,9 +221,11 @@ On `SIGTERM`, stop accepting new connections and drain with
 
 ## Related Skills
 
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+- [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md) —
   Rate limiting, connection caps, WebSocket throttling
-- [graceful-degradation](./graceful-degradation-deployment.md) — Full graceful degradation and circuit breaker patterns
-- [web-service-security](./web-service-security-auth.md) — Authentication, authorization, input validation, TLS
-- [observability-and-logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting
-- [Rust-performance-optimization](./rust-performance-optimization.md) — Bounded allocations, zero-copy, profiling
+- [Graceful Degradation Deployment](./graceful-degradation-deployment.md) — Full graceful degradation and
+  circuit breaker patterns
+- [Web Service Security Auth](./web-service-security-auth.md) — Authentication, authorization, input
+  validation, TLS
+- [Observability And Logging](./observability-and-logging.md) — Metrics emission, tracing, anomaly alerting
+- [Rust Performance Optimization](./rust-performance-optimization.md) — Bounded allocations, zero-copy, profiling

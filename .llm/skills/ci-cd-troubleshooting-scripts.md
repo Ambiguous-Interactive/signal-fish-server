@@ -85,22 +85,9 @@ Test with files that have `#[cfg(test)] mod` near the top (like `src/server.rs`)
 
 ## Pattern 11: Inconsistent Coverage Flags
 
-### Symptom
-
-```text
-Coverage threshold passes but was enforced against a different build configuration
-than what generated the coverage report.
-```
-
-### Root Cause
-
-Collection command uses `--all-features --workspace` but `report` subcommand omits
-them, enforcing the threshold against a different build configuration.
-
-### Solution
-
-Apply build-selection flags only to the collection command. The `report` subcommand
-reads existing artifacts — use only reporting flags:
+Collection uses `--all-features --workspace` but `report` omits them, enforcing
+against a different build. Apply build-selection flags only to collection; use
+only reporting flags on `report`:
 
 ```yaml
 - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
@@ -144,24 +131,9 @@ that calls `chrono::Utc::now()` or any wall-clock API.
 
 ## Pattern 13: Bash Code Block Validation Fails on Non-Bash Syntax
 
-### Symptom
-
-```text
-SC2283 (error): Remove spaces around = to assign
-```
-
-or `bash -n` syntax errors in documentation code blocks.
-
-### Root Cause
-
-A markdown code block tagged as `bash` contains non-bash syntax (TOML, Dockerfile,
-YAML, etc.). CI validates bash blocks with `bash -n` and `shellcheck`.
-
-### Solution
-
-Change the code block language tag to `text` for mixed-syntax examples, or split
-into separate correctly-tagged blocks. Use `text` for TOML/Dockerfile/YAML examples
-that appear inside a documentation section tagged as `bash`.
+`SC2283` or `bash -n` errors in docs — a code block tagged `bash` contains
+non-bash syntax (TOML, YAML, etc.). Change the tag to `text` or split into
+separate correctly-tagged blocks.
 
 ---
 
@@ -221,51 +193,18 @@ to a directory is valid but `[ ! -f ]` alone will falsely flag it as broken.
 
 ## Pattern 15: Test Fixture Exclusion Consistency
 
-### Symptom
-
-```text
-JSON validator: PASS (excludes .github/test-fixtures/)
-YAML validator: FAIL on .github/test-fixtures/bad.yml
-```
-
-### Root Cause
-
-Test fixtures are excluded from some validators but not all.
-
-### Solution
-
-Add `! -path './.github/test-fixtures/*'` and `! -path './target/*'` exclusions
-to **every** `find` command in every validator (JSON, YAML, TOML, Bash, Markdown,
-link checker, spell checker). Search the workflow for ALL `find` and `grep`
-invocations, add exclusions to every validator, and verify with the full CI pipeline.
+Test fixtures excluded from some validators but not all. Add
+`! -path './.github/test-fixtures/*'` and `! -path './target/*'` to **every**
+`find` command in every validator (JSON, YAML, TOML, Bash, Markdown, links, spelling).
 
 ---
 
 ## Pattern 16: YAML Validation Fails on Non-YAML Code Blocks
 
-### Symptom
-
-```text
-ERROR: YAML parse error in docs/guide.md
-  mapping values are not allowed in this context
-```
-
-### Root Cause
-
-Code blocks with `yaml` language tags that contain non-YAML content (error logs,
-shell commands, mixed content) cause YAML validators to fail.
-
-### Solution
-
-| Content Type | Correct Tag | Wrong Tag |
-|--------------|-------------|-----------|
-| Error logs, CLI output | `text` | `yaml` |
-| Shell commands | `bash` | `yaml` |
-| Actual YAML config | `yaml` | `text` |
-| Mixed shell + YAML | Split into separate blocks | Single `yaml` block |
-
-Before tagging a code block as `yaml`, `json`, `toml`, or `bash`, verify the
-**entire** block content is valid in that language.
+Code blocks tagged `yaml` containing non-YAML content (logs, shell, mixed)
+cause validators to fail. Use `text` for logs/mixed, `bash` for shell.
+Before tagging a block as `yaml`/`json`/`toml`/`bash`, verify the **entire**
+block is valid in that language.
 
 ---
 
@@ -293,8 +232,36 @@ cargo test --locked --test ci_config_tests -- test_foo test_bar
 
 ---
 
+## Pattern 18: Test Output Assertions Match Diagnostic Help Text
+
+### Symptom
+
+`must_not_contain` assertion fails because the forbidden substring (e.g.,
+`"Cargo.lock"`) appears in diagnostic help text, not in error output.
+
+### Root Cause
+
+Bare substring assertions match the **entire** output, including help text
+that legitimately mentions the same tokens.
+
+### Solution
+
+Use **error-line-specific prefixes** so assertions only match structured error output:
+
+```rust
+// WRONG: bare substring matches help text too
+must_not_contain: vec!["Cargo.lock"],
+// CORRECT: prefix matches only the error-listed file format
+must_not_contain: vec!["  - Cargo.lock"],
+```
+
+**Prevention**: Document format coupling in both script and test. Prefer
+referencing functions over printing raw pattern lists in diagnostics.
+
+---
+
 ## Related Skills
 
-- [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [Supply Chain Troubleshooting](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
-- [Diagnostic Workflow](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [CI CD Troubleshooting Supply Chain](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

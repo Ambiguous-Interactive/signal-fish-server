@@ -39,6 +39,8 @@ fi
 ERRORS=0
 WARNINGS=0
 FILE_ARGS_MODE=0
+TOP_DIAGNOSTIC_FILES=8
+declare -a FILE_SIZE_RECORDS=()
 
 error() {
     echo -e "${RED}[ERROR]${NC} $1"
@@ -56,6 +58,29 @@ info() {
 
 success() {
     echo -e "${GREEN}[OK]${NC} $1"
+}
+
+print_size_diagnostics() {
+    if [ "${#FILE_SIZE_RECORDS[@]}" -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    echo "Largest checked .llm files:"
+    printf '%s\n' "${FILE_SIZE_RECORDS[@]}" \
+        | LC_ALL=C sort -rn -k1,1 \
+        | head -n "$TOP_DIAGNOSTIC_FILES" \
+        | awk -F '\t' -v max="$MAX_LINES" '
+            {
+                headroom = max - $1
+                if (headroom >= 0) {
+                    status = headroom " lines remaining"
+                } else {
+                    status = "exceeds by " (-headroom)
+                }
+                printf "  - %s: %s lines (%s)\n", $2, $1, status
+            }
+        '
 }
 
 # Find repository root
@@ -121,6 +146,7 @@ for file in "${FILES_TO_CHECK[@]}"; do
 
     LINE_COUNT=$(awk 'END {print NR}' "$file")
     CHECKED=$((CHECKED + 1))
+    FILE_SIZE_RECORDS+=("${LINE_COUNT}"$'\t'"${file}")
 
     if [ "$LINE_COUNT" -gt "$MAX_LINES" ]; then
         error "$file: $LINE_COUNT lines (max: $MAX_LINES — exceeds by $((LINE_COUNT - MAX_LINES)))"
@@ -164,6 +190,7 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "=========================================="
 if [ "$VIOLATIONS" -gt 0 ]; then
+    print_size_diagnostics
     error "LLM file size check found $VIOLATIONS file(s) exceeding the ${MAX_LINES}-line limit"
     echo ""
     echo "Each .llm/ file must stay within ${MAX_LINES} lines to:"
@@ -178,6 +205,7 @@ if [ "$VIOLATIONS" -gt 0 ]; then
     echo "  4. Run ./scripts/generate-skills-index.sh to refresh the index"
     exit 1
 elif [ "$WARNINGS" -gt 0 ]; then
+    print_size_diagnostics
     echo -e "${YELLOW}[WARN]${NC} LLM file size check passed with $WARNINGS warning(s)"
     echo "Files at or near the limit should be kept trim to prevent future violations."
     exit 0

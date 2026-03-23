@@ -7,13 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
+  `rustls-pki-types` built-in `PemObject` trait.
+
 ### Changed
 
+- Replaced `rustls-pemfile` with `rustls-pki-types` `PemObject` API for TLS certificate and
+  private key loading, removing one dependency from the `tls` feature.
 - Bumped `axum-test` dev-dependency from 18.7.0 to 19.1.1 (adapted test code for 19.x API changes).
 - Bumped `tempfile` dev-dependency from 3.25.0 to 3.26.0.
 - Bumped `tempfile` dev-dependency from 3.26.0 to 3.27.0.
 - Bumped `tokio` from 1.49.0 to 1.50.0.
 - Updated all transitive dependencies to latest compatible versions.
+- Normalized internal documentation link labels to human-readable text across
+  troubleshooting and reference docs.
 
 ## [0.2.0] - 2026-02-24
 

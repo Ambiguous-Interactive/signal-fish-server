@@ -22,6 +22,6 @@ ADRs are immutable once accepted. If a decision needs to be changed, a new ADR s
 
 ## Related Resources
 
-- [Architecture Documentation](../architecture.md) - Overall system architecture
-- [Protocol Reference](../protocol.md) - WebSocket protocol documentation
-- [Development Guide](../development.md) - Building and testing
+- [Architecture](../architecture.md) - Overall system architecture
+- [Protocol](../protocol.md) - WebSocket protocol documentation
+- [Development](../development.md) - Building and testing
