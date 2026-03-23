@@ -21,7 +21,7 @@
 
 ## When NOT to Use
 
-- See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) for what is strictly forbidden
+- See [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md) for what is strictly forbidden
 
 ---
 
@@ -258,7 +258,7 @@ The user's role is to:
 
 ## Related Skills
 
-- [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) — What is absolutely forbidden and why
-- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Agent workflow that integrates with user commits
-- [agent-self-review-checklist](./agent-self-review-checklist.md) — Pre-commit verification (user commits after)
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD patterns
+- [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md) — What is absolutely forbidden and why
+- [Agentic Workflow Patterns](./agentic-workflow-patterns.md) — Agent workflow that integrates with user commits
+- [Agent Self Review Checklist](./agent-self-review-checklist.md) — Pre-commit verification (user commits after)
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD patterns

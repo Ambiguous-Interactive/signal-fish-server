@@ -399,7 +399,7 @@ is_internal_path() {
         docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md)
             return 0
             ;;
-        Cargo.lock|PLAN.md|AGENTS.md|pre-push.txt|logs_*.zip)
+        Cargo.lock|PLAN.md|AGENTS.md|pre-push.txt|pre-commit.txt|logs_*.zip)
             return 0
             ;;
         .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml)

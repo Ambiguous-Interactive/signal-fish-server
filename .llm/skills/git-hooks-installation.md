@@ -243,6 +243,6 @@ Before committing new hooks:
 
 ## See Also
 
-- [git-hooks-checks](./git-hooks-checks.md) — Pre-commit hook design, checks, testing, debugging
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
-- [shell-scripting-patterns](./shell-scripting-patterns.md) — Shell scripting best practices
+- [Git Hooks Checks](./git-hooks-checks.md) — Pre-commit hook design, checks, testing, debugging
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [Shell Scripting Patterns](./shell-scripting-patterns.md) — Shell scripting best practices

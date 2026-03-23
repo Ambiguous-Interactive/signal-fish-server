@@ -21,8 +21,8 @@
 
 ## When NOT to Use
 
-- Core test patterns (see [testing-core-patterns](./testing-core-patterns.md))
-- CI/CD config validation tests (see [testing-ci-coverage](./testing-ci-coverage.md))
+- Core test patterns (see [Testing Core Patterns](./testing-core-patterns.md))
+- CI/CD config validation tests (see [Testing CI Coverage](./testing-ci-coverage.md))
 
 ---
 
@@ -187,41 +187,8 @@ fn test_github_actions_sha_pinning() {
 
 ---
 
-## Real-World Example: MSRV Consistency Test
-
-From `/workspaces/signal-fish-server/tests/ci_config_tests.rs`:
-
-```rust
-#[test]
-fn test_dockerfile_rust_version_matches_msrv() {
-    let dockerfile = read_file("Dockerfile");
-    let cargo_toml = read_file("Cargo.toml");
-
-    let dockerfile_version = extract_dockerfile_rust_version(&dockerfile);
-    let cargo_version = extract_cargo_rust_version(&cargo_toml);
-
-    // Normalize to X.Y format for comparison
-    let normalized_dockerfile = normalize_version(&dockerfile_version);
-    let normalized_cargo = normalize_version(&cargo_version);
-
-    assert_eq!(
-        normalized_dockerfile, normalized_cargo,
-        "Dockerfile Rust version must match Cargo.toml rust-version.\n\
-         Expected: {} (from Cargo.toml)\n\
-         Found: {} (from Dockerfile)\n\
-         Note: Docker Hub uses X.Y format (e.g., 1.88, not 1.88.0)\n\
-         Fix: Update Dockerfile to use Rust:{}-bookworm",
-        normalized_cargo, normalized_dockerfile, normalized_cargo
-    );
-}
-```
-
-**This error message includes:**
-
-1. Clear description of what's being tested
-2. Expected vs actual values
-3. Contextual note about Docker Hub version format
-4. Copy-paste fix instruction with exact line to change
+See dedicated example:
+[Testing Error Message Example MSRV Consistency](./testing-error-message-example-msrv-consistency.md).
 
 ---
 
@@ -241,6 +208,8 @@ Every test failure message should include:
 
 ## Related Skills
 
-- [testing-core-patterns](./testing-core-patterns.md) — Core test patterns (unit, async, table-driven)
-- [testing-ci-coverage](./testing-ci-coverage.md) — CI/CD smoke tests and config validation tests
-- [test-fixture-structure](./test-fixture-structure.md) — Data-driven CI configuration tests
+- [Testing Core Patterns](./testing-core-patterns.md) — Core test patterns (unit, async, table-driven)
+- [Testing CI Coverage](./testing-ci-coverage.md) — CI/CD smoke tests and config validation tests
+- [Test Fixture Structure](./test-fixture-structure.md) — Data-driven CI configuration tests
+- [Testing Error Message Example MSRV Consistency](./testing-error-message-example-msrv-consistency.md)
+    — MSRV assertion message example

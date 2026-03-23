@@ -424,7 +424,7 @@ echo "${BLUE}[12/${TOTAL_CHECKS}]${NC} Validating code blocks in markdown files.
 
 if [ -n "$STAGED_MD_FILES" ]; then
     # Filter out test fixture directories from staged markdown files
-    CB_MD_FILES=$(echo "$STAGED_MD_FILES" | grep -vE '^(\.github/test-fixtures/|test-fixtures/)' || true)
+    CB_MD_FILES=$(echo "$STAGED_MD_FILES" | grep -vE '^(\.github/test-fixtures/|test-fixtures/|node_modules/)' || true)
 
     if [ -n "$CB_MD_FILES" ]; then
         CB_TEMP_DIR=$(mktemp -d)
@@ -627,7 +627,7 @@ fi
 # This is a WARNING (non-blocking) since there may be legitimate uses
 # (e.g., external references, proper nouns, quotes).
 echo "${BLUE}[13/${TOTAL_CHECKS}]${NC} Checking for British English spellings..."
-STAGED_TEXT_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(rs|yml|yaml|md)$' || true)
+STAGED_TEXT_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(rs|yml|yaml|md)$' | grep -vE '^node_modules/' || true)
 
 if [ -n "$STAGED_TEXT_FILES" ]; then
     # Each entry is "british_pattern:american_equivalent"
@@ -699,6 +699,11 @@ recognising:recognizing"
         /^\+/ && $0 !~ /^\+\+\+/ {
             new_line++
             line = substr($0, 2)
+
+            # Skip third-party content in node_modules.
+            if (file ~ /^node_modules\//) {
+                next
+            }
 
             # Skip URLs to avoid false positives on external references.
             if (line ~ /http:\/\/|https:\/\//) {
@@ -953,12 +958,37 @@ if [ -n "$STAGED_LLM_FILES" ]; then
             set -f
             scripts/check-llm-file-sizes.sh --files $STAGED_LLM_FILES 2>&1
         ); then
+            OVERSIZED_LLM_FILES=$(printf '%s\n' "$LLM_SIZE_OUTPUT" \
+                | sed -n 's/^\[ERROR\] \([^:]*\.md\): .*/\1/p' \
+                | tr '\n' ' ' \
+                | sed 's/[[:space:]]*$//')
+            if [ -n "$OVERSIZED_LLM_FILES" ]; then
+                echo "${YELLOW}Oversized files:${NC} $OVERSIZED_LLM_FILES"
+            fi
             check_fail "LLM file sizes" "One or more .llm/ files exceed 300 lines. Run './scripts/check-llm-file-sizes.sh' for details."
             echo "$LLM_SIZE_OUTPUT"
             echo "${YELLOW}Tip:${NC} Split oversized files into focused sub-files of ≤300 lines."
             echo ""
         else
             check_pass "LLM file sizes"
+            if [ -x scripts/check-llm-example-files.sh ]; then
+                if ! LLM_EXAMPLE_POLICY_OUTPUT=$(
+                    # Preserve spaces in staged file paths by splitting only on newlines.
+                    IFS='
+'
+                    set -f
+                    scripts/check-llm-example-files.sh --files $STAGED_LLM_FILES 2>&1
+                ); then
+                    check_fail "LLM example extraction" "Inline example sections are disallowed in skill files. Run './scripts/check-llm-example-files.sh' for details."
+                    echo "$LLM_EXAMPLE_POLICY_OUTPUT"
+                    echo "${YELLOW}Tip:${NC} Move each example into a dedicated *-example-*.md file and link from the parent skill."
+                    echo ""
+                else
+                    check_pass "LLM example extraction"
+                fi
+            else
+                check_warn "LLM example extraction" "check-llm-example-files.sh not found or not executable"
+            fi
         fi
     else
         check_skip "LLM file sizes" "check-llm-file-sizes.sh not found or not executable"
@@ -1068,6 +1098,7 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  ./scripts/validate-ci.sh                    # Validate CI config"
     echo "  ./scripts/generate-skills-index.sh          # Refresh .llm/skills/index.md"
     echo "  ./scripts/check-llm-file-sizes.sh           # Check .llm/ file sizes"
+    echo "  ./scripts/check-llm-example-files.sh        # Enforce one-example-per-file policy"
     echo "  ./scripts/check-miri-compat.sh              # Check Miri annotations"
     echo "  ./scripts/check-readme-badges.sh README.md  # Check README badge styles"
     echo "  ./scripts/check-doc-consistency.sh --staged # Check version/changelog/doc consistency"

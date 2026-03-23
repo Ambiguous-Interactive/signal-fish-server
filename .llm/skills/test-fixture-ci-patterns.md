@@ -20,9 +20,9 @@ workflow existence, or tool configuration.
 
 ## When NOT to Use
 
-- Fixture organization and structure (see [test-fixture-structure](./test-fixture-structure.md))
-- Application unit tests (see [testing-core-patterns](./testing-core-patterns.md))
-- CI smoke tests (see [testing-ci-coverage](./testing-ci-coverage.md))
+- Fixture organization and structure (see [Test Fixture Structure](./test-fixture-structure.md))
+- Application unit tests (see [Testing Core Patterns](./testing-core-patterns.md))
+- CI smoke tests (see [Testing CI Coverage](./testing-ci-coverage.md))
 
 ---
 
@@ -285,9 +285,9 @@ Before committing new configuration tests:
 
 ## Related Skills
 
-- [test-fixture-structure](./test-fixture-structure.md) — Fixture directory layout, naming, and documentation
-- [testing-core-patterns](./testing-core-patterns.md) — Core testing methodology and patterns
-- [testing-error-message-quality](./testing-error-message-quality.md) — Actionable failure messages
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
-- [markdown-best-practices](./markdown-best-practices-formatting.md) — Markdown documentation standards
+- [Test Fixture Structure](./test-fixture-structure.md) — Fixture directory layout, naming, and documentation
+- [Testing Core Patterns](./testing-core-patterns.md) — Core testing methodology and patterns
+- [Testing Error Message Quality](./testing-error-message-quality.md) — Actionable failure messages
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Markdown documentation standards

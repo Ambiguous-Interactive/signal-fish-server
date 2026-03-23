@@ -11,8 +11,8 @@ dependencies for Rust cargo features.
 
 See also:
 
-- [deployment-strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
-- [container-security](./container-security.md) — Secrets management, immutable tags, security contexts
+- [Deployment Strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
+- [Container Security](./container-security.md) — Secrets management, immutable tags, security contexts
 
 ---
 
@@ -271,8 +271,8 @@ RUN bash -c 'rm -rf /path/{cache,src}'
 
 ## Related Skills
 
-- [deployment-strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
-- [container-security](./container-security.md) — Secrets management, immutable tags
-- [msrv-management](./msrv-management.md) — Matching Dockerfile Rust version to MSRV
-- [dependency-management](./dependency-management-cargo.md) — `cargo audit`, `cargo deny`
-- [shell-scripting-patterns](./shell-scripting-patterns.md) — Shell portability, POSIX vs bash
+- [Deployment Strategies](./deployment-strategies.md) — Kubernetes, health checks, graceful shutdown
+- [Container Security](./container-security.md) — Secrets management, immutable tags
+- [MSRV Management](./msrv-management.md) — Matching Dockerfile Rust version to MSRV
+- [Dependency Management Cargo](./dependency-management-cargo.md) — `cargo audit`, `cargo deny`
+- [Shell Scripting Patterns](./shell-scripting-patterns.md) — Shell portability, POSIX vs bash

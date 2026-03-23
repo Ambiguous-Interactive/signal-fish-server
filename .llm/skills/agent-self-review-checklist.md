@@ -19,13 +19,13 @@ or when reviewing own work for correctness.
 - After implementing a fix to verify it actually resolves the issue
 - Before responding "done" to the user
 
-⛔ **CRITICAL**: You NEVER commit changes - see [git-safety-forbidden-operations](./git-safety-forbidden-operations.md)
+⛔ **CRITICAL**: You NEVER commit changes - see [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md)
 
 ---
 
 ## When NOT to Use
 
-- When reviewing another developer's code (use [code-review-checklist](./code-review-checklist.md) instead)
+- When reviewing another developer's code (use [Code Review Checklist](./code-review-checklist.md) instead)
 - When just exploring or reading code without making changes
 - During initial research or context gathering
 
@@ -164,7 +164,7 @@ For any change touching authentication, user input, or network configuration:
 
 ✅ **REQUIRED**: Instead, provide clear commit instructions for user to execute.
 
-See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) for complete details.
+See [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md) for complete details.
 
 ---
 
@@ -258,9 +258,9 @@ After the checklist passes, provide these instructions to the user:
 3. **Commit**: Follow conventional commits (`feat:`, `fix:`, `refactor:`)
 4. **Push**: `git push origin branch-name` when ready
 
-⛔ **YOU NEVER**: Stage, commit, configure git, or push. See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md).
+⛔ **YOU NEVER**: Stage, commit, configure git, or push. See [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md).
 
-### Example Instructions to Provide User
+### Template Instructions to Provide User
 
 ```text
 Changes are ready. To commit:
@@ -284,7 +284,7 @@ git commit -m "feat: add new validation
 
 ## Related Skills
 
-- [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
-- [code-review-checklist](./code-review-checklist.md) — For reviewing others' code
-- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — Implement → Verify → Review → Present cycle
-- [testing-strategies](./testing-core-patterns.md) — How to write effective tests
+- [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
+- [Code Review Checklist](./code-review-checklist.md) — For reviewing others' code
+- [Agentic Workflow Patterns](./agentic-workflow-patterns.md) — Implement → Verify → Review → Present cycle
+- [Testing Core Patterns](./testing-core-patterns.md) — How to write effective tests

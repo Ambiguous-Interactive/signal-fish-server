@@ -71,7 +71,7 @@ on:
     branches: [main]
   schedule:
     # Weekly on Sunday at 02:00 UTC — heavy analysis jobs
-    - cron: '0 2 * * 0'
+    - cron: "0 2 * * 0"
   workflow_dispatch:
     # Manual trigger for diagnostics and debugging
 
@@ -159,6 +159,26 @@ jobs:
           echo "AddressSanitizer analysis complete."
         env:
           # AddressSanitizer needs these environment variables
+          ASAN_OPTIONS: "detect_odr_violation=0"
+
+      - name: Diagnose AddressSanitizer failures
+        if: failure()
+        run: |
+          set -euo pipefail
+          echo "=== ASan diagnostic context ==="
+          echo "workflow: ${{ github.workflow }}"
+          echo "job: AddressSanitizer"
+          echo "ref: ${{ github.ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
+          echo "ASAN_OPTIONS: ${ASAN_OPTIONS:-<unset>}"
+          echo "=== asan-output.txt (tail -n 200) ==="
+          if [ -f asan-output.txt ]; then
+            tail -n 200 asan-output.txt
+          else
+            echo "asan-output.txt is missing"
+          fi
+        env:
           ASAN_OPTIONS: "detect_odr_violation=0"
 
       - name: Upload AddressSanitizer output

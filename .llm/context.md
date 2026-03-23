@@ -65,7 +65,7 @@ Start here:
     |                                  skills/websocket-session-hijacking.md
     +-- Deployment/Containers? ------> skills/container-docker.md
     +-- CI/CD/GitHub Actions? -------> skills/github-actions-workflow-config.md
-    |                                  skills/ci-cd-troubleshooting-categories.md
+    |                                  skills/ci-cd-troubleshooting-index.md
     +-- Dependencies/Supply Chain? --> skills/supply-chain-audit-policy.md
     |                                  skills/dependency-management-cargo.md
     |                                  skills/msrv-management.md
@@ -184,6 +184,12 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
 - **Avoid accidental setext headings in skills** -- keep a blank line between
   `**Trigger**: ...` and a following `---` separator, or markdownlint will treat
   the trigger line as a heading (MD003/MD026).
+- **Skill examples must be split into dedicated files** -- when documenting incidents or
+  walkthroughs, create one `*-example-*.md` file per example and link from the parent
+  skill. Do not keep multi-example "mega" sections inside a single skill file.
+- **Use descriptive markdown link text for internal docs** -- avoid filename-as-label links
+  like `[testing-core-patterns](...)`; prefer human-readable labels like
+  `[Core Testing Patterns](...)`. Enforce with `./scripts/check-markdown-link-text.sh`.
 
 ---
 

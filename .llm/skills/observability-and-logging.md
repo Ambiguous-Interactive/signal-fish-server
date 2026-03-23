@@ -22,8 +22,8 @@
 
 ## When NOT to Use
 
-- Error type design (see [error-handling-guide](./error-handling-guide.md))
-- Performance profiling with criterion (see [Rust-performance-optimization](./rust-performance-optimization.md))
+- Error type design (see [Error Handling Guide](./error-handling-guide.md))
+- Performance profiling with criterion (see [Rust Performance Optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -288,6 +288,6 @@ if tracing::enabled!(tracing::Level::TRACE) {
 
 ## Related Skills
 
-- [error-handling-guide](./error-handling-guide.md) — Structured error logging patterns
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Tracing spans for async functions
-- [defensive-programming](./defensive-programming.md) — Logging at system boundaries
+- [Error Handling Guide](./error-handling-guide.md) — Structured error logging patterns
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Tracing spans for async functions
+- [Defensive Programming](./defensive-programming.md) — Logging at system boundaries

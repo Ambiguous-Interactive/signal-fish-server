@@ -23,8 +23,8 @@
 
 ## When NOT to Use
 
-- Writing brand new code from scratch (see [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md))
-- Performance-focused changes (see [Rust-performance-optimization](./rust-performance-optimization.md))
+- Writing brand new code from scratch (see [Rust Idioms And Patterns](./rust-idioms-and-patterns.md))
+- Performance-focused changes (see [Rust Performance Optimization](./rust-performance-optimization.md))
 
 ---
 
@@ -133,7 +133,7 @@ Grep for numeric/string literals, replace one at a time, compile after each.
 
 ## Converting `unwrap()` Chains to Proper Error Handling
 
-See [error-handling-guide](./error-handling-guide.md) for the full unwrap hierarchy and `?` propagation patterns.
+See [Error Handling Guide](./error-handling-guide.md) for the full unwrap hierarchy and `?` propagation patterns.
 
 **Quick workflow:**
 
@@ -153,10 +153,10 @@ See [error-handling-guide](./error-handling-guide.md) for the full unwrap hierar
   update `.get()` (returns `Ref` guard). Check DashMap docs for `.entry()` API differences.
 - **Sync → Async:** Add `async`, replace blocking I/O with `tokio::fs`, add `.await`,
   check for `std::sync::Mutex` → `tokio::sync::Mutex`.
-  See [async-Rust-best-practices](./async-rust-best-practices.md).
+  See [Async Rust Best Practices](./async-rust-best-practices.md).
 - **Reduce clone():** Pass `&T`, use `Arc<T>` for shared ownership, `Bytes` for network data,
   `Cow<str>` for conditional ownership.
-  See [Rust-performance-optimization](./rust-performance-optimization.md).
+  See [Rust Performance Optimization](./rust-performance-optimization.md).
 
 ---
 
@@ -205,7 +205,7 @@ impl Database for InMemoryDatabase { ... }
 
 ## Using `cargo clippy --fix`
 
-See [clippy-and-linting](./clippy-and-linting.md) for full clippy configuration.
+See [Clippy And Linting](./clippy-and-linting.md) for full clippy configuration.
 
 ```bash
 # Commit first, then fix, review, commit
@@ -247,9 +247,9 @@ During: one type of change at a time, compile and test after each logical step.
 
 ## Related Skills
 
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Target patterns for refactoring
-- [clippy-and-linting](./clippy-and-linting.md) — Automated fixes with clippy
-- [error-handling-guide](./error-handling-guide.md) — Refactoring unwrap chains
-- [testing-strategies](./testing-core-patterns.md) — Tests must pass before and after refactoring
-- [code-review-checklist](./code-review-checklist.md) — AI-driven code review with structured output
-- [solid-principles-enforcement](./solid-principles-enforcement.md) — SOLID principle enforcement during refactoring
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Target patterns for refactoring
+- [Clippy And Linting](./clippy-and-linting.md) — Automated fixes with clippy
+- [Error Handling Guide](./error-handling-guide.md) — Refactoring unwrap chains
+- [Testing Core Patterns](./testing-core-patterns.md) — Tests must pass before and after refactoring
+- [Code Review Checklist](./code-review-checklist.md) — AI-driven code review with structured output
+- [Solid Principles Enforcement](./solid-principles-enforcement.md) — SOLID principle enforcement during refactoring

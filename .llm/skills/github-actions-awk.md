@@ -295,4 +295,4 @@ quoting boundaries.
 
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck, variable quoting, subshells
 - [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Workflow structure and configuration
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

@@ -11,9 +11,9 @@ dealing with technical term whitelisting.
 
 See also:
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Code block language identifiers
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
-- [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Code block language identifiers
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
+- [Markdown Best Practices Links](./markdown-best-practices-links.md) — Link validation
 
 ---
 
@@ -295,6 +295,6 @@ Recommended extensions for `.vscode/extensions.json`: `davidanson.vscode-markdow
 
 ## Related Skills
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Code block language identifiers
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
-- [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation patterns
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Code block language identifiers
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — Linting rules and CI/CD integration
+- [Markdown Best Practices Links](./markdown-best-practices-links.md) — Link validation patterns

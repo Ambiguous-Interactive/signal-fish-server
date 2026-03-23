@@ -12,10 +12,10 @@
 **Trigger**: When debugging ecosystem mismatch, cache errors, stale toolchains, unused
 dependencies, local-vs-CI divergence, or Docker build failures.
 
-See also: [ci-cd-troubleshooting-linting.md](./ci-cd-troubleshooting-linting.md),
-[ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md),
-[ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md),
-[ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
+See also: [CI CD Troubleshooting Linting](./ci-cd-troubleshooting-linting.md),
+[CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md),
+[CI CD Troubleshooting Supply Chain](./ci-cd-troubleshooting-supply-chain.md),
+[CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md)
 
 ---
 
@@ -138,7 +138,7 @@ error[E0658]: use of unstable library feature 'foo'
     toolchain: nightly-2026-02-01  # recent, acceptable
 ```
 
-For stable MSRV issues, see [msrv-management](./msrv-management.md).
+For stable MSRV issues, see [MSRV Management](./msrv-management.md).
 
 ### Staleness Thresholds
 
@@ -286,7 +286,7 @@ rejected by CI validation tests. Always use the concrete version from `rust-tool
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-supply-chain.md](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick ref
-- [msrv-management](./msrv-management.md) — MSRV updates and consistency
+- [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
+- [CI CD Troubleshooting Supply Chain](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnostic workflow, quick ref
+- [MSRV Management](./msrv-management.md) — MSRV updates and consistency

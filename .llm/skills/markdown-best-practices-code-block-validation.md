@@ -10,8 +10,8 @@
 
 See also:
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Core fence language selection
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md) — markdownlint + CI validation rules
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Core fence language selection
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md) — markdownlint + CI validation rules
 
 ---
 
@@ -152,5 +152,5 @@ with the right tag.
 
 ## Related Skills
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md)
-- [markdown-best-practices-linting](./markdown-best-practices-linting.md)
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md)
+- [Markdown Best Practices Linting](./markdown-best-practices-linting.md)

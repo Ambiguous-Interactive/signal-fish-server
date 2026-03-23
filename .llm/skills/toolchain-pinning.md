@@ -11,8 +11,8 @@ developer workflow for a Rust project.
 
 See also:
 
-- [msrv-management](./msrv-management.md) — MSRV definition, config files, update checklist
-- [toolchain-nightly](./toolchain-nightly.md) — Nightly Rust for CI-only analysis tools
+- [MSRV Management](./msrv-management.md) — MSRV definition, config files, update checklist
+- [Toolchain Nightly](./toolchain-nightly.md) — Nightly Rust for CI-only analysis tools
 
 ---
 
@@ -204,7 +204,7 @@ git commit -m "Update MSRV"
 # CI MSRV verification job will fail due to inconsistency
 ```
 
-**Correct:** Update all files using the checklist in [msrv-management](./msrv-management.md).
+**Correct:** Update all files using the checklist in [MSRV Management](./msrv-management.md).
 
 ### Using Different Versions in Different Files
 
@@ -248,6 +248,6 @@ Changes:
 
 ## Related Skills
 
-- [msrv-management](./msrv-management.md) — MSRV definition, config files, update checklist, CI
-- [toolchain-nightly](./toolchain-nightly.md) — Nightly Rust for CI-only tools
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [MSRV Management](./msrv-management.md) — MSRV definition, config files, update checklist, CI
+- [Toolchain Nightly](./toolchain-nightly.md) — Nightly Rust for CI-only tools
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD workflow patterns

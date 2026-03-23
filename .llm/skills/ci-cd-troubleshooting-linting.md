@@ -10,10 +10,10 @@
 **Trigger**: When debugging Clippy lints in test code, typos spell-checker false positives
 or misconfiguration, and markdown/documentation quality failures.
 
-See also: [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md),
-[ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md),
-[ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md),
-[ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md)
+See also: [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md),
+[CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md),
+[CI CD Troubleshooting Links](./ci-cd-troubleshooting-links.md),
+[CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md)
 
 ---
 
@@ -256,7 +256,7 @@ fi
 
 ## Related Skills
 
-- [ci-cd-troubleshooting-ecosystem.md](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [ci-cd-troubleshooting-scripts.md](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
-- [ci-cd-troubleshooting-links.md](./ci-cd-troubleshooting-links.md) — Lychee, link checker patterns
-- [ci-cd-troubleshooting-categories.md](./ci-cd-troubleshooting-categories.md) — Summary and diagnostic workflow
+- [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Shell scripts, Miri, test filtering
+- [CI CD Troubleshooting Links](./ci-cd-troubleshooting-links.md) — Lychee, link checker patterns
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Summary and diagnostic workflow

@@ -262,6 +262,6 @@ referencing functions over printing raw pattern lists in diagnostics.
 
 ## Related Skills
 
-- [Ecosystem Troubleshooting](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
-- [Supply Chain Troubleshooting](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
-- [Diagnostic Workflow](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md) — Language mismatch, cache, toolchain
+- [CI CD Troubleshooting Supply Chain](./ci-cd-troubleshooting-supply-chain.md) — Action ref policy, Dockerfile
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

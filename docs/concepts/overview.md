@@ -100,8 +100,8 @@ The WebSocket endpoint is served at `/v2/ws`. Clients connect, optionally
 authenticate, then create or join rooms.
 
 For the complete list of client and server message types, see the
-[Protocol Reference](../protocol.md). For server configuration options, see
-the [Configuration Guide](../configuration.md).
+[Protocol](../protocol.md). For server configuration options, see
+the [Configuration](../configuration.md).
 
 ## Next Steps
 

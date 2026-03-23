@@ -79,6 +79,6 @@
 
 ## Related Skills
 
-- [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) — Write compliant entries
-- [review-changelog-entries](./review-changelog-entries.md) — Verify quality and consistency
-- [documentation-standards](./documentation-standards.md) — Full documentation requirements
+- [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) — Write compliant entries
+- [Review Changelog Entries](./review-changelog-entries.md) — Verify quality and consistency
+- [Documentation Standards](./documentation-standards.md) — Full documentation requirements

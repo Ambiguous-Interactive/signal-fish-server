@@ -20,8 +20,8 @@ CI pipeline, or checking CI action compatibility with the Cargo.lock version.
 
 ## When NOT to Use
 
-- Audit tools and cargo-deny policy (see [supply-chain-audit-policy](./supply-chain-audit-policy.md))
-- Choosing between crates for functionality (see [dependency-management-cargo](./dependency-management-cargo.md))
+- Audit tools and cargo-deny policy (see [Supply Chain Audit Policy](./supply-chain-audit-policy.md))
+- Choosing between crates for functionality (see [Dependency Management Cargo](./dependency-management-cargo.md))
 
 ## Rationalizations to Reject
 
@@ -211,9 +211,9 @@ This script checks:
 
 ## Related Skills
 
-- [supply-chain-audit-policy](./supply-chain-audit-policy.md) — cargo audit, cargo-deny config,
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — cargo audit, cargo-deny config,
   pinning, reproducible builds
-- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
   workspace dependency patterns
 - [Container Docker](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines
-- [clippy-and-linting](./clippy-and-linting.md) — CI integration for static analysis gates
+- [Clippy And Linting](./clippy-and-linting.md) — CI integration for static analysis gates

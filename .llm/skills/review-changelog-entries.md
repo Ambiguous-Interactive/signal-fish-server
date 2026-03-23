@@ -84,6 +84,6 @@ PASS: CHANGELOG.md entries are compliant and high quality.
 
 ## Related Skills
 
-- [classify-user-visible-changes](./classify-user-visible-changes.md) — Scope decision
-- [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) — Authoring workflow
-- [agent-self-review-checklist](./agent-self-review-checklist.md) — Full task quality checks
+- [Classify User Visible Changes](./classify-user-visible-changes.md) — Scope decision
+- [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) — Authoring workflow
+- [Agent Self Review Checklist](./agent-self-review-checklist.md) — Full task quality checks

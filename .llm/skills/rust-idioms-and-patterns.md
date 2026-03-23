@@ -22,8 +22,8 @@
 
 ## When NOT to Use
 
-- Performance-specific optimizations (see [Rust-performance-optimization](./rust-performance-optimization.md))
-- Error type design specifically (see [error-handling-guide](./error-handling-guide.md))
+- Performance-specific optimizations (see [Rust Performance Optimization](./rust-performance-optimization.md))
+- Error type design specifically (see [Error Handling Guide](./error-handling-guide.md))
 
 ---
 
@@ -264,7 +264,7 @@ buffer.clone_from(&new_data);  // Reuses buffer's allocation (vs buffer = new_da
 
 ## Related Skills
 
-- [api-design-guidelines](./api-design-guidelines.md) — Public API design patterns
-- [defensive-programming](./defensive-programming.md) — Safety-first coding patterns
-- [error-handling-guide](./error-handling-guide.md) — Error type conventions
-- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Modernizing code to idiomatic patterns
+- [API Design Guidelines](./api-design-guidelines.md) — Public API design patterns
+- [Defensive Programming](./defensive-programming.md) — Safety-first coding patterns
+- [Error Handling Guide](./error-handling-guide.md) — Error type conventions
+- [Rust Refactoring Guide](./rust-refactoring-guide.md) — Modernizing code to idiomatic patterns

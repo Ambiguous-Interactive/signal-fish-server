@@ -53,6 +53,44 @@ fn run_cargo_deny(deny_args: &[&str]) -> Option<(bool, String)> {
     Some((output.status.success(), combined))
 }
 
+/// Build and run a nested `cargo check` for one optional feature in an isolated
+/// target directory with sanitizer-related environment variables removed.
+///
+/// This avoids false negatives in sanitizer jobs where nested Cargo invocations
+/// can conflict with instrumentation flags and cached artifacts.
+fn run_isolated_feature_check(feature: &str) -> (bool, String) {
+    let root = repo_root();
+    let target_dir = root
+        .join("target")
+        .join("ci-config-feature-check")
+        .join(feature.replace([',', ' '], "_"));
+
+    let output = Command::new("cargo")
+        .args(["check", "--features", feature, "--locked"])
+        .current_dir(&root)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTDOCFLAGS")
+        .env_remove("ASAN_OPTIONS")
+        .env_remove("LSAN_OPTIONS")
+        .env_remove("UBSAN_OPTIONS")
+        .env_remove("TSAN_OPTIONS")
+        .env_remove("MIRIFLAGS")
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run cargo check for feature `{feature}`: {e}"));
+
+    let mut combined = String::new();
+    combined.push_str(&format!(
+        "command: cargo check --features {feature} --locked\n"
+    ));
+    combined.push_str(&format!("CARGO_TARGET_DIR: {}\n\n", target_dir.display()));
+    combined.push_str(&String::from_utf8_lossy(&output.stdout));
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    (output.status.success(), combined)
+}
+
 fn parse_github_slug_from_remote_url(remote_url: &str) -> Option<(String, String)> {
     let trimmed = remote_url.trim().trim_end_matches(".git");
     let slug = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
@@ -2194,6 +2232,13 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
         content.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
         "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
          Update mismatch guidance in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("./scripts/check-markdown-link-text.sh"),
+        "check-markdown.sh must enforce human-readable internal markdown link text via scripts/check-markdown-link-text.sh.\n\
+         Missing link-text policy enforcement in {}",
         script.display()
     );
 }
@@ -5450,6 +5495,11 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
         content.contains("paths:") && content.contains("**.md"),
         "markdownlint.yml should have path filters to run only on .md changes"
     );
+
+    assert!(
+        content.contains("scripts/check-markdown-link-text.sh"),
+        "markdownlint.yml must include scripts/check-markdown-link-text.sh in path filters and execution steps."
+    );
 }
 
 #[test]
@@ -8603,6 +8653,23 @@ fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
 }
 
 #[test]
+fn test_pre_commit_hook_includes_llm_example_extraction_policy_check() {
+    let root = repo_root();
+    let hook_path = root.join(".githooks/pre-commit");
+    let content = read_file(&hook_path);
+
+    assert!(
+        content.contains("scripts/check-llm-example-files.sh --files $STAGED_LLM_FILES"),
+        "Check 18 must invoke scripts/check-llm-example-files.sh with staged .llm files."
+    );
+    assert!(
+        content.contains("check_fail \"LLM example extraction\"")
+            && content.contains("Inline example sections are disallowed in skill files"),
+        "Check 18 must fail with actionable guidance when inline examples violate policy."
+    );
+}
+
+#[test]
 fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-commit");
@@ -10591,23 +10658,36 @@ fn test_cargo_deny_check_advisories_passes() {
 }
 
 #[test]
-fn test_tls_feature_compiles() {
-    // Verify the tls feature compiles correctly after the rustls-pemfile migration.
-    let root = repo_root();
-    let output = Command::new("cargo")
-        .args(["check", "--features", "tls", "--locked"])
-        .current_dir(&root)
-        .output()
-        .unwrap_or_else(|e| panic!("Failed to run cargo check --features tls: {e}"));
+fn test_optional_feature_compile_matrix() {
+    // Data-driven checks for optional features that are expected to compile in
+    // isolation. This prevents regressions from dependency migrations and
+    // feature-gating drift.
+    const FEATURE_CASES: &[(&str, &str)] = &[
+        ("TLS support", "tls"),
+        ("Legacy full-mesh compatibility", "legacy-fullmesh"),
+        (
+            "Combined optional feature compatibility",
+            "tls,legacy-fullmesh",
+        ),
+    ];
 
-    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    let mut failures = Vec::new();
+
+    for &(label, feature) in FEATURE_CASES {
+        let (success, output) = run_isolated_feature_check(feature);
+        if !success {
+            failures.push(format!(
+                "{label} (feature `{feature}`) failed to compile:\n{output}"
+            ));
+        }
+    }
 
     assert!(
-        output.status.success(),
-        "cargo check --features tls --locked failed.\n\
-         The tls feature must compile successfully after dependency migrations.\n\
-         Output:\n{combined}",
+        failures.is_empty(),
+        "One or more optional feature compile checks failed.\n\
+         These checks run in an isolated target directory with sanitizer env
+         scrubbed to avoid false positives in ASan/Miri contexts.\n\n{}",
+        failures.join("\n\n---\n\n"),
     );
 }
 

@@ -21,10 +21,10 @@ or configuring Kubernetes deployment strategies for the signaling server.
 ## When NOT to Use
 
 - Service level degradation or circuit breakers
-  (see [graceful-degradation-service-levels](./graceful-degradation-service-levels.md))
-- Rate limiting or DDoS prevention (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
+  (see [Graceful Degradation Service Levels](./graceful-degradation-service-levels.md))
+- Rate limiting or DDoS prevention (see [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md))
 - WebSocket protocol design unrelated to availability
-  (see [WebSocket-protocol-patterns](./websocket-protocol-patterns.md))
+  (see [WebSocket Protocol Patterns](./websocket-protocol-patterns.md))
 
 ## Rationalizations to Reject
 
@@ -249,9 +249,9 @@ impl Room {
 
 ## Related Skills
 
-- [graceful-degradation-service-levels](./graceful-degradation-service-levels.md) — Service levels,
+- [Graceful Degradation Service Levels](./graceful-degradation-service-levels.md) — Service levels,
   circuit breakers, feature flags, DB failover
-- [async-Rust-best-practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
-- [observability-and-logging](./observability-and-logging.md) — Health metrics, tracing spans, alert thresholds
-- [error-handling-guide](./error-handling-guide.md) — Error types, fallible operations, context propagation
-- [WebSocket-protocol-patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, close frames, heartbeat
+- [Async Rust Best Practices](./async-rust-best-practices.md) — Tokio patterns, `select!`, cancellation safety
+- [Observability And Logging](./observability-and-logging.md) — Health metrics, tracing spans, alert thresholds
+- [Error Handling Guide](./error-handling-guide.md) — Error types, fallible operations, context propagation
+- [WebSocket Protocol Patterns](./websocket-protocol-patterns.md) — WebSocket lifecycle, close frames, heartbeat

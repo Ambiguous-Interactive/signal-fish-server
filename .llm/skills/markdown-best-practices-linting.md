@@ -11,9 +11,9 @@ tests for markdown validation.
 
 See also:
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Code block best practices
-- [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation
-- [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Code block best practices
+- [Markdown Best Practices Links](./markdown-best-practices-links.md) — Link validation
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Proper nouns and spell checking
 
 ---
 
@@ -291,9 +291,9 @@ typos                                      # Spell check
 
 ## Related Skills
 
-- [markdown-best-practices-code-blocks](./markdown-best-practices-code-blocks.md) — Code block language identifiers
-- [markdown-best-practices-links](./markdown-best-practices-links.md) — Link validation patterns
-- [markdown-best-practices-formatting](./markdown-best-practices-formatting.md) — Proper nouns, spell checking
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD integration
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Debugging markdown lint failures
-- [testing-strategies](./testing-core-patterns.md) — Data-driven tests for validation
+- [Markdown Best Practices Code Blocks](./markdown-best-practices-code-blocks.md) — Code block language identifiers
+- [Markdown Best Practices Links](./markdown-best-practices-links.md) — Link validation patterns
+- [Markdown Best Practices Formatting](./markdown-best-practices-formatting.md) — Proper nouns, spell checking
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD integration
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Debugging markdown lint failures
+- [Testing Core Patterns](./testing-core-patterns.md) — Data-driven tests for validation

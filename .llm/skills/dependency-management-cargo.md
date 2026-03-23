@@ -22,9 +22,9 @@
 
 ## When NOT to Use
 
-- Designing APIs for your own crate (see [api-design-guidelines](./api-design-guidelines.md))
-- MSRV compliance and version pinning (see [dependency-management-versioning](./dependency-management-versioning.md))
-- Supply chain security auditing (see [supply-chain-security](./supply-chain-audit-policy.md))
+- Designing APIs for your own crate (see [API Design Guidelines](./api-design-guidelines.md))
+- MSRV compliance and version pinning (see [Dependency Management Versioning](./dependency-management-versioning.md))
+- Supply chain security auditing (see [Supply Chain Audit Policy](./supply-chain-audit-policy.md))
 
 ---
 
@@ -111,7 +111,7 @@ any of the following criteria are met:
 | **License**       | Cargo.toml license field  | GPL/AGPL in MIT project              | Must be compatible with project license |
 | **Safety**        | `unsafe` usage            | Lots of unsafe without justification | Review unsafe code carefully            |
 | **Build time**    | `cargo build --timings`   | >10s for one crate                   | Impacts developer productivity          |
-| **MSRV**          | Minimum Rust version      | Higher than project MSRV             | **CRITICAL**: See [dependency-management-versioning](./dependency-management-versioning.md) |
+| **MSRV**          | Minimum Rust version      | Higher than project MSRV             | **CRITICAL**: See [Dependency Management Versioning](./dependency-management-versioning.md) |
 | **API stability** | Version number, changelog | Frequent breaking releases           | Check semver adherence                  |
 
 ### Decision Process
@@ -144,7 +144,7 @@ Don't put commonly-needed deps behind flags (if 90% of users need it, make it de
 **Native C dependencies:** If a feature pulls in a crate that requires native libraries (e.g., `rdkafka` needs `cmake`,
 `libcurl-dev`, `libssl-dev`),
 you must also update `.github/actions/install-build-deps/action.yml` and the `Dockerfile` builder stage.
-See [Container Docker § CI Native Build Dependencies](./container-docker.md) for details.
+See [Container Docker](./container-docker.md) for details.
 
 ### Testing All Feature Combinations
 
@@ -263,7 +263,7 @@ To see which dependencies have newer versions available (informational, not a CI
 
 For unmaintained crate advisories, check if the functionality has been absorbed into
 another crate (e.g., `rustls-pemfile` was absorbed into `rustls-pki-types`). See
-[supply-chain-audit-policy](./supply-chain-audit-policy.md) for the full resolution
+[Supply Chain Audit Policy](./supply-chain-audit-policy.md) for the full resolution
 decision tree and migration examples.
 
 ---
@@ -286,7 +286,7 @@ decision tree and migration examples.
 
 ## Related Skills
 
-- [dependency-management-versioning](./dependency-management-versioning.md) — MSRV, pinning, and recommended crates
-- [supply-chain-security](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
-- [msrv-management](./msrv-management.md) — MSRV updates and consistency
-- [clippy-and-linting](./clippy-and-linting.md) — CI integration for dependency checks
+- [Dependency Management Versioning](./dependency-management-versioning.md) — MSRV, pinning, and recommended crates
+- [Supply Chain Audit Policy](./supply-chain-audit-policy.md) — Dependency security audits and SBOMs
+- [MSRV Management](./msrv-management.md) — MSRV updates and consistency
+- [Clippy And Linting](./clippy-and-linting.md) — CI integration for dependency checks

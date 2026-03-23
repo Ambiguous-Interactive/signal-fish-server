@@ -201,6 +201,10 @@ MARKDOWNLINT_GLOBS=(
 if [ "$FIX_MODE" = true ]; then
     echo "Running markdownlint-cli2 with auto-fix..."
     if "${MARKDOWNLINT_CMD[@]}" --fix "${MARKDOWNLINT_GLOBS[@]}"; then
+        if [ -x ./scripts/check-markdown-link-text.sh ]; then
+            echo "Running markdown link text auto-fix..."
+            ./scripts/check-markdown-link-text.sh --fix
+        fi
         echo -e "${GREEN}All markdown files are valid (after fixes)${NC}"
         exit 0
     else
@@ -210,6 +214,10 @@ if [ "$FIX_MODE" = true ]; then
 else
     echo "Running markdownlint-cli2..."
     if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_GLOBS[@]}"; then
+        if [ -x ./scripts/check-markdown-link-text.sh ]; then
+            echo "Running markdown link text policy checks..."
+            ./scripts/check-markdown-link-text.sh
+        fi
         echo -e "${GREEN}All markdown files are valid${NC}"
         exit 0
     else

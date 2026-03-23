@@ -21,6 +21,7 @@ target
 #.idea/
 # Build artifacts
 /target/
+/node_modules/
 
 pre-commit.txt
 pre-push.txt

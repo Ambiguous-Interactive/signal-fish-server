@@ -23,10 +23,10 @@
 
 ## When NOT to Use
 
-- Configuring testing tools or frameworks (see [testing-tools-and-frameworks](./testing-tools-and-frameworks.md))
-- Production error handling (see [error-handling-guide](./error-handling-guide.md))
-- Benchmark-specific setup (see [Rust-performance-optimization](./rust-performance-optimization.md))
-- CI config validation tests (see [test-fixture-structure](./test-fixture-structure.md))
+- Configuring testing tools or frameworks (see [Testing Tools And Frameworks](./testing-tools-and-frameworks.md))
+- Production error handling (see [Error Handling Guide](./error-handling-guide.md))
+- Benchmark-specific setup (see [Rust Performance Optimization](./rust-performance-optimization.md))
+- CI config validation tests (see [Test Fixture Structure](./test-fixture-structure.md))
 
 ---
 
@@ -234,7 +234,7 @@ async fn test_no_data_race_on_room_state() {
 ## Script Output Assertion Specificity
 
 For `must_not_contain` assertions, use error-line-specific prefixes (e.g.,
-`"  - Cargo.lock"`) not bare substrings. See [Pattern 18](./ci-cd-troubleshooting-scripts.md).
+`"  - Cargo.lock"`) not bare substrings. See [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md).
 
 ---
 
@@ -285,8 +285,8 @@ Use `serial_test` (dev-dependency) with `#[serial]` for tests sharing global sta
 
 ## Related Skills
 
-- [testing-error-message-quality](./testing-error-message-quality.md) — Writing actionable test failure messages
-- [testing-ci-coverage](./testing-ci-coverage.md) — CI/CD smoke tests and config validation
-- [testing-tools-and-frameworks](./testing-tools-and-frameworks.md) — Testing tools and coverage measurement
-- [error-handling-guide](./error-handling-guide.md) — Testing error conditions
-- [defensive-programming](./defensive-programming.md) — Edge cases to test
+- [Testing Error Message Quality](./testing-error-message-quality.md) — Writing actionable test failure messages
+- [Testing CI Coverage](./testing-ci-coverage.md) — CI/CD smoke tests and config validation
+- [Testing Tools And Frameworks](./testing-tools-and-frameworks.md) — Testing tools and coverage measurement
+- [Error Handling Guide](./error-handling-guide.md) — Testing error conditions
+- [Defensive Programming](./defensive-programming.md) — Edge cases to test

@@ -207,4 +207,4 @@ ensures every required workflow with `paths:` filters appears in `PATH_FILTERED_
 - [GitHub Actions Config Tests](./github-actions-config-tests.md) — Tests that validate release workflow correctness
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, job guards
 - [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Path filters, permissions, concurrency
-- [ci-cd-troubleshooting](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
+- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

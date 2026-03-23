@@ -107,6 +107,6 @@ Only include sections that have entries.
 
 ## Related Skills
 
-- [classify-user-visible-changes](./classify-user-visible-changes.md) — Determine whether entry is required
-- [review-changelog-entries](./review-changelog-entries.md) — Final quality gate
-- [documentation-standards](./documentation-standards.md) — Documentation completeness policy
+- [Classify User Visible Changes](./classify-user-visible-changes.md) — Determine whether entry is required
+- [Review Changelog Entries](./review-changelog-entries.md) — Final quality gate
+- [Documentation Standards](./documentation-standards.md) — Documentation completeness policy

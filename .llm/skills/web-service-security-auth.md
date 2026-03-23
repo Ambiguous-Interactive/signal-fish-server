@@ -19,8 +19,8 @@
 
 ## When NOT to Use
 
-- Secrets management and TLS (see [web-service-security-hardening](./web-service-security-hardening.md))
-- Rate limiting and connection caps (see [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md))
+- Secrets management and TLS (see [Web Service Security Hardening](./web-service-security-hardening.md))
+- Rate limiting and connection caps (see [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md))
 
 ## Rationalizations to Reject
 
@@ -238,8 +238,8 @@ axum does NOT enable it by default — do not add `.enable_compression()`.
 
 ## Related Skills
 
-- [web-service-security-hardening](./web-service-security-hardening.md) — Secrets, TLS, Rust safety, security logging
-- [defensive-programming](./defensive-programming.md) — Input validation, panic prevention, safe arithmetic
-- [error-handling-guide](./error-handling-guide.md) — Error types, generic messages, context propagation
-- [ddos-rate-limiting-connections](./ddos-rate-limiting-connections.md) —
+- [Web Service Security Hardening](./web-service-security-hardening.md) — Secrets, TLS, Rust safety, security logging
+- [Defensive Programming](./defensive-programming.md) — Input validation, panic prevention, safe arithmetic
+- [Error Handling Guide](./error-handling-guide.md) — Error types, generic messages, context propagation
+- [DDoS Rate Limiting Connections](./ddos-rate-limiting-connections.md) —
   Rate limiting, connection management, DDoS prevention

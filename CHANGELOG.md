@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `tempfile` dev-dependency from 3.26.0 to 3.27.0.
 - Bumped `tokio` from 1.49.0 to 1.50.0.
 - Updated all transitive dependencies to latest compatible versions.
+- Normalized internal documentation link labels to human-readable text across
+  troubleshooting and reference docs.
 
 ## [0.2.0] - 2026-02-24
 

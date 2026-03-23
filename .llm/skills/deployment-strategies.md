@@ -12,8 +12,8 @@ connections, or setting up container monitoring.
 
 See also:
 
-- [container-Docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
-- [container-security](./container-security.md) — Secrets management, security contexts
+- [Container Docker](./container-docker.md) — Dockerfile builds, image scanning, CI/CD pipelines
+- [Container Security](./container-security.md) — Secrets management, security contexts
 
 ---
 
@@ -294,7 +294,7 @@ spec:
 
 ## Related Skills
 
-- [container-Docker](./container-docker.md) — Dockerfile, image scanning, CI/CD pipelines
-- [container-security](./container-security.md) — Secrets management, security contexts
-- [observability-and-logging](./observability-and-logging.md) — Structured logging, tracing, OpenTelemetry
-- [graceful-degradation](./graceful-degradation-deployment.md) — Connection draining, circuit breakers
+- [Container Docker](./container-docker.md) — Dockerfile, image scanning, CI/CD pipelines
+- [Container Security](./container-security.md) — Secrets management, security contexts
+- [Observability And Logging](./observability-and-logging.md) — Structured logging, tracing, OpenTelemetry
+- [Graceful Degradation Deployment](./graceful-degradation-deployment.md) — Connection draining, circuit breakers

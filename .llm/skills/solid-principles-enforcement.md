@@ -280,8 +280,8 @@ mod relay_transport;
 
 ## Related Skills
 
-- [code-review-checklist](./code-review-checklist.md) — Review process incorporating SOLID checks
-- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Refactoring workflow for fixing violations
-- [Rust-idioms-and-patterns](./rust-idioms-and-patterns.md) — Idiomatic Rust patterns
-- [api-design-guidelines](./api-design-guidelines.md) — API design following SOLID
-- [agentic-workflow-patterns](./agentic-workflow-patterns.md) — AI agent workflow patterns for code review
+- [Code Review Checklist](./code-review-checklist.md) — Review process incorporating SOLID checks
+- [Rust Refactoring Guide](./rust-refactoring-guide.md) — Refactoring workflow for fixing violations
+- [Rust Idioms And Patterns](./rust-idioms-and-patterns.md) — Idiomatic Rust patterns
+- [API Design Guidelines](./api-design-guidelines.md) — API design following SOLID
+- [Agentic Workflow Patterns](./agentic-workflow-patterns.md) — AI agent workflow patterns for code review

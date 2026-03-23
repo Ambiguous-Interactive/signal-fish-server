@@ -68,7 +68,7 @@ Every significant code change follows this cycle:
 **Never skip verification.** Running `cargo clippy` and `cargo test` catches more issues than visual inspection.
 
 **CRITICAL:** Step 6 is "PRESENT" not "COMMIT" — you provide instructions, user commits.
-See [git-safety-forbidden-operations](./git-safety-forbidden-operations.md).
+See [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md).
 
 ---
 
@@ -154,7 +154,7 @@ Run verification after EVERY logical change, not just at the end.
 If verification fails, fix before proceeding — don't accumulate errors.
 Never delete a failing test to make the build green.
 
-For the complete verification command sequence, see [agent-self-review-checklist](./agent-self-review-checklist.md).
+For the complete verification command sequence, see [Agent Self Review Checklist](./agent-self-review-checklist.md).
 
 ---
 
@@ -228,8 +228,8 @@ Fix: Suggested improvement
 
 ## Related Skills
 
-- [git-safety-forbidden-operations](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
-- [code-review-checklist](./code-review-checklist.md) — Detailed review criteria
-- [Rust-refactoring-guide](./rust-refactoring-guide.md) — Safe refactoring workflow
-- [testing-strategies](./testing-core-patterns.md) — Test writing methodology
-- [agent-self-review-checklist](./agent-self-review-checklist.md) — Pre-commit verification workflow
+- [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md) — **CRITICAL** - Never commit or configure git
+- [Code Review Checklist](./code-review-checklist.md) — Detailed review criteria
+- [Rust Refactoring Guide](./rust-refactoring-guide.md) — Safe refactoring workflow
+- [Testing Core Patterns](./testing-core-patterns.md) — Test writing methodology
+- [Agent Self Review Checklist](./agent-self-review-checklist.md) — Pre-commit verification workflow

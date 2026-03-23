@@ -20,9 +20,9 @@ or setting up reproducible builds.
 
 ## When NOT to Use
 
-- SBOM generation and update automation (see [supply-chain-sbom-updates](./supply-chain-sbom-updates.md))
-- Application-level security (see [web-service-security-auth](./web-service-security-auth.md))
-- Choosing between crates for functionality (see [dependency-management-cargo](./dependency-management-cargo.md))
+- SBOM generation and update automation (see [Supply Chain Sbom Updates](./supply-chain-sbom-updates.md))
+- Application-level security (see [Web Service Security Auth](./web-service-security-auth.md))
+- Choosing between crates for functionality (see [Dependency Management Cargo](./dependency-management-cargo.md))
 
 ## TL;DR
 
@@ -206,24 +206,8 @@ Unmaintained advisory detected:
         ignore with expiry in deny.toml
 ```
 
-### Example: rustls-pemfile to rustls-pki-types Migration
-
-RUSTSEC-2025-0134 flagged `rustls-pemfile` as unmaintained because its PEM parsing
-was absorbed into `rustls-pki-types`. Migration:
-
-```toml
-# BEFORE: tls = ["axum-server", "rustls", "rustls-pemfile"]
-# AFTER:
-tls = ["axum-server", "rustls", "rustls-pki-types"]
-```
-
-```rust
-// BEFORE: use rustls_pemfile::certs;
-// AFTER:
-use rustls_pki_types::{pem::PemObject, CertificateDer};
-let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(path)
-    .collect::<Result<Vec<_>, _>>()?;
-```
+See dedicated migration example:
+[Supply Chain Example Rustls Pemfile To Rustls Pki Types](./supply-chain-example-rustls-pemfile-to-rustls-pki-types.md).
 
 ---
 
@@ -261,7 +245,7 @@ When a new RUSTSEC advisory is discovered:
    section 6 above (migrate, vendor, or document ignore with expiry).
 4. **Add ban if warranted** — if the crate should never be used again,
    add it to `deny.toml` `[[bans.deny]]` following the ban policy in
-   [dependency-management-cargo](./dependency-management-cargo.md).
+   [Dependency Management Cargo](./dependency-management-cargo.md).
 5. **Verify** — run `cargo deny check` and `cargo audit` to confirm the
    advisory is resolved or properly ignored.
 
@@ -288,10 +272,10 @@ When a new RUSTSEC advisory is discovered:
 
 ## Related Skills
 
-- [supply-chain-sbom-updates](./supply-chain-sbom-updates.md) — SBOM generation, update policy,
+- [Supply Chain Sbom Updates](./supply-chain-sbom-updates.md) — SBOM generation, update policy,
   CI pipeline, action compatibility
-- [dependency-management-cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
+- [Dependency Management Cargo](./dependency-management-cargo.md) — Crate evaluation, feature flags,
   workspace dependency patterns
-- [web-service-security-hardening](./web-service-security-hardening.md) —
+- [Web Service Security Hardening](./web-service-security-hardening.md) —
   Application-level security, auth, input validation, TLS
 - [Container Docker](./container-docker.md) — Dockerfile hardening, image scanning, CI/CD pipelines

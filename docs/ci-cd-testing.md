@@ -906,5 +906,5 @@ This testing infrastructure provides defense in depth against CI/CD issues:
 
 - [Lychee Configuration Documentation](https://github.com/lycheeverse/lychee#configuration)
 - [Markdownlint Rules](https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md)
-- [GitHub Actions Best Practices](../.llm/skills/github-actions-workflow-config.md)
-- [CI/CD Troubleshooting](../.llm/skills/ci-cd-troubleshooting-categories.md)
+- [GitHub Actions Workflow Config](../.llm/skills/github-actions-workflow-config.md)
+- [CI CD Troubleshooting Categories](../.llm/skills/ci-cd-troubleshooting-categories.md)

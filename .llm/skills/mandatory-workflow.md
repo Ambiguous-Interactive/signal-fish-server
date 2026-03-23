@@ -21,8 +21,8 @@
 
 ## When NOT to Use
 
-- Choosing test strategies (see [testing-strategies](./testing-core-patterns.md))
-- Configuring clippy rules (see [clippy-and-linting](./clippy-and-linting.md))
+- Choosing test strategies (see [Testing Core Patterns](./testing-core-patterns.md))
+- Configuring clippy rules (see [Clippy And Linting](./clippy-and-linting.md))
 
 ---
 
@@ -32,9 +32,9 @@
 2. **Run the appropriate linters** after every change (see table below).
 3. **Zero warnings, zero errors** — all linters enforce strict compliance.
 4. **For user-visible changes**: run changelog flow
-   [classify-user-visible-changes](./classify-user-visible-changes.md) ->
-   [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) ->
-   [review-changelog-entries](./review-changelog-entries.md).
+   [Classify User Visible Changes](./classify-user-visible-changes.md) ->
+   [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) ->
+   [Review Changelog Entries](./review-changelog-entries.md).
 
 ---
 
@@ -66,16 +66,16 @@ scripts/check-doc-consistency.sh     # Version sync + changelog + docs accuracy 
 
 - `check-ci-config.sh`: Catches outdated action versions incompatible with current `Cargo.lock`
 
-  format (see [supply-chain-security](./supply-chain-audit-policy.md))
+  format (see [Supply Chain Audit Policy](./supply-chain-audit-policy.md))
 
 - `check-msrv-consistency.sh`: Validates all configuration files use the same Rust version as
 
-  `Cargo.toml` (see [msrv-management](./msrv-management.md))
+  `Cargo.toml` (see [MSRV Management](./msrv-management.md))
 
 - `check-doc-consistency.sh`: Enforces Cargo version reference sync, Keep a Changelog
 
   structure/link validity, and protocol/documentation anti-drift checks (see
-  [doc-accuracy-guarantees](./doc-accuracy-guarantees.md))
+  [Doc Accuracy Guarantees](./doc-accuracy-guarantees.md))
 
 ---
 
@@ -161,19 +161,19 @@ configuration changed. Always verify the full chain.
 - [ ] `scripts/check-ci-config.sh` — CI config validated
 - [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
 - [ ] `scripts/check-doc-consistency.sh` — version/changelog/docs consistency validated
-- [ ] New code has exhaustive tests (see [testing-strategies](./testing-core-patterns.md))
-- [ ] Documentation updated (see [documentation-standards](./documentation-standards.md))
-- [ ] CHANGELOG decision documented via [classify-user-visible-changes](./classify-user-visible-changes.md)
-- [ ] CHANGELOG updated for user-facing changes via [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md)
-- [ ] CHANGELOG reviewed via [review-changelog-entries](./review-changelog-entries.md)
+- [ ] New code has exhaustive tests (see [Testing Core Patterns](./testing-core-patterns.md))
+- [ ] Documentation updated (see [Documentation Standards](./documentation-standards.md))
+- [ ] CHANGELOG decision documented via [Classify User Visible Changes](./classify-user-visible-changes.md)
+- [ ] CHANGELOG updated for user-facing changes via [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md)
+- [ ] CHANGELOG reviewed via [Review Changelog Entries](./review-changelog-entries.md)
 - [ ] Breaking changes documented
-- [ ] MSRV update documented (if applicable, see [msrv-management](./msrv-management.md))
+- [ ] MSRV update documented (if applicable, see [MSRV Management](./msrv-management.md))
 
 ---
 
 ## Security Checklist (Pre-Merge)
 
-- [ ] No `.unwrap()` on user input (see [defensive-programming](./defensive-programming.md))
+- [ ] No `.unwrap()` on user input (see [Defensive Programming](./defensive-programming.md))
 - [ ] All `.expect()` have `// SAFETY:` comments
 - [ ] Rate limiting in place for public endpoints
 - [ ] Auth tokens validated before privileged operations
@@ -182,5 +182,5 @@ configuration changed. Always verify the full chain.
 - [ ] No integer overflow in arithmetic (use `saturating_*` or `checked_*`)
 - [ ] No unchecked array/slice indexing (use `.get()` or `.last()`)
 
-Use [web-service-security](./web-service-security-auth.md)
-and [code-review-checklist](./code-review-checklist.md) skills for comprehensive audit.
+Use [Web Service Security Auth](./web-service-security-auth.md)
+and [Code Review Checklist](./code-review-checklist.md) skills for comprehensive audit.

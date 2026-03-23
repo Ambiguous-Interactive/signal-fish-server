@@ -19,8 +19,8 @@
 
 ## When NOT to Use
 
-- Application unit tests (see [testing-core-patterns](./testing-core-patterns.md))
-- Writing the data-driven test patterns (see [test-fixture-ci-patterns](./test-fixture-ci-patterns.md))
+- Application unit tests (see [Testing Core Patterns](./testing-core-patterns.md))
+- Writing the data-driven test patterns (see [Test Fixture CI Patterns](./test-fixture-ci-patterns.md))
 - Performance benchmarks (see [Rust Performance Optimization](./rust-performance-optimization.md))
 
 ---
@@ -292,7 +292,7 @@ jobs:
 
 ## Related Skills
 
-- [test-fixture-ci-patterns](./test-fixture-ci-patterns.md) — Data-driven CI configuration test patterns
-- [testing-core-patterns](./testing-core-patterns.md) — Core testing methodology and patterns
-- [testing-error-message-quality](./testing-error-message-quality.md) — Actionable test failure messages
-- [GitHub-actions-best-practices](./github-actions-workflow-config.md) — CI/CD workflow patterns
+- [Test Fixture CI Patterns](./test-fixture-ci-patterns.md) — Data-driven CI configuration test patterns
+- [Testing Core Patterns](./testing-core-patterns.md) — Core testing methodology and patterns
+- [Testing Error Message Quality](./testing-error-message-quality.md) — Actionable test failure messages
+- [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — CI/CD workflow patterns

@@ -14,13 +14,15 @@ on:
   push:
     branches: [main]
     paths:
-      - '.llm/**'
-      - 'scripts/check-llm-file-sizes.sh'
+      - ".llm/**"
+      - "scripts/check-llm-file-sizes.sh"
+      - "scripts/check-llm-example-files.sh"
   pull_request:
     branches: [main]
     paths:
-      - '.llm/**'
-      - 'scripts/check-llm-file-sizes.sh'
+      - ".llm/**"
+      - "scripts/check-llm-file-sizes.sh"
+      - "scripts/check-llm-example-files.sh"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -40,6 +42,9 @@ jobs:
       - name: Run LLM file size checks
         run: ./scripts/check-llm-file-sizes.sh
 
+      - name: Run LLM example extraction checks
+        run: ./scripts/check-llm-example-files.sh
+
       - name: Summary
         if: always()
         run: |
@@ -48,3 +53,4 @@ jobs:
           echo "This check validates:"
           echo "  - All .llm/ files are within the 300-line limit"
           echo "  - Context and skill files remain concise for agent use"
+          echo "  - Skill examples are extracted into dedicated *-example-*.md files"

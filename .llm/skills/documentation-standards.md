@@ -22,8 +22,8 @@
 
 ## When NOT to Use
 
-- Writing test documentation (see [testing-strategies](./testing-core-patterns.md))
-- Formatting/linting docs (see [mandatory-workflow](./mandatory-workflow.md))
+- Writing test documentation (see [Testing Core Patterns](./testing-core-patterns.md))
+- Formatting/linting docs (see [Mandatory Workflow](./mandatory-workflow.md))
 
 ---
 
@@ -108,9 +108,9 @@ Use [Keep a Changelog](https://keepachangelog.com/) format:
 - Add entries under `[Unreleased]` during development
 - Use imperative mood ("Add feature X", not "Added feature X") — section headers use past tense per Keep a Changelog
 - Reference issue/PR numbers; mark breaking changes explicitly
-- Use [classify-user-visible-changes](./classify-user-visible-changes.md) before writing entries
-- Use [update-changelog-keep-a-changelog](./update-changelog-keep-a-changelog.md) to author entries
-- Use [review-changelog-entries](./review-changelog-entries.md) as final changelog QA gate
+- Use [Classify User Visible Changes](./classify-user-visible-changes.md) before writing entries
+- Use [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) to author entries
+- Use [Review Changelog Entries](./review-changelog-entries.md) as final changelog QA gate
 
 ### Changelog Gate Classification
 
@@ -236,9 +236,9 @@ After every feature/bugfix:
 
 - [ ] Updated relevant `///` doc comments with examples
 - [ ] Code samples compile and run correctly
-- [ ] User-visible scope classified (see [classify-user-visible-changes](./classify-user-visible-changes.md))
+- [ ] User-visible scope classified (see [Classify User Visible Changes](./classify-user-visible-changes.md))
 - [ ] CHANGELOG entry added under `[Unreleased]` using Keep a Changelog sections
-- [ ] CHANGELOG entry reviewed (see [review-changelog-entries](./review-changelog-entries.md))
+- [ ] CHANGELOG entry reviewed (see [Review Changelog Entries](./review-changelog-entries.md))
 - [ ] README updated if user-facing
 - [ ] New behavior clearly marked as new
 - [ ] Markdown files pass linting (`./scripts/check-markdown.sh`)

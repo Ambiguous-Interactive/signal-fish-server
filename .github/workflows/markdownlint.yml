@@ -18,19 +18,21 @@ on:
   push:
     branches: [main]
     paths:
-      - '**.md'
-      - '.markdownlint.json'
-      - '.markdownlint-cli2.jsonc'
-      - '.markdownlintignore'
-      - '.github/workflows/markdownlint.yml'
+      - "**.md"
+      - ".markdownlint.json"
+      - ".markdownlint-cli2.jsonc"
+      - ".markdownlintignore"
+      - "scripts/check-markdown-link-text.sh"
+      - ".github/workflows/markdownlint.yml"
   pull_request:
     branches: [main]
     paths:
-      - '**.md'
-      - '.markdownlint.json'
-      - '.markdownlint-cli2.jsonc'
-      - '.markdownlintignore'
-      - '.github/workflows/markdownlint.yml'
+      - "**.md"
+      - ".markdownlint.json"
+      - ".markdownlint-cli2.jsonc"
+      - ".markdownlintignore"
+      - "scripts/check-markdown-link-text.sh"
+      - ".github/workflows/markdownlint.yml"
 
 # Restrict permissions to minimum required for the job
 permissions:
@@ -58,3 +60,5 @@ jobs:
             !node_modules/**
             !.github/test-fixtures/**
             !test-fixtures/**
+      - name: Enforce human-readable internal markdown link text
+        run: ./scripts/check-markdown-link-text.sh
