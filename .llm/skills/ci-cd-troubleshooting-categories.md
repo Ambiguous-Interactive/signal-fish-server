@@ -38,6 +38,7 @@ CI Failure
     +-- Docker warning ---------> BuildKit false positive on ENV variable names
     +-- PowerShell parse error -> Bash syntax without shell: bash on Windows
     +-- Changelog gate error --> Check if dep-only change; verify actor vs commit msg detection
+    +-- Missing ext tool -----> Test shells out to optional tool; must skip gracefully
 ```
 
 ### Step 2: Check Recent Changes

@@ -260,6 +260,13 @@ assert!(is_excluded("example.com"), "example.com should be excluded");
 - No network calls (use fixtures or offline mode)
 - No external tools (pure Rust file reading)
 
+### 4. External Tool Tests Must Skip Gracefully
+
+Tests that shell out to optional tools (e.g., `cargo-deny`) **must** skip when the
+tool is absent. Probe via `--version` (not string-matching), return early with a skip
+message, and centralize in a shared helper. See `cargo_deny_available()` and
+`run_cargo_deny()` in `tests/ci_config_tests.rs` for the canonical implementation.
+
 ---
 
 ## Prevention Checklist
@@ -269,7 +276,7 @@ Before committing new configuration tests:
 - [ ] Test validates intent (consistency), not specific values
 - [ ] Error messages include fix instructions
 - [ ] Test is data-driven (easy to add new cases)
-- [ ] Test executes in < 10ms (no external tools)
+- [ ] Test executes in < 10ms, or skips gracefully if external tool unavailable
 - [ ] Test has documentation comment explaining purpose
 - [ ] Test is organized in appropriate module
 - [ ] Test covers both positive and negative cases

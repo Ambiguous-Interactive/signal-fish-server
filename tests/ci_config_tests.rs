@@ -18,6 +18,41 @@ use std::process::Command;
 
 use common::{read_file, repo_root};
 
+/// Check whether `cargo-deny` is installed by running `cargo deny --version`.
+/// Returns `true` when the subcommand is available, `false` otherwise.
+fn cargo_deny_available() -> bool {
+    Command::new("cargo")
+        .args(["deny", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `cargo deny <deny_args>` and return `(success, combined_output)`.
+/// Returns `None` (and prints a skip message) when cargo-deny is not installed.
+fn run_cargo_deny(deny_args: &[&str]) -> Option<(bool, String)> {
+    if !cargo_deny_available() {
+        eprintln!(
+            "Skipping: cargo-deny is not installed.\n\
+             Install with: cargo install cargo-deny"
+        );
+        return None;
+    }
+
+    let mut args = vec!["deny"];
+    args.extend_from_slice(deny_args);
+
+    let output = Command::new("cargo")
+        .args(&args)
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to execute cargo deny");
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    Some((output.status.success(), combined))
+}
+
 fn parse_github_slug_from_remote_url(remote_url: &str) -> Option<(String, String)> {
     let trimmed = remote_url.trim().trim_end_matches(".git");
     let slug = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
@@ -10537,38 +10572,22 @@ fn test_run_local_ci_includes_advisory_check() {
 fn test_cargo_deny_check_advisories_passes() {
     // Run cargo deny check advisories to verify no active RUSTSEC advisories.
     // This test mirrors the CI deny job locally.
-    let root = repo_root();
-    let output = Command::new("cargo")
-        .args(["deny", "check", "advisories"])
-        .current_dir(&root)
-        .output();
+    let Some((success, output)) = run_cargo_deny(&["check", "advisories"]) else {
+        return;
+    };
 
-    match output {
-        Ok(result) => {
-            let mut combined = String::from_utf8_lossy(&result.stdout).to_string();
-            combined.push_str(&String::from_utf8_lossy(&result.stderr));
-
-            assert!(
-                result.status.success(),
-                "cargo deny check advisories failed.\n\
-                 This means there are active RUSTSEC advisories in the dependency tree.\n\n\
-                 To investigate:\n\
-                 1. Run: cargo deny check advisories\n\
-                 2. For each advisory, either:\n\
-                    a. Update the dependency to a patched version\n\
-                    b. Replace the dependency with a maintained alternative\n\
-                    c. Add a documented ignore in deny.toml with justification and expiry\n\n\
-                 Output:\n{combined}",
-            );
-        }
-        Err(e) => {
-            // cargo-deny may not be installed in all environments; skip gracefully
-            eprintln!(
-                "Warning: could not run cargo deny check advisories: {e}\n\
-                 Install with: cargo install cargo-deny"
-            );
-        }
-    }
+    assert!(
+        success,
+        "cargo deny check advisories failed.\n\
+         This means there are active RUSTSEC advisories in the dependency tree.\n\n\
+         To investigate:\n\
+         1. Run: cargo deny check advisories\n\
+         2. For each advisory, either:\n\
+            a. Update the dependency to a patched version\n\
+            b. Replace the dependency with a maintained alternative\n\
+            c. Add a documented ignore in deny.toml with justification and expiry\n\n\
+         Output:\n{output}",
+    );
 }
 
 #[test]
@@ -10714,38 +10733,23 @@ fn test_no_rustls_pemfile_in_cargo_lock() {
 
 #[test]
 fn test_cargo_deny_full_check_passes() {
-    let root = repo_root();
-    let output = Command::new("cargo")
-        .args(["deny", "--all-features", "check"])
-        .current_dir(&root)
-        .output();
+    let Some((success, output)) = run_cargo_deny(&["--all-features", "check"]) else {
+        return;
+    };
 
-    match output {
-        Ok(result) => {
-            let mut combined = String::from_utf8_lossy(&result.stdout).to_string();
-            combined.push_str(&String::from_utf8_lossy(&result.stderr));
-
-            assert!(
-                result.status.success(),
-                "cargo deny --all-features check failed.\n\
-                 All four policy areas (advisories, licenses, bans, sources) must pass.\n\n\
-                 To investigate:\n\
-                 1. Run: cargo deny --all-features check\n\
-                 2. Address each failure category separately:\n\
-                    - advisories: update or replace affected dependency\n\
-                    - licenses: add exception or replace dependency\n\
-                    - bans: remove banned crate or add skip entry with justification\n\
-                    - sources: ensure all deps come from crates.io\n\n\
-                 Output:\n{combined}",
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: could not run cargo deny check: {e}\n\
-                 Install with: cargo install cargo-deny"
-            );
-        }
-    }
+    assert!(
+        success,
+        "cargo deny --all-features check failed.\n\
+         All four policy areas (advisories, licenses, bans, sources) must pass.\n\n\
+         To investigate:\n\
+         1. Run: cargo deny --all-features check\n\
+         2. Address each failure category separately:\n\
+            - advisories: update or replace affected dependency\n\
+            - licenses: add exception or replace dependency\n\
+            - bans: remove banned crate or add skip entry with justification\n\
+            - sources: ensure all deps come from crates.io\n\n\
+         Output:\n{output}",
+    );
 }
 
 #[test]
