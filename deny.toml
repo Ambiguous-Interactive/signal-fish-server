@@ -24,8 +24,6 @@ yanked = "deny"
 # Ignore specific advisories (use sparingly and document why)
 ignore = [
     # Example: "RUSTSEC-2020-0159",  # Chrono timezone issues (non-exploitable)
-    # TODO(revisit by 2026-09-01): re-evaluate once rustls-pemfile is replaced or advisory is withdrawn
-    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained — thin wrapper around rustls-pki-types
 ]
 
 [licenses]
