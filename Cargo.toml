@@ -71,8 +71,8 @@ dashmap = "6.1"
 # Crypto & security
 base64 = "0.22"
 aes-gcm = { version = "0.10", features = ["aes"] }
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13.0-rc.6"
 getrandom = "0.4"
 subtle = "2.6"
 

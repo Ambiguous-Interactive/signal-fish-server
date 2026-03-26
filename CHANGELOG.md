@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Upgraded `sha2` from `0.10.9` to `0.11.0` and `hmac` from `0.12.1` to `0.13.0-rc.6` to align
+  on `digest 0.11` and fix the `CoreProxy` trait bound build error.
 - Replaced `rustls-pemfile` with `rustls-pki-types` `PemObject` API for TLS certificate and
   private key loading, removing one dependency from the `tls` feature.
 - Bumped `axum-test` dev-dependency from 18.7.0 to 19.1.1 (adapted test code for 19.x API changes).

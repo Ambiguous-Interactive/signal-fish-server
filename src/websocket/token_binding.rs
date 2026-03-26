@@ -198,7 +198,7 @@ mod tests {
     use crate::security::token_binding::TokenBindingScheme;
     use crate::security::CLIENT_FINGERPRINT_HEADER_CANDIDATES;
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use serde_json::json;
     use sha2::Sha256;
     use std::sync::Arc;
