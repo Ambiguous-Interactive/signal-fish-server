@@ -929,15 +929,16 @@ STAGED_WORKFLOW_HYGIENE_BYTES=$(git diff --cached --name-only -z --diff-filter=A
     | wc -c | tr -d '[:space:]')
 
 if [ "$STAGED_WORKFLOW_HYGIENE_BYTES" -gt 0 ]; then
-    if [ -x scripts/check-workflow-hygiene.sh ]; then
-        if scripts/check-workflow-hygiene.sh > /dev/null 2>&1; then
+    if [ -f scripts/check-workflow-hygiene.sh ]; then
+        if OUTPUT=$(bash scripts/check-workflow-hygiene.sh 2>&1); then
             check_pass "Workflow hygiene checks"
         else
             check_fail "Workflow hygiene checks" "Run './scripts/check-workflow-hygiene.sh' and fix reported errors."
+            echo "$OUTPUT"
             echo ""
         fi
     else
-        check_fail "Workflow hygiene checks" "scripts/check-workflow-hygiene.sh not found or not executable."
+        check_fail "Workflow hygiene checks" "scripts/check-workflow-hygiene.sh not found."
         echo ""
     fi
 else
@@ -1044,15 +1045,16 @@ fi
 # Enforces version sync, keep-a-changelog structure, and protocol quick-reference drift checks.
 echo "${BLUE}[21/${TOTAL_CHECKS}]${NC} Checking documentation + changelog consistency..."
 
-if [ -x scripts/check-doc-consistency.sh ]; then
-    if scripts/check-doc-consistency.sh --staged > /dev/null 2>&1; then
+if [ -f scripts/check-doc-consistency.sh ]; then
+    if OUTPUT=$(bash scripts/check-doc-consistency.sh --staged 2>&1); then
         check_pass "Doc + changelog consistency"
     else
         check_fail "Doc + changelog consistency" "Run './scripts/check-doc-consistency.sh --staged' and fix reported issues."
+        echo "$OUTPUT"
         echo ""
     fi
 else
-    check_fail "Doc + changelog consistency" "scripts/check-doc-consistency.sh not found or not executable."
+    check_fail "Doc + changelog consistency" "scripts/check-doc-consistency.sh not found."
     echo ""
 fi
 
@@ -1063,22 +1065,23 @@ echo "${BLUE}[22/${TOTAL_CHECKS}]${NC} Checking Dockerfile shell portability..."
 STAGED_DOCKERFILES=$(git diff --cached --name-only --diff-filter=ACM | grep -iE '(^|/)Dockerfile|\.Dockerfile$' || true)
 
 if [ -n "$STAGED_DOCKERFILES" ]; then
-    if [ -x scripts/check-dockerfile-portability.sh ]; then
+    if [ -f scripts/check-dockerfile-portability.sh ]; then
         # shellcheck disable=SC2086
-        if (
+        if OUTPUT=$(
             # Preserve spaces in staged file paths by splitting only on newlines.
             IFS='
 '
             set -f
-            scripts/check-dockerfile-portability.sh --quiet --files $STAGED_DOCKERFILES
-        ) > /dev/null 2>&1; then
+            bash scripts/check-dockerfile-portability.sh --quiet --files $STAGED_DOCKERFILES 2>&1
+        ); then
             check_pass "Dockerfile portability"
         else
             check_fail "Dockerfile portability" "Run './scripts/check-dockerfile-portability.sh' and fix reported issues."
+            echo "$OUTPUT"
             echo ""
         fi
     else
-        check_skip "Dockerfile portability" "check-dockerfile-portability.sh not found or not executable"
+        check_skip "Dockerfile portability" "check-dockerfile-portability.sh not found"
     fi
 else
     check_skip "Dockerfile portability" "no Dockerfiles staged"
@@ -1091,15 +1094,16 @@ echo "${BLUE}[23/${TOTAL_CHECKS}]${NC} Checking Dependabot config consistency...
 STAGED_DEPENDABOT=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^\.github/dependabot\.ya?ml$' || true)
 
 if [ -n "$STAGED_DEPENDABOT" ]; then
-    if [ -x scripts/check-dependabot-config.sh ]; then
-        if scripts/check-dependabot-config.sh >/dev/null; then
+    if [ -f scripts/check-dependabot-config.sh ]; then
+        if OUTPUT=$(bash scripts/check-dependabot-config.sh 2>&1); then
             check_pass "Dependabot config consistency"
         else
             check_fail "Dependabot config consistency" "Run './scripts/check-dependabot-config.sh' and fix reported errors."
+            echo "$OUTPUT"
             echo ""
         fi
     else
-        check_skip "Dependabot config consistency" "check-dependabot-config.sh not found or not executable"
+        check_skip "Dependabot config consistency" "check-dependabot-config.sh not found"
     fi
 else
     check_skip "Dependabot config consistency" "no .github/dependabot.yml staged"

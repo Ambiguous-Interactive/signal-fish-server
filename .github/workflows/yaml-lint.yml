@@ -72,5 +72,4 @@ jobs:
 
       - name: Validate Dependabot config consistency
         run: |
-          chmod +x scripts/check-dependabot-config.sh
-          ./scripts/check-dependabot-config.sh
+          bash scripts/check-dependabot-config.sh
