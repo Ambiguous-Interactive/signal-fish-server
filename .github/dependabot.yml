@@ -16,7 +16,7 @@ updates:
   # ============================================================================
   # Covers main server dependencies: tokio, axum, serialization, crypto, etc.
   # Daily schedule: Rust security advisories are critical and frequent
-  # Higher PR limit: Cargo updates tend to be well-tested and low-risk
+  # Consolidated PR limit: Area-grouped updates reduce review overhead
   #
   # Workspace Structure:
   # This is a single-crate workspace with one vendored dependency:
@@ -62,7 +62,7 @@ updates:
   # ============================================================================
   # Vendored MessagePack library referenced in [patch.crates-io]
   # Daily schedule: Must stay in sync with upstream rmp ecosystem
-  # Lower PR limit: Changes here require careful compatibility testing
+  # Consolidated PR limit: Keep third_party updates grouped and manageable
   - package-ecosystem: "cargo"
     directory: "/third_party/rmp"
     schedule:
@@ -115,7 +115,7 @@ updates:
   # ============================================================================
   # Includes CI, documentation validation, linting workflows
   # Weekly schedule: Actions updates are less frequent and lower risk
-  # Moderate PR limit: Workflow changes need testing but aren't as critical
+  # Consolidated PR limit: Consolidate workflow updates into fewer review PRs
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -151,7 +151,7 @@ updates:
   # ============================================================================
   # Multi-stage build with rust base image and debian bookworm runtime
   # Weekly schedule: Base image updates are infrequent and need validation
-  # Lower PR limit: Docker changes require multi-stage build testing
+  # Consolidated PR limit: Group base image updates for coordinated validation
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -211,7 +211,7 @@ updates:
   # ============================================================================
   # Development environment with tooling (cargo-nextest, cargo-tarpaulin, etc.)
   # Weekly schedule: Dev environment updates are less urgent than production
-  # Lower PR limit: Devcontainer changes affect developer workflow
+  # Consolidated PR limit: Reduce noise in developer-experience updates
   - package-ecosystem: "docker"
     directory: "/.devcontainer"
     schedule:

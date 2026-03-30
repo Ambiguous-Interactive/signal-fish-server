@@ -28,6 +28,7 @@
 #  20. README badge style consistency (if README.md modified)
 #  21. Documentation + changelog consistency (version sync, changelog format, protocol drift)
 #  22. Dockerfile shell portability (bash-isms in RUN commands, find without -type f)
+#  23. Dependabot config consistency (relative PR-limit terminology, missing limits, comment drift)
 
 set -e
 
@@ -47,7 +48,7 @@ if [ ! -t 1 ]; then
     NC=''
 fi
 
-TOTAL_CHECKS=22
+TOTAL_CHECKS=23
 
 echo "${BLUE}[pre-commit]${NC} Running pre-commit checks..."
 echo ""
@@ -1083,6 +1084,27 @@ else
     check_skip "Dockerfile portability" "no Dockerfiles staged"
 fi
 
+# Check 23: Dependabot config consistency (only if .github/dependabot.yml is staged)
+# Catches relative PR-limit terminology, missing open-pull-requests-limit fields,
+# and inline numeric comment/config mismatches before they mislead maintainers.
+echo "${BLUE}[23/${TOTAL_CHECKS}]${NC} Checking Dependabot config consistency..."
+STAGED_DEPENDABOT=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^\.github/dependabot\.ya?ml$' || true)
+
+if [ -n "$STAGED_DEPENDABOT" ]; then
+    if [ -x scripts/check-dependabot-config.sh ]; then
+        if scripts/check-dependabot-config.sh >/dev/null; then
+            check_pass "Dependabot config consistency"
+        else
+            check_fail "Dependabot config consistency" "Run './scripts/check-dependabot-config.sh' and fix reported errors."
+            echo ""
+        fi
+    else
+        check_skip "Dependabot config consistency" "check-dependabot-config.sh not found or not executable"
+    fi
+else
+    check_skip "Dependabot config consistency" "no .github/dependabot.yml staged"
+fi
+
 # Summary
 echo ""
 echo "=========================================="
@@ -1103,6 +1125,7 @@ if [ "$CHECKS_FAILED" -gt 0 ]; then
     echo "  ./scripts/check-readme-badges.sh README.md  # Check README badge styles"
     echo "  ./scripts/check-doc-consistency.sh --staged # Check version/changelog/doc consistency"
     echo "  ./scripts/check-dockerfile-portability.sh   # Check Dockerfile shell portability"
+    echo "  ./scripts/check-dependabot-config.sh        # Check Dependabot config consistency"
     echo "  ./scripts/run-local-ci.sh --fix             # Fix all issues"
     echo ""
     echo "${YELLOW}To bypass (NOT recommended):${NC}"

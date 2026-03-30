@@ -3,6 +3,11 @@
 # Validates all YAML files for syntax errors, formatting issues, and best practices
 # using yamllint with project-specific configuration.
 #
+# Also validates .github/dependabot.yml for semantic consistency:
+#   - No stale relative PR-limit terminology (Higher/Moderate/Lower)
+#   - Every update entry has open-pull-requests-limit defined
+#   - Inline comment PR limit numbers match configured values
+#
 # Configuration:
 #   - .yamllint.yml: YAML linting rules and exclusions
 #
@@ -13,6 +18,7 @@
 # Features:
 #   - Validates YAML syntax and formatting
 #   - Checks GitHub Actions workflow files
+#   - Semantic validation of Dependabot configuration
 #   - Pinned yamllint version for reproducibility
 
 name: YAML Lint
@@ -24,6 +30,7 @@ on:
       - '**/*.yml'
       - '**/*.yaml'
       - '.yamllint.yml'
+      - 'scripts/check-dependabot-config.sh'
       - '.github/workflows/yaml-lint.yml'
   pull_request:
     branches: [main]
@@ -31,6 +38,7 @@ on:
       - '**/*.yml'
       - '**/*.yaml'
       - '.yamllint.yml'
+      - 'scripts/check-dependabot-config.sh'
       - '.github/workflows/yaml-lint.yml'
 
 concurrency:
@@ -61,3 +69,8 @@ jobs:
 
       - name: Run yamllint
         run: yamllint -c .yamllint.yml .
+
+      - name: Validate Dependabot config consistency
+        run: |
+          chmod +x scripts/check-dependabot-config.sh
+          ./scripts/check-dependabot-config.sh
