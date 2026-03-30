@@ -349,7 +349,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.69.6
+        uses: taiki-e/install-action@v2.70.2
         with:
           tool: cargo-sbom
 
