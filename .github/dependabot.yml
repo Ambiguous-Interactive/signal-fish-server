@@ -1,13 +1,13 @@
 # Dependabot Configuration for Signal Fish Server
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 #
-# This configuration is designed to balance security updates with PR noise reduction.
+# This configuration is designed to strongly favor fewer, larger, area-grouped PRs.
 # Key design decisions:
-# - Grouping is enabled to prevent PR spam by bundling related updates
+# - Broad grouping bundles most updates within each ecosystem area
+# - Low PR limits bias toward large, consolidated update PRs
 # - Schedule intervals are tuned per ecosystem based on update frequency needs
 # - Labels enable automated routing and filtering
 # - Explicit rebase-strategy ensures clean merge history
-# - PR limits prevent overwhelming the review queue
 
 version: 2
 updates:
@@ -40,39 +40,22 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Higher limit for primary dependencies as they're critical to monitor
-    open-pull-requests-limit: 10
+    # Prefer a small number of large, grouped dependency PRs
+    open-pull-requests-limit: 2
     # Organize PRs with clear labels
     labels:
       - "dependencies"
       - "rust"
       - "automated"
-    # Group patch and minor updates to reduce PR noise
+    # Group all update types to favor large, area-grouped PRs
     groups:
-      # Group all patch-level updates together (e.g., 1.2.3 -> 1.2.4)
-      patch-updates:
+      cargo-root-updates:
         patterns:
           - "*"
         update-types:
-          - "patch"
-      # Group minor updates for non-critical dependencies
-      minor-updates:
-        patterns:
-          - "*"
-        exclude-patterns:
-          # Keep critical dependencies separate for individual review:
-          # - tokio*: Async runtime - core to all async operations
-          # - axum*/tower*/hyper*: Web framework stack - routing, middleware, HTTP
-          # - rustls*/ring/webpki*: TLS and crypto - security-critical
-          - "tokio*"
-          - "axum*"
-          - "tower*"
-          - "hyper*"
-          - "rustls*"
-          - "ring"
-          - "webpki*"
-        update-types:
+          - "major"
           - "minor"
+          - "patch"
 
   # ============================================================================
   # Rust Dependencies (Cargo) - third_party/rmp
@@ -93,14 +76,14 @@ updates:
     commit-message:
       prefix: "chore(third_party)"
       include: "scope"
-    # Lower limit: third_party changes need careful review
-    open-pull-requests-limit: 5
+    # Prefer a small number of grouped third_party PRs
+    open-pull-requests-limit: 2
     labels:
       - "dependencies"
       - "rust"
       - "third_party"
       - "automated"
-    # Coordinate rmp-serde related updates to prevent conflicts
+    # Coordinate rmp-serde related updates to prevent conflicts and PR spam
     #
     # Security Note: While patch updates are ignored here, security vulnerabilities
     # are still monitored through:
@@ -123,6 +106,7 @@ updates:
         patterns:
           - "rmp*"
         update-types:
+          - "major"
           - "minor"
           - "patch"
 
@@ -145,19 +129,20 @@ updates:
     commit-message:
       prefix: "chore(ci)"
       include: "scope"
-    # Moderate limit: Balance between staying current and review capacity
-    open-pull-requests-limit: 5
+    # Prefer fewer, larger workflow update PRs
+    open-pull-requests-limit: 2
     labels:
       - "dependencies"
       - "github-actions"
       - "ci"
       - "automated"
-    # Group minor and patch updates to reduce weekly PR noise
+    # Group all update types to reduce fragmentation
     groups:
       github-actions-updates:
         patterns:
           - "*"
         update-types:
+          - "major"
           - "minor"
           - "patch"
 
@@ -180,8 +165,8 @@ updates:
     commit-message:
       prefix: "chore(docker)"
       include: "scope"
-    # Low limit: Docker updates need comprehensive testing
-    open-pull-requests-limit: 3
+    # Prefer a small number of grouped Docker PRs
+    open-pull-requests-limit: 2
     labels:
       - "dependencies"
       - "docker"
@@ -212,6 +197,14 @@ updates:
     ignore:
       - dependency-name: "rust"
         update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+    groups:
+      docker-main-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
 
   # ============================================================================
   # Docker Dependencies - Devcontainer
@@ -232,8 +225,8 @@ updates:
     commit-message:
       prefix: "chore(devcontainer)"
       include: "scope"
-    # Low limit: Devcontainer changes need developer testing
-    open-pull-requests-limit: 3
+    # Prefer fewer, larger devcontainer update PRs
+    open-pull-requests-limit: 2
     labels:
       - "dependencies"
       - "docker"
@@ -257,11 +250,12 @@ updates:
     #
     # For now, no ignore rules to allow tracking latest Rust stable
     groups:
-      # Group all devcontainer base images for coordinated updates
-      rust-dev-images:
+      # Group all devcontainer updates for coordinated review
+      devcontainer-updates:
         patterns:
-          - "rust*"
+          - "*"
         update-types:
+          - "major"
           - "minor"
           - "patch"
 
@@ -276,17 +270,17 @@ updates:
 # - Docker devcontainer (weekly): Dev environment, not production-critical
 #
 # PR Limits Rationale:
-# - Cargo root (10): High volume, well-tested ecosystem, critical to monitor
-# - Cargo third_party (5): Lower volume, needs careful compatibility review
-# - GitHub Actions (5): Moderate volume, workflow testing needed
-# - Docker main (3): Low volume, requires comprehensive build testing
-# - Docker devcontainer (3): Low volume, affects developer workflow
+# - Cargo root (2): prioritize broad, consolidated dependency updates
+# - Cargo third_party (2): keep third_party updates grouped and manageable
+# - GitHub Actions (2): consolidate workflow updates into fewer PRs
+# - Docker main (2): group base image updates for coordinated validation
+# - Docker devcontainer (2): reduce noise in developer-experience updates
 #
 # Grouping Strategy:
-# - Patch updates grouped by default to reduce noise
-# - Critical security dependencies kept separate for visibility
-# - Ecosystem packages (rmp, rust images) grouped for coordination
-# - Minor updates grouped except for core infrastructure packages
+# - Each ecosystem uses broad grouping to produce fewer, larger PRs
+# - Root Cargo updates are grouped together across major/minor/patch
+# - rmp ecosystem updates stay grouped to preserve compatibility
+# - GitHub Actions and Docker updates are consolidated by area
 #
 # Ignore Rules:
 # - Rust production image (Dockerfile): Aligned with MSRV policy, manual updates only
