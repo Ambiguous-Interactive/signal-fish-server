@@ -53,6 +53,12 @@ if [ ! -f "$FILE" ]; then
     exit 2
 fi
 
+# Temp file for Python scripts — avoids heredoc-inside-$() which fails bash 3.2
+# syntax checking on macOS (bash -n). Using a top-level heredoc into a temp
+# file is safe on all bash versions.
+_TMPPY=$(mktemp)
+trap 'rm -f "$_TMPPY"' EXIT
+
 ERRORS=0
 
 error() {
@@ -106,7 +112,7 @@ info "Check 2: All update entries have open-pull-requests-limit defined..."
 # Use Python for reliable YAML structural validation when available.
 # Falls back to awk-based heuristic if Python is absent.
 if command -v python3 >/dev/null 2>&1; then
-    MISSING_LIMIT=$(python3 - "$FILE" <<'PYEOF'
+    cat > "$_TMPPY" << 'PYEOF'
 import sys
 import yaml
 
@@ -129,7 +135,7 @@ if missing:
 else:
     print("OK")
 PYEOF
-)
+    MISSING_LIMIT=$(python3 "$_TMPPY" "$FILE")
     if echo "$MISSING_LIMIT" | grep -q "^MISSING_LIMIT"; then
         error "The following update entries are missing open-pull-requests-limit:"
         echo "$MISSING_LIMIT" | grep -v "^MISSING_LIMIT" | grep -v "^OK" || true
@@ -180,7 +186,7 @@ fi
 info "Check 3: Inline PR limit numbers in comments match configured values..."
 
 if command -v python3 >/dev/null 2>&1; then
-    MISMATCH_RESULT=$(python3 - "$FILE" <<'PYEOF'
+    cat > "$_TMPPY" << 'PYEOF'
 import sys
 import re
 import yaml
@@ -265,7 +271,7 @@ if mismatches:
 else:
     print("OK")
 PYEOF
-)
+    MISMATCH_RESULT=$(python3 "$_TMPPY" "$FILE")
     if echo "$MISMATCH_RESULT" | grep -q "^MISMATCH"; then
         error "PR limit numbers in comments do not match configured open-pull-requests-limit:"
         echo "$MISMATCH_RESULT" | grep -v "^MISMATCH" | grep -v "^OK" || true

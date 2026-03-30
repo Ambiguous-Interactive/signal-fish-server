@@ -16,13 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Upgraded `sha2` from `0.10.9` to `0.11.0` and `hmac` from `0.12.1` to `0.13.0-rc.6` to align
   on `digest 0.11` and fix the `CoreProxy` trait bound build error.
+- Bumped `hmac` from `0.13.0-rc.6` to `0.13.0` (stable release).
+- Bumped `uuid` from `1.22.0` to `1.23.0`.
 - Replaced `rustls-pemfile` with `rustls-pki-types` `PemObject` API for TLS certificate and
   private key loading, removing one dependency from the `tls` feature.
 - Bumped `axum-test` dev-dependency from 18.7.0 to 19.1.1 (adapted test code for 19.x API changes).
 - Bumped `tempfile` dev-dependency from 3.25.0 to 3.26.0.
 - Bumped `tempfile` dev-dependency from 3.26.0 to 3.27.0.
 - Bumped `tokio` from 1.49.0 to 1.50.0.
-- Updated all transitive dependencies to latest compatible versions.
+- Updated all transitive dependencies to latest compatible versions (`aws-lc-sys`, `cc`, `cmake`,
+  `inventory`, `iri-string`, `mio`, `rustc-hash`, `unicode-segmentation`, `wasm-bindgen`,
+  `zerocopy`, and others via `cargo update`).
 - Normalized internal documentation link labels to human-readable text across
   troubleshooting and reference docs.
 

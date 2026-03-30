@@ -28,7 +28,6 @@ limit") from when limits were different per section.
 
 > The root Cargo section header comments still say this entry uses a "Higher PR
 > limit"… but the configuration now sets `open-pull-requests-limit: 2`.
-
 > This section's earlier rationale comments describe a "Moderate PR limit", but
 > the config now uses `open-pull-requests-limit: 2`.
 
@@ -38,7 +37,7 @@ limit") from when limits were different per section.
 
 Relative terminology (Higher / Moderate / Lower) is inherently fragile:
 
-- It depends on *all* sections having *different* limits.
+- It depends on _all_ sections having _different_ limits.
 - Changing any one limit without updating all related comments breaks the
   relative ordering.
 - Reviewers and future maintainers see a contradiction between the comment and
