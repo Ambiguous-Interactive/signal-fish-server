@@ -87,7 +87,7 @@ echo ""
 # ---------------------------------------------------------------------------
 info "Check 1: No relative PR-limit terminology in comments..."
 
-RELATIVE_HITS=$(grep -nE "^[[:space:]]*#[[:space:]]*(Higher|Moderate|Lower)[[:space:]]PR[[:space:]]limit" "$FILE" || true)
+RELATIVE_HITS=$(grep -niE "^[[:space:]]*#[[:space:]]*(Higher|Moderate|Lower)[[:space:]]PR[[:space:]]limit" "$FILE" || true)
 if [ -n "$RELATIVE_HITS" ]; then
     error "Relative PR-limit terminology found — these comments drift when limits change:"
     echo "$RELATIVE_HITS" | while IFS= read -r line; do
@@ -109,9 +109,9 @@ fi
 # ---------------------------------------------------------------------------
 info "Check 2: All update entries have open-pull-requests-limit defined..."
 
-# Use Python for reliable YAML structural validation when available.
-# Falls back to awk-based heuristic if Python is absent.
-if command -v python3 >/dev/null 2>&1; then
+# Use Python+PyYAML for reliable YAML structural validation when available.
+# Falls back to awk-based heuristic if python3 or PyYAML is absent.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
     cat > "$_TMPPY" << 'PYEOF'
 import sys
 import yaml
@@ -172,8 +172,8 @@ else
     else
         success "All update entries appear to have open-pull-requests-limit defined (awk heuristic)"
     fi
-    echo -e "${YELLOW}[NOTE]${NC} Python 3 not found — Check 2 used awk heuristic only." \
-        "Install Python 3 for reliable YAML parsing."
+    echo -e "${YELLOW}[NOTE]${NC} Python 3 with PyYAML not found — Check 2 used awk heuristic only." \
+        "Install PyYAML ('pip install pyyaml') for reliable YAML parsing."
 fi
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ fi
 # ---------------------------------------------------------------------------
 info "Check 3: Inline PR limit numbers in comments match configured values..."
 
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
     cat > "$_TMPPY" << 'PYEOF'
 import sys
 import re
@@ -282,8 +282,8 @@ PYEOF
         success "All inline PR limit numbers match configured values"
     fi
 else
-    echo -e "${YELLOW}[NOTE]${NC} Python 3 not found — Check 3 skipped." \
-        "Install Python 3 for inline limit cross-check."
+    echo -e "${YELLOW}[NOTE]${NC} Python 3 with PyYAML not found — Check 3 skipped." \
+        "Install PyYAML ('pip install pyyaml') for inline limit cross-check."
 fi
 
 # ---------------------------------------------------------------------------
