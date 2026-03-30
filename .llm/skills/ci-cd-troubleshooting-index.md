@@ -34,6 +34,7 @@ incident examples, and related remediation guides.
 - [CI CD Troubleshooting Example Stale Nightly Toolchain](./ci-cd-troubleshooting-example-stale-nightly-toolchain.md)
 - [CI CD Troubleshooting Example Unused Dependencies](./ci-cd-troubleshooting-example-unused-dependencies.md)
 - [CI CD Troubleshooting Example Changelog Dependabot Bump](./ci-cd-troubleshooting-example-changelog-dependabot-bump.md)
+- [CI CD Troubleshooting Example Dependabot Comment Drift](./ci-cd-troubleshooting-example-dependabot-comment-drift.md)
 
 ---
 
