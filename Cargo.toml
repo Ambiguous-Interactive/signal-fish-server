@@ -80,7 +80,7 @@ subtle = "2.6"
 lru = "0.16"
 hdrhistogram = "7.5"
 rand = "0.10"
-fastrand = "2.3"
+fastrand = "2.4"
 
 # CLI
 clap = { version = "4.6", features = ["derive", "env"] }
