@@ -6987,7 +6987,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let jobs_index = content.find("jobs:").unwrap_or(0);
     let pre_jobs = &content[..jobs_index];
     assert!(
-        pre_jobs.contains("\npermissions:") && pre_jobs.contains("contents: read"),
+        pre_jobs.contains("permissions:\n  contents: read"),
         "dependabot-auto-merge.yml must declare a minimal top-level workflow permissions baseline.\n\
          Keep elevated write permissions scoped only to the dependabot job.\n\
          File: {}\n\
@@ -6997,7 +6997,9 @@ fn test_dependabot_auto_merge_workflow_hardening() {
         workflow_path.display()
     );
     assert!(
-        pre_jobs.contains("\nconcurrency:") && pre_jobs.contains("cancel-in-progress: true"),
+        pre_jobs.contains(
+            "concurrency:\n  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}\n  cancel-in-progress: true",
+        ),
         "dependabot-auto-merge.yml must declare workflow-level concurrency with cancellation.\n\
          File: {}\n\
          Fix:\n\
