@@ -338,17 +338,54 @@ fn yaml_first_child_indent(content: &str) -> Option<usize> {
         .map(yaml_indent_spaces)
 }
 
-/// Strip YAML inline comments while preserving `#` inside quoted strings.
+/// Strip YAML inline comments while preserving `#` inside quoted strings,
+/// including escaped quotes in double-quoted scalars and doubled quotes in
+/// single-quoted scalars.
 fn strip_yaml_inline_comment(value: &str) -> &str {
     let mut in_single_quotes = false;
     let mut in_double_quotes = false;
     let mut previous_char: Option<char> = None;
+    let mut consecutive_backslashes = 0usize;
+    let mut chars = value.char_indices().peekable();
 
-    for (idx, ch) in value.char_indices() {
+    while let Some((idx, ch)) = chars.next() {
+        if in_single_quotes {
+            if ch == '\'' {
+                if matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next();
+                    previous_char = Some('\'');
+                    continue;
+                }
+                in_single_quotes = false;
+            }
+
+            previous_char = Some(ch);
+            continue;
+        }
+
+        if in_double_quotes {
+            match ch {
+                '\\' => consecutive_backslashes += 1,
+                '"' => {
+                    if consecutive_backslashes.is_multiple_of(2) {
+                        in_double_quotes = false;
+                    }
+                    consecutive_backslashes = 0;
+                }
+                _ => consecutive_backslashes = 0,
+            }
+
+            previous_char = Some(ch);
+            continue;
+        }
+
         match ch {
-            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
-            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
-            '#' if !in_single_quotes && !in_double_quotes => {
+            '\'' => in_single_quotes = true,
+            '"' => {
+                in_double_quotes = true;
+                consecutive_backslashes = 0;
+            }
+            '#' => {
                 if idx == 0 || previous_char.is_some_and(char::is_whitespace) {
                     return &value[..idx];
                 }
@@ -449,6 +486,24 @@ fn test_extract_yaml_mapping_block_allows_trailing_comments() {
     let extracted = extract_yaml_mapping_block(content, "permissions", 0)
         .expect("expected key with trailing comment to be treated as block mapping");
     assert!(extracted.contains("contents: read"));
+}
+
+#[test]
+fn test_strip_yaml_inline_comment_preserves_hash_after_escaped_double_quote() {
+    let value = "\"value with escaped quote \\\" and # still scalar\" # comment";
+    assert_eq!(
+        strip_yaml_inline_comment(value),
+        "\"value with escaped quote \\\" and # still scalar\" "
+    );
+}
+
+#[test]
+fn test_strip_yaml_inline_comment_preserves_hash_in_single_quoted_scalar() {
+    let value = "'value with '' escaped quote and # still scalar' # comment";
+    assert_eq!(
+        strip_yaml_inline_comment(value),
+        "'value with '' escaped quote and # still scalar' "
+    );
 }
 
 /// Extract the display name of a job from workflow YAML content.
