@@ -333,6 +333,30 @@ fn yaml_first_child_indent(content: &str) -> Option<usize> {
         .map(yaml_indent_spaces)
 }
 
+/// Strip YAML inline comments while preserving `#` inside quoted strings.
+fn strip_yaml_inline_comment(value: &str) -> &str {
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+    let mut previous_char: Option<char> = None;
+
+    for (idx, ch) in value.char_indices() {
+        match ch {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '#' if !in_single_quotes && !in_double_quotes => {
+                if idx == 0 || previous_char.is_some_and(char::is_whitespace) {
+                    return &value[..idx];
+                }
+            }
+            _ => {}
+        }
+
+        previous_char = Some(ch);
+    }
+
+    value
+}
+
 /// Extract values from a YAML field that may be inline (`field: [a, b]`) or
 /// multi-line list form:
 ///   field:
@@ -344,10 +368,6 @@ fn extract_yaml_field_values(block: &str, field: &str) -> Vec<String> {
 
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with(field) {
-            continue;
-        }
-
         let Some(rest) = trimmed.strip_prefix(field) else {
             continue;
         };
@@ -356,7 +376,7 @@ fn extract_yaml_field_values(block: &str, field: &str) -> Vec<String> {
         };
 
         let field_indent = yaml_indent_spaces(line);
-        let scalar = rest_after_colon.split('#').next().unwrap_or("").trim();
+        let scalar = strip_yaml_inline_comment(rest_after_colon).trim();
         if scalar.starts_with('[') && scalar.ends_with(']') {
             let inner = &scalar[1..scalar.len().saturating_sub(1)];
             for item in inner.split(',') {
@@ -384,7 +404,7 @@ fn extract_yaml_field_values(block: &str, field: &str) -> Vec<String> {
 
             let trimmed_follow = follow.trim_start();
             if let Some(item) = trimmed_follow.strip_prefix("- ") {
-                let item = item.split('#').next().unwrap_or("").trim();
+                let item = strip_yaml_inline_comment(item).trim();
                 if !item.is_empty() {
                     values.push(item.trim_matches('"').trim_matches('\'').to_string());
                 }
