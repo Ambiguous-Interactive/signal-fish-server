@@ -6964,6 +6964,71 @@ fn test_release_workflow_requires_preflight() {
 }
 
 #[test]
+fn test_dependabot_auto_merge_workflow_hardening() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/dependabot-auto-merge.yml");
+    let content = read_file(&workflow_path);
+
+    assert!(
+        content.contains("pull_request:")
+            && content.contains("branches: [main]")
+            && content.contains("types: [opened, synchronize, reopened, ready_for_review]"),
+        "dependabot-auto-merge.yml must scope pull_request triggers to main and expected events.\n\
+         File: {}\n\
+         Fix:\n\
+           on:\n\
+             pull_request:\n\
+               branches: [main]\n\
+               types: [opened, synchronize, reopened, ready_for_review]",
+        workflow_path.display()
+    );
+
+    let jobs_index = content.find("jobs:").unwrap_or(0);
+    let pre_jobs = &content[..jobs_index];
+    assert!(
+        !pre_jobs.contains("\npermissions:"),
+        "dependabot-auto-merge.yml should not grant top-level workflow permissions.\n\
+         Keep elevated write permissions scoped only to the dependabot job.\n\
+         File: {}",
+        workflow_path.display()
+    );
+
+    let dependabot_job = content
+        .split_once("  dependabot:\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    assert!(
+        dependabot_job.contains("timeout-minutes: 5"),
+        "dependabot-auto-merge.yml must define a small job timeout to prevent hung runs.\n\
+         File: {}\n\
+         Fix: add 'timeout-minutes: 5' under jobs.dependabot.",
+        workflow_path.display()
+    );
+    assert!(
+        dependabot_job.contains("permissions:")
+            && dependabot_job.contains("contents: write")
+            && dependabot_job.contains("pull-requests: write"),
+        "dependabot-auto-merge.yml dependabot job must explicitly scope write permissions.\n\
+         File: {}\n\
+         Fix:\n\
+           jobs:\n\
+             dependabot:\n\
+               permissions:\n\
+                 contents: write\n\
+                 pull-requests: write",
+        workflow_path.display()
+    );
+    assert!(
+        dependabot_job.contains("github.event.pull_request.user.login == 'dependabot[bot]'")
+            && dependabot_job.contains("github.event.sender.login == 'dependabot[bot]'"),
+        "dependabot-auto-merge.yml must gate on both PR author and event sender as dependabot[bot].\n\
+         File: {}\n\
+         Fix: include both checks in jobs.dependabot.if.",
+        workflow_path.display()
+    );
+}
+
+#[test]
 fn test_release_workflow_handles_path_filtered_workflows() {
     // This test validates that the release workflow's preflight job handles
     // path-filtered workflows (like Documentation Validation) that may be

@@ -2,18 +2,26 @@ name: Dependabot auto-merge
 
 on:
   pull_request:
+    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
-
-permissions:
-  contents: write
-  pull-requests: write
 
 jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
     runs-on: ubuntu-latest
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.draft == false
+    timeout-minutes: 5
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.sender.login == 'dependabot[bot]' && github.event.pull_request.draft == false
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
+      - name: Log Dependabot auto-merge context
+        run: |
+          echo "action=${{ github.event.action }}"
+          echo "pr_author=${{ github.event.pull_request.user.login }}"
+          echo "event_sender=${{ github.event.sender.login }}"
+          echo "base_ref=${{ github.event.pull_request.base.ref }}"
+          echo "head_ref=${{ github.event.pull_request.head.ref }}"
       - name: Enable auto-merge
         run: gh pr merge --auto --merge "$PR_URL"
         env:
