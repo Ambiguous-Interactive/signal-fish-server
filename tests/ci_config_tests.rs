@@ -7016,13 +7016,15 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let dependabot_rest = jobs_content
         .split_once("  dependabot:\n")
         .map(|(_, rest)| rest)
-        .expect(&format!(
-            "dependabot-auto-merge.yml must define a 'jobs.dependabot' block for hardening checks.\n\
-             File: {}",
-            workflow_path.display()
-        ));
+        .unwrap_or_else(|| {
+            panic!(
+                "dependabot-auto-merge.yml must define a 'jobs.dependabot' block for hardening checks.\n\
+                 File: {}",
+                workflow_path.display()
+            )
+        });
     let is_within_dependabot_job_block =
-        |line: &&str| !line.starts_with("  ") || line.starts_with("    ");
+        |line: &&str| line.trim().is_empty() || line.starts_with("    ");
     let dependabot_job = dependabot_rest
         .lines()
         .take_while(is_within_dependabot_job_block)
