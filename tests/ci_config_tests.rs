@@ -6969,11 +6969,12 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/dependabot-auto-merge.yml");
     let content = read_file(&workflow_path);
+    let normalized_content = content.replace("\r\n", "\n");
 
     assert!(
-        content.contains("pull_request:")
-            && content.contains("branches: [main]")
-            && content.contains("types: [opened, synchronize, reopened, ready_for_review]"),
+        normalized_content.contains(
+            "pull_request:\n    branches: [main]\n    types: [opened, synchronize, reopened, ready_for_review]",
+        ),
         "dependabot-auto-merge.yml must scope pull_request triggers to main and expected events.\n\
          File: {}\n\
          Fix:\n\
@@ -6984,8 +6985,10 @@ fn test_dependabot_auto_merge_workflow_hardening() {
         workflow_path.display()
     );
 
-    let jobs_index = content.find("jobs:").unwrap_or(0);
-    let pre_jobs = &content[..jobs_index];
+    let jobs_index = normalized_content.find("jobs:").expect(
+        "dependabot-auto-merge.yml must contain a top-level 'jobs:' block before workflow-level hardening checks can run.",
+    );
+    let pre_jobs = &normalized_content[..jobs_index];
     assert!(
         pre_jobs.contains("permissions:\n  contents: read"),
         "dependabot-auto-merge.yml must declare a minimal top-level workflow permissions baseline.\n\
@@ -7009,7 +7012,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
         workflow_path.display()
     );
 
-    let dependabot_job = content
+    let dependabot_job = normalized_content
         .split_once("  dependabot:\n")
         .map(|(_, rest)| rest)
         .unwrap_or_default();
