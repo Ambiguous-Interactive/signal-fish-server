@@ -5579,33 +5579,18 @@ fn test_workflow_hygiene_requirements() {
     // `check`:   (&str, &str) -> Vec<String> — receives (filename, content),
     //            returns a list of violation descriptions (empty = pass).
 
-    // Workflows that must have concurrency groups. All workflows except
-    // docs-deploy.yml (which uses a special `pages` concurrency group that
-    // is intentionally different from the standard pattern).
-    let concurrency_allowlist: &[&str] = &[
-        "actionlint.yml",
-        "ci.yml",
-        "ci-safety.yml",
-        "dependabot-auto-merge.yml",
-        "doc-validation.yml",
-        "link-check.yml",
-        "markdownlint.yml",
-        "release.yml",
-        "spellcheck.yml",
-        "unused-deps.yml",
-        "workflow-hygiene.yml",
-        "yaml-lint.yml",
-    ];
+    // Workflows exempt from standard concurrency validation.
+    // docs-deploy.yml uses a specialized `pages` group pattern intentionally.
+    let concurrency_exceptions: &[&str] = &["docs-deploy.yml"];
 
     let rules: Vec<HygieneRule> = vec![
         // Rule 1: Concurrency groups -----------------------------------------
         HygieneRule {
             name: "concurrency groups",
-            // Applies to the explicit allowlist (docs-deploy.yml is excluded
-            // because it uses a special `pages` concurrency group).
+            // Applies to all workflows except explicit exceptions.
             filter: Box::new({
-                let list = concurrency_allowlist.to_vec();
-                move |filename: &str| list.contains(&filename)
+                let exceptions = concurrency_exceptions.to_vec();
+                move |filename: &str| !exceptions.contains(&filename)
             }),
             check: Box::new(|filename: &str, content: &str| {
                 let mut violations = Vec::new();
@@ -7023,9 +7008,8 @@ fn test_dependabot_auto_merge_workflow_hardening() {
                 workflow_path.display()
             )
         });
-    let is_within_dependabot_job_block = |line: &&str| {
-        line.starts_with("    ") || (line.trim().is_empty() && line.starts_with(' '))
-    };
+    let is_within_dependabot_job_block =
+        |line: &&str| line.starts_with("    ") || line.trim().is_empty();
     let dependabot_job = dependabot_rest
         .lines()
         .take_while(is_within_dependabot_job_block)
