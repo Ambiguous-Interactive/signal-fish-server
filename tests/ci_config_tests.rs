@@ -287,18 +287,23 @@ fn yaml_indent_spaces(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ').count()
 }
 
-/// Returns true if a line defines `key:` at exactly `indent` leading spaces.
-fn is_yaml_key_at_indent(line: &str, key: &str, indent: usize) -> bool {
+/// Returns true when `<indent><key>:` starts a block mapping, meaning there is
+/// no inline scalar/flow value after `:` other than optional whitespace/comment.
+fn yaml_key_starts_block_mapping(line: &str, key: &str, indent: usize) -> bool {
     if yaml_indent_spaces(line) != indent {
         return false;
     }
 
     let trimmed = line.trim_start();
-    if let Some(rest) = trimmed.strip_prefix(key) {
-        return rest.trim_start().starts_with(':');
-    }
+    let Some(rest) = trimmed.strip_prefix(key) else {
+        return false;
+    };
+    let Some(after_colon) = rest.trim_start().strip_prefix(':') else {
+        return false;
+    };
 
-    false
+    let trailing = strip_yaml_inline_comment(after_colon).trim();
+    trailing.is_empty()
 }
 
 /// Extract a YAML mapping block that starts with `<indent><key>:` and continues
@@ -307,7 +312,7 @@ fn extract_yaml_mapping_block(content: &str, key: &str, indent: usize) -> Option
     let lines: Vec<&str> = content.lines().collect();
 
     for (idx, line) in lines.iter().enumerate() {
-        if !is_yaml_key_at_indent(line, key, indent) {
+        if !yaml_key_starts_block_mapping(line, key, indent) {
             continue;
         }
 
@@ -415,6 +420,35 @@ fn extract_yaml_field_values(block: &str, field: &str) -> Vec<String> {
     }
 
     values
+}
+
+#[test]
+fn test_extract_yaml_mapping_block_ignores_inline_mapping_values() {
+    let content = concat!(
+        "permissions: read-all\n",
+        "concurrency: { group: test, cancel-in-progress: true }\n",
+        "permissions:\n",
+        "  contents: read\n",
+    );
+
+    let extracted = extract_yaml_mapping_block(content, "permissions", 0)
+        .expect("expected block-mapping permissions key to be extracted");
+    assert!(
+        extracted.contains("contents: read"),
+        "block mapping should be extracted, not inline scalar form"
+    );
+    assert!(
+        !extracted.contains("read-all"),
+        "inline scalar value must be ignored by block-mapping extraction"
+    );
+}
+
+#[test]
+fn test_extract_yaml_mapping_block_allows_trailing_comments() {
+    let content = concat!("permissions: # baseline\n", "  contents: read\n");
+    let extracted = extract_yaml_mapping_block(content, "permissions", 0)
+        .expect("expected key with trailing comment to be treated as block mapping");
+    assert!(extracted.contains("contents: read"));
 }
 
 /// Extract the display name of a job from workflow YAML content.
@@ -7085,7 +7119,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let normalized_content = content.replace("\r\n", "\n");
     let on_block = extract_yaml_mapping_block(&normalized_content, "on", 0).unwrap_or_else(|| {
         panic!(
-            "dependabot-auto-merge.yml must define top-level `on` trigger configuration.\n\
+            "dependabot-auto-merge.yml must define top-level `on` trigger configuration as a block mapping.\n\
              File: {}",
             workflow_path.display()
         )
@@ -7100,7 +7134,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let pull_request_block = extract_yaml_mapping_block(&on_block, "pull_request", on_child_indent)
         .unwrap_or_else(|| {
             panic!(
-                "dependabot-auto-merge.yml must define `on.pull_request` for hardening checks.\n\
+                "dependabot-auto-merge.yml must define `on.pull_request` as a block mapping for hardening checks.\n\
                  File: {}",
                 workflow_path.display()
             )
@@ -7128,14 +7162,14 @@ fn test_dependabot_auto_merge_workflow_hardening() {
          Fix:\n\
            on:\n\
              pull_request:\n\
-                types: [opened, synchronize, reopened, ready_for_review]",
+               types: [opened, synchronize, reopened, ready_for_review]",
         workflow_path.display()
     );
 
     let permissions_block = extract_yaml_mapping_block(&normalized_content, "permissions", 0)
         .unwrap_or_else(|| {
             panic!(
-                "dependabot-auto-merge.yml must define top-level `permissions`.\n\
+                "dependabot-auto-merge.yml must define top-level `permissions` as a block mapping.\n\
                  File: {}",
                 workflow_path.display()
             )
@@ -7155,7 +7189,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let concurrency_block = extract_yaml_mapping_block(&normalized_content, "concurrency", 0)
         .unwrap_or_else(|| {
             panic!(
-                "dependabot-auto-merge.yml must define top-level `concurrency`.\n\
+                "dependabot-auto-merge.yml must define top-level `concurrency` as a block mapping.\n\
                  File: {}",
                 workflow_path.display()
             )
@@ -7179,7 +7213,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
     let jobs_content = extract_yaml_mapping_block(&normalized_content, "jobs", 0)
         .unwrap_or_else(|| {
             panic!(
-                "dependabot-auto-merge.yml must contain a top-level `jobs` block for hardening checks.\n\
+                "dependabot-auto-merge.yml must contain top-level `jobs` as a block mapping for hardening checks.\n\
                  File: {}",
                 workflow_path.display()
             )
@@ -7195,7 +7229,7 @@ fn test_dependabot_auto_merge_workflow_hardening() {
         extract_yaml_mapping_block(&jobs_content, "dependabot", jobs_child_indent).unwrap_or_else(
             || {
                 panic!(
-                    "dependabot-auto-merge.yml must define a `jobs.dependabot` block for hardening checks.\n\
+                    "dependabot-auto-merge.yml must define `jobs.dependabot` as a block mapping for hardening checks.\n\
                      File: {}",
                     workflow_path.display()
                 )
