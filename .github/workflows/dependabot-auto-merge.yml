@@ -5,6 +5,13 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
@@ -16,12 +23,18 @@ jobs:
       pull-requests: write
     steps:
       - name: Log Dependabot auto-merge context
+        env:
+          ACTION: ${{ github.event.action }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          EVENT_SENDER: ${{ github.event.sender.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          echo "action=${{ github.event.action }}"
-          echo "pr_author=${{ github.event.pull_request.user.login }}"
-          echo "event_sender=${{ github.event.sender.login }}"
-          echo "base_ref=${{ github.event.pull_request.base.ref }}"
-          echo "head_ref=${{ github.event.pull_request.head.ref }}"
+          echo "action=$ACTION"
+          echo "pr_author=$PR_AUTHOR"
+          echo "event_sender=$EVENT_SENDER"
+          echo "base_ref=$BASE_REF"
+          echo "head_ref=$HEAD_REF"
       - name: Enable auto-merge
         run: gh pr merge --auto --merge "$PR_URL"
         env:
