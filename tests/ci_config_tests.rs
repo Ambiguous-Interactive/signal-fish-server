@@ -7012,10 +7012,18 @@ fn test_dependabot_auto_merge_workflow_hardening() {
         workflow_path.display()
     );
 
-    let dependabot_job = normalized_content
+    let jobs_content = &normalized_content[jobs_index + "jobs:\n".len()..];
+    let dependabot_rest = jobs_content
         .split_once("  dependabot:\n")
         .map(|(_, rest)| rest)
-        .unwrap_or_default();
+        .expect(
+            "dependabot-auto-merge.yml must define a 'jobs.dependabot' block for hardening checks.",
+        );
+    let dependabot_job = dependabot_rest
+        .lines()
+        .take_while(|line| !line.starts_with("  ") || line.starts_with("    "))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         dependabot_job.contains("timeout-minutes: 5"),
         "dependabot-auto-merge.yml must define a small job timeout to prevent hung runs.\n\
