@@ -7023,8 +7023,9 @@ fn test_dependabot_auto_merge_workflow_hardening() {
                 workflow_path.display()
             )
         });
-    let is_within_dependabot_job_block =
-        |line: &&str| line.trim().is_empty() || line.starts_with("    ");
+    let is_within_dependabot_job_block = |line: &&str| {
+        line.starts_with("    ") || (line.trim().is_empty() && line.starts_with(' '))
+    };
     let dependabot_job = dependabot_rest
         .lines()
         .take_while(is_within_dependabot_job_block)
