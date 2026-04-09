@@ -7319,6 +7319,15 @@ fn test_dependabot_auto_merge_workflow_hardening() {
          Fix: include both checks in jobs.dependabot.if.",
         workflow_path.display()
     );
+    assert!(
+        dependabot_job.contains("gh pr merge --auto \"$PR_URL\"")
+            && !dependabot_job.contains("gh pr merge --auto --merge \"$PR_URL\""),
+        "dependabot-auto-merge.yml must enable auto-merge without forcing --merge strategy.\n\
+         Repositories may disable merge commits; hardcoding --merge causes auto-merge CI failures.\n\
+         File: {}\n\
+         Fix: use `gh pr merge --auto \"$PR_URL\"`.",
+        workflow_path.display()
+    );
 }
 
 #[test]
