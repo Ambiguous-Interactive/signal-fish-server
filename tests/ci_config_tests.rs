@@ -7291,24 +7291,26 @@ fn test_dependabot_auto_merge_workflow_hardening() {
             },
         );
     assert!(
-        dependabot_job.contains("timeout-minutes: 5"),
-        "dependabot-auto-merge.yml must define a small job timeout to prevent hung runs.\n\
+        dependabot_job.contains("timeout-minutes: 60"),
+        "dependabot-auto-merge.yml must define a timeout that gives CI time to finish before auto-merge is enabled.\n\
          File: {}\n\
-         Fix: add 'timeout-minutes: 5' under jobs.dependabot.",
+         Fix: add 'timeout-minutes: 60' under jobs.dependabot.",
         workflow_path.display()
     );
     assert!(
         dependabot_job.contains("permissions:")
             && dependabot_job.contains("contents: write")
-            && dependabot_job.contains("pull-requests: write"),
+            && dependabot_job.contains("pull-requests: write")
+            && dependabot_job.contains("actions: read"),
         "dependabot-auto-merge.yml dependabot job must explicitly scope write permissions.\n\
          File: {}\n\
          Fix:\n\
-           jobs:\n\
-             dependabot:\n\
-               permissions:\n\
-                 contents: write\n\
-                 pull-requests: write",
+            jobs:\n\
+              dependabot:\n\
+                permissions:\n\
+                  contents: write\n\
+                  pull-requests: write\n\
+                  actions: read",
         workflow_path.display()
     );
     assert!(
@@ -7320,12 +7322,18 @@ fn test_dependabot_auto_merge_workflow_hardening() {
         workflow_path.display()
     );
     assert!(
-        dependabot_job.contains("gh pr merge --auto \"$PR_URL\"")
-            && !dependabot_job.contains("gh pr merge --auto --merge \"$PR_URL\""),
-        "dependabot-auto-merge.yml must enable auto-merge without forcing --merge strategy.\n\
-         Repositories may disable merge commits; hardcoding --merge causes auto-merge CI failures.\n\
+        dependabot_job.contains("event=pull_request")
+            && dependabot_job.contains("if [[ \"$state\" == \"failed\" ]]")
+            && dependabot_job.contains("if [[ \"$state\" == \"ready\" ]]")
+            && dependabot_job.contains("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}")
+            && dependabot_job.contains("gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"")
+            && !dependabot_job.contains("gh pr merge --auto --merge \"$PR_URL\"")
+            && !dependabot_job.contains("gh pr merge --auto --rebase \"$PR_URL\""),
+        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful and use squash auto-merge.\n\
+         Repositories that allow only squash merges fail if --merge/--rebase is forced.\n\
          File: {}\n\
-         Fix: use `gh pr merge --auto \"$PR_URL\"`.",
+         Fix: poll pull_request workflow-run status, block on failed/pending checks, then run\n\
+              `gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"`.",
         workflow_path.display()
     );
 }
