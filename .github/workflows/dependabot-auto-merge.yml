@@ -43,7 +43,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          deadline=$((SECONDS + 3300))
+          workflow_timeout_minutes=60
+          deadline=$((SECONDS + ((workflow_timeout_minutes - 5) * 60)))
           ready_streak=0
           last_seen_count=-1
 
