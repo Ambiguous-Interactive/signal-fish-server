@@ -107,7 +107,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.73.0
+        uses: taiki-e/install-action@v2.75.9
         with:
           tool: cargo-nextest
 
@@ -235,7 +235,7 @@ jobs:
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2.0.15
+        uses: EmbarkStudios/cargo-deny-action@v2.0.16
         with:
           arguments: --all-features
           # Ensure the Dockerized action installs and uses a concrete toolchain
@@ -266,7 +266,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.73.0
+        uses: taiki-e/install-action@v2.75.9
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -444,7 +444,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.73.0
+        uses: taiki-e/install-action@v2.75.9
         with:
           tool: cargo-llvm-cov
 
@@ -456,7 +456,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: coverage-report
           path: lcov.info
@@ -509,7 +509,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.73.0
+        uses: taiki-e/install-action@v2.75.9
         with:
           tool: cargo-sbom
 
@@ -518,7 +518,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: success()
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: sbom-cyclonedx-${{ github.sha }}
           path: sbom.cdx.json

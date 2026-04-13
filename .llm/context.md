@@ -190,6 +190,10 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
 - **Use descriptive markdown link text for internal docs** -- avoid filename-as-label links
   like `[testing-core-patterns](...)`; prefer human-readable labels like
   `[Core Testing Patterns](...)`. Enforce with `./scripts/check-markdown-link-text.sh`.
+- **Dependabot auto-merge gating must be CI-aware and squash-only** -- never enable
+  Dependabot auto-merge while pull request CI workflows are pending or failing; require
+  completed workflow runs with `success`/`skipped` conclusions, then use
+  `gh pr merge --auto --squash --match-head-commit ...` to stay compatible with squash-only repos.
 
 ---
 

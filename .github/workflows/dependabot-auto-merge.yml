@@ -16,7 +16,7 @@ jobs:
   dependabot:
     name: Enable auto-merge for Dependabot PRs
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 60
     if: >
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.sender.login == 'dependabot[bot]' &&
@@ -24,6 +24,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: read
     steps:
       - name: Log Dependabot auto-merge context
         env:
@@ -39,7 +40,83 @@ jobs:
           echo "base_ref=$BASE_REF"
           echo "head_ref=$HEAD_REF"
       - name: Enable auto-merge
-        run: gh pr merge --auto "$PR_URL"
+        run: |
+          set -euo pipefail
+
+          workflow_timeout_minutes=60
+          deadline=$((SECONDS + ((workflow_timeout_minutes - 5) * 60)))
+          ready_streak=0
+          last_seen_count=-1
+
+          while (( SECONDS < deadline )); do
+            runs_json="$(gh api \
+              "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$PR_HEAD_SHA&event=pull_request&per_page=100")"
+
+            analysis="$(jq -r --arg current_run_id "$GITHUB_RUN_ID" '
+              (
+                [
+                  .workflow_runs[]
+                  | select((.id | tostring) != $current_run_id)
+                  | select(.name != "Dependabot auto-merge")
+                ]
+                | sort_by(.workflow_id)
+                | group_by(.workflow_id)
+                | map(max_by([.run_number, .run_attempt]))
+              ) as $runs
+              | ($runs | length) as $count
+              | [
+                  $runs[]
+                  | select(
+                      .status == "completed"
+                      and (.conclusion != "success" and .conclusion != "skipped")
+                    )
+                  | "\(.name)#\(.run_number):\(.conclusion)"
+                ] as $failures
+              | (
+                  if ($failures | length) > 0 then "failed"
+                  elif $count == 0 then "pending"
+                  elif ([ $runs[] | select(.status != "completed") ] | length) > 0 then "pending"
+                  else "ready"
+                  end
+                ) as $state
+              | [$state, ($count | tostring), ($failures | join("; "))]
+              | .[]
+            ' <<<"$runs_json")"
+
+            state="$(printf '%s\n' "$analysis" | sed -n '1p')"
+            seen_count="$(printf '%s\n' "$analysis" | sed -n '2p')"
+            failure_summary="$(printf '%s\n' "$analysis" | sed -n '3p')"
+
+            echo "state=$state seen_workflows=$seen_count"
+
+            if [[ "$state" == "failed" ]]; then
+              echo "Detected failed CI workflows for this PR head: $failure_summary" >&2
+              exit 1
+            fi
+
+            if [[ "$state" == "ready" ]]; then
+              if [[ "$seen_count" == "$last_seen_count" ]]; then
+                ready_streak=$((ready_streak + 1))
+              else
+                ready_streak=1
+                last_seen_count="$seen_count"
+              fi
+
+              if (( ready_streak >= 2 )); then
+                echo "All observed pull_request workflows are complete and success/skipped."
+                gh pr merge --auto --squash --match-head-commit "$PR_HEAD_SHA" "$PR_URL"
+                exit 0
+              fi
+            else
+              ready_streak=0
+            fi
+
+            sleep 15
+          done
+
+          echo "Timed out waiting for PR CI workflows to complete successfully." >&2
+          exit 1
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
