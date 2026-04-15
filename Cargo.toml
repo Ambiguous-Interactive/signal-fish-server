@@ -21,7 +21,7 @@ tls = ["axum-server", "rustls", "rustls-pki-types"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.51", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
@@ -77,7 +77,7 @@ getrandom = "0.4"
 subtle = "2.6"
 
 # Data structures
-lru = "0.16"
+lru = "0.17"
 hdrhistogram = "7.5"
 rand = "0.10"
 fastrand = "2.4"

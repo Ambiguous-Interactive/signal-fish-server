@@ -65,45 +65,58 @@ fn test_ci_workflow_runs_doc_consistency_check_with_changed_files() {
     );
 }
 
+fn extract_ci_dep_detect_step_block(workflow: &str) -> String {
+    let step_start = workflow
+        .find("      - name: Detect dependency-only changes")
+        .expect("doc-consistency dep-detect step header not found in .github/workflows/ci.yml");
+    let after_start = &workflow[step_start..];
+    let step_end = after_start
+        .find("\n      - name: Run documentation/changelog consistency checks")
+        .expect("dep-detect step terminator not found in .github/workflows/ci.yml");
+    after_start[..step_end].to_string()
+}
+
 #[test]
-fn test_ci_workflow_has_dep_detect_step_with_commit_message_patterns() {
+fn test_ci_workflow_has_file_based_actor_agnostic_dep_detect_step() {
     let root = repo_root();
     let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let dep_detect_step = extract_ci_dep_detect_step_block(&workflow);
 
     assert!(
-        workflow.contains("Detect dependency-only changes"),
+        dep_detect_step.contains("Detect dependency-only changes"),
         "ci.yml must contain a 'Detect dependency-only changes' step."
     );
     assert!(
-        workflow.contains("id: dep-detect"),
+        dep_detect_step.contains("id: dep-detect"),
         "ci.yml dependency detection step must have id 'dep-detect'."
     );
     assert!(
-        workflow.contains("skip_changelog"),
+        dep_detect_step.contains("skip_changelog"),
         "ci.yml dep-detect step must set a skip_changelog output."
     );
     assert!(
-        workflow.contains("dependabot[bot]"),
-        "ci.yml dep-detect step must check for dependabot[bot] actor."
+        dep_detect_step.contains("HAS_CARGO_CHANGE=\"false\"")
+            && dep_detect_step.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
+            && dep_detect_step
+                .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
+        "ci.yml dep-detect step must use file-based dependency-only detection for Cargo manifest/lock changes."
     );
-
-    let expected_patterns = [
-        "^bump ",
-        "^chore\\(deps\\)",
-        "dependabot",
-        "dependency.bump",
-        "update.*dependencies",
-    ];
-    for pattern in expected_patterns {
-        assert!(
-            workflow.contains(pattern),
-            "ci.yml dep-detect commit message grep must include pattern '{pattern}'."
-        );
-    }
 
     assert!(
         workflow.contains("--skip-changelog-gate"),
         "ci.yml must pass --skip-changelog-gate to the checker when dep-detect triggers."
+    );
+
+    assert!(
+        !dep_detect_step.contains("${{ github.actor }}")
+            && !dep_detect_step.contains("dependabot[bot]"),
+        "ci.yml dep-detect step must be actor-agnostic."
+    );
+    assert!(
+        !dep_detect_step.contains("COMMIT_MSG=")
+            && !dep_detect_step.contains("git log -1 --format")
+            && !dep_detect_step.contains("grep -qiE"),
+        "ci.yml dep-detect step must not rely on commit-message pattern matching."
     );
 }
 
