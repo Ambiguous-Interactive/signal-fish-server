@@ -156,23 +156,20 @@ jobs:
         run: |
           set -euo pipefail
           SKIP_CHANGELOG="false"
+          HAS_CARGO_CHANGE="false"
 
-          # Skip for dependabot actor (direct dependabot PRs)
-          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
-            SKIP_CHANGELOG="true"
-          fi
-
-          # Skip if all non-internal changed files are only Cargo.toml/Cargo.lock
-          # AND the commit message looks like a dependency bump (handles squash-merged
-          # dependabot PRs where the actor is the human who merged).
-          if [ "$SKIP_CHANGELOG" = "false" ] && [ -f changed-files.txt ]; then
+          # Skip changelog when the change set is dependency-only:
+          # at least one Cargo.toml/Cargo.lock change and no non-internal files.
+          # This is intentionally actor/message-agnostic so squash merges and
+          # manual merges behave consistently.
+          if [ -f changed-files.txt ]; then
             NON_INTERNAL="false"
             while IFS= read -r f; do
               # Dependency-only detection: skip paths that are internal to dev/CI (matches
               # is_internal_path() in scripts/check-doc-consistency.sh) plus Cargo.toml
               # and CHANGELOG.md which are expected in dependency bumps.
               case "$f" in
-                Cargo.toml|Cargo.lock) ;;
+                Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
                 docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md) ;;
@@ -186,13 +183,8 @@ jobs:
               esac
             done < changed-files.txt
 
-            if [ "$NON_INTERNAL" = "false" ]; then
-              COMMIT_MSG=$(git log -1 --format='%s' "${{ github.sha }}")
-              # The `.` in `dependency.bump` is an intentional ERE wildcard so it
-              # matches both "dependency-bump" and "dependency bump" variants.
-              if echo "$COMMIT_MSG" | grep -qiE '(^bump |^chore\(deps\)|dependabot|dependency.bump|update.*dependencies)'; then
-                SKIP_CHANGELOG="true"
-              fi
+            if [ "$NON_INTERNAL" = "false" ] && [ "$HAS_CARGO_CHANGE" = "true" ]; then
+              SKIP_CHANGELOG="true"
             fi
           fi
 

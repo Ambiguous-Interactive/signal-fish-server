@@ -11569,6 +11569,60 @@ fn test_run_local_ci_excludes_check_outdated() {
     );
 }
 
+fn extract_ci_dep_detect_step(ci_content: &str) -> String {
+    let step_start = ci_content
+        .find("      - name: Detect dependency-only changes")
+        .expect("doc-consistency dep-detect step header not found in .github/workflows/ci.yml");
+    let after_start = &ci_content[step_start..];
+    let step_end = after_start
+        .find("\n      - name: Run documentation/changelog consistency checks")
+        .expect("dep-detect step terminator not found in .github/workflows/ci.yml");
+    after_start[..step_end].to_string()
+}
+
+#[test]
+fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message_gate() {
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let dep_detect_step = extract_ci_dep_detect_step(&ci_content);
+
+    assert!(
+        dep_detect_step.contains("HAS_CARGO_CHANGE=\"false\"")
+            && dep_detect_step.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
+            && dep_detect_step
+                .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
+        "dep-detect must skip changelog for dependency-only Cargo changes using file classification, \
+         not commit message heuristics.\n\
+         Required logic:\n\
+         1. Track whether Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
+         2. Set skip_changelog=true when HAS_CARGO_CHANGE=true and NON_INTERNAL=false.\n\
+         This prevents merge commit messages from accidentally forcing the changelog gate."
+    );
+
+    assert!(
+        !dep_detect_step.contains("COMMIT_MSG=")
+            && !dep_detect_step.contains("git log -1 --format")
+            && !dep_detect_step.contains("grep -qiE"),
+        "dep-detect must not rely on commit message pattern matching for dependency-only changelog skips.\n\
+         Commit messages vary across squash/merge/rebase flows and are not a stable policy input."
+    );
+}
+
+#[test]
+fn test_ci_dep_detect_is_actor_agnostic_for_dependency_only_skips() {
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let dep_detect_step = extract_ci_dep_detect_step(&ci_content);
+
+    assert!(
+        !dep_detect_step.contains("${{ github.actor }}")
+            && !dep_detect_step.contains("dependabot[bot]"),
+        "dep-detect dependency-only changelog skip logic must be actor-agnostic.\n\
+         Skipping should depend on changed files, not actor identity, so merges by humans \
+         and bots behave consistently."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Internal Path Classification Tests
 //
