@@ -107,7 +107,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.75.9
+        uses: taiki-e/install-action@v2.75.18
         with:
           tool: cargo-nextest
 
@@ -227,7 +227,7 @@ jobs:
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2.0.16
+        uses: EmbarkStudios/cargo-deny-action@v2.0.17
         with:
           arguments: --all-features
           # Ensure the Dockerized action installs and uses a concrete toolchain
@@ -258,7 +258,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.75.9
+        uses: taiki-e/install-action@v2.75.18
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -436,7 +436,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.75.9
+        uses: taiki-e/install-action@v2.75.18
         with:
           tool: cargo-llvm-cov
 
@@ -501,7 +501,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.75.9
+        uses: taiki-e/install-action@v2.75.18
         with:
           tool: cargo-sbom
 
