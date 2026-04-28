@@ -256,7 +256,7 @@ jobs:
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
         continue-on-error: true
 
       - name: Verify sccache is working
@@ -349,7 +349,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.75.18
+        uses: taiki-e/install-action@v2.75.25
         with:
           tool: cargo-sbom
 
