@@ -75,6 +75,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -106,6 +108,8 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2.75.30
         with:
@@ -257,6 +261,8 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2.75.30
         with:
@@ -372,6 +378,7 @@ jobs:
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Verify build and tests with MSRV
         run: |
@@ -435,6 +442,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2.75.30
         with:
@@ -477,6 +486,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Run panic-policy check
         run: ./scripts/check-no-panics.sh
 
@@ -500,6 +511,8 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
         uses: taiki-e/install-action@v2.75.30
         with:

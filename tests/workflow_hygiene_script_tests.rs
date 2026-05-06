@@ -336,3 +336,118 @@ jobs:
         "Did not expect invalid-ref errors for explicit version tags.\nOutput:\n{output}"
     );
 }
+
+#[test]
+fn test_workflow_hygiene_fails_when_pull_request_rust_cache_missing_save_if() {
+    let workflow = r#"name: Rust Cache Policy
+on:
+  pull_request:
+  push:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: Swatinem/rust-cache@v2.9.1
+      - run: cargo test --locked
+"#;
+
+    let (success, output) =
+        run_hygiene_with_workflow("rust-cache-missing-save-if.yml", workflow);
+
+    assert!(
+        !success,
+        "Workflow hygiene script must fail when pull_request rust-cache lacks save-if.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("rust-cache step in pull_request workflow must define with.save-if"),
+        "Expected rust-cache save-if policy violation message.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_accepts_pull_request_rust_cache_with_save_if() {
+    let workflow = r#"name: Rust Cache Policy
+on:
+  pull_request:
+  push:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - run: cargo test --locked
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("rust-cache-with-save-if.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed when pull_request rust-cache has save-if.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("rust-cache step in pull_request workflow must define with.save-if"),
+        "Did not expect rust-cache save-if policy violations.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_fails_when_pull_request_rust_cache_has_weak_save_if() {
+    let workflow = r#"name: Rust Cache Policy
+on:
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ true }}
+      - run: cargo test --locked
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("rust-cache-weak-save-if.yml", workflow);
+
+    assert!(
+        !success,
+        "Workflow hygiene script must fail when pull_request rust-cache save-if is too weak.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("rust-cache save-if must gate fork PR writes"),
+        "Expected rust-cache save-if strength policy violation message.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_ignores_non_pr_workflow_with_pull_request_string() {
+    let workflow = r#"name: Rust Cache Policy
+on: [push]
+jobs:
+  lint:
+    if: contains(github.event.pull_request.labels.*.name, 'deps')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: Swatinem/rust-cache@v2.9.1
+      - run: cargo test --locked
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("rust-cache-non-pr-string.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should not enforce pull_request rust-cache policy for push-only workflows.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("rust-cache step in pull_request workflow must define with.save-if"),
+        "Did not expect pull_request rust-cache policy violation for push-only workflow.\nOutput:\n{output}"
+    );
+}

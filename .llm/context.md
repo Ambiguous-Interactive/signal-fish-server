@@ -194,6 +194,10 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
   Dependabot auto-merge while pull request CI workflows are pending or failing; require
   completed workflow runs with `success`/`skipped` conclusions, then use
   `gh pr merge --auto --squash --match-head-commit ...` to stay compatible with squash-only repos.
+- **`Swatinem/rust-cache` in `pull_request` workflows must use `with.save-if` gating** --
+  allow cache restore everywhere, but condition cache writes to trusted contexts (for example,
+  `github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`)
+  so fork PRs cannot fail CI in rust-cache post-job save steps.
 
 ---
 
