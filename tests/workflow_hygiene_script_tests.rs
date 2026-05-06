@@ -353,8 +353,7 @@ jobs:
       - run: cargo test --locked
 "#;
 
-    let (success, output) =
-        run_hygiene_with_workflow("rust-cache-missing-save-if.yml", workflow);
+    let (success, output) = run_hygiene_with_workflow("rust-cache-missing-save-if.yml", workflow);
 
     assert!(
         !success,

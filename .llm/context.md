@@ -197,7 +197,7 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
 - **`Swatinem/rust-cache` in `pull_request` workflows must use `with.save-if` gating** --
   allow cache restore everywhere, but condition cache writes to trusted contexts (for example,
   `github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`)
-  so fork PRs cannot fail CI in rust-cache post-job save steps.
+  so fork PRs cannot fail CI in `Swatinem/rust-cache` post-job save steps.
 
 ---
 
