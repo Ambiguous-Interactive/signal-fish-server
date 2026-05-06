@@ -962,6 +962,92 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# 14. Check pull_request workflows for rust-cache save-if gating
+# ---------------------------------------------------------------------------
+info "Checking pull_request workflows for rust-cache save-if gating..."
+
+RUST_CACHE_SAVE_IF_VIOLATIONS=0
+RUST_CACHE_GATED_STEPS=0
+PULL_REQUEST_TRIGGER_PATTERN='^[[:space:]]*pull_request:[[:space:]]*$|^[[:space:]]*-[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*\[[^]]*pull_request'
+
+for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$workflow" ] || continue
+    WORKFLOW_NAME=$(basename "$workflow")
+
+    if ! grep -Eq \
+        "$PULL_REQUEST_TRIGGER_PATTERN" \
+        "$workflow" 2>/dev/null; then
+        continue
+    fi
+
+    while IFS=$'\t' read -r cache_line save_if_state; do
+        [ -n "$cache_line" ] || continue
+        if [ "$save_if_state" = "2" ]; then
+            RUST_CACHE_GATED_STEPS=$((RUST_CACHE_GATED_STEPS + 1))
+        elif [ "$save_if_state" = "1" ]; then
+            error "$WORKFLOW_NAME:$cache_line: rust-cache save-if must gate fork PR writes"
+            error "  Use event_name + head.repo.full_name checks to restrict untrusted cache saves."
+            RUST_CACHE_SAVE_IF_VIOLATIONS=$((RUST_CACHE_SAVE_IF_VIOLATIONS + 1))
+        else
+            error "$WORKFLOW_NAME:$cache_line: rust-cache step in pull_request workflow must define with.save-if"
+            error "  Use save-if to skip cache writes on untrusted fork PRs (restore still works)."
+            RUST_CACHE_SAVE_IF_VIOLATIONS=$((RUST_CACHE_SAVE_IF_VIOLATIONS + 1))
+        fi
+    done < <(awk '
+        # cache_save_if_state values:
+        #   0 = missing save-if
+        #   1 = present but does not enforce fork-safe structure
+        #   2 = present with expected fork-safe structure
+        function flush_step() {
+            if (!in_cache_step) return
+            printf "%d\t%d\n", cache_line, cache_save_if_state
+            in_cache_step = 0
+            cache_save_if_state = 0
+            cache_line = 0
+        }
+
+        /^[[:space:]]*-[[:space:]]/ {
+            if (in_cache_step) {
+                flush_step()
+            }
+        }
+
+        {
+            if ($0 ~ /^[[:space:]-]*uses:[[:space:]]*Swatinem\/rust-cache@/) {
+                if (in_cache_step) {
+                    flush_step()
+                }
+                in_cache_step = 1
+                cache_line = NR
+                cache_save_if_state = 0
+                next
+            }
+
+            if (in_cache_step && $0 ~ /^[[:space:]]*save-if:[[:space:]]*/) {
+                cache_save_if_state = 1
+                if ($0 ~ /github\.event_name[[:space:]]*!=/ &&
+                    $0 ~ /pull_request/ &&
+                    $0 ~ /\|\|/ &&
+                    $0 ~ /github\.event\.pull_request\.head\.repo\.full_name/ &&
+                    $0 ~ /==/ &&
+                    $0 ~ /github\.repository/) {
+                    cache_save_if_state = 2
+                }
+            }
+        }
+
+        END {
+            flush_step()
+        }
+    ' "$workflow")
+done
+
+if [ "$RUST_CACHE_SAVE_IF_VIOLATIONS" -eq 0 ]; then
+    success "All pull_request rust-cache steps define save-if gating ($RUST_CACHE_GATED_STEPS checked)"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "=========================================="

@@ -123,6 +123,8 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       # Build rustdoc with strict warnings (no broken links, valid code blocks)
       - name: Build rustdoc
         run: cargo doc --locked --no-deps --all-features
@@ -147,6 +149,8 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       # Run all doc tests (tests embedded in /// comments)
       - name: Run doc tests
         run: cargo test --locked --doc
@@ -172,6 +176,8 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt
       - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       # Build the library first so we have it available for compilation validation
       - name: Build library
         run: cargo build --lib --locked --all-features

@@ -107,6 +107,7 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
         with:
           prefix-key: "ci-safety-nightly"
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Setup Miri
         run: cargo +nightly-2026-02-01 miri setup
@@ -146,6 +147,7 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
         with:
           prefix-key: "ci-safety-nightly"
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Run tests with AddressSanitizer
         run: |
