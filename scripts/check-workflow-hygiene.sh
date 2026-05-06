@@ -968,13 +968,14 @@ info "Checking pull_request workflows for rust-cache save-if gating..."
 
 RUST_CACHE_SAVE_IF_VIOLATIONS=0
 RUST_CACHE_GATED_STEPS=0
+PULL_REQUEST_TRIGGER_PATTERN='^[[:space:]]*pull_request:[[:space:]]*$|^[[:space:]]*-[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*\[[^]]*pull_request'
 
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
     [ -f "$workflow" ] || continue
     WORKFLOW_NAME=$(basename "$workflow")
 
     if ! grep -Eq \
-        '^[[:space:]]*pull_request:[[:space:]]*$|^[[:space:]]*-[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*\[[^]]*pull_request' \
+        "$PULL_REQUEST_TRIGGER_PATTERN" \
         "$workflow" 2>/dev/null; then
         continue
     fi
@@ -993,6 +994,10 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
             RUST_CACHE_SAVE_IF_VIOLATIONS=$((RUST_CACHE_SAVE_IF_VIOLATIONS + 1))
         fi
     done < <(awk '
+        # cache_save_if_state values:
+        #   0 = missing save-if
+        #   1 = present but does not enforce fork-safe structure
+        #   2 = present with expected fork-safe structure
         function flush_step() {
             if (!in_cache_step) return
             printf "%d\t%d\n", cache_line, cache_save_if_state
@@ -1022,7 +1027,9 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                 cache_save_if_state = 1
                 if ($0 ~ /github\.event_name[[:space:]]*!=/ &&
                     $0 ~ /pull_request/ &&
+                    $0 ~ /\|\|/ &&
                     $0 ~ /github\.event\.pull_request\.head\.repo\.full_name/ &&
+                    $0 ~ /==/ &&
                     $0 ~ /github\.repository/) {
                     cache_save_if_state = 2
                 }
