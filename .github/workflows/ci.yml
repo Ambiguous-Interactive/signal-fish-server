@@ -111,7 +111,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.75.30
+        uses: taiki-e/install-action@v2.77.5
         with:
           tool: cargo-nextest
 
@@ -231,7 +231,7 @@ jobs:
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2.0.17
+        uses: EmbarkStudios/cargo-deny-action@v2.0.18
         with:
           arguments: --all-features
           # Ensure the Dockerized action installs and uses a concrete toolchain
@@ -264,7 +264,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.75.30
+        uses: taiki-e/install-action@v2.77.5
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -445,7 +445,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.75.30
+        uses: taiki-e/install-action@v2.77.5
         with:
           tool: cargo-llvm-cov
 
@@ -514,7 +514,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.75.30
+        uses: taiki-e/install-action@v2.77.5
         with:
           tool: cargo-sbom
 
