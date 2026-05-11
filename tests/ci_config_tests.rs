@@ -7327,13 +7327,22 @@ fn test_dependabot_auto_merge_workflow_hardening() {
             && dependabot_job.contains("if [[ \"$state\" == \"ready\" ]]")
             && dependabot_job.contains("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}")
             && dependabot_job.contains("gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"")
+            && dependabot_job.contains("set +e")
+            && dependabot_job.contains("merge_status=$?")
+            && dependabot_job.contains("if (( merge_status == 0 ))")
+            && dependabot_job.contains("grep -Eiq 'unstable status'")
+            && dependabot_job
+                .contains("Auto-merge enable was rejected due to unstable status; retrying.")
+            && dependabot_job.contains("ready_streak=0")
+            && dependabot_job.contains("exit \"$merge_status\"")
             && !dependabot_job.contains("gh pr merge --auto --merge \"$PR_URL\"")
             && !dependabot_job.contains("gh pr merge --auto --rebase \"$PR_URL\""),
-        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful and use squash auto-merge.\n\
+        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful, handle transient unstable merge-state races, and use squash auto-merge.\n\
          Repositories that allow only squash merges fail if --merge/--rebase is forced.\n\
          File: {}\n\
          Fix: poll pull_request workflow-run status, block on failed/pending checks, then run\n\
-              `gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"`.",
+              `gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"` with retries for\n\
+              transient `in unstable status` GraphQL responses.",
         workflow_path.display()
     );
 }

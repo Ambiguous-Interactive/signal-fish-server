@@ -104,8 +104,23 @@ jobs:
 
               if (( ready_streak >= 2 )); then
                 echo "All observed pull_request workflows are complete and success/skipped."
-                gh pr merge --auto --squash --match-head-commit "$PR_HEAD_SHA" "$PR_URL"
-                exit 0
+                set +e
+                merge_output="$(gh pr merge --auto --squash --match-head-commit "$PR_HEAD_SHA" "$PR_URL" 2>&1)"
+                merge_status=$?
+                set -e
+
+                if (( merge_status == 0 )); then
+                  echo "$merge_output"
+                  exit 0
+                fi
+
+                if grep -Eiq 'unstable status' <<<"$merge_output"; then
+                  echo "Auto-merge enable was rejected due to unstable status; retrying."
+                  ready_streak=0
+                else
+                  echo "$merge_output" >&2
+                  exit "$merge_status"
+                fi
               fi
             else
               ready_streak=0
