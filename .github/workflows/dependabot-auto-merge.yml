@@ -43,6 +43,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          is_automerge_unsupported_error() {
+            local output="$1"
+            local lowered_output
+            lowered_output="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
+
+            grep -Eq \
+              'required protected branch rules|enablepullrequestautomerge|pull request auto merge is not allowed|auto-merge is not enabled' \
+              <<<"$lowered_output"
+          }
+
           workflow_timeout_minutes=60
           deadline=$((SECONDS + ((workflow_timeout_minutes - 5) * 60)))
           ready_streak=0
@@ -117,6 +127,21 @@ jobs:
                 if grep -Eiq 'unstable status' <<<"$merge_output"; then
                   echo "Auto-merge enable was rejected due to unstable status; retrying."
                   ready_streak=0
+                elif is_automerge_unsupported_error "$merge_output"; then
+                  echo "Auto-merge unsupported by repo/branch policy; attempting immediate squash merge."
+                  set +e
+                  fallback_output="$(gh pr merge --squash --match-head-commit "$PR_HEAD_SHA" "$PR_URL" 2>&1)"
+                  fallback_status=$?
+                  set -e
+
+                  if (( fallback_status == 0 )); then
+                    echo "$fallback_output"
+                    exit 0
+                  fi
+
+                  echo "$merge_output" >&2
+                  echo "$fallback_output" >&2
+                  exit "$fallback_status"
                 else
                   echo "$merge_output" >&2
                   exit "$merge_status"

@@ -7333,16 +7333,33 @@ fn test_dependabot_auto_merge_workflow_hardening() {
             && dependabot_job.contains("grep -Eiq 'unstable status'")
             && dependabot_job
                 .contains("Auto-merge enable was rejected due to unstable status; retrying.")
+            && dependabot_job.contains("is_automerge_unsupported_error()")
+            && dependabot_job.contains("required protected branch rules")
+            && dependabot_job.contains("enablepullrequestautomerge")
+            && dependabot_job.contains("pull request auto merge is not allowed")
+            && dependabot_job.contains("auto-merge is not enabled")
+            && dependabot_job.contains("elif is_automerge_unsupported_error \"$merge_output\"; then")
+            && dependabot_job
+                .contains("Auto-merge unsupported by repo/branch policy; attempting immediate squash merge.")
+            && dependabot_job.contains("gh pr merge --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"")
+            && dependabot_job.contains("fallback_status=$?")
+            && dependabot_job.contains("if (( fallback_status == 0 ))")
+            && dependabot_job.contains("echo \"$merge_output\" >&2")
+            && dependabot_job.contains("echo \"$fallback_output\" >&2")
+            && dependabot_job.contains("exit \"$fallback_status\"")
             && dependabot_job.contains("ready_streak=0")
             && dependabot_job.contains("exit \"$merge_status\"")
             && !dependabot_job.contains("gh pr merge --auto --merge \"$PR_URL\"")
             && !dependabot_job.contains("gh pr merge --auto --rebase \"$PR_URL\""),
-        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful, handle transient unstable merge-state races, and use squash auto-merge.\n\
+        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful, handle transient unstable merge-state races, and remain compatible with repositories that do not require protected-branch checks for auto-merge.\n\
          Repositories that allow only squash merges fail if --merge/--rebase is forced.\n\
          File: {}\n\
          Fix: poll pull_request workflow-run status, block on failed/pending checks, then run\n\
-              `gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"` with retries for\n\
-              transient `in unstable status` GraphQL responses.",
+              `gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"`.\n\
+              Retry transient `in unstable status` GraphQL responses, and when GitHub returns\n\
+              branch/repository policy rejections (for example\n\
+              `Branch does not have required protected branch rules (enablePullRequestAutoMerge)`),\n\
+              fallback to immediate `gh pr merge --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"`.",
         workflow_path.display()
     );
 }
