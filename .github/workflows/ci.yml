@@ -111,7 +111,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.77.5
+        uses: taiki-e/install-action@v2.79.1
         with:
           tool: cargo-nextest
 
@@ -264,7 +264,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.77.5
+        uses: taiki-e/install-action@v2.79.1
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -445,7 +445,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.77.5
+        uses: taiki-e/install-action@v2.79.1
         with:
           tool: cargo-llvm-cov
 
@@ -514,7 +514,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.77.5
+        uses: taiki-e/install-action@v2.79.1
         with:
           tool: cargo-sbom
 
