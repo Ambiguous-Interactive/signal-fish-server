@@ -66,7 +66,7 @@ futures-util = { version = "0.3", features = ["std"] }
 # Performance primitives
 bytes = "1.11"
 smallvec = { version = "1.15", features = ["union", "const_generics", "serde"] }
-dashmap = "6.1"
+dashmap = "6.2"
 
 # Crypto & security
 base64 = "0.22"
