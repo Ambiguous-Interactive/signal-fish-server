@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
   `rustls-pki-types` built-in `PemObject` trait.
 
+### Fixed
+
+- Fixed README protocol-reference formatting for the `Reconnect` row and typical session-flow diagram alignment.
+
 ### Changed
 
 - Upgraded `sha2` from `0.10.9` to `0.11.0` and `hmac` from `0.12.1` to `0.13.0-rc.6` to align

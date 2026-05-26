@@ -133,6 +133,31 @@ jobs:
 }
 
 #[test]
+fn test_workflow_hygiene_exempts_cargo_audit_from_locked_warning() {
+    let workflow = r#"name: Audit Workflow
+on: [push]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-audit
+        run: cargo audit
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("audit.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed for cargo-audit.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("missing --locked flag"),
+        "cargo-audit reads Cargo.lock directly and should not require --locked.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_workflow_hygiene_flags_multiline_cargo_sbom_locked_as_error() {
     let workflow = r#"name: SBOM Workflow
 on: [push]
