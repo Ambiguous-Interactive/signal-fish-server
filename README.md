@@ -259,7 +259,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 | `AuthorityRequest` | Request or release game authority                                                |
 | `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
 | `ProvideConnectionInfo` | Share peer connection information for P2P establishment                     |
-| `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`       |
+| `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`        |
 | `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
 | `LeaveSpectator`   | Leave spectator mode                                                             |
 | `LeaveRoom`        | Leave the current room                                                           |
@@ -320,8 +320,8 @@ Client                              Server
   |         (other client joins)       |
   |<-- PlayerJoined -------------------|
   |                                    |
-  |--- PlayerReady -------------------->|
-  |<-- LobbyStateChanged (lobby) -------|
+  |--- PlayerReady ------------------->|
+  |<-- LobbyStateChanged (lobby) ------|
   |                                    |
   |--- GameData ---------------------->|
   |<-- GameData (from other player) ---|
