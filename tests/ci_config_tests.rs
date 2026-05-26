@@ -9710,8 +9710,8 @@ fn test_audit_job_installs_cargo_audit() {
 
 #[test]
 fn test_audit_job_runs_cargo_audit() {
-    // Validates that the audit job actually runs `cargo audit` to scan for
-    // known vulnerabilities in the RustSec advisory database.
+    // Validates that the audit job runs `cargo audit` to scan Cargo.lock for
+    // known RustSec vulnerabilities.
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -9722,6 +9722,12 @@ fn test_audit_job_runs_cargo_audit() {
         audit_section.contains("cargo audit"),
         "Audit job must run `cargo audit` to scan for vulnerabilities.\n\
          The audit job should invoke cargo-audit against the RustSec advisory database."
+    );
+
+    assert!(
+        !audit_section.contains("cargo audit --locked"),
+        "cargo-audit reads Cargo.lock directly and does not support --locked.\n\
+         Fix: use `cargo audit` without --locked in .github/workflows/ci.yml."
     );
 }
 

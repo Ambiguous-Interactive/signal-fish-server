@@ -593,6 +593,7 @@ normalize_run_block_commands() {
 }
 
 # Commands that are exempt from the --locked requirement:
+#   - cargo audit: Reads Cargo.lock directly and does not support --locked
 #   - cargo fmt: Formatter only, does not resolve dependencies
 #   - cargo publish: Intentionally resolves from registry for crates.io compatibility
 #   - cargo install: Installing tools, not building the project
@@ -602,7 +603,7 @@ normalize_run_block_commands() {
 #   - cargo init/new/search/login/owner/yank: Registry or scaffolding commands,
 #     not project builds (unlikely in CI but listed for completeness)
 #   - cargo bench: Benchmarking, not a correctness gate
-LOCKED_EXEMPT_PATTERNS="fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench"
+LOCKED_EXEMPT_PATTERNS="audit|fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench"
 
 MISSING_LOCKED=0
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do

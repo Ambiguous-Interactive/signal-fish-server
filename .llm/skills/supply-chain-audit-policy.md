@@ -27,6 +27,7 @@ or setting up reproducible builds.
 ## TL;DR
 
 - Run `cargo audit` and `cargo deny check` in CI on every PR — block merges on failure.
+- Run `cargo audit` in CI; it scans `Cargo.lock` directly and does not support `--locked`.
 - Pin security-critical dependencies with exact versions (`=1.2.3`) and always commit `Cargo.lock`.
 - Build with `cargo build --locked` in CI to guarantee reproducibility.
 
@@ -35,12 +36,15 @@ or setting up reproducible builds.
 ## 1. Cargo Audit and Advisory Database
 
 ```bash
-cargo audit              # Check against RustSec Advisory Database
+cargo audit              # Check Cargo.lock against RustSec Advisory Database
 cargo audit --json       # JSON output for CI parsing
 ```
 
 Every advisory must result in: **Fix** (update the crate), **Ignore with justification** (document in `audit.toml`),
 or **Deny** (replace the crate).
+
+Do not add `--locked` to `cargo audit`; unlike build/test/check commands,
+cargo-audit already reads `Cargo.lock` directly.
 
 Document ignored advisories in `audit.toml` with rationale and expiry dates.
 Never silently ignore — every ignore must have a justification and a revisit date.
