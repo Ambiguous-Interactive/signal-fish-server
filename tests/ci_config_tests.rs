@@ -7407,6 +7407,7 @@ fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_fail
             "Retryable merge error pattern must be valid regex: {e}\nPattern: {retryable_pattern}"
         )
     });
+    let workflow_display = workflow_path.display();
 
     for sample in [
         "GraphQL: Pull request is in unstable status",
@@ -7418,10 +7419,9 @@ fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_fail
 
         assert!(
             retryable_regex.is_match(&lowered_sample),
-            "Retryable merge error pattern should match sample `{}`.\n\
-             Pattern: {}",
-            sample,
-            retryable_pattern
+            "Retryable merge error pattern should match sample `{sample}`.\n\
+             Pattern: {retryable_pattern}\n\
+             File: {workflow_display}",
         );
     }
 
@@ -7434,10 +7434,9 @@ fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_fail
 
         assert!(
             !retryable_regex.is_match(&lowered_sample),
-            "Retryable merge error pattern must not hide permanent merge errors by matching sample `{}`.\n\
-             Pattern: {}",
-            sample,
-            retryable_pattern
+            "Retryable merge error pattern must not hide permanent merge errors by matching sample `{sample}`.\n\
+             Pattern: {retryable_pattern}\n\
+             File: {workflow_display}",
         );
     }
 }
