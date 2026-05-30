@@ -194,6 +194,10 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
   Dependabot auto-merge while pull request CI workflows are pending or failing; require
   completed workflow runs with `success`/`skipped` conclusions, then use
   `gh pr merge --auto --squash --match-head-commit ...` to stay compatible with squash-only repos.
+- **Dependabot auto-merge must retry transient GitHub merge API errors** -- treat
+  `unstable status`, `GraphQL: Something went wrong while executing your query`,
+  rate limits, and HTTP 5xx-style merge errors as retryable with a capped counter/backoff;
+  keep policy, permission, and unsupported auto-merge errors on fail-fast or fallback paths.
 - **`Swatinem/rust-cache` in `pull_request` workflows must use `with.save-if` gating** --
   allow cache restore everywhere, but condition cache writes to trusted contexts (for example,
   `github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`)

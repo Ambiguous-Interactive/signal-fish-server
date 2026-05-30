@@ -53,10 +53,22 @@ jobs:
               <<<"$lowered_output"
           }
 
+          is_retryable_merge_error() {
+            local output="$1"
+            local lowered_output
+            lowered_output="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
+
+            grep -Eq \
+              'unstable status|something went wrong while executing your query|temporary failure|timed out|timeout|connection (reset|refused)|service unavailable|internal server error|bad gateway|gateway timeout|rate limit' \
+              <<<"$lowered_output"
+          }
+
           workflow_timeout_minutes=60
           deadline=$((SECONDS + ((workflow_timeout_minutes - 5) * 60)))
           ready_streak=0
           last_seen_count=-1
+          retryable_merge_error_count=0
+          max_retryable_merge_errors=5
 
           while (( SECONDS < deadline )); do
             runs_json="$(gh api \
@@ -124,9 +136,20 @@ jobs:
                   exit 0
                 fi
 
-                if grep -Eiq 'unstable status' <<<"$merge_output"; then
-                  echo "Auto-merge enable was rejected due to unstable status; retrying."
-                  ready_streak=0
+                if is_retryable_merge_error "$merge_output"; then
+                  retryable_merge_error_count=$((retryable_merge_error_count + 1))
+                  if (( retryable_merge_error_count > max_retryable_merge_errors )); then
+                    echo "Exceeded retryable GitHub merge API error limit ($max_retryable_merge_errors)." >&2
+                    echo "$merge_output" >&2
+                    exit "$merge_status"
+                  fi
+
+                  echo "Retryable GitHub merge API error detected ($retryable_merge_error_count/$max_retryable_merge_errors); retrying merge attempt."
+                  if grep -Eiq 'unstable status' <<<"$merge_output"; then
+                    ready_streak=0
+                  fi
+                  sleep $((15 * retryable_merge_error_count))
+                  continue
                 elif is_automerge_unsupported_error "$merge_output"; then
                   echo "Auto-merge unsupported by repo/branch policy; attempting immediate squash merge."
                   set +e

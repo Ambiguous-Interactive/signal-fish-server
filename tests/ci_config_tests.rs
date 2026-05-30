@@ -7330,9 +7330,16 @@ fn test_dependabot_auto_merge_workflow_hardening() {
             && dependabot_job.contains("set +e")
             && dependabot_job.contains("merge_status=$?")
             && dependabot_job.contains("if (( merge_status == 0 ))")
-            && dependabot_job.contains("grep -Eiq 'unstable status'")
-            && dependabot_job
-                .contains("Auto-merge enable was rejected due to unstable status; retrying.")
+            && dependabot_job.contains("is_retryable_merge_error()")
+            && dependabot_job.contains("unstable status")
+            && dependabot_job.contains("something went wrong while executing your query")
+            && dependabot_job.contains("temporary failure")
+            && dependabot_job.contains("service unavailable")
+            && dependabot_job.contains("retryable_merge_error_count")
+            && dependabot_job.contains("max_retryable_merge_errors=5")
+            && dependabot_job.contains("if is_retryable_merge_error \"$merge_output\"; then")
+            && dependabot_job.contains("Retryable GitHub merge API error detected")
+            && dependabot_job.contains("Exceeded retryable GitHub merge API error limit")
             && dependabot_job.contains("is_automerge_unsupported_error()")
             && dependabot_job.contains("required protected branch rules")
             && dependabot_job.contains("enablepullrequestautomerge")
@@ -7351,17 +7358,105 @@ fn test_dependabot_auto_merge_workflow_hardening() {
             && dependabot_job.contains("exit \"$merge_status\"")
             && !dependabot_job.contains("gh pr merge --auto --merge \"$PR_URL\"")
             && !dependabot_job.contains("gh pr merge --auto --rebase \"$PR_URL\""),
-        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful, handle transient unstable merge-state races, and remain compatible with repositories that do not require protected-branch checks for auto-merge.\n\
+        "dependabot-auto-merge.yml must wait for pull_request CI workflows to be complete/successful, retry transient GitHub merge API failures with a cap, and remain compatible with repositories that do not require protected-branch checks for auto-merge.\n\
          Repositories that allow only squash merges fail if --merge/--rebase is forced.\n\
          File: {}\n\
          Fix: poll pull_request workflow-run status, block on failed/pending checks, then run\n\
               `gh pr merge --auto --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"`.\n\
-              Retry transient `in unstable status` GraphQL responses, and when GitHub returns\n\
+              Retry transient `in unstable status` and `Something went wrong while executing your query`\n\
+              GraphQL responses with a capped retry counter, and when GitHub returns\n\
               branch/repository policy rejections (for example\n\
               `Branch does not have required protected branch rules (enablePullRequestAutoMerge)`),\n\
               fallback to immediate `gh pr merge --squash --match-head-commit \"$PR_HEAD_SHA\" \"$PR_URL\"`.",
         workflow_path.display()
     );
+}
+
+#[test]
+fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_failures() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/dependabot-auto-merge.yml");
+    let content = read_file(&workflow_path);
+    let retryable_function = content
+        .split("is_retryable_merge_error() {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n          }").next())
+        .unwrap_or_else(|| {
+            panic!(
+                "dependabot-auto-merge.yml must define is_retryable_merge_error().\n\
+                 File: {}",
+                workflow_path.display()
+            )
+        });
+    let retryable_pattern = retryable_function
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("something went wrong while executing your query"))
+        .map(|line| line.trim_end_matches(" \\").trim_matches('\''))
+        .unwrap_or_else(|| {
+            panic!(
+                "is_retryable_merge_error() must include the observed GitHub GraphQL transient failure.\n\
+                 File: {}",
+                workflow_path.display()
+            )
+        });
+
+    for sample in [
+        "GraphQL: Pull request is in unstable status",
+        "GraphQL: Something went wrong while executing your query on 2026-05-27T12:14:34Z.",
+        "Error: service unavailable",
+        "Error: gateway timeout",
+    ] {
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(
+                "lowered=$(printf '%s' \"$SAMPLE\" | tr '[:upper:]' '[:lower:]'); \
+                 grep -Eq \"$PATTERN\" <<<\"$lowered\"",
+            )
+            .env("PATTERN", retryable_pattern)
+            .env("SAMPLE", sample)
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to evaluate retryable merge pattern: {e}"));
+
+        assert!(
+            output.status.success(),
+            "Retryable merge error pattern should match sample `{}`.\n\
+             Pattern: {}\nstdout: {}\nstderr: {}",
+            sample,
+            retryable_pattern,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for sample in [
+        "Branch does not have required protected branch rules (enablePullRequestAutoMerge)",
+        "Pull request auto merge is not allowed",
+        "Authentication failed",
+    ] {
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(
+                "lowered=$(printf '%s' \"$SAMPLE\" | tr '[:upper:]' '[:lower:]'); \
+                 ! grep -Eq \"$PATTERN\" <<<\"$lowered\"",
+            )
+            .env("PATTERN", retryable_pattern)
+            .env("SAMPLE", sample)
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to evaluate retryable merge pattern: {e}"));
+
+        assert!(
+            output.status.success(),
+            "Retryable merge error pattern must not hide permanent merge errors by matching sample `{}`.\n\
+             Pattern: {}\nstdout: {}\nstderr: {}",
+            sample,
+            retryable_pattern,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
