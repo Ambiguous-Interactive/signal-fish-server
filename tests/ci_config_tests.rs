@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::{read_file, repo_root};
+use regex::Regex;
 
 /// Check whether `cargo-deny` is installed by running `cargo deny --version`.
 /// Returns `true` when the subcommand is available, `false` otherwise.
@@ -7401,32 +7402,26 @@ fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_fail
             )
         });
 
+    let retryable_regex = Regex::new(retryable_pattern).unwrap_or_else(|e| {
+        panic!(
+            "Retryable merge error pattern must be valid regex: {e}\nPattern: {retryable_pattern}"
+        )
+    });
+
     for sample in [
         "GraphQL: Pull request is in unstable status",
         "GraphQL: Something went wrong while executing your query on 2026-05-27T12:14:34Z.",
         "Error: service unavailable",
         "Error: gateway timeout",
     ] {
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(
-                "lowered=$(printf '%s' \"$SAMPLE\" | tr '[:upper:]' '[:lower:]'); \
-                 grep -Eq \"$PATTERN\" <<<\"$lowered\"",
-            )
-            .env("PATTERN", retryable_pattern)
-            .env("SAMPLE", sample)
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("Failed to evaluate retryable merge pattern: {e}"));
+        let lowered_sample = sample.to_lowercase();
 
         assert!(
-            output.status.success(),
+            retryable_regex.is_match(&lowered_sample),
             "Retryable merge error pattern should match sample `{}`.\n\
-             Pattern: {}\nstdout: {}\nstderr: {}",
+             Pattern: {}",
             sample,
-            retryable_pattern,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            retryable_pattern
         );
     }
 
@@ -7435,26 +7430,14 @@ fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_fail
         "Pull request auto merge is not allowed",
         "Authentication failed",
     ] {
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(
-                "lowered=$(printf '%s' \"$SAMPLE\" | tr '[:upper:]' '[:lower:]'); \
-                 ! grep -Eq \"$PATTERN\" <<<\"$lowered\"",
-            )
-            .env("PATTERN", retryable_pattern)
-            .env("SAMPLE", sample)
-            .current_dir(&root)
-            .output()
-            .unwrap_or_else(|e| panic!("Failed to evaluate retryable merge pattern: {e}"));
+        let lowered_sample = sample.to_lowercase();
 
         assert!(
-            output.status.success(),
+            !retryable_regex.is_match(&lowered_sample),
             "Retryable merge error pattern must not hide permanent merge errors by matching sample `{}`.\n\
-             Pattern: {}\nstdout: {}\nstderr: {}",
+             Pattern: {}",
             sample,
-            retryable_pattern,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            retryable_pattern
         );
     }
 }
