@@ -794,6 +794,7 @@ async fn test_custom_rate_limiting() {
             max_room_creations: 1,               // Very restrictive for testing
             time_window: Duration::from_secs(5), // Longer window to ensure test stability
             max_join_attempts: 2,
+            max_signals: 600,
         },
         empty_room_timeout: Duration::from_secs(300),
         inactive_room_timeout: Duration::from_secs(3600),

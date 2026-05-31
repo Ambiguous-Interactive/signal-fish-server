@@ -10,9 +10,33 @@ use uuid::Uuid;
 use crate::auth::AppInfo;
 use crate::coordination::MessageCoordinator;
 use crate::metrics::ServerMetrics;
-use crate::protocol::{GameDataEncoding, PlayerId, RoomId, ServerMessage};
+use crate::protocol::{GameDataEncoding, PlayerId, RoomId, ServerMessage, Topology, Transport};
 
 use super::RegisterClientError;
+
+/// Protocol capabilities negotiated for a single connection during `Authenticate`.
+///
+/// The default is a pure v2 client: protocol version 2, relay-only transport and
+/// relay-only topology. v3 negotiation overwrites this via [`ConnectionManager::set_protocol`].
+#[derive(Debug, Clone)]
+pub(crate) struct NegotiatedProtocol {
+    pub version: u16,
+    pub transports: Vec<Transport>,
+    // `topologies` is negotiated and persisted in P1; the session-plan/topology
+    // selection logic that reads it lands in P3 (see PLAN.md §P3).
+    #[allow(dead_code)]
+    pub topologies: Vec<Topology>,
+}
+
+impl Default for NegotiatedProtocol {
+    fn default() -> Self {
+        Self {
+            version: crate::config::SERVER_MIN_PROTOCOL_VERSION,
+            transports: vec![Transport::Relay],
+            topologies: vec![Topology::Relay],
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClientConnection {
@@ -26,6 +50,8 @@ pub(crate) struct ClientConnection {
     pub client_addr: SocketAddr,
     pub game_data_format: GameDataEncoding,
     pub app_info: Option<AppInfo>,
+    /// Protocol version + transport/topology capabilities negotiated at auth.
+    pub protocol: NegotiatedProtocol,
 }
 
 pub(crate) struct ConnectionManager {
@@ -80,6 +106,7 @@ impl ConnectionManager {
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_info: None,
+            protocol: NegotiatedProtocol::default(),
         };
 
         self.clients.insert(player_id, connection);
@@ -111,6 +138,7 @@ impl ConnectionManager {
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_info: None,
+            protocol: NegotiatedProtocol::default(),
         };
 
         self.increment_ip_slot_unbounded(client_addr.ip());
@@ -161,6 +189,36 @@ impl ConnectionManager {
 
     pub fn prefers_encoding(&self, player_id: &PlayerId, encoding: GameDataEncoding) -> bool {
         self.game_data_format(player_id) == encoding
+    }
+
+    pub fn set_protocol(&self, player_id: &PlayerId, protocol: NegotiatedProtocol) {
+        if let Some(mut connection) = self.clients.get_mut(player_id) {
+            connection.protocol = protocol;
+        }
+    }
+
+    // Read the full negotiated protocol for a connection. Consumed by the P3
+    // session-plan/topology selection path (see PLAN.md §P3).
+    #[allow(dead_code)]
+    pub fn protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
+        self.clients
+            .get(player_id)
+            .map(|conn| conn.protocol.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn supports_v3(&self, player_id: &PlayerId) -> bool {
+        self.clients
+            .get(player_id)
+            .map(|conn| conn.protocol.version >= 3)
+            .unwrap_or(false)
+    }
+
+    pub fn supports_transport(&self, player_id: &PlayerId, transport: Transport) -> bool {
+        self.clients
+            .get(player_id)
+            .map(|conn| conn.protocol.transports.contains(&transport))
+            .unwrap_or(false)
     }
 
     pub fn set_app_info(&self, player_id: &PlayerId, app_info: AppInfo) {
@@ -250,6 +308,7 @@ impl ConnectionManager {
                 client_addr: old_connection.client_addr,
                 game_data_format: old_connection.game_data_format,
                 app_info: old_connection.app_info,
+                protocol: old_connection.protocol,
             };
 
             // IP slot is already reserved from the old entry -- no need to
@@ -617,6 +676,100 @@ mod tests {
             result.is_ok(),
             "Registration should succeed after removing the reassigned client"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol capability negotiation (P1).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn protocol_defaults_to_v2_relay_only() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:7100".parse().unwrap();
+        let (tx, _rx) = channel();
+        let pid = manager
+            .register_client(tx, addr, Uuid::new_v4())
+            .await
+            .expect("register");
+
+        let proto = manager.protocol(&pid);
+        assert_eq!(proto.version, 2);
+        assert_eq!(proto.transports, vec![Transport::Relay]);
+        assert_eq!(proto.topologies, vec![Topology::Relay]);
+
+        assert!(!manager.supports_v3(&pid));
+        assert!(manager.supports_transport(&pid, Transport::Relay));
+        assert!(!manager.supports_transport(&pid, Transport::WebRtc));
+    }
+
+    #[tokio::test]
+    async fn set_protocol_updates_capabilities_and_v3_gate() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:7101".parse().unwrap();
+        let (tx, _rx) = channel();
+        let pid = manager
+            .register_client(tx, addr, Uuid::new_v4())
+            .await
+            .expect("register");
+
+        manager.set_protocol(
+            &pid,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+
+        assert!(manager.supports_v3(&pid));
+        assert!(manager.supports_transport(&pid, Transport::WebRtc));
+        assert!(manager.supports_transport(&pid, Transport::Relay));
+        assert!(!manager.supports_transport(&pid, Transport::Direct));
+
+        let proto = manager.protocol(&pid);
+        assert_eq!(proto.version, 3);
+        assert_eq!(proto.topologies, vec![Topology::Relay, Topology::Mesh]);
+    }
+
+    #[tokio::test]
+    async fn protocol_helpers_default_for_unknown_player() {
+        let manager = make_manager(4);
+        let unknown = Uuid::new_v4();
+        // Unknown player => default (v2 relay-only), not v3.
+        let proto = manager.protocol(&unknown);
+        assert_eq!(proto.version, 2);
+        assert!(!manager.supports_v3(&unknown));
+        assert!(!manager.supports_transport(&unknown, Transport::Relay));
+    }
+
+    #[tokio::test]
+    async fn protocol_is_preserved_across_reconnect() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:7102".parse().unwrap();
+        let (tx, _rx) = channel();
+        let original = manager
+            .register_client(tx, addr, Uuid::new_v4())
+            .await
+            .expect("register");
+
+        manager.set_protocol(
+            &original,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+
+        let new_pid = Uuid::new_v4();
+        let room = RoomId::new_v4();
+        assert!(manager.reassign_connection(&original, &new_pid, room));
+
+        // The migrated connection keeps its negotiated v3 capabilities.
+        let proto = manager.protocol(&new_pid);
+        assert_eq!(proto.version, 3);
+        assert!(manager.supports_v3(&new_pid));
+        assert!(manager.supports_transport(&new_pid, Transport::WebRtc));
     }
 
     /// D19: Multiple concurrent releases do not underflow the IP counter.

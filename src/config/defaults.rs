@@ -77,6 +77,10 @@ pub const fn default_max_join_attempts() -> u32 {
     20
 }
 
+pub const fn default_max_signals() -> u32 {
+    600
+}
+
 // =============================================================================
 // Protocol Defaults
 // =============================================================================
@@ -103,6 +107,14 @@ pub const fn default_enable_message_pack_game_data() -> bool {
 
 pub const fn default_sdk_enforce() -> bool {
     true
+}
+
+pub const fn default_min_protocol_version() -> u16 {
+    super::protocol::SERVER_MIN_PROTOCOL_VERSION
+}
+
+pub const fn default_max_protocol_version() -> u16 {
+    super::protocol::SERVER_MAX_PROTOCOL_VERSION
 }
 
 // =============================================================================

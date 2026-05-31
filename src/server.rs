@@ -7,6 +7,7 @@ use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
 use crate::protocol::{
     room_codes, GameDataEncoding, PlayerId, RoomId, ServerMessage, SpectatorStateChangeReason,
+    Transport,
 };
 use crate::rate_limit::{RateLimitConfig, RoomRateLimiter};
 use anyhow::Result;
@@ -42,10 +43,14 @@ mod relay_policy;
 mod room_service;
 #[cfg(test)]
 mod room_service_tests;
+mod signaling;
+#[cfg(test)]
+mod signaling_tests;
 mod spectator_handlers;
 mod spectator_service;
 
 use connection_manager::ConnectionManager;
+pub(crate) use connection_manager::NegotiatedProtocol;
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 use spectator_service::SpectatorService;
 
@@ -315,6 +320,31 @@ impl EnhancedGameServer {
     /// Fetch the negotiated game data encoding for a client.
     pub fn client_game_data_format(&self, player_id: &PlayerId) -> GameDataEncoding {
         self.connection_manager.game_data_format(player_id)
+    }
+
+    /// Persist the negotiated protocol version + transport/topology capabilities
+    /// for a client (mirrors [`set_client_game_data_format`](Self::set_client_game_data_format)).
+    pub(crate) fn set_client_protocol(&self, player_id: &PlayerId, protocol: NegotiatedProtocol) {
+        self.connection_manager.set_protocol(player_id, protocol);
+    }
+
+    /// Fetch the negotiated protocol capabilities for a client (defaults to v2 relay-only).
+    ///
+    /// Built in P1; consumed by the P3 session-plan/topology selection path.
+    #[allow(dead_code)]
+    pub(crate) fn client_protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
+        self.connection_manager.protocol(player_id)
+    }
+
+    /// Whether the client negotiated protocol v3 or higher (gates all v3 emission).
+    pub fn client_supports_v3(&self, player_id: &PlayerId) -> bool {
+        self.connection_manager.supports_v3(player_id)
+    }
+
+    /// Whether the client negotiated support for the given transport.
+    pub fn client_supports_transport(&self, player_id: &PlayerId, transport: Transport) -> bool {
+        self.connection_manager
+            .supports_transport(player_id, transport)
     }
 
     /// Attach authenticated application context to a connected client.

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added ADR-0001 (`docs/adr/0001-protocol-v3-two-axis.md`) locking the protocol v3 design:
+  additive capability-gated versioning, relay-as-floor invariant, opaque-signal routing,
+  deterministic glare avoidance, and the `{Relay, Host, Mesh}` topology / `{Relay, Direct, WebRtc}`
+  transport sets.
+- Added ADR-0002 (`docs/adr/0002-matchbox-compatibility.md`) deciding that native signal payloads
+  follow the matchbox `PeerSignal` shape (`Offer` / `Answer` / `IceCandidate`) inside the opaque
+  `signal` field while the server stays matchbox-decoupled.
+- Added golden v2 wire snapshot tests (`tests/v2_wire_golden.rs`) freezing the current v2
+  `ClientMessage` / `ServerMessage` JSON and MessagePack (`rmp_serde::to_vec_named`) wire format;
+  any future diff is a breaking change and fails CI.
+- Added protocol version and transport/topology capability negotiation (protocol v3 phase P1).
+  `Authenticate` now accepts optional `protocol_version`, `supported_transports`
+  (`relay` / `direct` / `webrtc`) and `supported_topologies` (`relay` / `host` / `mesh`) fields;
+  the negotiated version + capabilities are persisted per connection. `ProtocolInfo` now advertises
+  the negotiated `protocol_version` alongside the deployment's `min_protocol_version` /
+  `max_protocol_version`. Added `protocol.min_protocol_version` (default 2) and
+  `protocol.max_protocol_version` (default 3) config options with validation. Added a `/v3/ws`
+  endpoint alias that shares the `/v2/ws` handler and defaults the protocol version to 3 when the
+  client omits it. This change is fully backward compatible: clients that omit the new fields
+  negotiate as pure v2 (relay-only) and observe byte-identical v2 behavior.
+- Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
+  relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
+  `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.
+  On room join, existing v3 WebRTC peers and the joiner are paired via `ServerMessage::NewPeer
+  { peer_id, you_initiate }`, where the deterministic glare rule (lesser UUID initiates) designates
+  exactly one offerer per pair. Same-room enforcement, WebRTC-transport negotiation, and a
+  per-connection signal rate limit (`rate_limit.max_signals`, default 600) are enforced, surfacing
+  the new `CROSS_ROOM_SIGNAL`, `UNSUPPORTED_TRANSPORT`, `SIGNAL_TARGET_NOT_FOUND`, and
+  `SIGNAL_RATE_LIMITED` error codes. All signaling is gated to v3 + WebRTC peers, so v2 clients never
+  receive `Signal` or `NewPeer` and v2 wire behavior is byte-identical.
+
 ### Security
 
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses

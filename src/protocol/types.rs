@@ -81,6 +81,43 @@ pub enum GameDataEncoding {
     Rkyv,
 }
 
+/// Data-path transport a client can use for game traffic.
+///
+/// `Relay` is the universal floor (WebSocket fan-out through the server) and is
+/// always available. `Direct` is a LAN / routable IP:port path and `WebRtc` is a
+/// peer-to-peer WebRTC data channel; both are opt-in upgrades negotiated in
+/// `Authenticate`. Wire tokens (Appendix A): `relay`, `direct`, `webrtc`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    /// Server WebSocket fan-out — the mandatory floor every client supports.
+    Relay,
+    /// Direct IP:port connection (LAN / routable host).
+    Direct,
+    /// Peer-to-peer WebRTC data channel.
+    ///
+    /// `rename_all = "snake_case"` would emit `web_rtc`; Appendix A requires the
+    /// token `webrtc`, so the variant is renamed explicitly.
+    #[serde(rename = "webrtc")]
+    WebRtc,
+}
+
+/// Session topology negotiated for a room.
+///
+/// `Relay` keeps the v2 server-relay hub. `Host` is a star topology around a
+/// single authoritative peer, and `Mesh` is everyone-to-everyone. Wire tokens
+/// (Appendix A): `relay`, `host`, `mesh`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Topology {
+    /// Server relay hub (v2 behavior, always available).
+    Relay,
+    /// Star topology around a single host/authority.
+    Host,
+    /// Full mesh: every peer connects to every other peer.
+    Mesh,
+}
+
 /// Connection information for P2P establishment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -214,6 +251,18 @@ pub struct ProtocolInfoPayload {
     pub game_data_formats: Vec<GameDataEncoding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player_name_rules: Option<PlayerNameRulesPayload>,
+    /// Protocol version negotiated for this connection (v3+ only).
+    ///
+    /// `None` for pure v2 fixtures so the v2 golden snapshot stays byte-identical;
+    /// the live server always populates it with `Some(..)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
+    /// Lowest protocol version this deployment accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_protocol_version: Option<u16>,
+    /// Highest protocol version this deployment speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_protocol_version: Option<u16>,
 }
 
 /// Describes the characters your deployment allows inside `player_name`.

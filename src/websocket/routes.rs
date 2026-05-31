@@ -5,7 +5,7 @@ use axum::routing::get;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use super::handler::websocket_handler;
+use super::handler::{websocket_handler, websocket_handler_v3};
 use super::metrics::{metrics_handler, prometheus_metrics_handler};
 
 /// Create the Axum router with WebSocket support
@@ -33,8 +33,18 @@ pub fn create_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>
         }
     };
 
+    // NOTE ON PATH NESTING: this router is mounted by `src/main.rs` under
+    // `.nest("/v2", enhanced_router)`, so the routes below are reached as
+    // `/v2/ws`, `/v2/health`, etc. The `/v3/ws` route declared here therefore
+    // becomes `/v2/v3/ws` under that nesting — UNUSED in the production wiring.
+    // The real `/v3/ws` alias is mounted at the top level in `src/main.rs`
+    // (`.route("/v3/ws", get(websocket_handler_v3))`); both aliases share this
+    // same handler set, differing only in the default protocol version. The
+    // `/v3/ws` route is kept here because `run_server` serves this router
+    // un-nested, so library/standalone users reach `/ws` and `/v3/ws` directly.
     axum::Router::new()
         .route("/ws", get(websocket_handler))
+        .route("/v3/ws", get(websocket_handler_v3))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/prom", get(prometheus_metrics_handler))

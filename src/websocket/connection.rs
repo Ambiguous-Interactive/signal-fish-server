@@ -1,8 +1,8 @@
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, PlayerNameRulesPayload, ProtocolInfoPayload,
-    RateLimitInfo, ServerMessage,
+    RateLimitInfo, ServerMessage, Topology, Transport,
 };
-use crate::server::{EnhancedGameServer, RegisterClientError};
+use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -16,11 +16,64 @@ use super::batching::{send_batch, MessageBatcher};
 use super::sending::{send_immediate_server_message, send_single_message};
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 
+/// Resolve the negotiated transport/topology capability sets for a connection.
+///
+/// Relay is the universal floor, so it is always present in both sets. A
+/// connection negotiated below v3 is **relay-only** regardless of what it
+/// advertised — peer-to-peer transports/topologies are a v3+ upgrade and must
+/// never be recorded for a v2 peer. For v3+, the client's advertised sets are
+/// used with `Relay` forced in (if the client omitted it) and duplicates
+/// removed while preserving the client's stated preference order.
+fn negotiate_capabilities(
+    negotiated_version: u16,
+    supported_transports: Option<Vec<Transport>>,
+    supported_topologies: Option<Vec<Topology>>,
+) -> (Vec<Transport>, Vec<Topology>) {
+    if negotiated_version < 3 {
+        return (vec![Transport::Relay], vec![Topology::Relay]);
+    }
+
+    let mut transports = supported_transports.unwrap_or_else(|| vec![Transport::Relay]);
+    if !transports.contains(&Transport::Relay) {
+        transports.push(Transport::Relay);
+    }
+    dedup_preserving_order(&mut transports);
+
+    let mut topologies = supported_topologies.unwrap_or_else(|| vec![Topology::Relay]);
+    if !topologies.contains(&Topology::Relay) {
+        topologies.push(Topology::Relay);
+    }
+    dedup_preserving_order(&mut topologies);
+
+    (transports, topologies)
+}
+
+/// Remove duplicate entries while preserving the first occurrence of each.
+///
+/// Unlike [`Vec::dedup`], which only collapses *consecutive* duplicates, this
+/// drops every later repeat regardless of position. The lists it operates on
+/// (negotiated transports/topologies) have at most three variants, so the
+/// quadratic scan is trivially cheap and keeps the relative ordering the client
+/// advertised (which conveys preference for the P3 selection logic).
+fn dedup_preserving_order<T: PartialEq>(items: &mut Vec<T>) {
+    let mut index = 0;
+    while index < items.len() {
+        if items[..index].contains(&items[index]) {
+            items.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+// `default_protocol_version` is the fallback used when the client omits
+// `Authenticate.protocol_version`: `2` for the `/v2/ws` path, `3` for `/v3/ws`.
 pub(super) async fn handle_socket(
     socket: WebSocket,
     server: Arc<EnhancedGameServer>,
     addr: SocketAddr,
     token_binding: Option<TokenBindingHandshake>,
+    default_protocol_version: u16,
 ) {
     let (mut sender, mut receiver) = socket.split();
     let queue_capacity = server.config().websocket_config.batch_size.max(1) * 4;
@@ -246,6 +299,9 @@ pub(super) async fn handle_socket(
                             sdk_version,
                             platform,
                             game_data_format,
+                            protocol_version,
+                            supported_transports,
+                            supported_topologies,
                         } => {
                             if authenticated {
                                 tracing::warn!(%player_id, "Client already authenticated");
@@ -344,12 +400,45 @@ pub(super) async fn handle_socket(
                                     };
                                     server_clone
                                         .set_client_game_data_format(&player_id, negotiated_format);
+
+                                    // Protocol version + capability negotiation (P1).
+                                    // A missing `protocol_version` on the /v3 path is
+                                    // treated as the path default (3); on /v2 it stays
+                                    // v2. Explicit client values always take precedence.
+                                    let cfg = server_clone.protocol_config();
+                                    let client_max =
+                                        protocol_version.or(Some(default_protocol_version));
+                                    let negotiated_version =
+                                        cfg.negotiate_protocol_version(client_max);
+
+                                    let (negotiated_transports, negotiated_topologies) =
+                                        negotiate_capabilities(
+                                            negotiated_version,
+                                            supported_transports,
+                                            supported_topologies,
+                                        );
+
+                                    let min_protocol_version = cfg.min_protocol_version;
+                                    let max_protocol_version = cfg.max_protocol_version;
+
+                                    server_clone.set_client_protocol(
+                                        &player_id,
+                                        NegotiatedProtocol {
+                                            version: negotiated_version,
+                                            transports: negotiated_transports.clone(),
+                                            topologies: negotiated_topologies.clone(),
+                                        },
+                                    );
+
                                     tracing::info!(
                                         %player_id,
                                         app_name = %info.name,
                                         app_id = %app_id,
                                         ?sdk_version,
                                         ?platform,
+                                        protocol_version = negotiated_version,
+                                        ?negotiated_transports,
+                                        ?negotiated_topologies,
                                         "Client authenticated"
                                     );
 
@@ -380,6 +469,9 @@ pub(super) async fn handle_socket(
                                             notes: compatibility.notes.clone(),
                                             game_data_formats: supported_formats,
                                             player_name_rules: Some(player_name_rules),
+                                            protocol_version: Some(negotiated_version),
+                                            min_protocol_version: Some(min_protocol_version),
+                                            max_protocol_version: Some(max_protocol_version),
                                         });
 
                                     if let Err(err) = tx_clone.try_send(Arc::new(auth_response)) {
@@ -551,6 +643,76 @@ mod tests {
     use crate::server::ServerConfig;
     use std::net::SocketAddr;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
+
+    #[test]
+    fn negotiate_capabilities_v2_is_relay_only_even_if_p2p_advertised() {
+        // A connection negotiated below v3 must be relay-only regardless of what
+        // it advertised — P2P is a v3+ upgrade and must not leak to a v2 peer.
+        let (transports, topologies) = negotiate_capabilities(
+            2,
+            Some(vec![Transport::WebRtc, Transport::Direct]),
+            Some(vec![Topology::Mesh, Topology::Host]),
+        );
+        assert_eq!(transports, vec![Transport::Relay]);
+        assert_eq!(topologies, vec![Topology::Relay]);
+    }
+
+    #[test]
+    fn negotiate_capabilities_v3_forces_relay_floor_and_dedups() {
+        // Client advertised P2P but omitted Relay and repeated WebRtc: Relay is
+        // forced in, duplicates removed, preference order preserved.
+        let (transports, topologies) = negotiate_capabilities(
+            3,
+            Some(vec![
+                Transport::WebRtc,
+                Transport::Direct,
+                Transport::WebRtc,
+            ]),
+            Some(vec![Topology::Mesh, Topology::Mesh]),
+        );
+        assert_eq!(
+            transports,
+            vec![Transport::WebRtc, Transport::Direct, Transport::Relay]
+        );
+        assert_eq!(topologies, vec![Topology::Mesh, Topology::Relay]);
+    }
+
+    #[test]
+    fn negotiate_capabilities_v3_defaults_to_relay_when_unspecified() {
+        let (transports, topologies) = negotiate_capabilities(3, None, None);
+        assert_eq!(transports, vec![Transport::Relay]);
+        assert_eq!(topologies, vec![Topology::Relay]);
+    }
+
+    #[test]
+    fn dedup_preserving_order_drops_non_adjacent_repeats() {
+        // Non-adjacent duplicates (the case `Vec::dedup` misses) are removed,
+        // first-occurrence order is preserved.
+        let mut transports = vec![
+            Transport::WebRtc,
+            Transport::Relay,
+            Transport::WebRtc,
+            Transport::Direct,
+            Transport::Relay,
+        ];
+        dedup_preserving_order(&mut transports);
+        assert_eq!(
+            transports,
+            vec![Transport::WebRtc, Transport::Relay, Transport::Direct]
+        );
+
+        // Already-unique and empty inputs are unchanged.
+        let mut unique = vec![Topology::Relay, Topology::Mesh, Topology::Host];
+        dedup_preserving_order(&mut unique);
+        assert_eq!(
+            unique,
+            vec![Topology::Relay, Topology::Mesh, Topology::Host]
+        );
+
+        let mut empty: Vec<Transport> = Vec::new();
+        dedup_preserving_order(&mut empty);
+        assert!(empty.is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]

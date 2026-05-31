@@ -19,6 +19,10 @@ ADRs are immutable once accepted. If a decision needs to be changed, a new ADR s
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-001](reconnection-protocol.md) | Reconnection Protocol | Accepted |
+| [ADR-0001](0001-protocol-v3-two-axis.md) | Protocol v3: Two-Axis (Topology + Transport) Capability-Gated Signaling | Accepted |
+| [ADR-0002](0002-matchbox-compatibility.md) | Matchbox-Compatible Signal Payloads | Accepted |
+
+> Numbering note: the legacy `ADR-001` (3-digit) predates the current `ADR-0001` 4-digit scheme. New ADRs use the 4-digit `ADR-NNNN` form; the legacy ID is preserved as-is to keep existing links stable.
 
 ## Related Resources
 

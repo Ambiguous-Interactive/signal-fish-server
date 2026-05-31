@@ -134,15 +134,30 @@ pub(super) async fn send_text_message(
     Ok(())
 }
 
+/// The exact struct serialized onto the wire for binary game-data frames.
+///
+/// IMPORTANT: binary frames do NOT travel through the `ServerMessage` enum's
+/// `{type, data}` envelope. The `ServerMessage::GameDataBinary` variant is only
+/// an *in-memory* carrier used to route the payload through the broadcast layer;
+/// `send_single_message` intercepts it and instead serializes this bare struct
+/// via `rmp_serde::to_vec_named` (see `encode_binary_game_data`). The map keys
+/// are therefore `from_player`/`encoding`/`payload` with NO `type`/`data`
+/// wrapper. Golden wire tests must freeze the bytes produced from this struct,
+/// not the enum variant.
 #[derive(Serialize)]
-struct BinaryGameDataFrame<'a> {
-    from_player: PlayerId,
-    encoding: GameDataEncoding,
+pub struct BinaryGameDataFrame<'a> {
+    pub from_player: PlayerId,
+    pub encoding: GameDataEncoding,
     #[serde(with = "serde_bytes")]
-    payload: &'a [u8],
+    pub payload: &'a [u8],
 }
 
-fn encode_binary_game_data(
+/// Encodes a binary game-data frame exactly as production puts it on the wire.
+///
+/// This is the single source of truth for the binary send path and is exposed
+/// (via [`crate::websocket::encode_binary_game_data`]) so integration golden
+/// tests can freeze the real wire bytes rather than the in-memory enum form.
+pub fn encode_binary_game_data(
     from_player: PlayerId,
     encoding: GameDataEncoding,
     payload: &[u8],

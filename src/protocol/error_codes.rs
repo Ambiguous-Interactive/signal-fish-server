@@ -64,6 +64,15 @@ pub enum ErrorCode {
     InternalError,
     StorageError,
     ServiceUnavailable,
+
+    // Signaling errors (8xxx) — appended last to preserve rkyv discriminant
+    // stability of pre-existing variants. rkyv encodes enum discriminants
+    // positionally, so new variants must be added at the END of the enum;
+    // serde tokens are name-based (SCREAMING_SNAKE_CASE) and order-independent.
+    CrossRoomSignal,
+    UnsupportedTransport,
+    SignalTargetNotFound,
+    SignalRateLimited,
 }
 
 impl ErrorCode {
@@ -198,6 +207,20 @@ impl ErrorCode {
                 "Failed to join as a spectator. The room may be full or spectating may be disabled."
             }
 
+            // Signaling errors (8xxx)
+            Self::CrossRoomSignal => {
+                "Cannot signal a peer in a different room. WebRTC signaling is restricted to peers within the same room."
+            }
+            Self::UnsupportedTransport => {
+                "Signaling requires the WebRTC transport, which was not negotiated for this connection. Re-authenticate advertising WebRTC support."
+            }
+            Self::SignalTargetNotFound => {
+                "The signal target peer could not be found in your room, or does not support WebRTC. Verify the peer id and that the peer is connected."
+            }
+            Self::SignalRateLimited => {
+                "Too many signaling messages in a short time. Please slow down trickle-ICE and try again shortly."
+            }
+
             // Server errors (9xxx)
             Self::InternalError => {
                 "An internal server error occurred. Please try again or contact support if the issue persists."
@@ -266,6 +289,10 @@ mod tests {
             ErrorCode::InternalError,
             ErrorCode::StorageError,
             ErrorCode::ServiceUnavailable,
+            ErrorCode::CrossRoomSignal,
+            ErrorCode::UnsupportedTransport,
+            ErrorCode::SignalTargetNotFound,
+            ErrorCode::SignalRateLimited,
         ];
 
         for error_code in &error_codes {

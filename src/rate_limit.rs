@@ -13,6 +13,8 @@ pub struct RateLimitConfig {
     pub time_window: Duration,
     /// Maximum number of join attempts per time window (including existing rooms)
     pub max_join_attempts: u32,
+    /// Maximum number of WebRTC signaling messages per time window
+    pub max_signals: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -21,6 +23,7 @@ impl Default for RateLimitConfig {
             max_room_creations: 5, // 5 room creations per minute
             time_window: Duration::from_secs(60),
             max_join_attempts: 20, // 20 join attempts per minute
+            max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
         }
     }
 }
@@ -32,6 +35,8 @@ struct RateLimitEntry {
     room_creations: u32,
     /// Number of total join attempts in current window
     join_attempts: u32,
+    /// Number of WebRTC signaling messages in current window
+    signals: u32,
     /// Window start time
     window_start: Instant,
 }
@@ -41,6 +46,7 @@ impl RateLimitEntry {
         Self {
             room_creations: 0,
             join_attempts: 0,
+            signals: 0,
             window_start: Instant::now(),
         }
     }
@@ -50,6 +56,7 @@ impl RateLimitEntry {
         if self.window_start.elapsed() >= config.time_window {
             self.room_creations = 0;
             self.join_attempts = 0;
+            self.signals = 0;
             self.window_start = Instant::now();
         }
     }
@@ -71,6 +78,17 @@ impl RateLimitEntry {
         self.maybe_reset_window(config);
         if self.join_attempts < config.max_join_attempts {
             self.join_attempts += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a signaling message is allowed and increment counter
+    fn try_signal(&mut self, config: &RateLimitConfig) -> bool {
+        self.maybe_reset_window(config);
+        if self.signals < config.max_signals {
+            self.signals += 1;
             true
         } else {
             false
@@ -134,6 +152,23 @@ impl RoomRateLimiter {
         }
     }
 
+    /// Check if a WebRTC signaling message is allowed for the given player
+    pub async fn check_signal(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
+
+        if entry.try_signal(&self.config) {
+            Ok(())
+        } else {
+            let reset_time = entry.time_until_reset(&self.config);
+            Err(RateLimitError::SignalLimitExceeded {
+                retry_after: reset_time,
+            })
+        }
+    }
+
     /// Clean up old entries to prevent memory leaks
     pub async fn cleanup_old_entries(&self) {
         let mut entries = self.entries.write().await;
@@ -162,6 +197,7 @@ impl RoomRateLimiter {
         entries.get(player_id).map(|entry| PlayerRateStats {
             room_creations: entry.room_creations,
             join_attempts: entry.join_attempts,
+            signals: entry.signals,
             time_until_reset: entry.time_until_reset(&self.config),
         })
     }
@@ -172,6 +208,7 @@ impl RoomRateLimiter {
 pub enum RateLimitError {
     RoomCreationLimitExceeded { retry_after: Duration },
     JoinLimitExceeded { retry_after: Duration },
+    SignalLimitExceeded { retry_after: Duration },
 }
 
 impl std::fmt::Display for RateLimitError {
@@ -191,6 +228,13 @@ impl std::fmt::Display for RateLimitError {
                     retry_after.as_secs()
                 )
             }
+            Self::SignalLimitExceeded { retry_after } => {
+                write!(
+                    f,
+                    "Signaling rate limit exceeded. Try again in {} seconds.",
+                    retry_after.as_secs()
+                )
+            }
         }
     }
 }
@@ -202,6 +246,7 @@ impl std::error::Error for RateLimitError {}
 pub struct PlayerRateStats {
     pub room_creations: u32,
     pub join_attempts: u32,
+    pub signals: u32,
     pub time_until_reset: Duration,
 }
 
@@ -214,6 +259,7 @@ mod tests {
             max_room_creations: 2,
             time_window: Duration::from_millis(100),
             max_join_attempts: 3,
+            max_signals: 2,
         }
     }
 
@@ -248,6 +294,53 @@ mod tests {
 
         // Fourth should fail
         assert!(limiter.check_join_attempt(&player_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_signal_rate_limit() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player_id = Uuid::new_v4();
+
+        // First two signals should succeed (max_signals = 2).
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+
+        // Third should fail.
+        assert!(limiter.check_signal(&player_id).await.is_err());
+
+        // Wait for window to reset, then it should work again.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_signal_limit_independent_per_player() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player1 = Uuid::new_v4();
+        let player2 = Uuid::new_v4();
+
+        // Exhaust player1's signal budget.
+        assert!(limiter.check_signal(&player1).await.is_ok());
+        assert!(limiter.check_signal(&player1).await.is_ok());
+        assert!(limiter.check_signal(&player1).await.is_err());
+
+        // player2 is unaffected.
+        assert!(limiter.check_signal(&player2).await.is_ok());
+        assert!(limiter.check_signal(&player2).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_signal_limit_independent_of_join_budget() {
+        // Signals do not consume the join/creation budget and vice versa.
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player_id = Uuid::new_v4();
+
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal(&player_id).await.is_err());
+
+        // Join budget is untouched.
+        assert!(limiter.check_join_attempt(&player_id).await.is_ok());
     }
 
     #[tokio::test]
@@ -288,6 +381,7 @@ mod tests {
             max_room_creations: 1,
             time_window: Duration::from_millis(50),
             max_join_attempts: 1,
+            max_signals: 1,
         };
         let limiter = RoomRateLimiter::new(config);
         let player_id = Uuid::new_v4();
@@ -319,9 +413,11 @@ mod tests {
         // After some activity, stats should be available
         let _ = limiter.check_room_creation(&player_id).await;
         let _ = limiter.check_join_attempt(&player_id).await;
+        let _ = limiter.check_signal(&player_id).await;
 
         let stats = limiter.get_player_stats(&player_id).await.unwrap();
         assert_eq!(stats.room_creations, 1);
         assert_eq!(stats.join_attempts, 2); // Room creation counts as join attempt too
+        assert_eq!(stats.signals, 1);
     }
 }

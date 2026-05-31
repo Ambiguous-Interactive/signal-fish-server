@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
             max_room_creations: cfg.rate_limit.max_room_creations,
             time_window: tokio::time::Duration::from_secs(cfg.rate_limit.time_window),
             max_join_attempts: cfg.rate_limit.max_join_attempts,
+            max_signals: cfg.rate_limit.max_signals,
         },
         empty_room_timeout: tokio::time::Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: tokio::time::Duration::from_secs(cfg.server.inactive_room_timeout),
@@ -203,11 +204,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Complete the router
+    // Complete the router.
+    //
+    // PATH NESTING: the enhanced protocol router (`/ws`, `/health`, ...) is
+    // nested under `/v2`, so its WebSocket entry point is `/v2/ws`. The `/v3/ws`
+    // alias is mounted directly at the top level and shares the SAME connection
+    // handler, differing only in the fallback protocol version (3 vs 2) applied
+    // when the client omits `Authenticate.protocol_version`. `/v2/ws` behavior is
+    // byte-for-byte unchanged.
     let combined_router = combined_router
         .nest("/v2", enhanced_router) // Enhanced protocol under /v2
+        .route("/v3/ws", get(websocket::websocket_handler_v3)) // v3 alias, shared handler
         .fallback(|| async {
-            "Signal Fish Server. Use /v2/ws for WebSocket protocol, /v1/metrics for metrics, /metrics/prom for Prometheus."
+            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v1/metrics for metrics, /metrics/prom for Prometheus."
         })
         .layer(middleware::from_fn(capture_client_fingerprint))
         .with_state(game_server)

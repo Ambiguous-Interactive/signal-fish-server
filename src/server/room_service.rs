@@ -222,6 +222,13 @@ impl EnhancedGameServer {
                     )
                     .await;
 
+                // Additively notify v3 WebRTC peers so the joiner and each
+                // existing peer establish exactly one offerer (PLAN §P2,
+                // Appendix E). Purely additive: gated to v3 + WebRTC peers, so
+                // v2 message ordering and bytes are untouched.
+                self.handle_webrtc_late_join(player_id, &current_players)
+                    .await;
+
                 // Check if room should transition to lobby state
                 if room.should_enter_lobby() {
                     if let Err(e) = self

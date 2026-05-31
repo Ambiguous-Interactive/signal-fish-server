@@ -16,14 +16,17 @@
   "rate_limit": {
     "max_room_creations": 5,
     "time_window": 60,
-    "max_join_attempts": 20
+    "max_join_attempts": 20,
+    "max_signals": 600
   },
   "protocol": {
     "max_game_name_length": 64,
     "room_code_length": 6,
     "max_player_name_length": 32,
     "max_players_limit": 100,
-    "enable_message_pack_game_data": true
+    "enable_message_pack_game_data": true,
+    "min_protocol_version": 2,
+    "max_protocol_version": 3
   },
   "logging": {
     "dir": "logs",
