@@ -6,6 +6,11 @@
         "dockerfile": "Dockerfile",
         "context": ".."
     },
+    "features": {
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "lts"
+        }
+    },
     // Forwarded ports
     "forwardPorts": [
         3536
