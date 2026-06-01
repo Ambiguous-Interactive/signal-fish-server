@@ -84,17 +84,78 @@ if [ ${#FILES[@]} -gt 0 ]; then
     TO_CHECK=("${FILES[@]}")
 elif [ "$MODE" = "all" ]; then
     echo "Checking all markdown files..."
-    mapfile -t TO_CHECK < <(find . -type f -name "*.md" \
-        -not -path "./target/*" \
-        -not -path "./third_party/*" \
-        -not -path "./.git/*" \
-        -not -path "./node_modules/*")
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        while IFS= read -r -d '' markdown_file; do
+            case "$markdown_file" in
+                target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*)
+                    continue
+                    ;;
+            esac
+            TO_CHECK+=("$markdown_file")
+        done < <(git ls-files -z -- '*.md')
+    else
+        while IFS= read -r -d '' markdown_file; do
+            TO_CHECK+=("$markdown_file")
+        done < <(find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" \
+            -not -path "./node_modules/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" \
+            -print0)
+    fi
 elif [ "$MODE" = "staged" ]; then
     echo "Checking staged markdown files..."
-    mapfile -t TO_CHECK < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' || true)
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: --staged requires a Git worktree${NC}"
+        exit 2
+    fi
+    while IFS= read -r -d '' markdown_file; do
+        TO_CHECK+=("$markdown_file")
+    done < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.md')
 else
     echo "Checking modified markdown files..."
-    mapfile -t TO_CHECK < <(git status --porcelain | grep -E '\.md$' | awk '{print $2}' || true)
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        while IFS= read -r -d '' markdown_file; do
+            TO_CHECK+=("$markdown_file")
+        done < <(find . -type f -name "*.md" \
+            -not -path "./target/*" \
+            -not -path "./third_party/*" \
+            -not -path "./.git/*" \
+            -not -path "./node_modules/*" \
+            -not -path "./.github/test-fixtures/*" \
+            -not -path "./test-fixtures/*" \
+            -print0)
+    else
+        STATUS_ENTRIES=()
+        mapfile -d '' STATUS_ENTRIES < <(git status --porcelain=v1 -z -- '*.md')
+        index=0
+        while [ "$index" -lt "${#STATUS_ENTRIES[@]}" ]; do
+            entry="${STATUS_ENTRIES[$index]}"
+            index=$((index + 1))
+
+            [ "${#entry}" -ge 4 ] || continue
+            status="${entry:0:2}"
+            markdown_file="${entry:3}"
+
+            case "$markdown_file" in
+                target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*)
+                    ;;
+                *)
+                    if [ -f "$markdown_file" ]; then
+                        TO_CHECK+=("$markdown_file")
+                    fi
+                    ;;
+            esac
+
+            # In porcelain v1 -z output, rename/copy entries are followed by
+            # the original path as a second NUL-delimited record.
+            if [[ "$status" == R* || "$status" == C* || "$status" == ?R || "$status" == ?C ]]; then
+                index=$((index + 1))
+            fi
+        done
+    fi
 fi
 
 # Check if there are any files to check
@@ -104,6 +165,21 @@ if [ ${#TO_CHECK[@]} -eq 0 ]; then
 fi
 
 echo "Files to check: ${#TO_CHECK[@]}"
+echo ""
+
+echo "Checking internal links and tracked targets..."
+if ! ./scripts/check-internal-links.sh --quiet "${TO_CHECK[@]}"; then
+    echo ""
+    echo -e "${RED}✗ Internal link check failed${NC}"
+    echo ""
+    echo "Fix broken links and try again."
+    echo "Common issues:"
+    echo "  - Relative link points to a non-existent file"
+    echo "  - Link target exists locally but is not tracked by git"
+    echo "  - Typo in filename or path"
+    exit 1
+fi
+echo -e "${GREEN}✓ Internal links are valid${NC}"
 echo ""
 
 # Create temporary file for lychee input

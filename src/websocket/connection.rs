@@ -56,14 +56,13 @@ fn negotiate_capabilities(
 /// quadratic scan is trivially cheap and keeps the relative ordering the client
 /// advertised (which conveys preference for the P3 selection logic).
 fn dedup_preserving_order<T: PartialEq>(items: &mut Vec<T>) {
-    let mut index = 0;
-    while index < items.len() {
-        if items[..index].contains(&items[index]) {
-            items.remove(index);
-        } else {
-            index += 1;
+    let mut unique = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if !unique.contains(&item) {
+            unique.push(item);
         }
     }
+    *items = unique;
 }
 
 // `default_protocol_version` is the fallback used when the client omits

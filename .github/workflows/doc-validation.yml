@@ -32,6 +32,7 @@ on:
       - '**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'scripts/check-internal-links.sh'
       - '.github/workflows/doc-validation.yml'
       - '.github/scripts/**'
   pull_request:
@@ -41,6 +42,7 @@ on:
       - '**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'scripts/check-internal-links.sh'
       - '.github/workflows/doc-validation.yml'
       - '.github/scripts/**'
 
@@ -54,6 +56,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  TAPLO_CLI_VERSION: 0.10.0
+  YQ_VERSION: v4.53.2
   # Enforce strict rustdoc validation
   RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
 
@@ -484,7 +488,7 @@ jobs:
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           # Install yq for YAML validation
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
           sudo chmod +x /usr/local/bin/yq
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
@@ -577,7 +581,7 @@ jobs:
           echo "Validating TOML code blocks..."
 
           # Install taplo for TOML validation
-          cargo install taplo-cli --locked
+          cargo install taplo-cli --version "$TAPLO_CLI_VERSION" --locked
 
           # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
@@ -818,117 +822,7 @@ jobs:
 
       # Fallback: Custom internal link validator (more detailed errors)
       - name: Check internal markdown links
-        run: |
-          set -euo pipefail
-
-          echo "Checking for broken internal links in documentation..."
-
-          # Constants - use UPPERCASE for cross-script values
-          TEMP_DIR=$(mktemp -d)
-          trap 'rm -rf "$TEMP_DIR"' EXIT
-
-          BROKEN_LINKS_FILE="$TEMP_DIR/broken_links"
-          # Counter file format: single integer (count of broken links)
-          echo "0" > "$BROKEN_LINKS_FILE"
-
-          find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
-
-            # Local variable - use lowercase
-            [ -f "$md_file" ] || continue
-
-            echo "Checking links in: $md_file"
-
-            # Extract markdown links [text](url), skipping fenced code blocks and inline code.
-            # AWK toggles in_fence on ``` lines so example links inside fences are ignored.
-            # Inline code spans (`...`) are stripped before matching to avoid false positives
-            # on example links like `[title](path)` in educational documentation.
-            # Empty output is handled gracefully (no links = while loop doesn't execute).
-            (awk '
-              # Fence tracking with proper nesting: record opening fence width,
-              # close only when a line has >= that many backticks followed by
-              # optional whitespace (CommonMark allows trailing spaces/tabs).
-              /^```/ {
-                if (!fence_width) {
-                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
-                  fence_width = n
-                } else {
-                  n = 0; s = $0; while (substr(s,1,1)=="`") { n++; s = substr(s,2) }
-                  if (n >= fence_width && s ~ /^[ \t]*$/) fence_width = 0
-                }
-                next
-              }
-              !fence_width {
-                line = $0
-                gsub(/`[^`]+`/, "", line)
-                while (match(line, /\[([^]]+)\]\(([^)]+)\)/)) {
-                  print substr(line, RSTART, RLENGTH)
-                  line = substr(line, RSTART + RLENGTH)
-                }
-              }
-            ' "$md_file") | while read -r link; do
-              # Local variables - use lowercase
-              # Extract the URL part
-              url=$(echo "$link" | sed -E 's/.*\(([^)]+)\).*/\1/')
-
-              # Skip external URLs (http/https)
-              if [[ "$url" =~ ^https?:// ]]; then
-                continue
-              fi
-
-              # Skip anchors-only links (will be checked by anchor validator if implemented)
-              if [[ "$url" =~ ^# ]]; then
-                continue
-              fi
-
-              # Separate file path from anchor
-              file_part="${url%%#*}"
-              # TODO: Extract and validate anchor_part="${url#*#}"
-              # Implementation approach: Parse target markdown for headings, convert to anchor format
-              # (lowercase, replace spaces with hyphens, remove special chars), then verify match.
-              # Priority: Low - lychee already validates anchors for most cases.
-
-              # Skip empty paths (anchor-only after removal)
-              if [ -z "$file_part" ]; then
-                continue
-              fi
-
-              # Resolve relative path
-              base_dir=$(dirname "$md_file")
-              full_path="$base_dir/$file_part"
-
-              # Normalize path (resolve .. and .)
-              full_path=$(realpath -m "$full_path")
-
-              # Check if file exists
-              if [ ! -f "$full_path" ] && [ ! -d "$full_path" ]; then
-                echo "  ✗ Broken link in $md_file: $url (resolved to $full_path)"
-                read -r broken < "$BROKEN_LINKS_FILE"
-                echo "$((broken + 1))" > "$BROKEN_LINKS_FILE"
-              fi
-
-              # TODO: Validate anchor exists in target file
-              # Implementation approach: Extract heading from target file, normalize to anchor ID
-              # (GitHub format: lowercase, spaces to hyphens, strip special chars except hyphens/underscores),
-              # then compare with anchor_part from URL.
-              # Priority: Low - lychee action above already handles most anchor validation.
-            done
-          done
-
-          read -r broken_links < "$BROKEN_LINKS_FILE"
-
-          # Exit with error code 1 if any broken links were found
-          if [ "$broken_links" -gt 0 ]; then
-            echo ""
-            echo "Found $broken_links broken internal link(s)"
-            exit 1  # Non-zero exit code indicates failure
-          fi
-
-          echo "All internal links valid ✓"
+        run: ./scripts/check-internal-links.sh --all
 
   # Validate inline code references match actual code (future enhancement)
   # This would check that references like `ServerConfig` actually exist in the codebase

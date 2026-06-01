@@ -160,7 +160,7 @@ clean fallback.
 
 ## References
 
-- [Protocol v3 Plan](../../PLAN.md) - Sections 0, 1, 2; Appendices A, B, D, E
+- Internal protocol v3 implementation plan - Sections 0, 1, 2; Appendices A, B, D, E
 - [Matchbox Compatibility (ADR-0002)](0002-matchbox-compatibility.md)
 - [Reconnection Protocol (ADR-001)](reconnection-protocol.md)
 - Golden v2 wire freeze: `tests/v2_wire_golden.rs`

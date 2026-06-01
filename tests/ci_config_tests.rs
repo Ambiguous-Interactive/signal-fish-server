@@ -1013,35 +1013,33 @@ fn test_msrv_version_normalization_logic() {
 
 #[test]
 fn test_ci_workflow_msrv_normalization() {
-    // This test validates that the CI workflow's MSRV verification logic
-    // correctly normalizes versions before comparison.
-    //
-    // It simulates the exact bash commands used in .github/workflows/ci.yml
-    // to ensure they produce the expected results.
+    // The CI workflow should call the standalone script instead of duplicating
+    // MSRV comparison logic inline. The script owns Docker major.minor
+    // normalization and has dedicated local tests.
 
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
     let content = read_file(&ci_workflow);
+    let script_content = read_file(&root.join("scripts/check-msrv-consistency.sh"));
 
-    // Verify that the CI workflow contains the normalization logic
     assert!(
-        content.contains("MSRV_SHORT=$(echo \"$MSRV\" | sed -E 's/([0-9]+\\.[0-9]+).*/\\1/')"),
-        "CI workflow must normalize MSRV to major.minor format for Dockerfile comparison.\n\
-         This prevents false failures when comparing 1.88.0 (Cargo.toml) to 1.88 (Dockerfile)."
+        content.contains("./scripts/check-msrv-consistency.sh"),
+        "CI workflow must run scripts/check-msrv-consistency.sh for MSRV consistency.\n\
+         Keeping the logic in one script prevents local/CI drift."
     );
 
-    // Verify the comparison uses the normalized version
     assert!(
-        content.contains("if [ \"$DOCKERFILE_RUST\" != \"$MSRV_SHORT\" ]"),
-        "CI workflow must compare Dockerfile version against normalized MSRV_SHORT, not full MSRV.\n\
-         Using full MSRV causes spurious failures (1.88 != 1.88.0)."
+        script_content
+            .contains("MSRV_SHORT=$(echo \"$MSRV\" | sed -E 's/([0-9]+\\.[0-9]+).*/\\1/')"),
+        "scripts/check-msrv-consistency.sh must normalize MSRV to major.minor \
+         format for Dockerfile comparison. This prevents false failures when \
+         comparing 1.88.0 (Cargo.toml) to 1.88 (Dockerfile)."
     );
 
-    // Verify there's a comment explaining the normalization
     assert!(
-        content.contains("Normalize MSRV to major.minor")
-            || content.contains("handles both 1.88 and 1.88.0 formats"),
-        "CI workflow should document why version normalization is needed"
+        script_content.contains("check_file \"Dockerfile\" \"$MSRV_SHORT\" \"$DOCKERFILE_RUST\""),
+        "scripts/check-msrv-consistency.sh must compare Dockerfile version \
+         against normalized MSRV_SHORT, not full MSRV."
     );
 }
 
@@ -1067,7 +1065,8 @@ fn test_msrv_script_consistency_with_ci() {
     let script_content = read_file(&script);
     let ci_content = read_file(&ci_workflow);
 
-    // Both should normalize MSRV to major.minor for Dockerfile comparison
+    // The script should normalize MSRV to major.minor for Dockerfile comparison,
+    // and CI should call that script instead of maintaining duplicate logic.
     let normalization_pattern = "sed -E 's/([0-9]+\\.[0-9]+).*/\\1/'";
 
     assert!(
@@ -1076,19 +1075,14 @@ fn test_msrv_script_consistency_with_ci() {
     );
 
     assert!(
-        ci_content.contains(normalization_pattern),
-        "CI workflow must normalize MSRV version (found in ci.yml)"
-    );
-
-    // Verify both use MSRV_SHORT variable for comparison
-    assert!(
         script_content.contains("MSRV_SHORT"),
         "Local script should use MSRV_SHORT variable for normalized version"
     );
 
     assert!(
-        ci_content.contains("MSRV_SHORT"),
-        "CI workflow should use MSRV_SHORT variable for normalized version"
+        ci_content.contains("./scripts/check-msrv-consistency.sh"),
+        "CI workflow should call scripts/check-msrv-consistency.sh so MSRV \
+         consistency logic has a single source of truth."
     );
 }
 
@@ -2464,6 +2458,15 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
         content.contains("./scripts/check-markdown-link-text.sh"),
         "check-markdown.sh must enforce human-readable internal markdown link text via scripts/check-markdown-link-text.sh.\n\
          Missing link-text policy enforcement in {}",
+        script.display()
+    );
+
+    assert!(
+        content.contains("git ls-files -z -- '*.md'"),
+        "check-markdown.sh must lint tracked Markdown files from git when \
+         available. This keeps local runs aligned with clean CI checkouts and \
+         avoids ignored planning artifacts causing false failures.\n\
+         Missing tracked-file discovery in {}",
         script.display()
     );
 }
@@ -3873,6 +3876,8 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
     let mut files = Vec::new();
 
     fn visit_dirs(dir: &Path, extension: &str, exclude_dirs: &[&str], files: &mut Vec<PathBuf>) {
+        const ALWAYS_EXCLUDED_DIRS: &[&str] = &[".git", "node_modules"];
+
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -3880,7 +3885,9 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
                 // Skip excluded directories
                 if path.is_dir() {
                     let dir_name = path.file_name().unwrap().to_string_lossy();
-                    if exclude_dirs.iter().any(|&excl| dir_name == excl) {
+                    if ALWAYS_EXCLUDED_DIRS.iter().any(|&excl| dir_name == excl)
+                        || exclude_dirs.iter().any(|&excl| dir_name == excl)
+                    {
                         continue;
                     }
                     visit_dirs(&path, extension, exclude_dirs, files);
@@ -5698,6 +5705,7 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
     );
 
     let content = read_file(&workflow);
+    let script_content = read_file(&root.join("scripts/check-markdown.sh"));
 
     // Verify workflow uses markdownlint-cli2-action
     assert!(
@@ -5710,8 +5718,10 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
     let excluded_dirs = vec!["target", "third_party", "node_modules"];
     for dir in excluded_dirs {
         assert!(
-            content.contains(dir),
-            "markdownlint.yml should exclude {dir} directory"
+            script_content.contains(dir),
+            "scripts/check-markdown.sh should exclude {dir} directory.\n\
+             markdownlint.yml delegates to this pinned local script so CI and \
+             local linting use the same exclusions."
         );
     }
 
@@ -6065,9 +6075,9 @@ fn test_docs_relative_links_to_llm_use_parent_prefix() {
 
 #[test]
 fn test_docs_relative_links_resolve_to_existing_files() {
-    // This test validates that all relative links in docs/ actually point
-    // to files that exist in the repository. Catches broken links early
-    // before they reach CI link checking.
+    // Keep this test delegated to the same checker CI uses. Duplicating
+    // Markdown parsing here has caused false positives for valid link syntax
+    // such as titles and parentheses in destinations.
 
     let root = repo_root();
     let docs_dir = root.join("docs");
@@ -6076,82 +6086,295 @@ fn test_docs_relative_links_resolve_to_existing_files() {
         return;
     }
 
-    let mut broken_links = Vec::new();
+    let output = Command::new("bash")
+        .args(["scripts/check-internal-links.sh", "--docs-only", "--quiet"])
+        .current_dir(&root)
+        .output()
+        .expect("failed to run scripts/check-internal-links.sh");
 
-    let docs_files = find_files_with_extension(&docs_dir, "md", &["target", "third_party"]);
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
 
-    for file in &docs_files {
-        let content = read_file(file);
-        let relative_path = file.strip_prefix(&root).unwrap_or(file);
-        let file_dir = file.parent().unwrap_or(&root);
-
-        for (line_num, _text, url) in extract_markdown_links(&content) {
-            // Skip external URLs and anchors
-            if url.starts_with("http://")
-                || url.starts_with("https://")
-                || url.starts_with("mailto:")
-                || url.starts_with('#')
-            {
-                continue;
-            }
-
-            // Strip anchor portion for file existence check
-            let file_part = url.split('#').next().unwrap_or(&url);
-            if file_part.is_empty() {
-                continue;
-            }
-
-            // Resolve the path relative to the markdown file's directory
-            let resolved = file_dir.join(file_part);
-
-            // Canonicalize to resolve .. and . components, then check existence
-            // Use the resolved path's existence as the check
-            if !resolved.exists() {
-                // Try canonicalizing parent to handle .. components
-                let normalized = normalize_path(&resolved);
-                if !normalized.exists() {
-                    broken_links.push(format!(
-                        "{}:{}: Link '{}' -> file not found (resolved to {})",
-                        relative_path.display(),
-                        line_num,
-                        url,
-                        normalized.display()
-                    ));
-                }
-            }
-        }
-    }
-
-    if !broken_links.is_empty() {
-        panic!(
-            "Broken relative links found in docs/ markdown files:\n\n{}\n\n\
-             Fix: Update the link paths to point to existing files.\n\
+    assert!(
+        output.status.success(),
+        "Broken relative links found in docs/ markdown files:\n\n{combined}\n\n\
+             Fix: Update the link paths to point to existing tracked files.\n\
              Common issues:\n\
              - Missing ../ prefix for links to parent directories\n\
              - Typo in filename or directory name\n\
-             - File was moved or renamed\n\n\
-             Verify: ./scripts/validate-ci.sh --links",
-            broken_links.join("\n")
-        );
-    }
+             - File was moved, renamed, or left uncommitted\n\n\
+             Verify: ./scripts/validate-ci.sh --links"
+    );
 }
 
-/// Normalize a path by resolving `.` and `..` components without requiring
-/// the path to exist on disk (unlike `canonicalize()`).
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                components.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => {
-                components.push(other);
-            }
+#[test]
+fn test_internal_link_validators_check_tracked_targets() {
+    let root = repo_root();
+    let script_content = read_file(&root.join("scripts/check-internal-links.sh"));
+    let fast_link_content = read_file(&root.join("scripts/check-links-fast.sh"));
+    let validate_ci_content = read_file(&root.join("scripts/validate-ci.sh"));
+    let doc_validation_content = read_file(&root.join(".github/workflows/doc-validation.yml"));
+
+    assert!(
+        script_content.contains("git ls-files"),
+        "scripts/check-internal-links.sh must verify that local link targets are tracked by git.\n\
+         This prevents links from passing locally because an untracked file exists while \
+         failing in CI after a clean checkout."
+    );
+
+    assert!(
+        script_content.contains("declare -A TRACKED_FILE_SET")
+            && script_content.contains("load_tracked_paths"),
+        "scripts/check-internal-links.sh must preload tracked Git paths once \
+         instead of spawning `git ls-files` for every link target. This keeps \
+         all-file validation fast enough for CI."
+    );
+
+    assert!(
+        script_content.contains("git ls-files -z -- '*.md'"),
+        "scripts/check-internal-links.sh --all should discover tracked Markdown \
+         files from git instead of scanning ignored local artifacts. CI checks \
+         tracked files only, while explicit file arguments still allow local \
+         one-off validation."
+    );
+
+    assert!(
+        script_content.contains("target resolves outside the repository"),
+        "scripts/check-internal-links.sh must reject relative links that escape \
+         the repository, even when the target exists on the local filesystem."
+    );
+
+    assert!(
+        fast_link_content.contains("git ls-files -z -- '*.md'")
+            && fast_link_content.contains("git diff --cached --name-only -z")
+            && fast_link_content.contains("git status --porcelain=v1 -z"),
+        "scripts/check-links-fast.sh must use Git's null-delimited file lists \
+         for --all, --staged, and modified-file discovery. This avoids ignored \
+         local artifacts and handles paths with spaces."
+    );
+
+    assert!(
+        validate_ci_content.contains("./scripts/check-internal-links.sh --docs-only --quiet"),
+        "scripts/validate-ci.sh --links must delegate to scripts/check-internal-links.sh.\n\
+         Local validation should use the same tracked-target diagnostics as CI."
+    );
+
+    assert!(
+        doc_validation_content.contains("./scripts/check-internal-links.sh --all"),
+        "doc-validation.yml must run scripts/check-internal-links.sh for detailed \
+         file:line diagnostics and tracked-target checks."
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_internal_link_checker_handles_common_markdown_inline_link_forms() {
+    let root = repo_root();
+    let temp_root = root.join("target").join("test-temp");
+    fs::create_dir_all(&temp_root)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", temp_root.display()));
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("internal-link-parser-")
+        .tempdir_in(&temp_root)
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to create temp link parser dir in {}: {e}",
+                temp_root.display()
+            )
+        });
+
+    for target in [
+        "plain.md",
+        "title.md",
+        "target-(one).md",
+        "escaped).md",
+        "space target.md",
+        "developer's-guide.md",
+    ] {
+        fs::write(temp_dir.path().join(target), "# Target\n")
+            .unwrap_or_else(|e| panic!("failed to write temp target {target}: {e}"));
+    }
+
+    let markdown_path = temp_dir.path().join("links.md");
+    fs::write(
+        &markdown_path,
+        concat!(
+            "[Plain](plain.md)\n",
+            "[With title](title.md \"Title text\")\n",
+            "[With single-quoted title](title.md 'Title text')\n",
+            "[ADR (0001)](plain.md)\n",
+            "[Paren destination](target-(one).md)\n",
+            "[Escaped destination](escaped\\).md)\n",
+            "[Angle destination](<space target.md>)\n",
+            "[Apostrophe destination](developer's-guide.md)\n",
+            "[Anchor with title](title.md#section \"Section\")\n",
+            "`[Ignored](missing.md)`\n",
+        ),
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "failed to write temp markdown {}: {e}",
+            markdown_path.display()
+        )
+    });
+
+    let output = Command::new("bash")
+        .args([
+            "scripts/check-internal-links.sh",
+            "--no-git-tracked-check",
+            "--quiet",
+        ])
+        .arg(&markdown_path)
+        .current_dir(&root)
+        .output()
+        .expect("failed to run scripts/check-internal-links.sh");
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "scripts/check-internal-links.sh must parse common inline Markdown \
+         link forms: parentheses in visible text, parentheses in destinations, \
+         escaped destination parentheses, angle-bracket destinations with spaces, \
+         apostrophes in destinations, and optional link titles.\n\n\
+         Output:\n{combined}"
+    );
+
+    let missing_markdown_path = temp_dir.path().join("missing-apostrophe-target.md");
+    fs::write(
+        &missing_markdown_path,
+        "[Missing apostrophe destination](missing-developer's-guide.md)\n",
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "failed to write temp markdown {}: {e}",
+            missing_markdown_path.display()
+        )
+    });
+
+    let output = Command::new("bash")
+        .args([
+            "scripts/check-internal-links.sh",
+            "--no-git-tracked-check",
+            "--quiet",
+        ])
+        .arg(&missing_markdown_path)
+        .current_dir(&root)
+        .output()
+        .expect("failed to run scripts/check-internal-links.sh");
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        !output.status.success()
+            && combined.contains("missing-developer's-guide.md")
+            && combined.contains("file not found"),
+        "scripts/check-internal-links.sh must parse apostrophes as part of \
+         destinations so missing apostrophe-containing targets are reported.\n\n\
+         Output:\n{combined}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_internal_link_checker_rejects_repo_escaping_relative_links() {
+    let root = repo_root();
+    let temp_root = root.join("target").join("test-temp");
+    fs::create_dir_all(&temp_root)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", temp_root.display()));
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("internal-link-escape-")
+        .tempdir_in(&temp_root)
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to create temp link escape dir in {}: {e}",
+                temp_root.display()
+            )
+        });
+
+    let outside_file = tempfile::Builder::new()
+        .prefix("signal-fish-outside-link-target-")
+        .suffix(".md")
+        .tempfile()
+        .expect("failed to create outside-repo temp file");
+    fs::write(outside_file.path(), "# Outside repo\n")
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", outside_file.path().display()));
+
+    let markdown_path = temp_dir.path().join("links.md");
+    let escaping_link = relative_path_between(
+        &fs::canonicalize(temp_dir.path())
+            .unwrap_or_else(|e| panic!("failed to canonicalize temp dir: {e}")),
+        &fs::canonicalize(outside_file.path())
+            .unwrap_or_else(|e| panic!("failed to canonicalize outside file: {e}")),
+    );
+    fs::write(
+        &markdown_path,
+        format!("[Escapes repository]({})\n", escaping_link.display()),
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "failed to write temp markdown {}: {e}",
+            markdown_path.display()
+        )
+    });
+
+    let output = Command::new("bash")
+        .args(["scripts/check-internal-links.sh", "--quiet"])
+        .arg(&markdown_path)
+        .current_dir(&root)
+        .output()
+        .expect("failed to run scripts/check-internal-links.sh");
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        !output.status.success()
+            && combined.contains("target resolves outside the repository")
+            && combined.contains(
+                outside_file
+                    .path()
+                    .file_name()
+                    .expect("outside temp file should have a name")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+        "scripts/check-internal-links.sh must reject relative links that escape \
+         the repository even when the target exists locally.\n\n\
+         Output:\n{combined}"
+    );
+}
+
+#[cfg(unix)]
+fn relative_path_between(from_dir: &Path, to_path: &Path) -> PathBuf {
+    let from_components: Vec<_> = from_dir.components().collect();
+    let to_components: Vec<_> = to_path.components().collect();
+    let mut common_len = 0;
+
+    while common_len < from_components.len()
+        && common_len < to_components.len()
+        && from_components[common_len] == to_components[common_len]
+    {
+        common_len += 1;
+    }
+
+    let mut relative = PathBuf::new();
+
+    for component in &from_components[common_len..] {
+        if matches!(component, std::path::Component::Normal(_)) {
+            relative.push("..");
         }
     }
-    components.iter().collect()
+
+    for component in &to_components[common_len..] {
+        relative.push(component.as_os_str());
+    }
+
+    relative
 }
 
 #[test]
@@ -7863,6 +8086,39 @@ fn test_ci_safety_workflow_has_required_triggers() {
 }
 
 #[test]
+fn test_ci_safety_pr_triggers_are_code_scoped() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for required_path in ["src/**", "tests/**", "build.rs", "Cargo.toml", "Cargo.lock"] {
+        assert!(
+            content.contains(required_path),
+            "ci-safety.yml push/pull_request path filters must include `{required_path}`.\n\
+             Heavy Miri/ASan analysis should run for code and dependency changes, \
+             but not for docs-only changes where failures would be misclassified and slow.\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_runs_miri_compat_preflight() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    assert!(
+        content.contains("./scripts/check-miri-compat.sh"),
+        "ci-safety.yml should run scripts/check-miri-compat.sh before the slow \
+         Miri interpreter step so incompatible tests fail fast with local \
+         remediation guidance.\nFile: {}",
+        workflow_path.display()
+    );
+}
+
+#[test]
 fn test_ci_safety_workflow_uploads_artifacts() {
     // Validates that both safety jobs upload their output as artifacts.
     // Artifacts are critical for diagnosing safety findings even when
@@ -7966,6 +8222,29 @@ fn test_ci_safety_workflow_artifact_uploads_always_run() {
              analysis step fails, making triage impossible.\n\
              To fix: Add 'if: always()' to each upload-artifact step.",
             missing_always.join("\n")
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_failure_diagnostics_include_markers() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for required in [
+        "Diagnose Miri failures",
+        "Diagnose AddressSanitizer failures",
+        "grep -nE \"FAILED|failures:|panicked at|error:",
+        "grep -nE \"AddressSanitizer|SUMMARY: AddressSanitizer|FAILED|failures:|panicked at|error:",
+    ] {
+        assert!(
+            content.contains(required),
+            "ci-safety.yml diagnostics must include `{required}`.\n\
+             Failure markers are needed because --no-fail-fast can push the \
+             original failing test outside a simple tail excerpt.\n\
+             File: {}",
+            workflow_path.display()
         );
     }
 }
@@ -8560,6 +8839,19 @@ fn test_nextest_config_no_retries_by_default() {
 }
 
 #[test]
+fn test_ci_nextest_uses_ci_profile() {
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        ci_content.contains("cargo nextest run --profile ci --locked --all-features"),
+        "ci.yml nextest job must run with `--profile ci`.\n\
+         The repository defines [profile.ci] in .config/nextest.toml; CI should \
+         activate it so timeout/output tuning is not silently ignored."
+    );
+}
+
+#[test]
 fn test_ci_safety_shared_nightly_cache_prefix() {
     // The Miri and ASan jobs in ci-safety.yml should share a cache prefix so
     // that compiled nightly artifacts can be reused between the two jobs,
@@ -8899,6 +9191,22 @@ fn test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks() {
             && content.contains("xargs -0 lychee --offline --quiet --config .lychee.toml"),
         "Pre-commit Check 11 must pass markdown filenames via NUL-delimited git diff + xargs -0.\n\
          This prevents filename splitting bugs when markdown paths contain spaces."
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_ci_runs_awk_validator() {
+    let root = repo_root();
+    let workflow = root.join(".github/workflows/workflow-hygiene.yml");
+    let content = read_file(&workflow);
+
+    assert!(
+        content.contains("scripts/validate-workflow-awk.sh"),
+        "workflow-hygiene.yml must trigger and run scripts/validate-workflow-awk.sh.\n\
+         Local hooks already validate workflow AWK snippets; CI should run the \
+         same fast checker so workflow portability issues cannot bypass local tooling.\n\
+         File: {}",
+        workflow.display()
     );
 }
 
@@ -11141,23 +11449,24 @@ fn test_cargo_deny_check_advisories_passes() {
     );
 }
 
+const OPTIONAL_FEATURE_MATRIX_CASES: &[(&str, &str)] = &[
+    ("TLS support", "tls"),
+    ("Legacy full-mesh compatibility", "legacy-fullmesh"),
+    (
+        "Combined optional feature compatibility",
+        "tls,legacy-fullmesh",
+    ),
+];
+
 #[test]
+#[ignore = "expensive nested Cargo compile matrix; CI runs scripts/check-feature-matrix.sh once instead"]
 fn test_optional_feature_compile_matrix() {
     // Data-driven checks for optional features that are expected to compile in
     // isolation. This prevents regressions from dependency migrations and
     // feature-gating drift.
-    const FEATURE_CASES: &[(&str, &str)] = &[
-        ("TLS support", "tls"),
-        ("Legacy full-mesh compatibility", "legacy-fullmesh"),
-        (
-            "Combined optional feature compatibility",
-            "tls,legacy-fullmesh",
-        ),
-    ];
-
     let mut failures = Vec::new();
 
-    for &(label, feature) in FEATURE_CASES {
+    for &(label, feature) in OPTIONAL_FEATURE_MATRIX_CASES {
         let (success, output) = run_isolated_feature_check(feature);
         if !success {
             failures.push(format!(
@@ -11172,6 +11481,66 @@ fn test_optional_feature_compile_matrix() {
          These checks run in an isolated target directory with sanitizer env
          scrubbed to avoid false positives in ASan/Miri contexts.\n\n{}",
         failures.join("\n\n---\n\n"),
+    );
+}
+
+#[test]
+fn test_optional_feature_matrix_runs_once_in_ci_lint_job() {
+    let root = repo_root();
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let script_path = root.join("scripts/check-feature-matrix.sh");
+
+    assert!(
+        script_path.exists(),
+        "scripts/check-feature-matrix.sh must exist.\n\
+         Optional feature compile validation should live in a standalone script \
+         so it can run once in CI instead of as a nested Cargo build inside every \
+         test runner."
+    );
+
+    let script_content = read_file(&script_path);
+
+    assert!(
+        ci_content.contains("run: ./scripts/check-feature-matrix.sh"),
+        "ci.yml must run scripts/check-feature-matrix.sh.\n\
+         Keeping the feature compile matrix in CI preserves feature-gating coverage \
+         while avoiding repeated nested Cargo builds in nextest, coverage, MSRV, \
+         Miri, and sanitizer jobs."
+    );
+
+    assert!(
+        ci_content.contains("if: matrix.os == 'ubuntu-latest'"),
+        "ci.yml should run the optional feature matrix once on ubuntu-latest.\n\
+         Running it across every OS lane duplicates compile work without adding \
+         meaningful feature-gating coverage."
+    );
+
+    let feature_cases_start = script_content
+        .find("FEATURE_CASES=(")
+        .expect("scripts/check-feature-matrix.sh should define FEATURE_CASES array");
+    let feature_cases_rest = &script_content[feature_cases_start..];
+    let feature_cases_end = feature_cases_rest
+        .find("\n)")
+        .expect("scripts/check-feature-matrix.sh FEATURE_CASES array should close with `)`");
+    let feature_cases_block = &feature_cases_rest[..feature_cases_end];
+
+    let case_regex =
+        Regex::new(r#"(?m)^\s*"([^"|]+)\|([^"]+)"\s*$"#).expect("valid feature case regex");
+    let actual_cases: Vec<(String, String)> = case_regex
+        .captures_iter(feature_cases_block)
+        .map(|captures| (captures[1].to_string(), captures[2].to_string()))
+        .collect();
+    let expected_cases: Vec<(String, String)> = OPTIONAL_FEATURE_MATRIX_CASES
+        .iter()
+        .map(|(label, feature)| ((*label).to_string(), (*feature).to_string()))
+        .collect();
+
+    assert_eq!(
+        actual_cases, expected_cases,
+        "scripts/check-feature-matrix.sh must keep the same data-driven \
+         optional feature coverage as test_optional_feature_compile_matrix. \
+         Update OPTIONAL_FEATURE_MATRIX_CASES and the script together when \
+         adding or removing feature combinations."
     );
 }
 

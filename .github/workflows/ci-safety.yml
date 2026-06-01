@@ -67,8 +67,28 @@ name: Advanced Safety
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci-safety.yml'
+      - 'scripts/check-miri-compat.sh'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci-safety.yml'
+      - 'scripts/check-miri-compat.sh'
   schedule:
     # Weekly on Sunday at 02:00 UTC — heavy analysis jobs
     - cron: "0 2 * * 0"
@@ -97,6 +117,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      - name: Check Miri compatibility annotations
+        run: ./scripts/check-miri-compat.sh
       - name: Install Rust nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -120,6 +142,26 @@ jobs:
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
           cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
+
+      - name: Diagnose Miri failures
+        if: failure()
+        run: |
+          set -euo pipefail
+          echo "=== Miri diagnostic context ==="
+          echo "workflow: ${{ github.workflow }}"
+          echo "job: Miri"
+          echo "ref: ${{ github.ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
+          if [ ! -f miri-output.txt ]; then
+            echo "miri-output.txt is missing"
+            exit 0
+          fi
+          echo "=== miri-output.txt failure markers ==="
+          grep -nE "FAILED|failures:|panicked at|error:|undefined behavior|unsupported operation" \
+            miri-output.txt || true
+          echo "=== miri-output.txt tail -n 200 ==="
+          tail -n 200 miri-output.txt
 
       - name: Upload Miri output
         if: always()
@@ -174,12 +216,15 @@ jobs:
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
           echo "ASAN_OPTIONS: ${ASAN_OPTIONS:-<unset>}"
-          echo "=== asan-output.txt (tail -n 200) ==="
-          if [ -f asan-output.txt ]; then
-            tail -n 200 asan-output.txt
-          else
+          if [ ! -f asan-output.txt ]; then
             echo "asan-output.txt is missing"
+            exit 0
           fi
+          echo "=== asan-output.txt failure markers ==="
+          grep -nE "AddressSanitizer|SUMMARY: AddressSanitizer|FAILED|failures:|panicked at|error:" \
+            asan-output.txt || true
+          echo "=== asan-output.txt tail -n 200 ==="
+          tail -n 200 asan-output.txt
         env:
           ASAN_OPTIONS: "detect_odr_violation=0"
 

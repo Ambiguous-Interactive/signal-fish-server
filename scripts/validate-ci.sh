@@ -267,82 +267,10 @@ validate_markdown_links() {
     CHECKS_RUN=$((CHECKS_RUN + 1))
     info "Validating markdown relative links in docs/..."
 
-    local link_errors=0
-    local links_checked=0
-    local files_checked=0
-
-    # Check all markdown files in docs/ directory
-    for md_file in docs/*.md docs/**/*.md; do
-        [ -f "$md_file" ] || continue
-        files_checked=$((files_checked + 1))
-
-        local base_dir
-        base_dir=$(dirname "$md_file")
-
-        # Extract relative links from markdown: [text](relative/path)
-        # Skip external URLs (http/https), anchor-only (#), and empty links
-        while IFS= read -r link_match; do
-            [ -z "$link_match" ] && continue
-
-            # Extract the URL portion from [text](url)
-            local url
-            url=$(echo "$link_match" | sed -E 's/.*\(([^)]+)\).*/\1/')
-
-            # Skip external URLs and anchors
-            case "$url" in
-                http://*|https://*|mailto:*|\#*) continue ;;
-            esac
-
-            # Warn about machine-specific absolute paths (not portable)
-            case "$url" in
-                /workspaces/*|/home/*|/Users/*|/tmp/*)
-                    warn "Non-portable absolute path in $md_file: [$url] -- use a relative path instead"
-                    continue
-                    ;;
-                /*)
-                    # Other absolute paths are skipped silently (e.g., root-relative paths)
-                    continue
-                    ;;
-            esac
-
-            # Strip anchor portion for file existence check
-            local file_part="${url%%#*}"
-            [ -z "$file_part" ] && continue
-
-            links_checked=$((links_checked + 1))
-
-            # Resolve the path relative to the markdown file's directory
-            local resolved_path="$base_dir/$file_part"
-
-            # Check if the resolved file exists
-            if [ ! -f "$resolved_path" ] && [ ! -d "$resolved_path" ]; then
-                fail "Broken link in $md_file: [$url] (resolves to $resolved_path)"
-                link_errors=$((link_errors + 1))
-
-                # Provide helpful fix suggestion for common .llm path issues
-                if echo "$url" | grep -q '\.llm/' && ! echo "$url" | grep -q '^\.\./'; then
-                    printf '  %bFix%b: Change "%s" to "../%s"\n' "$YELLOW" "$NC" "$url" "$url"
-                fi
-            fi
-
-            # Special check: docs/ files linking to .llm/ must use ../ prefix
-            if echo "$url" | grep -qE '^\.llm/'; then
-                fail "Invalid relative link in $md_file: [$url] -- links from docs/ to .llm/ must use ../ prefix"
-                printf '  %bFix%b: Change "%s" to "../%s"\n' "$YELLOW" "$NC" "$url" "$url"
-                link_errors=$((link_errors + 1))
-            fi
-        done < <(grep -oE '\[[^]]*\]\([^)]+\)' "$md_file" 2>/dev/null || true)
-    done
-
-    if [ "$files_checked" -eq 0 ]; then
-        info "No markdown files found in docs/"
-        return
-    fi
-
-    if [ "$link_errors" -eq 0 ]; then
-        success "All $links_checked link(s) in $files_checked docs file(s) are valid"
+    if ./scripts/check-internal-links.sh --docs-only --quiet; then
+        success "All docs/ internal markdown links are valid"
     else
-        fail "$link_errors broken link(s) found in docs/ markdown files"
+        fail "Broken internal link(s) found in docs/ markdown files"
     fi
 }
 

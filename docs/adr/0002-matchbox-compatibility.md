@@ -9,7 +9,7 @@ ADR-0002 - Accepted
 Protocol v3 ([ADR-0001](0001-protocol-v3-two-axis.md)) introduces opaque WebRTC
 signaling: `ClientMessage::Signal` / `ServerMessage::Signal` carry a `signal`
 field that the server routes by `to` / `from` and never parses. The wire shape
-of that opaque payload is therefore a *client-to-client* convention, not a server
+of that opaque payload is therefore a _client-to-client_ convention, not a server
 contract -- but the protocol should still recommend one shape so reference and
 third-party clients interoperate without bespoke adapters.
 
@@ -85,7 +85,7 @@ substantially cutting that cost.
   non-conforming `signal`; conformance is a client/documentation concern (bounded
   by the rate-limit, size cap, and same-room checks from ADR-0001).
 - **Soft tie to an upstream shape:** if matchbox changes `PeerSignal`, our
-  *recommended* convention may drift, though server behavior is unaffected.
+  _recommended_ convention may drift, though server behavior is unaffected.
 
 ### Mitigations
 
@@ -115,6 +115,6 @@ costs nothing and unlocks interop.
 
 ## References
 
-- [Protocol v3 Plan](../../PLAN.md) - Appendix A (opaque payload convention), Appendix L (item 1)
+- Internal protocol v3 implementation plan - Appendix A (opaque payload convention), Appendix L (item 1)
 - [Protocol v3 Two-Axis (ADR-0001)](0001-protocol-v3-two-axis.md) - opaque-signal invariant
 - [Matchbox](https://github.com/johanhelsing/matchbox) - `PeerSignal` shape and payload-agnostic signaling

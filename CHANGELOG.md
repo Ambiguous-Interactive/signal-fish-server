@@ -48,9 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed README protocol-reference formatting for the `Reconnect` row and typical session-flow diagram alignment.
+- Fixed CI documentation failures by removing broken ADR links to an untracked local planning file and aligning ADR
+  markdown with the repository lint rules.
+- Fixed the production panic-policy violation in WebSocket capability deduplication by removing direct vector indexing
+  and slicing.
+- Hardened internal Markdown link validation so local checks fail when a link target exists locally but is not tracked
+  by Git, matching clean CI checkout behavior.
 
 ### Changed
 
+- Moved the optional feature compile matrix out of the default Rust test suite and into a single CI script step to avoid
+  repeated nested Cargo builds in nextest, coverage, MSRV, Miri, and sanitizer jobs.
 - Upgraded `sha2` from `0.10.9` to `0.11.0` and `hmac` from `0.12.1` to `0.13.0-rc.6` to align
   on `digest 0.11` and fix the `CoreProxy` trait bound build error.
 - Bumped `hmac` from `0.13.0-rc.6` to `0.13.0` (stable release).

@@ -32,6 +32,7 @@ on:
       - '.github/workflows/*.yaml'
       - 'scripts/check-workflow-hygiene.sh'
       - 'scripts/check-workflow-toolchain.sh'
+      - 'scripts/validate-workflow-awk.sh'
       - '.github/workflows/workflow-hygiene.yml'
   pull_request:
     branches: [main]
@@ -40,6 +41,7 @@ on:
       - '.github/workflows/*.yaml'
       - 'scripts/check-workflow-hygiene.sh'
       - 'scripts/check-workflow-toolchain.sh'
+      - 'scripts/validate-workflow-awk.sh'
       - '.github/workflows/workflow-hygiene.yml'
   schedule:
     # Run weekly on Monday at 06:00 UTC to detect stale nightly toolchains
@@ -66,6 +68,9 @@ jobs:
       - name: Validate toolchain inputs
         run: ./scripts/check-workflow-toolchain.sh
 
+      - name: Validate workflow AWK snippets
+        run: ./scripts/validate-workflow-awk.sh
+
       - name: Summary
         if: always()
         run: |
@@ -79,3 +84,4 @@ jobs:
           echo "  - Jobs have timeout configurations"
           echo "  - GitHub Actions use explicit version tags (no moving channels)"
           echo "  - dtolnay/rust-toolchain usages specify explicit toolchain input"
+          echo "  - Inline AWK snippets in workflow files are portable"
