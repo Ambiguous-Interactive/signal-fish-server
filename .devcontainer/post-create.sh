@@ -160,6 +160,46 @@ install_codex_cli() {
     codex --version
 }
 
+make_project_scripts_executable() {
+    local chmod_log
+    local chmod_probe
+    local first_script
+
+    if [[ ! -d "scripts" ]]; then
+        return 0
+    fi
+
+    first_script="$(find scripts -type f -name '*.sh' -print -quit)"
+    if [[ -z "$first_script" ]]; then
+        return 0
+    fi
+
+    chmod_probe="$(mktemp scripts/.chmod-probe.XXXXXX 2>/dev/null || true)"
+    if [[ -z "$chmod_probe" ]]; then
+        echo "[setup] Warning: could not create chmod probe in scripts/. Skipping executable-bit normalization."
+        return 0
+    fi
+
+    if ! chmod +x "$chmod_probe" 2>/dev/null; then
+        rm -f "$chmod_probe"
+        echo "[setup] Warning: workspace mount does not allow chmod; skipping scripts/**/*.sh executable-bit normalization."
+        echo "[setup] This is common on Windows bind mounts. Scripts can still be run with: bash scripts/<name>.sh"
+        return 0
+    fi
+    rm -f "$chmod_probe"
+
+    chmod_log="$(mktemp)"
+    if find scripts -type f -name '*.sh' -exec chmod +x {} + 2>"$chmod_log"; then
+        rm -f "$chmod_log"
+        echo "[setup] Made scripts/**/*.sh executable."
+        return 0
+    fi
+
+    echo "[setup] Warning: could not mark every script executable; continuing."
+    sed -n '1,10p' "$chmod_log" | sed 's/^/[setup]   /'
+    rm -f "$chmod_log"
+}
+
 install_codex_cli
 
 # Pre-download all dependencies
@@ -171,11 +211,7 @@ echo "[setup] Pre-building (cargo check --all-features)..."
 cargo check --all-features 2>&1 || echo "[setup] Warning: cargo check failed, continuing..."
 echo "[setup] Build cache warmed."
 
-# Make project scripts executable
-if [ -d "scripts" ]; then
-    find scripts -type f -name '*.sh' -exec chmod +x {} +
-    echo "[setup] Made scripts/**/*.sh executable."
-fi
+make_project_scripts_executable
 
 # Install git hooks if the script exists
 if [ -f "scripts/enable-hooks.sh" ]; then
