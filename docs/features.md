@@ -300,9 +300,9 @@ relays, and rejected WebRTC signal attempts.
 
 ```
 
-- `max_room_creations` - Max rooms per IP per time window
+- `max_room_creations` - Max room creations per player per time window
 - `time_window` - Window duration in seconds
-- `max_join_attempts` - Max join attempts per IP per window
+- `max_join_attempts` - Max join attempts per player per window
 - `max_signals` - Max valid WebRTC signal relays per player per window
 - `max_signal_errors` - Max rejected WebRTC signal attempts per player per window
 

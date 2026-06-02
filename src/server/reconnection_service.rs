@@ -1,7 +1,68 @@
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, ReconnectedPayload, RoomId, ServerMessage};
+use crate::reconnection::{ClaimedReconnection, DisconnectedPlayer, ReconnectionManager};
 use std::sync::Arc;
 
 use super::EnhancedGameServer;
+
+struct ReconnectionClaimGuard {
+    manager: Arc<ReconnectionManager>,
+    claim: Option<ClaimedReconnection>,
+}
+
+impl ReconnectionClaimGuard {
+    fn new(manager: Arc<ReconnectionManager>, claim: ClaimedReconnection) -> Self {
+        Self {
+            manager,
+            claim: Some(claim),
+        }
+    }
+
+    fn disconnected(&self) -> Option<DisconnectedPlayer> {
+        self.claim.as_ref().map(|claim| claim.disconnected.clone())
+    }
+
+    async fn release(mut self) -> bool {
+        let Some(claim) = self.claim.take() else {
+            return false;
+        };
+        self.manager.release_reconnection_claim(&claim).await
+    }
+
+    async fn complete(mut self) -> bool {
+        let Some(claim) = self.claim.take() else {
+            return false;
+        };
+        self.manager.complete_claimed_reconnection(&claim).await
+    }
+}
+
+impl Drop for ReconnectionClaimGuard {
+    fn drop(&mut self) {
+        let Some(claim) = self.claim.take() else {
+            return;
+        };
+        let manager = Arc::clone(&self.manager);
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                player_id = %claim.disconnected.player_id,
+                room_id = %claim.disconnected.room_id,
+                "Reconnection claim guard dropped outside a Tokio runtime; claim release could not be scheduled"
+            );
+            return;
+        };
+
+        drop(handle.spawn(async move {
+            let released = manager.release_reconnection_claim(&claim).await;
+            tracing::warn!(
+                player_id = %claim.disconnected.player_id,
+                room_id = %claim.disconnected.room_id,
+                %released,
+                "Reconnection claim released by dropped restore guard"
+            );
+        }));
+    }
+}
 
 impl EnhancedGameServer {
     pub(crate) async fn register_disconnection_for_reconnect(
@@ -39,6 +100,69 @@ impl EnhancedGameServer {
             reconnection_token = %token[..8].to_string(),
             "Player disconnection registered for reconnection"
         );
+    }
+
+    async fn reject_claimed_reconnect(
+        &self,
+        current_player_id: &PlayerId,
+        claim_guard: ReconnectionClaimGuard,
+        restored_membership: bool,
+        restored_authority: bool,
+        reason: &str,
+        error_code: ErrorCode,
+    ) -> bool {
+        let Some(disconnected) = claim_guard.disconnected() else {
+            tracing::warn!(%reason, "Reconnection rejection had no active claim to release");
+            return false;
+        };
+        if restored_membership {
+            if let Err(err) = self
+                .database
+                .remove_player_from_room(&disconnected.room_id, &disconnected.player_id)
+                .await
+            {
+                tracing::warn!(
+                    player_id = %disconnected.player_id,
+                    room_id = %disconnected.room_id,
+                    error = %err,
+                    "Failed to roll back restored room membership after reconnect failure"
+                );
+            }
+        } else if restored_authority {
+            if let Err(err) = self
+                .database
+                .update_room_authority(&disconnected.room_id, None)
+                .await
+            {
+                tracing::warn!(
+                    player_id = %disconnected.player_id,
+                    room_id = %disconnected.room_id,
+                    error = %err,
+                    "Failed to roll back restored authority after reconnect failure"
+                );
+            }
+        }
+
+        let released = claim_guard.release().await;
+        tracing::warn!(
+            player_id = %disconnected.player_id,
+            room_id = %disconnected.room_id,
+            %released,
+            %reason,
+            "Reconnection claim released after restore failure"
+        );
+
+        let _ = self
+            .message_coordinator
+            .send_to_player(
+                current_player_id,
+                Arc::new(ServerMessage::ReconnectionFailed {
+                    reason: reason.to_string(),
+                    error_code,
+                }),
+            )
+            .await;
+        false
     }
 
     /// Handle player reconnection
@@ -96,13 +220,14 @@ impl EnhancedGameServer {
             return false;
         }
 
-        // Validate and atomically claim the reconnection token before any room
-        // or connection side effects. Reconnection tokens are single-use.
-        let disconnected = match reconnection_manager
-            .claim_reconnection(reconnect_player_id, room_id, auth_token)
+        // Validate and atomically reserve the reconnection token before any
+        // room or connection side effects. The record is only removed after
+        // the restore succeeds; post-claim failures release it for retry.
+        let claim = match reconnection_manager
+            .claim_reconnection(current_player_id, reconnect_player_id, room_id, auth_token)
             .await
         {
-            Ok(d) => d,
+            Ok(claim) => claim,
             Err(reason) => {
                 tracing::warn!(
                     %reconnect_player_id,
@@ -128,52 +253,60 @@ impl EnhancedGameServer {
                 return false;
             }
         };
+        let claim_guard = ReconnectionClaimGuard::new(Arc::clone(reconnection_manager), claim);
+        let Some(disconnected) = claim_guard.disconnected() else {
+            tracing::warn!(
+                %reconnect_player_id,
+                %room_id,
+                "Reconnection claim guard was empty immediately after claim"
+            );
+            return false;
+        };
+        let mut restored_membership = false;
+        let mut restored_authority = false;
 
         // Defense-in-depth for unexpected concurrent ownership paths. The
-        // single-use claim above is what resolves duplicate same-token races.
+        // claim above is what resolves duplicate same-token races.
         if self.connection_manager.has_client(reconnect_player_id) {
-            let _ = self
-                .message_coordinator
-                .send_to_player(
+            return self
+                .reject_claimed_reconnect(
                     current_player_id,
-                    Arc::new(ServerMessage::ReconnectionFailed {
-                        reason: "Player is already connected".to_string(),
-                        error_code: ErrorCode::PlayerAlreadyConnected,
-                    }),
+                    claim_guard,
+                    restored_membership,
+                    restored_authority,
+                    "Player is already connected",
+                    ErrorCode::PlayerAlreadyConnected,
                 )
                 .await;
-            return false;
         }
 
         // Get room from database
         let room = match self.database.get_room_by_id(room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                return self
+                    .reject_claimed_reconnect(
                         current_player_id,
-                        Arc::new(ServerMessage::ReconnectionFailed {
-                            reason: "Room no longer exists".to_string(),
-                            error_code: ErrorCode::RoomNotFound,
-                        }),
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Room no longer exists",
+                        ErrorCode::RoomNotFound,
                     )
                     .await;
-                return false;
             }
             Err(e) => {
                 tracing::error!("Failed to get room for reconnection: {}", e);
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                return self
+                    .reject_claimed_reconnect(
                         current_player_id,
-                        Arc::new(ServerMessage::ReconnectionFailed {
-                            reason: "Storage error".to_string(),
-                            error_code: ErrorCode::InternalError,
-                        }),
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Storage error",
+                        ErrorCode::InternalError,
                     )
                     .await;
-                return false;
             }
         };
 
@@ -184,33 +317,33 @@ impl EnhancedGameServer {
 
         if !room.players.contains_key(reconnect_player_id) {
             let Some(player_info) = disconnected.player_info.clone() else {
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                return self
+                    .reject_claimed_reconnect(
                         current_player_id,
-                        Arc::new(ServerMessage::ReconnectionFailed {
-                            reason: "Player room membership could not be restored".to_string(),
-                            error_code: ErrorCode::ReconnectionFailed,
-                        }),
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Player room membership could not be restored",
+                        ErrorCode::ReconnectionFailed,
                     )
                     .await;
-                return false;
             };
 
             match self.database.add_player_to_room(room_id, player_info).await {
-                Ok(true) => {}
+                Ok(true) => {
+                    restored_membership = true;
+                }
                 Ok(false) => {
-                    let _ = self
-                        .message_coordinator
-                        .send_to_player(
+                    return self
+                        .reject_claimed_reconnect(
                             current_player_id,
-                            Arc::new(ServerMessage::ReconnectionFailed {
-                                reason: "Room is full".to_string(),
-                                error_code: ErrorCode::RoomFull,
-                            }),
+                            claim_guard,
+                            restored_membership,
+                            restored_authority,
+                            "Room is full",
+                            ErrorCode::RoomFull,
                         )
                         .await;
-                    return false;
                 }
                 Err(err) => {
                     tracing::error!(
@@ -219,65 +352,68 @@ impl EnhancedGameServer {
                         error = %err,
                         "Failed to restore player room membership on reconnection"
                     );
-                    let _ = self
-                        .message_coordinator
-                        .send_to_player(
+                    return self
+                        .reject_claimed_reconnect(
                             current_player_id,
-                            Arc::new(ServerMessage::ReconnectionFailed {
-                                reason: "Storage error".to_string(),
-                                error_code: ErrorCode::InternalError,
-                            }),
+                            claim_guard,
+                            restored_membership,
+                            restored_authority,
+                            "Storage error",
+                            ErrorCode::InternalError,
                         )
                         .await;
-                    return false;
                 }
             }
         }
 
         if disconnected.was_authority && room.supports_authority && room.authority_player.is_none()
         {
-            if let Err(err) = self
+            match self
                 .database
                 .update_room_authority(room_id, Some(*reconnect_player_id))
                 .await
             {
-                tracing::warn!(
-                    %reconnect_player_id,
-                    %room_id,
-                    error = %err,
-                    "Failed to restore authority on reconnection"
-                );
+                Ok(true) => {
+                    restored_authority = true;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        %reconnect_player_id,
+                        %room_id,
+                        error = %err,
+                        "Failed to restore authority on reconnection"
+                    );
+                }
             }
         }
 
         let room = match self.database.get_room_by_id(room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                return self
+                    .reject_claimed_reconnect(
                         current_player_id,
-                        Arc::new(ServerMessage::ReconnectionFailed {
-                            reason: "Room no longer exists".to_string(),
-                            error_code: ErrorCode::RoomNotFound,
-                        }),
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Room no longer exists",
+                        ErrorCode::RoomNotFound,
                     )
                     .await;
-                return false;
             }
             Err(err) => {
                 tracing::error!("Failed to get restored room for reconnection: {}", err);
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                return self
+                    .reject_claimed_reconnect(
                         current_player_id,
-                        Arc::new(ServerMessage::ReconnectionFailed {
-                            reason: "Storage error".to_string(),
-                            error_code: ErrorCode::InternalError,
-                        }),
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Storage error",
+                        ErrorCode::InternalError,
                     )
                     .await;
-                return false;
             }
         };
 
@@ -287,18 +423,28 @@ impl EnhancedGameServer {
             reconnect_player_id,
             *room_id,
         ) else {
-            let _ = self
-                .message_coordinator
-                .send_to_player(
+            return self
+                .reject_claimed_reconnect(
                     current_player_id,
-                    Arc::new(ServerMessage::ReconnectionFailed {
-                        reason: "Current connection no longer exists".to_string(),
-                        error_code: ErrorCode::ReconnectionFailed,
-                    }),
+                    claim_guard,
+                    restored_membership,
+                    restored_authority,
+                    "Current connection no longer exists",
+                    ErrorCode::ReconnectionFailed,
                 )
                 .await;
-            return false;
         };
+
+        // Complete once the fallible connection reassignment succeeds. The
+        // remaining coordinator/message operations are best-effort updates.
+        if !claim_guard.complete().await {
+            tracing::warn!(
+                %reconnect_player_id,
+                %room_id,
+                "Reconnection succeeded but pending claim was already released"
+            );
+        }
+
         let _ = self
             .message_coordinator
             .unregister_local_client(current_player_id)
@@ -328,11 +474,6 @@ impl EnhancedGameServer {
                 e
             );
         }
-
-        // Complete reconnection in manager
-        reconnection_manager
-            .complete_claimed_reconnection(&disconnected)
-            .await;
 
         // Prepare room state
         let current_players: Vec<PlayerInfo> = room.players.values().cloned().collect();

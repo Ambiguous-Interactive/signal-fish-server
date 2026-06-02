@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed protocol v3 WebRTC reconnect behavior so restored peers are returned to room membership,
   receive fresh `NewPeer` pairing, and keep the reconnected player identity for subsequent WebSocket
   frames and disconnect cleanup.
+- Fixed reconnection claim handling so failed restore attempts release the claim, roll back partial
+  room restoration, and let clients retry with the same token until the reconnection window expires.
+- Fixed room-join coordination cleanup so max-room-cap denials and room-count storage errors release
+  distributed locks immediately instead of waiting for lock TTL expiry.
 - Fixed cross-platform hook/link-checker issues: shared PowerShell native-process helpers now avoid
   synchronous stream deadlocks, Bash hook scripts avoid Bash 4-only features, and the fast link
   checker initializes empty file sets safely.

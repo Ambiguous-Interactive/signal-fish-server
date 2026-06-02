@@ -556,12 +556,20 @@ async fn rejected_signals_do_not_consume_valid_signal_budget() {
 
 /// Build a real DB-backed room owned by `owner`, returning its id.
 async fn create_db_room(server: &EnhancedGameServer, owner: PlayerId) -> uuid::Uuid {
+    create_db_room_with_max(server, owner, 8).await
+}
+
+async fn create_db_room_with_max(
+    server: &EnhancedGameServer,
+    owner: PlayerId,
+    max_players: u8,
+) -> uuid::Uuid {
     let room = server
         .database
         .create_room(
             "webrtc-game".to_string(),
             None,
-            8,
+            max_players,
             true,
             owner,
             "udp".to_string(),
@@ -840,6 +848,176 @@ async fn reconnect_restores_room_membership_and_webrtc_pairing() {
         members.iter().any(|player| player.id == reconnecting),
         "reconnected player must be restored in room storage for future pairing"
     );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_room_full_failure_releases_claim_for_retry() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (filler, _filler_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room_with_max(&server, existing, 2).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(filler, "filler"))
+        .await
+        .expect("add filler player");
+    server
+        .connection_manager
+        .assign_client_to_room(&filler, room_id)
+        .await;
+
+    let first_attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(!first_attempt, "full room reconnect attempt must fail");
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::RoomFull);
+        }
+        other => panic!("expected ReconnectionFailed(RoomFull), got {other:?}"),
+    }
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("failed room-full attempt must release claim for retry");
+
+    server
+        .database
+        .remove_player_from_room(&room_id, &filler)
+        .await
+        .expect("remove filler player");
+    server.connection_manager.clear_room_assignment(&filler);
+
+    let second_attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        second_attempt,
+        "same token should succeed after room has space"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+        }
+        other => panic!("expected Reconnected after retry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, _current_rx) = register_client(&server).await;
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    server.connection_manager.remove_client(&current);
+    let first_attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        !first_attempt,
+        "reconnect should fail when temporary connection disappears"
+    );
+
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("reassign failure must release claim for retry");
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    assert!(
+        !members.iter().any(|player| player.id == reconnecting),
+        "failed reassign must roll back restored room membership"
+    );
+
+    let (replacement, mut replacement_rx) = register_client(&server).await;
+    let second_attempt = server
+        .handle_reconnect(&replacement, &reconnecting, &room_id, &token)
+        .await;
+    assert!(second_attempt, "same token should retry successfully");
+    match recv(&mut replacement_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+        }
+        other => panic!("expected Reconnected after retry, got {other:?}"),
+    }
 }
 
 #[tokio::test]

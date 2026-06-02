@@ -8,6 +8,22 @@ impl EnhancedGameServer {
         tracing::debug!(%room_id, %reason, "Room closed");
     }
 
+    pub(crate) async fn cleanup_expired_reconnections(&self) -> usize {
+        let Some(reconnection_manager) = &self.reconnection_manager else {
+            return 0;
+        };
+
+        let count = reconnection_manager.cleanup_expired().await;
+        if count > 0 {
+            tracing::info!(
+                count,
+                instance_id = %self.instance_id,
+                "Cleaned up expired reconnection records"
+            );
+        }
+        count
+    }
+
     /// Enhanced cleanup task with distributed coordination and idempotency
     ///
     /// In multi-instance deployments, this task uses idempotency keys to ensure
@@ -127,6 +143,8 @@ impl EnhancedGameServer {
                     tracing::error!("Failed to cleanup expired locks: {}", e);
                 }
             }
+
+            self.cleanup_expired_reconnections().await;
 
             // Cleanup old room cleanup events (idempotency tracking table)
             match self.database.cleanup_old_room_cleanup_events().await {
