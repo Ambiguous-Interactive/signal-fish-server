@@ -59,4 +59,4 @@ jobs:
       - name: Install pinned markdownlint-cli2
         run: npm ci --no-audit --no-fund
       - name: Run markdown checks
-        run: ./scripts/check-markdown.sh
+        run: bash scripts/check-markdown.sh

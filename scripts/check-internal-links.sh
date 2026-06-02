@@ -16,8 +16,19 @@ QUIET="false"
 CHECK_TRACKED="true"
 FILES=()
 TRACKED_PATHS_LOADED="false"
-declare -A TRACKED_FILE_SET=()
-declare -A TRACKED_DIR_SET=()
+TRACKED_FILE_LIST=""
+TRACKED_DIR_LIST=""
+
+cleanup_tracked_path_lists() {
+    if [ -n "$TRACKED_FILE_LIST" ]; then
+        rm -f "$TRACKED_FILE_LIST"
+    fi
+    if [ -n "$TRACKED_DIR_LIST" ]; then
+        rm -f "$TRACKED_DIR_LIST"
+    fi
+    return 0
+}
+trap cleanup_tracked_path_lists EXIT
 
 usage() {
     cat <<'EOF'
@@ -117,20 +128,39 @@ repo_relative_path() {
 load_tracked_paths() {
     [ "$TRACKED_PATHS_LOADED" = "true" ] && return
 
-    local tracked_file dir parent
-    while IFS= read -r -d '' tracked_file; do
-        TRACKED_FILE_SET["$tracked_file"]=1
+    TRACKED_FILE_LIST=$(mktemp)
+    TRACKED_DIR_LIST=$(mktemp)
 
-        dir=$(dirname -- "$tracked_file")
-        while [ "$dir" != "." ] && [ "$dir" != "/" ] && [ -n "$dir" ]; do
-            TRACKED_DIR_SET["$dir"]=1
-            parent=$(dirname -- "$dir")
-            [ "$parent" = "$dir" ] && break
-            dir="$parent"
-        done
-    done < <(git ls-files -z --)
+    git ls-files -z -- > "$TRACKED_FILE_LIST"
+    perl -0ne '
+        chomp;
+        while (s{/[^/]*$}{}) {
+            next if $_ eq "" || $_ eq "." || $seen{$_}++;
+            print "$_\0";
+        }
+    ' "$TRACKED_FILE_LIST" > "$TRACKED_DIR_LIST"
 
     TRACKED_PATHS_LOADED="true"
+}
+
+path_in_null_list() {
+    local needle="$1"
+    local list_file="$2"
+
+    perl -0ne '
+        BEGIN {
+            $needle = shift @ARGV;
+            $found = 0;
+        }
+        chomp;
+        if ($_ eq $needle) {
+            $found = 1;
+            exit 0;
+        }
+        END {
+            exit($found ? 0 : 1);
+        }
+    ' "$needle" "$list_file"
 }
 
 target_is_tracked() {
@@ -140,15 +170,15 @@ target_is_tracked() {
     load_tracked_paths
 
     if [ -f "$target" ]; then
-        [ -n "${TRACKED_FILE_SET[$relative]+tracked}" ]
+        path_in_null_list "$relative" "$TRACKED_FILE_LIST"
         return
     fi
 
     if [ -d "$target" ]; then
         if [ "$relative" = "." ]; then
-            [ "${#TRACKED_FILE_SET[@]}" -gt 0 ]
+            [ -s "$TRACKED_FILE_LIST" ]
         else
-            [ -n "${TRACKED_DIR_SET[$relative]+tracked}" ]
+            path_in_null_list "$relative" "$TRACKED_DIR_LIST"
         fi
         return
     fi

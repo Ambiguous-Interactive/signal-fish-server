@@ -118,6 +118,10 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance. See skill for full table.
 
+Git hooks are fast last-resort guards only and target sub-second execution. Agents must
+catch formatting, clippy, tests, docs, and policy failures through the mandatory workflow
+and `./scripts/run-local-ci.sh`, not by relying on hooks to run slow semantic checks.
+
 ---
 
 ## Software Design Philosophy

@@ -28,12 +28,22 @@ performance, debugging hook failures, or validating hook permissions in CI.
 
 ## TL;DR
 
-- Target execution time: < 5 seconds per hook
-- Check only staged files (`git diff --cached --name-only`)
-- Use NUL-delimited file lists (`git diff -z` + `xargs -0`) for path-safe tooling
-- Gracefully skip only truly optional checks; fail closed for CI-parity checks (for example markdownlint)
-- Always document `git commit --no-verify` for emergencies
-- Run all checks even on failure, report summary at end
+- Target execution time: < 1 second per hook
+- Git hooks are last-resort guards only; do not run `cargo fmt`, `cargo clippy`,
+  `cargo test`, `cargo doc`, `npm install`, `npm ci`, or `npx` in hooks
+- Put semantic checks in the mandatory agent workflow, `scripts/run-local-ci.sh`,
+  and CI
+- Prefer PowerShell 7 (`pwsh`) for hook logic; keep extensionless `.githooks/*`
+  files as tiny Git wrappers
+- Check only staged or pushed files and use NUL-delimited Git output for path safety
+- Force UTF-8 stdout/stderr decoding in native process helpers; never rely on
+  platform-default code pages for generated-file comparisons
+- Batch staged blob reads with `git ls-files -s -z`, `git cat-file --batch-check`,
+  and `git cat-file --batch`; cap aggregate bytes and avoid per-file `git show`
+  loops in hooks
+- Verify auto-repaired generated files by Git object id, not decoded text
+- Auto-repair only deterministic, fast generated artifacts that can be restaged safely
+- Run all fast checks even on failure, report summary at end
 
 ---
 
@@ -46,11 +56,7 @@ on ALL repository files is a scope mismatch bug.
 **Pattern (CORRECT):**
 
 ```bash
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.ext$' || true)
-if [ -n "$STAGED_FILES" ]; then
-    # shellcheck disable=SC2086
-    scripts/check-foo.sh --files $STAGED_FILES
-fi
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1
 ```
 
 **Anti-pattern (WRONG):**
@@ -62,9 +68,24 @@ if [ -n "$STAGED_FILES" ]; then
 fi
 ```
 
-**Exceptions:** Cross-file consistency checks (MSRV sync, workflow hygiene) legitimately
-need to scan all relevant files because inconsistency between staged and unstaged files
-is itself a bug.
+**Exceptions:** Cross-file consistency checks belong in local CI or CI unless they
+are demonstrably sub-second and dependency-light.
+
+## Slow Checks Belong Outside Hooks
+
+Run before handoff:
+
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+./scripts/run-local-ci.sh
+```
+
+The pre-commit failure in `pre-commit.txt` is the reference incident: `cargo
+clippy --fix` took 20.99s on Windows and still could not repair a cfg-specific
+unused variable. That category must be caught by agent verification and CI, not
+by a slow git hook.
 
 ---
 
@@ -119,7 +140,9 @@ Validate:
 
 - Hook files exist
 - Hooks and installer are executable
-- `cargo test` invocations use `--locked` and `--` separator for multiple filters
+- Hooks delegate to `scripts/hooks/*.ps1`
+- Hooks do not invoke slow semantic/install commands
+- Runners parse staged/pushed paths from NUL-delimited Git output
 
 Reference:
 [ci-hook-validation-tests.rs](../code-samples/git-hooks/ci-hook-validation-tests.rs).
@@ -128,11 +151,9 @@ Reference:
 
 ## Hook Debugging
 
-```bash
-if [ "${DEBUG:-0}" = "1" ]; then
-  set -x
-fi
-set -euo pipefail
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair
 ```
 
 Common troubleshooting commands:
@@ -152,10 +173,11 @@ See full debug examples:
 
 ## Best Practices
 
-1. **Separate required vs optional checks** — required CI-parity checks should fail closed;
-   only optional checks should degrade gracefully when a tool is missing
+1. **Separate hooks from CI parity** — hooks are fast last-resort checks; local CI
+   and GitHub CI own slow semantic validation
 2. **Always document `--no-verify`** — show bypass in error message
-3. **Keep in sync with CI** — hooks should match CI validation steps
+3. **Keep hook dependencies minimal** — no network install or environment bootstrap
+   in the commit path
 
 When to bypass: emergency hotfix, hook false positive, iterating on hook itself.
 

@@ -168,7 +168,7 @@ echo "Files to check: ${#TO_CHECK[@]}"
 echo ""
 
 echo "Checking internal links and tracked targets..."
-if ! ./scripts/check-internal-links.sh --quiet "${TO_CHECK[@]}"; then
+if ! bash scripts/check-internal-links.sh --quiet "${TO_CHECK[@]}"; then
     echo ""
     echo -e "${RED}✗ Internal link check failed${NC}"
     echo ""

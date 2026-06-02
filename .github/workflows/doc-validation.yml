@@ -822,7 +822,7 @@ jobs:
 
       # Fallback: Custom internal link validator (more detailed errors)
       - name: Check internal markdown links
-        run: ./scripts/check-internal-links.sh --all
+        run: bash scripts/check-internal-links.sh --all
 
   # Validate inline code references match actual code (future enhancement)
   # This would check that references like `ServerConfig` actually exist in the codebase

@@ -176,6 +176,238 @@ fn shields_url_has_for_the_badge_style(url: &str) -> bool {
     })
 }
 
+fn normalize_local_script_token(token: &str) -> Option<String> {
+    let token = token
+        .trim_matches(['"', '\'', '`', '(', ')', '[', ']', ','])
+        .trim_end_matches([';', ')', ',']);
+    let mut path = token;
+    for prefix in [
+        "${{ github.workspace }}/",
+        "$GITHUB_WORKSPACE/",
+        "${GITHUB_WORKSPACE}/",
+        "$PWD/",
+        "${PWD}/",
+    ] {
+        if let Some(stripped) = path.strip_prefix(prefix) {
+            path = stripped;
+            break;
+        }
+    }
+    let path = path.strip_prefix("./").unwrap_or(path);
+    let is_local_script = path.starts_with("scripts/") || path.starts_with(".github/scripts/");
+    let is_script_file = [".sh", ".awk", ".py", ".ps1", ".bash", ".js"]
+        .iter()
+        .any(|extension| path.ends_with(extension));
+
+    if is_local_script && is_script_file {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+fn invokes_script_through_interpreter(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | ';'));
+    matches!(
+        token,
+        "bash"
+            | "sh"
+            | "awk"
+            | "perl"
+            | "python"
+            | "python3"
+            | "shellcheck"
+            | "pwsh"
+            | "powershell"
+            | "node"
+            | "source"
+            | "."
+    ) || token.ends_with("/bash")
+        || token.ends_with("/sh")
+}
+
+fn is_shell_command_string_option(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | ';'));
+    token.starts_with('-') && !token.starts_with("--") && token.contains('c')
+}
+
+fn strip_unquoted_shell_comment(text: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut previous = None;
+
+    for (idx, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            previous = Some(ch);
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            previous = Some(ch);
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            previous = Some(ch);
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            previous = Some(ch);
+            continue;
+        }
+        if ch == '#' && !in_single && !in_double && previous.is_none_or(char::is_whitespace) {
+            return text[..idx].trim_end();
+        }
+        previous = Some(ch);
+    }
+
+    text
+}
+
+fn normalize_github_workspace_expression(command: &str) -> String {
+    command
+        .replace("${{ github.workspace }}", "$GITHUB_WORKSPACE")
+        .replace("${{github.workspace}}", "$GITHUB_WORKSPACE")
+}
+
+fn line_indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+fn workflow_run_command_lines(content: &str) -> Vec<(usize, String)> {
+    let mut commands = Vec::new();
+    let mut in_run_block = false;
+    let mut run_block_indent = 0;
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let line_number = line_idx + 1;
+        let trimmed = line.trim();
+        let indent = line_indent(line);
+
+        if in_run_block {
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if indent > run_block_indent {
+                commands.push((line_number, trimmed.to_string()));
+                continue;
+            }
+            in_run_block = false;
+        }
+
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        let command = trimmed
+            .strip_prefix("- run:")
+            .or_else(|| trimmed.strip_prefix("run:"))
+            .map(str::trim_start);
+        let Some(command) = command else {
+            continue;
+        };
+
+        if matches!(command.chars().next(), Some('|') | Some('>')) {
+            in_run_block = true;
+            run_block_indent = indent;
+            continue;
+        }
+
+        if !command.is_empty() {
+            commands.push((line_number, command.to_string()));
+        }
+    }
+
+    commands
+}
+
+fn workflow_direct_script_violations_for_content(
+    workflow_name: &str,
+    content: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+
+    for (line_number, command) in workflow_run_command_lines(content) {
+        let command = strip_unquoted_shell_comment(&command).trim();
+        if command.is_empty() {
+            continue;
+        }
+        let command = normalize_github_workspace_expression(command);
+        let mut token_text = command.replace("&&", " ").replace("||", " ");
+        for separator in [';', '&', '|', '(', ')'] {
+            token_text = token_text.replace(separator, " ");
+        }
+        let tokens: Vec<&str> = token_text.split_whitespace().collect();
+        for (token_idx, token) in tokens.iter().enumerate() {
+            let Some(script_path) = normalize_local_script_token(token) else {
+                continue;
+            };
+
+            let start = token_idx.saturating_sub(8);
+            let interpreted = (start..token_idx).rev().any(|previous_idx| {
+                invokes_script_through_interpreter(tokens[previous_idx])
+                    && !tokens[previous_idx + 1..token_idx]
+                        .iter()
+                        .any(|token| is_shell_command_string_option(token))
+            });
+            if interpreted {
+                continue;
+            }
+
+            violations.push(format!(
+                "  {workflow_name}:{line_number}: direct script invocation must use an interpreter\n\
+                 script: {script_path}\n\
+                 line: {command}"
+            ));
+        }
+    }
+
+    violations
+}
+
+#[test]
+fn test_workflow_direct_script_detector_edge_cases() {
+    let cases = [
+        (
+            "workspace expression direct path is rejected",
+            "jobs:\n  test:\n    steps:\n      - run: ${{ github.workspace }}/scripts/foo.sh\n",
+            true,
+        ),
+        (
+            "shell command string still executes script directly",
+            "jobs:\n  test:\n    steps:\n      - run: bash -c './scripts/foo.sh'\n",
+            true,
+        ),
+        (
+            "interpreter with options is allowed",
+            "jobs:\n  test:\n    steps:\n      - run: bash --noprofile --norc -e scripts/foo.sh\n",
+            false,
+        ),
+        (
+            "inline comments are ignored",
+            "jobs:\n  test:\n    steps:\n      - run: echo ok # ./scripts/foo.sh\n",
+            false,
+        ),
+        (
+            "source does not require executable bit",
+            "jobs:\n  test:\n    steps:\n      - run: source scripts/foo.sh\n",
+            false,
+        ),
+    ];
+
+    for (name, workflow, should_reject) in cases {
+        let violations = workflow_direct_script_violations_for_content("fixture.yml", workflow);
+        assert_eq!(
+            !violations.is_empty(),
+            should_reject,
+            "{name}: unexpected detector result: {violations:?}"
+        );
+    }
+}
+
 /// Collect README-style violations for Shields badge URLs that do not include
 /// style=for-the-badge.
 fn collect_shields_style_violations(file_name: &str, content: &str) -> Vec<String> {
@@ -1023,9 +1255,10 @@ fn test_ci_workflow_msrv_normalization() {
     let script_content = read_file(&root.join("scripts/check-msrv-consistency.sh"));
 
     assert!(
-        content.contains("./scripts/check-msrv-consistency.sh"),
+        content.contains("bash scripts/check-msrv-consistency.sh"),
         "CI workflow must run scripts/check-msrv-consistency.sh for MSRV consistency.\n\
-         Keeping the logic in one script prevents local/CI drift."
+         Keeping the logic in one script prevents local/CI drift. Invoke through \
+         bash so CI does not depend on checkout executable-bit metadata."
     );
 
     assert!(
@@ -1080,7 +1313,7 @@ fn test_msrv_script_consistency_with_ci() {
     );
 
     assert!(
-        ci_content.contains("./scripts/check-msrv-consistency.sh"),
+        ci_content.contains("bash scripts/check-msrv-consistency.sh"),
         "CI workflow should call scripts/check-msrv-consistency.sh so MSRV \
          consistency logic has a single source of truth."
     );
@@ -1614,89 +1847,42 @@ fn test_docs_deploy_requirements_file_exists() {
 
 #[test]
 fn test_scripts_are_executable() {
-    // This test ensures shell scripts have executable permissions
-    // Prevents "permission denied" errors in CI
-    //
-    // Platform Limitation:
-    // - Unix/Linux/macOS: This test validates executable permissions (mode & 0o111)
-    // - Windows: File permissions work differently (no executable bit concept)
-    //   Git on Windows stores the executable bit in the index, but file system
-    //   permissions are controlled by ACLs, not Unix-style mode bits.
-    //   This test only validates on Unix platforms to avoid false failures.
-    //
-    // Why this matters for CI:
-    // - GitHub Actions Linux runners require executable permissions on scripts
-    // - Git stores the executable bit and preserves it on clone
-    // - Scripts without +x fail with "permission denied" in CI
-    // - This test catches the issue before CI runs
+    // Workflow scripts must be invoked through an interpreter instead of
+    // relying on executable-bit metadata. This keeps CI robust across local
+    // filesystems, checkout modes, and Windows/macOS/Linux contributors.
 
     let root = repo_root();
-    let directories_to_check = vec![root.join("scripts"), root.join(".githooks")];
+    let workflows_dir = root.join(".github/workflows");
+    let workflow_files = collect_workflow_files(&workflows_dir);
 
-    #[cfg(unix)]
-    let mut non_executable_scripts = Vec::new();
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in {}",
+        workflows_dir.display()
+    );
 
-    for dir in directories_to_check {
-        if !dir.exists() {
-            continue;
-        }
+    let mut violations = Vec::new();
 
-        for entry in std::fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
-            let path = entry.path();
-            // Check .sh files and files without extension (common for git hooks)
-            let should_check = path.extension().map(|ext| ext == "sh").unwrap_or(false)
-                || (path.is_file()
-                    && path.extension().is_none()
-                    && !path.file_name().unwrap().to_string_lossy().starts_with('.'));
+    for entry in workflow_files {
+        let workflow_path = entry.path();
+        let content = read_file(&workflow_path);
+        let workflow_name = workflow_path
+            .file_name()
+            .expect("workflow file should have a name")
+            .to_string_lossy();
 
-            if should_check {
-                let metadata = std::fs::metadata(&path).unwrap_or_else(|e| {
-                    panic!("Failed to get metadata for {}: {}", path.display(), e)
-                });
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mode = metadata.permissions().mode();
-                    let is_executable = mode & 0o111 != 0;
-
-                    if !is_executable {
-                        non_executable_scripts.push(format!(
-                            "  - {}\n    Current permissions: {:o}",
-                            path.display(),
-                            mode & 0o777
-                        ));
-                    }
-                }
-
-                // On non-Unix platforms, just check the file exists
-                #[cfg(not(unix))]
-                {
-                    let _ = metadata; // Suppress unused variable warning
-                }
-            }
-        }
+        violations.extend(workflow_direct_script_violations_for_content(
+            &workflow_name,
+            &content,
+        ));
     }
 
-    #[cfg(unix)]
-    if !non_executable_scripts.is_empty() {
-        panic!(
-            "Shell scripts are not executable:\n\n{}\n\n\
-             Scripts must have executable permissions to run in CI and locally.\n\n\
-             To fix:\n\
-             1. Make scripts executable:\n\
-                chmod +x <script-path>\n\n\
-             2. Update git index to track executable bit:\n\
-                git update-index --chmod=+x <script-path>\n\n\
-             3. Verify with: git ls-files --stage <script-path>\n\
-                Should show: 100755 (executable) not 100644 (non-executable)\n\n\
-             Example:\n\
-                chmod +x scripts/check-markdown.sh\n\
-                git update-index --chmod=+x scripts/check-markdown.sh\n\
-                git add scripts/check-markdown.sh\n",
-            non_executable_scripts.join("\n")
-        );
-    }
+    assert!(
+        violations.is_empty(),
+        "Workflow scripts must not be invoked directly:\n\n{}\n\n\
+         Fix: invoke through an interpreter, e.g. `bash scripts/<name>.sh`.",
+        violations.join("\n")
+    );
 }
 
 #[test]
@@ -2472,27 +2658,18 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
 }
 
 #[test]
-fn test_pre_commit_hook_fails_closed_when_markdownlint_is_unavailable() {
+fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains(
-            "check_fail \"Markdown linting\" \"markdownlint-cli2 unavailable or wrong pinned version.\"",
-        ),
-        ".githooks/pre-commit must fail closed when markdownlint-cli2 is unavailable for staged markdown.\n\
-         This prevents CI-only markdownlint failures.\n\
-         Missing fail-closed handling in {}",
+        !content.contains("markdownlint") && !content.contains("npm install"),
+        ".githooks/pre-commit must not run or bootstrap markdownlint.\n\
+         Markdownlint remains fail-closed in run-local-ci.sh and CI, while git hooks \
+         stay dependency-light and sub-second.\n\
+         Unexpected markdownlint dependency in {}",
         hook_path.display()
-    );
-
-    assert!(
-        !content.contains(
-            "check_skip \"Markdown linting\" \"pinned markdownlint-cli2 unavailable (see .markdownlint-version)\"",
-        ),
-        ".githooks/pre-commit should not skip markdown linting when the pinned tool is unavailable.\n\
-         Skipping allows markdown regressions to reach CI."
     );
 }
 
@@ -6074,6 +6251,7 @@ fn test_docs_relative_links_to_llm_use_parent_prefix() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_docs_relative_links_resolve_to_existing_files() {
     // Keep this test delegated to the same checker CI uses. Duplicating
     // Markdown parsing here has caused false positives for valid link syntax
@@ -6097,13 +6275,17 @@ fn test_docs_relative_links_resolve_to_existing_files() {
 
     assert!(
         output.status.success(),
-        "Broken relative links found in docs/ markdown files:\n\n{combined}\n\n\
+        "Broken relative links found in docs/ markdown files:\n\n\
+             command: bash scripts/check-internal-links.sh --docs-only --quiet\n\
+             exit status: {}\n\n{combined}\n\n\
              Fix: Update the link paths to point to existing tracked files.\n\
              Common issues:\n\
              - Missing ../ prefix for links to parent directories\n\
              - Typo in filename or directory name\n\
-             - File was moved, renamed, or left uncommitted\n\n\
-             Verify: ./scripts/validate-ci.sh --links"
+             - File was moved, renamed, or left uncommitted\n\
+             - The checker used Bash syntax unavailable on this runner\n\n\
+             Verify: ./scripts/validate-ci.sh --links",
+        output.status
     );
 }
 
@@ -6123,11 +6305,13 @@ fn test_internal_link_validators_check_tracked_targets() {
     );
 
     assert!(
-        script_content.contains("declare -A TRACKED_FILE_SET")
+        script_content.contains("TRACKED_FILE_LIST")
+            && script_content.contains("path_in_null_list")
             && script_content.contains("load_tracked_paths"),
         "scripts/check-internal-links.sh must preload tracked Git paths once \
-         instead of spawning `git ls-files` for every link target. This keeps \
-         all-file validation fast enough for CI."
+         into Bash 3.2-compatible null-delimited files instead of spawning \
+         `git ls-files` for every link target. This keeps all-file validation \
+         fast enough for CI and portable on macOS runners."
     );
 
     assert!(
@@ -6154,16 +6338,32 @@ fn test_internal_link_validators_check_tracked_targets() {
     );
 
     assert!(
-        validate_ci_content.contains("./scripts/check-internal-links.sh --docs-only --quiet"),
+        validate_ci_content.contains("bash scripts/check-internal-links.sh --docs-only --quiet"),
         "scripts/validate-ci.sh --links must delegate to scripts/check-internal-links.sh.\n\
          Local validation should use the same tracked-target diagnostics as CI."
     );
 
     assert!(
-        doc_validation_content.contains("./scripts/check-internal-links.sh --all"),
+        doc_validation_content.contains("bash scripts/check-internal-links.sh --all"),
         "doc-validation.yml must run scripts/check-internal-links.sh for detailed \
          file:line diagnostics and tracked-target checks."
     );
+
+    for (pattern, reason) in [
+        (
+            "declare -A",
+            "Bash associative arrays require Bash 4+, but macOS runners provide Bash 3.2.",
+        ),
+        (
+            "local -n",
+            "Nameref variables require Bash 4.3+ and fail on macOS Bash 3.2.",
+        ),
+    ] {
+        assert!(
+            !script_content.contains(pattern),
+            "scripts/check-internal-links.sh must not use `{pattern}`.\n{reason}"
+        );
+    }
 }
 
 #[test]
@@ -6196,23 +6396,45 @@ fn test_internal_link_checker_handles_common_markdown_inline_link_forms() {
             .unwrap_or_else(|e| panic!("failed to write temp target {target}: {e}"));
     }
 
-    let markdown_path = temp_dir.path().join("links.md");
-    fs::write(
-        &markdown_path,
-        concat!(
-            "[Plain](plain.md)\n",
-            "[With title](title.md \"Title text\")\n",
-            "[With single-quoted title](title.md 'Title text')\n",
-            "[ADR (0001)](plain.md)\n",
-            "[Paren destination](target-(one).md)\n",
-            "[Escaped destination](escaped\\).md)\n",
-            "[Angle destination](<space target.md>)\n",
-            "[Apostrophe destination](developer's-guide.md)\n",
-            "[Anchor with title](title.md#section \"Section\")\n",
-            "`[Ignored](missing.md)`\n",
+    let valid_link_cases = [
+        ("plain", "[Plain](plain.md)"),
+        ("title", "[With title](title.md \"Title text\")"),
+        (
+            "single-quoted-title",
+            "[With single-quoted title](title.md 'Title text')",
         ),
-    )
-    .unwrap_or_else(|e| {
+        ("parentheses-in-label", "[ADR (0001)](plain.md)"),
+        (
+            "parentheses-in-destination",
+            "[Paren destination](target-(one).md)",
+        ),
+        (
+            "escaped-destination-parenthesis",
+            "[Escaped destination](escaped\\).md)",
+        ),
+        (
+            "angle-destination-with-space",
+            "[Angle destination](<space target.md>)",
+        ),
+        (
+            "apostrophe-destination",
+            "[Apostrophe destination](developer's-guide.md)",
+        ),
+        (
+            "anchor-with-title",
+            "[Anchor with title](title.md#section \"Section\")",
+        ),
+        ("inline-code-is-ignored", "`[Ignored](missing.md)`"),
+    ];
+    let markdown_content = valid_link_cases
+        .iter()
+        .map(|(_, markdown)| *markdown)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    let markdown_path = temp_dir.path().join("links.md");
+    fs::write(&markdown_path, markdown_content).unwrap_or_else(|e| {
         panic!(
             "failed to write temp markdown {}: {e}",
             markdown_path.display()
@@ -8110,10 +8332,11 @@ fn test_ci_safety_runs_miri_compat_preflight() {
     let content = read_file(&workflow_path);
 
     assert!(
-        content.contains("./scripts/check-miri-compat.sh"),
+        content.contains("bash scripts/check-miri-compat.sh"),
         "ci-safety.yml should run scripts/check-miri-compat.sh before the slow \
          Miri interpreter step so incompatible tests fail fast with local \
-         remediation guidance.\nFile: {}",
+         remediation guidance. Invoke through bash so CI does not depend on \
+         checkout executable-bit metadata.\nFile: {}",
         workflow_path.display()
     );
 }
@@ -9036,161 +9259,234 @@ fn test_release_sccache_failure_emits_warning() {
 }
 
 #[test]
-fn test_pre_commit_hook_checks_formatting_and_clippy() {
+fn test_pre_commit_hook_delegates_to_fast_powershell_runner() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-commit");
+    let runner_path = root.join("scripts/hooks/pre-commit.ps1");
 
     assert!(
         hook_path.exists(),
         ".githooks/pre-commit must exist to enforce formatting locally"
     );
+    assert!(
+        runner_path.exists(),
+        "scripts/hooks/pre-commit.ps1 must contain cross-platform hook logic."
+    );
 
-    let content = read_file(&hook_path);
+    let hook = read_file(&hook_path);
+    let runner = read_file(&runner_path);
 
     assert!(
-        content.contains("cargo fmt"),
-        ".githooks/pre-commit must include a 'cargo fmt' check.\n\
-         Without this, formatting errors slip through to CI."
+        hook.contains("pwsh") && hook.contains("scripts/hooks/pre-commit.ps1"),
+        ".githooks/pre-commit must delegate to the PowerShell runner."
     );
 
     assert!(
-        content.contains("cargo clippy"),
-        ".githooks/pre-commit must include a 'cargo clippy' check.\n\
-         Without this, lint errors slip through to CI."
+        !runner.contains("Invoke-Native -FileName \"cargo\"")
+            && !runner
+                .lines()
+                .any(|line| line.trim_start().starts_with("cargo ")),
+        "pre-commit hooks must remain last-resort and sub-second; run clippy/test/doc \
+         in agent workflows, local CI, and GitHub CI instead of git hooks."
     );
 }
 
 #[test]
-fn test_pre_commit_hook_includes_skills_index_freshness_check_16() {
+fn test_pre_commit_runner_auto_repairs_skills_index() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
 
     assert!(
         hook_path.exists(),
-        ".githooks/pre-commit must exist to enforce local quality gates"
+        "scripts/hooks/pre-commit.ps1 must exist to enforce local quality gates"
     );
 
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains("# Check 16: Skills index generation freshness"),
-        "Pre-commit hook must define Check 16 for skills index freshness."
+        content.contains("Repair-SkillsIndexIfNeeded"),
+        "pre-commit runner must include generated skills-index freshness logic."
     );
 
     assert!(
-        content.contains("scripts/generate-skills-index.sh --check"),
-        "Check 16 must use generator check mode to verify freshness without rewriting files."
+        content.contains("New-SkillsIndexContent")
+            && content.contains(".llm/skills/index.md")
+            && content.contains("Set-IndexText")
+            && content.contains("update-index")
+            && content.contains("Get-IndexObjectId"),
+        "skills index drift must be auto-repaired in the Git index and verified by object id without clobbering unstaged files."
     );
 
     assert!(
-        content.contains("check_fail \"Skills index freshness\"")
-            && content.contains(
-                "Run './scripts/generate-skills-index.sh' and stage .llm/skills/index.md."
-            ),
-        "Check 16 must fail with actionable regeneration guidance when the index is stale."
+        content.contains("Get-IndexSkillFileObjectIds")
+            && content.contains("cat-file")
+            && content.contains("--batch")
+            && content.contains("--batch-check=%(objectname) %(objecttype) %(objectsize)")
+            && content.contains("IndexTextCache")
+            && content.contains("MaxBatchedBlobBytes")
+            && content.contains("PreloadError")
+            && content.contains("git cat-file --batch returned"),
+        "skills index generation must batch staged Git index reads, cap aggregate blob size, verify batch object ids, and cache staged text with graceful preload failure handling; per-file git show fanout makes hooks too slow."
     );
+}
+
+#[test]
+fn test_powershell_git_hook_helpers_force_utf8_output_decoding() {
+    let root = repo_root();
+    let scripts = [
+        "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-push.ps1",
+        "scripts/check-hook-readiness.ps1",
+    ];
+
+    for script in scripts {
+        let content = read_file(&root.join(script));
+        assert!(
+            content.contains("[System.Text.UTF8Encoding]::new($false)")
+                && content.contains("StandardOutputEncoding")
+                && content.contains("StandardErrorEncoding"),
+            "{script} must force UTF-8 native process output decoding so Windows code pages cannot corrupt generated-file comparisons."
+        );
+    }
 }
 
 #[test]
 fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains("git diff --cached --name-only -z --diff-filter=ACDMR --"),
-        "Check 16 should gate on staged path changes using an explicit diff-filter."
+        content.contains(
+            "\"diff\", \"--cached\", \"--name-only\", \"-z\", \"--diff-filter=ACDMR\", \"--\""
+        ),
+        "pre-commit runner should discover staged paths with NUL-delimited git diff output, \
+         including deletions so generated indexes are refreshed."
     );
 
     for required_trigger in [
         ".llm/context.md",
         "scripts/generate-skills-index.sh",
-        "':(glob).llm/skills/*.md'",
+        ":(glob).llm/skills/*.md",
     ] {
         assert!(
             content.contains(required_trigger),
-            "Check 16 trigger list must include: {required_trigger}"
+            "skills index trigger list must include: {required_trigger}"
         );
     }
 
     assert!(
-        content.contains("check_skip \"Skills index freshness\""),
-        "Check 16 should skip cleanly when no skills/context/index inputs are staged."
+        content.contains("Skip \"Skills index freshness\""),
+        "skills index check should skip cleanly when no skills/context/index inputs are staged."
     );
 }
 
 #[test]
-fn test_pre_commit_hook_includes_workflow_hygiene_check_17() {
+fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
-
-    assert!(
-        hook_path.exists(),
-        ".githooks/pre-commit must exist to enforce local quality gates"
-    );
-
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains("# Check 17: Workflow hygiene script checks"),
-        "Pre-commit hook must define Check 17 for workflow hygiene validation."
-    );
-
-    assert!(
-        content.contains("scripts/check-workflow-hygiene.sh"),
-        "Check 17 must invoke scripts/check-workflow-hygiene.sh."
-    );
-
-    assert!(
-        content.contains("check_fail \"Workflow hygiene checks\"")
-            && content.contains("Run './scripts/check-workflow-hygiene.sh' and fix reported errors."),
-        "Check 17 must fail with actionable remediation guidance when workflow hygiene checks fail."
+        content.contains("$_.StartsWith(\"src/\")")
+            && content.contains("no production Rust files staged")
+            && content.contains(":(glob)src/**/*.rs"),
+        "pre-commit panic-pattern scans must be scoped to production Rust sources so test-only Rust edits do not pay a needless diff cost."
     );
 }
 
 #[test]
-fn test_pre_commit_hook_workflow_hygiene_triggers_cover_workflow_paths() {
+fn test_git_hooks_reject_slow_semantic_commands() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
-    let content = read_file(&hook_path);
+    let checked_files = [
+        ".githooks/pre-commit",
+        ".githooks/pre-push",
+        "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-push.ps1",
+    ];
 
-    for required_trigger in [
-        "':(glob).github/workflows/*.yml'",
-        "':(glob).github/workflows/*.yaml'",
-        "':(glob)scripts/*.sh'",
-        "':(glob).githooks/*'",
-        "scripts/check-workflow-hygiene.sh",
-    ] {
-        assert!(
-            content.contains(required_trigger),
-            "Check 17 trigger list must include: {required_trigger}"
-        );
+    for file in checked_files {
+        let path = root.join(file);
+        assert!(path.exists(), "{file} must exist for hook speed policy.");
+        let content = read_file(&path);
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || trimmed.starts_with("Write-Host") {
+                continue;
+            }
+
+            assert!(
+                !trimmed.starts_with("cargo ")
+                    && !trimmed.starts_with("& cargo ")
+                    && !trimmed.starts_with("npm install")
+                    && !trimmed.starts_with("npm ci")
+                    && !trimmed.starts_with("npx ")
+                    && !trimmed.contains("Invoke-Native -FileName \"cargo\"")
+                    && !trimmed.contains("Invoke-Native -FileName \"npm\"")
+                    && !trimmed.contains("Invoke-Native -FileName \"npx\""),
+                "{file}:{} must not run slow semantic/install commands in git hooks.\n\
+                 Hooks target <1s and are last-resort only.",
+                line_idx + 1
+            );
+        }
     }
+}
+
+#[test]
+fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
+    let root = repo_root();
+    let hook_path = root.join("scripts/hooks/pre-push.ps1");
+    let content = read_file(&hook_path);
 
     assert!(
-        content.contains("check_skip \"Workflow hygiene checks\""),
-        "Check 17 should skip cleanly when no workflow/hygiene files are staged."
+        content.contains("Test-WorkflowDirectScriptInvocations")
+            && content.contains("^\\.github/workflows/.*\\.ya?ml$")
+            && content.contains("Get-CommitBlobText")
+            && content.contains("Test-WorkflowContentForDirectScripts")
+            && content.contains("Test-CommandTextForDirectScript")
+            && content.contains("Normalize-CommandText")
+            && content.contains("Normalize-LocalScriptToken")
+            && content.contains("Test-InterpreterToken")
+            && content.contains("runBlockIndent"),
+        "pre-push runner must keep a workflow direct-script invocation guard that \
+         reads pushed commit content, scans only run commands, and permits local \
+         scripts only when invoked through an interpreter."
     );
 }
 
 #[test]
-fn test_pre_commit_hook_uses_null_delimited_inputs_for_xargs_checks() {
+fn test_git_hook_runners_use_null_delimited_git_paths() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
-    let content = read_file(&hook_path);
+    let pre_commit = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let pre_push = read_file(&root.join("scripts/hooks/pre-push.ps1"));
 
     assert!(
-        content.contains("git diff --cached --name-only -z --diff-filter=ACM -- \\")
-            && content.contains("xargs -0 scripts/validate-workflow-awk.sh"),
-        "Pre-commit Check 5 must pass workflow filenames via NUL-delimited git diff + xargs -0.\n\
-         This prevents filename splitting bugs when paths contain spaces."
+        pre_commit.contains("\"diff\", \"--cached\", \"--name-only\", \"-z\"")
+            && pre_commit.contains("Split([char]0"),
+        "pre-commit runner must parse staged file names from NUL-delimited git output."
     );
 
     assert!(
-        content.contains("git diff --cached --name-only -z --diff-filter=ACM -- '*.md'")
-            && content.contains("xargs -0 lychee --offline --quiet --config .lychee.toml"),
-        "Pre-commit Check 11 must pass markdown filenames via NUL-delimited git diff + xargs -0.\n\
-         This prevents filename splitting bugs when markdown paths contain spaces."
+        pre_push.contains("\"--raw\", \"-r\", \"-m\", \"-z\"")
+            && pre_push.contains("\"--root\"")
+            && pre_push.contains("\"-m\"")
+            && pre_push.contains("Split-NulOutput")
+            && pre_push.contains("diff-tree\", \"--stdin\""),
+        "pre-push runner must parse pushed commit/file changes from NUL-delimited \
+         git output, including merge commits, without per-commit process fanout."
+    );
+}
+
+#[test]
+fn test_validate_ci_shellcheck_covers_all_git_hook_wrappers() {
+    let root = repo_root();
+    let validate_ci = read_file(&root.join("scripts/validate-ci.sh"));
+
+    assert!(
+        validate_ci.contains("for hook in .githooks/*")
+            && validate_ci.contains("run_shellcheck \"$hook_shell\" \"$sc_severity\" \"$hook\""),
+        "scripts/validate-ci.sh must shellcheck every .githooks/* wrapper, not only pre-commit."
     );
 }
 
@@ -9214,27 +9510,40 @@ fn test_workflow_hygiene_ci_runs_awk_validator() {
 fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
     let root = repo_root();
     let hook_path = root.join(".githooks/pre-push");
+    let runner_path = root.join("scripts/hooks/pre-push.ps1");
 
     assert!(
         hook_path.exists(),
         ".githooks/pre-push must exist to enforce workflow policy checks before push."
     );
+    assert!(
+        runner_path.exists(),
+        "scripts/hooks/pre-push.ps1 must contain fast push-time policy checks."
+    );
 
-    let content = read_file(&hook_path);
+    let hook = read_file(&hook_path);
+    let runner = read_file(&runner_path);
 
     assert!(
-        content.contains("scripts/check-workflow-hygiene.sh"),
-        "pre-push hook must run scripts/check-workflow-hygiene.sh when workflow policy files change."
+        hook.contains("pwsh") && hook.contains("scripts/hooks/pre-push.ps1"),
+        ".githooks/pre-push must delegate to the PowerShell runner."
+    );
+    assert!(
+        hook.contains("\"$@\""),
+        ".githooks/pre-push must forward Git's remote name and URL arguments to \
+         the PowerShell runner."
     );
 
     assert!(
-        content.contains("cargo test")
-            && content.contains("--locked")
-            && content.contains("--test ci_config_tests")
-            && content.contains("test_github_actions_use_version_refs_not_commit_hashes")
-            && content.contains("test_workflow_toolchain_fields_do_not_use_moving_aliases")
-            && content.contains("test_docker_publish_workflow_uses_owner_derived_ghcr_image_name"),
-        "pre-push hook must run CI policy tests with --locked for action refs, toolchain alias pinning, and owner-derived GHCR image naming."
+        runner.contains("Get-ChangedFilesForPush")
+            && runner.contains("\"--not\", $remoteArg")
+            && runner.contains("--remotes=$RemoteName")
+            && runner.contains("\"rev-list\", \"$RemoteSha..$LocalSha\"")
+            && runner.contains("Add-ChangedFilesFromCommits")
+            && runner.contains("Test-WorkflowDirectScriptInvocations"),
+        "pre-push runner must inspect all introduced commits for existing refs, \
+         scope new-branch discovery to the push target remote, and run fast \
+         workflow policy checks without invoking cargo tests."
     );
 }
 
@@ -9396,109 +9705,83 @@ fn test_git_hook_cargo_test_invocations_use_locked_and_separator() {
 #[test]
 fn test_pre_commit_hook_includes_llm_file_size_check_18() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     assert!(hook_path.exists(), ".githooks/pre-commit must exist");
     let content = read_file(&hook_path);
     assert!(
-        content.contains("# Check 18: LLM file size limit"),
-        "Pre-commit hook must define Check 18 for LLM file size enforcement."
+        content.contains("Test-LlmFileSizes"),
+        "Pre-commit runner must define a fast LLM file size check."
     );
     assert!(
-        content.contains("scripts/check-llm-file-sizes.sh"),
-        "Check 18 must invoke scripts/check-llm-file-sizes.sh."
+        content.contains("Get-IndexText"),
+        "Pre-commit runner must validate staged content from the Git index, not working-tree files."
     );
     assert!(
-        content.contains("check_fail \"LLM file sizes\"")
-            && content.contains("One or more .llm/ files exceed 300 lines"),
-        "Check 18 must fail with actionable remediation guidance."
+        content.contains("Fail \"LLM file sizes\"") && content.contains("300 lines or fewer"),
+        "LLM file size check must fail with actionable remediation guidance."
     );
 }
 
 #[test]
 fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
     assert!(
-        content.contains(r"^\.llm/.*\.md$"),
-        "Check 18 trigger filter must match .llm/*.md files with the anchored regex."
+        content.contains("$script:StagedFiles")
+            && content.contains("$_.StartsWith(\".llm/\")")
+            && content.contains("$_.EndsWith(\".md\")"),
+        "LLM file size check must scope itself to all staged .llm/**/*.md files."
     );
     assert!(
-        content.contains("Preserve spaces in staged file paths by splitting only on newlines."),
-        "Check 18 must document why newline-only splitting is required."
-    );
-    assert!(
-        content.contains("set -f")
-            && content.contains("scripts/check-llm-file-sizes.sh --files $STAGED_LLM_FILES"),
-        "Check 18 must disable globbing and pass staged files with newline-only splitting semantics."
-    );
-    assert!(
-        content.contains("check_skip \"LLM file sizes\""),
-        "Check 18 should skip cleanly when no .llm/*.md files are staged."
+        content.contains("Skip \"LLM file sizes\""),
+        "LLM file size check should skip cleanly when no .llm/*.md files are staged."
     );
 }
 
 #[test]
 fn test_pre_commit_hook_includes_llm_example_extraction_policy_check() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains("scripts/check-llm-example-files.sh --files $STAGED_LLM_FILES"),
-        "Check 18 must invoke scripts/check-llm-example-files.sh with staged .llm files."
-    );
-    assert!(
-        content.contains("check_fail \"LLM example extraction\"")
-            && content.contains("Inline example sections are disallowed in skill files"),
-        "Check 18 must fail with actionable guidance when inline examples violate policy."
+        !content.contains("scripts/check-llm-example-files.sh"),
+        "Pre-commit hooks must not delegate to slower shell policy scripts. \
+         Inline example extraction remains in local CI and agent verification."
     );
 }
 
 #[test]
 fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     assert!(hook_path.exists(), ".githooks/pre-commit must exist");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains("# Check 20: README badge style consistency"),
-        "Pre-commit hook must define Check 20 for README badge style consistency."
+        content.contains("Test-ReadmeBadges"),
+        "Pre-commit runner must define a fast README badge style check."
     );
     assert!(
-        content.contains("scripts/check-readme-badges.sh"),
-        "Check 20 must invoke scripts/check-readme-badges.sh."
-    );
-    assert!(
-        content.contains("check_fail \"README badge styles\"")
-            && content.contains("style=for-the-badge"),
-        "Check 20 must fail with actionable guidance when README badge styles are inconsistent."
-    );
-    assert!(
-        content.contains("README_BADGE_OUTPUT=$(scripts/check-readme-badges.sh README.md 2>&1)")
-            && content.contains("echo \"$README_BADGE_OUTPUT\""),
-        "Check 20 should capture and print check-readme-badges.sh output on failure."
+        content.contains("Fail \"README badge styles\"") && content.contains("style=for-the-badge"),
+        "README badge check must fail with actionable guidance when badge styles are inconsistent."
     );
 }
 
 #[test]
 fn test_pre_commit_hook_readme_badge_style_trigger_includes_checker_script() {
     let root = repo_root();
-    let hook_path = root.join(".githooks/pre-commit");
+    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains(r"^(README\.md|scripts/check-readme-badges\.sh)$"),
-        "Check 20 trigger must match staged README.md and scripts/check-readme-badges.sh changes."
+        content.contains("$script:StagedFiles -notcontains \"README.md\""),
+        "README badge check must run when README.md is staged."
     );
     assert!(
-        content.contains(r"scripts/check-readme-badges\.sh"),
-        "Check 20 trigger should also run when scripts/check-readme-badges.sh is staged."
-    );
-    assert!(
-        content.contains("check_skip \"README badge styles\""),
-        "Check 20 should skip cleanly when neither README.md nor scripts/check-readme-badges.sh is staged."
+        content.contains("Skip \"README badge styles\""),
+        "README badge check should skip cleanly when README.md is not staged."
     );
 }
 
@@ -11501,11 +11784,12 @@ fn test_optional_feature_matrix_runs_once_in_ci_lint_job() {
     let script_content = read_file(&script_path);
 
     assert!(
-        ci_content.contains("run: ./scripts/check-feature-matrix.sh"),
+        ci_content.contains("run: bash scripts/check-feature-matrix.sh"),
         "ci.yml must run scripts/check-feature-matrix.sh.\n\
          Keeping the feature compile matrix in CI preserves feature-gating coverage \
          while avoiding repeated nested Cargo builds in nextest, coverage, MSRV, \
-         Miri, and sanitizer jobs."
+         Miri, and sanitizer jobs. The workflow must invoke it through bash so \
+         CI does not depend on checkout executable-bit metadata."
     );
 
     assert!(

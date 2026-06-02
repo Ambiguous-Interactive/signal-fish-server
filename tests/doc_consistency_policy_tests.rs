@@ -23,28 +23,17 @@ fn test_repository_passes_doc_consistency_script() {
 }
 
 #[test]
-fn test_pre_commit_hook_includes_doc_consistency_check() {
-    let root = repo_root();
-    let hook = read_file(&root.join(".githooks/pre-commit"));
-
-    assert!(
-        hook.contains("# Check 21: Documentation + changelog consistency"),
-        ".githooks/pre-commit must include Check 21 heading for doc/changelog consistency policy."
-    );
-    assert!(
-        hook.contains("scripts/check-doc-consistency.sh --staged"),
-        "Check 21 must run scripts/check-doc-consistency.sh in --staged mode."
-    );
-}
-
-#[test]
 fn test_run_local_ci_includes_doc_consistency_check() {
     let root = repo_root();
-    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+    let local_ci = read_file(&root.join("scripts/run-local-ci.sh"));
 
     assert!(
-        script.contains("check-doc-consistency.sh"),
-        "scripts/run-local-ci.sh must execute scripts/check-doc-consistency.sh as a local CI gate."
+        local_ci.contains("doc-consistency"),
+        "scripts/run-local-ci.sh must include a docs/changelog consistency check."
+    );
+    assert!(
+        local_ci.contains("scripts/check-doc-consistency.sh"),
+        "docs/changelog consistency must run outside sub-second git hooks."
     );
 }
 
@@ -188,17 +177,20 @@ fn test_ci_dep_detect_internal_paths_match_script() {
 }
 
 #[test]
-fn test_pre_push_hook_includes_doc_consistency_gate_and_tests() {
+fn test_local_ci_includes_doc_consistency_gate_and_tests() {
     let root = repo_root();
-    let hook = read_file(&root.join(".githooks/pre-push"));
+    let local_ci = read_file(&root.join("scripts/run-local-ci.sh"));
 
     assert!(
-        hook.contains("scripts/check-doc-consistency.sh --changed-files"),
-        ".githooks/pre-push must run scripts/check-doc-consistency.sh in --changed-files mode for relevant push diffs."
+        local_ci.contains("doc-consistency")
+            && local_ci.contains("scripts/check-doc-consistency.sh"),
+        "scripts/run-local-ci.sh must run scripts/check-doc-consistency.sh before handoff/CI."
     );
     assert!(
-        hook.contains("cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests"),
-        ".githooks/pre-push must run doc consistency policy tests when docs/changelog policy files change."
+        local_ci.contains("doc-policy-tests")
+            && local_ci.contains("--test doc_consistency_policy_tests")
+            && local_ci.contains("--test doc_consistency_script_tests"),
+        "scripts/run-local-ci.sh must run doc consistency policy tests outside git hooks."
     );
 }
 

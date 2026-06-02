@@ -139,8 +139,9 @@ cargo test --locked --all-features
 # 2. Script-level policy checks
 scripts/check-doc-consistency.sh --staged   # or --changed-files <files>
 scripts/check-workflow-hygiene.sh
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
 
-# 3. Hook-specific test suites (these run during pre-push)
+# 3. Hook/local-policy test suites (run before handoff; hooks stay fast)
 cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
 cargo test --locked --test ci_config_tests
 ```
@@ -148,7 +149,9 @@ cargo test --locked --test ci_config_tests
 **Why this matters**: Git hooks run test suites that validate script output,
 internal path classifications, and CI config consistency. A change that passes
 `cargo test` alone may still fail pre-push hooks if script output or policy
-configuration changed. Always verify the full chain.
+configuration changed. Always verify the full chain. Git hooks themselves stay
+sub-second and do not run clippy/tests/docs; agents and local CI are responsible
+for catching those failures before the hook is ever reached.
 
 ---
 

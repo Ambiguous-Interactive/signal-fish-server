@@ -1,0 +1,555 @@
+#requires -Version 7.0
+param(
+    [string]$RemoteName = "",
+    [string]$RemoteUrl = ""
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$script:Passed = 0
+$script:Failed = 0
+$script:Skipped = 0
+
+function Pass {
+    param([string]$Name)
+    Write-Host "PASS: $Name"
+    $script:Passed++
+}
+
+function Fail {
+    param(
+        [string]$Name,
+        [string]$Message
+    )
+    Write-Host "FAIL: $Name"
+    Write-Host "[pre-push] ERROR: $Message"
+    $script:Failed++
+}
+
+function Skip {
+    param(
+        [string]$Name,
+        [string]$Reason
+    )
+    Write-Host "SKIP: $Name ($Reason)"
+    $script:Skipped++
+}
+
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FileName
+    foreach ($argument in $Arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardOutputEncoding = $utf8NoBom
+    $psi.StandardErrorEncoding = $utf8NoBom
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Stdout = $stdout
+        Stderr = $stderr
+        Output = $stdout + $stderr
+    }
+}
+
+function Invoke-Git {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $result = Invoke-Native -FileName "git" -Arguments $Arguments
+    if ($result.ExitCode -ne 0) {
+        throw "git $($Arguments -join ' ') failed:`n$($result.Output)"
+    }
+    $result
+}
+
+function Invoke-NativeWithInput {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$InputText
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FileName
+    foreach ($argument in $Arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardOutputEncoding = $utf8NoBom
+    $psi.StandardErrorEncoding = $utf8NoBom
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $process.StandardInput.Write($InputText)
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Stdout = $stdout
+        Stderr = $stderr
+        Output = $stdout + $stderr
+    }
+}
+
+function Split-NulOutput {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) {
+        return @()
+    }
+    $Text.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+}
+
+function Add-ChangedFile {
+    param(
+        [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
+        [string]$Commit,
+        [string]$File
+    )
+
+    if (-not $Map.ContainsKey($File)) {
+        $Map[$File] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    }
+    [void]$Map[$File].Add($Commit)
+}
+
+function Get-RevList {
+    param(
+        [Parameter(Mandatory = $true)][string]$LocalSha,
+        [Parameter(Mandatory = $true)][string]$RemoteSha,
+        [Parameter(Mandatory = $true)][string]$AllZeroSha,
+        [AllowEmptyString()][string]$RemoteName = ""
+    )
+
+    if ($RemoteSha -eq $AllZeroSha) {
+        $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
+        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $remoteArg)
+    } else {
+        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", "$RemoteSha..$LocalSha")
+    }
+
+    if ($result.ExitCode -ne 0 -and $RemoteSha -ne $AllZeroSha) {
+        $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
+        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $remoteArg)
+    }
+
+    if ($result.ExitCode -ne 0) {
+        throw "git rev-list failed:`n$($result.Output)"
+    }
+
+    @($result.Stdout -split "`n" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Add-ChangedFilesFromCommits {
+    param(
+        [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
+        [string[]]$Commits
+    )
+
+    if ($Commits.Count -eq 0) {
+        return
+    }
+
+    $diffInput = ($Commits -join "`n") + "`n"
+    $diff = Invoke-NativeWithInput -FileName "git" -Arguments @("diff-tree", "--stdin", "--root", "--raw", "-r", "-m", "-z") -InputText $diffInput
+    if ($diff.ExitCode -ne 0) {
+        throw "git diff-tree --stdin failed:`n$($diff.Output)"
+    }
+
+    $entries = @(Split-NulOutput -Text $diff.Stdout)
+    $currentCommit = $null
+    for ($index = 0; $index -lt $entries.Count; $index++) {
+        $entry = $entries[$index]
+        if ($entry -match "^[0-9a-fA-F]{40}$") {
+            $currentCommit = $entry.ToLowerInvariant()
+            continue
+        }
+
+        if ($null -eq $currentCommit -or -not $entry.StartsWith(":")) {
+            continue
+        }
+
+        $fields = @($entry -split "\s+" | Where-Object { $_ -ne "" })
+        if ($fields.Count -lt 5) {
+            continue
+        }
+
+        $status = $fields[$fields.Count - 1]
+        $statusCode = $status.Substring(0, 1)
+        if ($statusCode -eq "R" -or $statusCode -eq "C") {
+            $index++
+            if ($index -ge $entries.Count) {
+                break
+            }
+            $index++
+            if ($index -ge $entries.Count) {
+                break
+            }
+            Add-ChangedFile -Map $Map -Commit $currentCommit -File $entries[$index]
+            continue
+        }
+
+        $index++
+        if ($index -ge $entries.Count) {
+            break
+        }
+        Add-ChangedFile -Map $Map -Commit $currentCommit -File $entries[$index]
+    }
+}
+
+function Get-ChangedFilesForPush {
+    $files = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new([System.StringComparer]::Ordinal)
+    $stdin = [Console]::In.ReadToEnd()
+    if ([string]::IsNullOrWhiteSpace($stdin)) {
+        return $files
+    }
+
+    $allZeroSha = "0000000000000000000000000000000000000000"
+
+    foreach ($rawLine in $stdin -split "`n") {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $parts = $line -split "\s+"
+        if ($parts.Count -lt 4) {
+            continue
+        }
+
+        $localSha = $parts[1]
+        $remoteSha = $parts[3]
+        if ($localSha -eq $allZeroSha) {
+            continue
+        }
+
+        $commits = @(Get-RevList -LocalSha $localSha -RemoteSha $remoteSha -AllZeroSha $allZeroSha -RemoteName $script:RemoteName)
+        Add-ChangedFilesFromCommits -Map $files -Commits $commits
+    }
+
+    $files
+}
+
+function Get-CommitBlobText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Commit,
+        [Parameter(Mandatory = $true)][string]$File
+    )
+
+    $result = Invoke-Native -FileName "git" -Arguments @("show", "${Commit}:$File")
+    if ($result.ExitCode -ne 0) {
+        return $null
+    }
+    $result.Stdout
+}
+
+function Test-FastHookSource {
+    param([System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$ChangedFiles)
+
+    $files = @(
+        ".githooks/pre-commit",
+        ".githooks/pre-push",
+        "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-push.ps1"
+    )
+    $slowCommandPattern = "^\s*(&\s*)?[""']?cargo[""']?\s+(fmt|clippy|test|doc|check|build|install)\b|^\s*(&\s*)?[""']?npm[""']?\s+(install|ci)\b|^\s*(&\s*)?[""']?npx[""']?\b|Invoke-Native\s+-FileName\s+[""'](cargo|npm|npx)[""']|Start-Process\s+[""']?(cargo|npm|npx)[""']?"
+    $violations = [System.Collections.Generic.List[string]]::new()
+    $checked = 0
+
+    foreach ($file in $files) {
+        if (-not $ChangedFiles.ContainsKey($file)) {
+            continue
+        }
+
+        foreach ($commit in $ChangedFiles[$file]) {
+            $content = Get-CommitBlobText -Commit $commit -File $file
+            if ($null -eq $content) {
+                continue
+            }
+            $checked++
+
+            $lineNumber = 0
+            foreach ($line in $content -split "`r?`n") {
+                $lineNumber++
+                $trimmed = $line.TrimStart()
+                if ($trimmed.StartsWith("#")) {
+                    continue
+                }
+                if ($trimmed -match $slowCommandPattern) {
+                    [void]$violations.Add("${file}@${commit}:${lineNumber}: $trimmed")
+                }
+            }
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        Fail "Hook speed policy" "Git hooks must not run slow semantic or install commands.`n$($violations -join "`n")"
+    } elseif ($checked -eq 0) {
+        Skip "Hook speed policy" "no hook files pushed"
+    } else {
+        Pass "Hook speed policy"
+    }
+}
+
+function Get-Indent {
+    param([string]$Line)
+    $Line.Length - $Line.TrimStart().Length
+}
+
+function Normalize-LocalScriptToken {
+    param([string]$Token)
+
+    $clean = $Token.Trim('"', "'", '`', '(', ')', '[', ']', ',', '{', '}')
+    $clean = $clean.TrimEnd(';', ')', ',', ']', '}')
+    $path = $clean
+    foreach ($prefix in @('${{ github.workspace }}/', '$GITHUB_WORKSPACE/', '${GITHUB_WORKSPACE}/', '$PWD/', '${PWD}/')) {
+        if ($path.StartsWith($prefix)) {
+            $path = $path.Substring($prefix.Length)
+            break
+        }
+    }
+    if ($path.StartsWith("./")) {
+        $path = $path.Substring(2)
+    }
+    $isLocalScript = $path.StartsWith("scripts/") -or $path.StartsWith(".github/scripts/")
+    $isScriptFile = $path.EndsWith(".sh") -or
+        $path.EndsWith(".awk") -or
+        $path.EndsWith(".py") -or
+        $path.EndsWith(".ps1") -or
+        $path.EndsWith(".bash") -or
+        $path.EndsWith(".js")
+
+    if ($isLocalScript -and $isScriptFile) {
+        return $path
+    }
+
+    $null
+}
+
+function Test-InterpreterToken {
+    param([string]$Token)
+
+    $clean = $Token.Trim('"', "'", '`', '(', ')', ';')
+    $clean -in @("bash", "sh", "awk", "perl", "python", "python3", "shellcheck") -or
+        $clean -in @("pwsh", "powershell", "node", "source", ".") -or
+        $clean.EndsWith("/bash") -or
+        $clean.EndsWith("/sh")
+}
+
+function Test-ShellCommandStringOption {
+    param([string]$Token)
+
+    $clean = $Token.Trim('"', "'", '`', '(', ')', ';')
+    $clean.StartsWith("-") -and -not $clean.StartsWith("--") -and $clean.Contains("c")
+}
+
+function Remove-UnquotedShellComment {
+    param([string]$Text)
+
+    $inSingle = $false
+    $inDouble = $false
+    $escaped = $false
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $char = $Text[$index]
+        if ($escaped) {
+            $escaped = $false
+            continue
+        }
+        if ($char -eq "\" -and -not $inSingle) {
+            $escaped = $true
+            continue
+        }
+        if ($char -eq "'" -and -not $inDouble) {
+            $inSingle = -not $inSingle
+            continue
+        }
+        if ($char -eq '"' -and -not $inSingle) {
+            $inDouble = -not $inDouble
+            continue
+        }
+        if ($char -eq "#" -and -not $inSingle -and -not $inDouble) {
+            if ($index -eq 0 -or [char]::IsWhiteSpace($Text[$index - 1])) {
+                return $Text.Substring(0, $index).TrimEnd()
+            }
+        }
+    }
+
+    $Text
+}
+
+function Normalize-CommandText {
+    param([string]$Text)
+
+    $Text.Replace('${{ github.workspace }}', '$GITHUB_WORKSPACE').
+        Replace('${{github.workspace}}', '$GITHUB_WORKSPACE')
+}
+
+function Test-CommandTextForDirectScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandText,
+        [Parameter(Mandatory = $true)][string]$File,
+        [Parameter(Mandatory = $true)][int]$LineNumber,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]]$Violations
+    )
+
+    $trimmed = Normalize-CommandText -Text ((Remove-UnquotedShellComment -Text $CommandText).Trim())
+    if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+        return
+    }
+
+    $tokenText = $trimmed -replace "&&|\|\||[;&|()]", " "
+    $tokens = @($tokenText -split "\s+" | Where-Object { $_ -ne "" })
+    for ($tokenIndex = 0; $tokenIndex -lt $tokens.Count; $tokenIndex++) {
+        $scriptPath = Normalize-LocalScriptToken -Token $tokens[$tokenIndex]
+        if ($null -eq $scriptPath) {
+            continue
+        }
+
+        $interpreted = $false
+        $start = [Math]::Max(0, $tokenIndex - 8)
+        for ($previousIndex = $tokenIndex - 1; $previousIndex -ge $start; $previousIndex--) {
+            if (Test-InterpreterToken -Token $tokens[$previousIndex]) {
+                $usesCommandString = $false
+                for ($middleIndex = $previousIndex + 1; $middleIndex -lt $tokenIndex; $middleIndex++) {
+                    if (Test-ShellCommandStringOption -Token $tokens[$middleIndex]) {
+                        $usesCommandString = $true
+                        break
+                    }
+                }
+                $interpreted = -not $usesCommandString
+                break
+            }
+        }
+        if ($interpreted) {
+            continue
+        }
+
+        [void]$Violations.Add("${File}:${LineNumber}: direct script invocation must use an interpreter: $scriptPath")
+    }
+}
+
+function Test-WorkflowContentForDirectScripts {
+    param(
+        [Parameter(Mandatory = $true)][string]$File,
+        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]]$Violations
+    )
+
+    $inRunBlock = $false
+    $runBlockIndent = -1
+    $lineNumber = 0
+    foreach ($line in $Content -split "`r?`n") {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        $indent = Get-Indent -Line $line
+
+        if ($inRunBlock) {
+            if ([string]::IsNullOrWhiteSpace($trimmed)) {
+                continue
+            }
+            if ($indent -gt $runBlockIndent) {
+                Test-CommandTextForDirectScript -CommandText $trimmed -File $File -LineNumber $lineNumber -Violations $Violations
+                continue
+            }
+            $inRunBlock = $false
+        }
+
+        if ($trimmed.StartsWith("#")) {
+            continue
+        }
+
+        if ($line -match "^\s*(?:-\s*)?run:\s*([|>])[-+]?\s*$") {
+            $inRunBlock = $true
+            $runBlockIndent = $indent
+            continue
+        }
+
+        if ($line -match "^\s*(?:-\s*)?run:\s*(.+)$") {
+            Test-CommandTextForDirectScript -CommandText $Matches[1] -File $File -LineNumber $lineNumber -Violations $Violations
+        }
+    }
+}
+
+function Test-WorkflowDirectScriptInvocations {
+    param([System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$ChangedFiles)
+
+    $workflowFiles = @($ChangedFiles.Keys | Where-Object { $_ -match "^\.github/workflows/.*\.ya?ml$" })
+    if ($workflowFiles.Count -eq 0) {
+        Skip "Workflow script invocation policy" "no workflow files pushed"
+        return
+    }
+
+    $violations = [System.Collections.Generic.List[string]]::new()
+    foreach ($file in $workflowFiles) {
+        foreach ($commit in $ChangedFiles[$file]) {
+            $content = Get-CommitBlobText -Commit $commit -File $file
+            if ($null -eq $content) {
+                continue
+            }
+            Test-WorkflowContentForDirectScripts -File $file -Content $content -Violations $violations
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        Fail "Workflow script invocation policy" "Invoke local scripts through an interpreter so executable-bit drift cannot break CI.`n$($violations -join "`n")"
+    } else {
+        Pass "Workflow script invocation policy"
+    }
+}
+
+$timer = [System.Diagnostics.Stopwatch]::StartNew()
+$script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
+Set-Location $script:RepoRoot
+
+Write-Host "[pre-push] Running fast push checks..."
+$changedFiles = Get-ChangedFilesForPush
+
+if ($changedFiles.Count -eq 0) {
+    Skip "Changed file discovery" "no pushed file changes detected"
+} else {
+    Pass "Changed file discovery"
+}
+
+Test-FastHookSource -ChangedFiles $changedFiles
+Test-WorkflowDirectScriptInvocations -ChangedFiles $changedFiles
+
+$timer.Stop()
+Write-Host "[pre-push] Completed in $($timer.ElapsedMilliseconds)ms"
+
+if ($script:Failed -gt 0) {
+    Write-Host "[pre-push] $script:Failed failed, $script:Passed passed, $script:Skipped skipped."
+    Write-Host "[pre-push] Slow semantic checks stay outside git hooks. Run:"
+    Write-Host "  cargo fmt --check"
+    Write-Host "  cargo clippy --locked --all-targets --all-features -- -D warnings"
+    Write-Host "  cargo test --locked --all-features"
+    Write-Host "  ./scripts/run-local-ci.sh"
+    exit 1
+}
+
+Write-Host "[pre-push] All checks passed ($script:Passed passed, $script:Skipped skipped)."
+exit 0

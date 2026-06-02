@@ -85,7 +85,7 @@ jobs:
 
       - name: Check optional feature matrix
         if: matrix.os == 'ubuntu-latest'
-        run: ./scripts/check-feature-matrix.sh
+        run: bash scripts/check-feature-matrix.sh
 
   nextest:
     name: Nextest (${{ matrix.os }})
@@ -209,9 +209,9 @@ jobs:
             SKIP_FLAG="--skip-changelog-gate"
           fi
           if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
-            ./scripts/check-doc-consistency.sh $SKIP_FLAG --changed-files "${CHANGED_FILES[@]}"
+            bash scripts/check-doc-consistency.sh $SKIP_FLAG --changed-files "${CHANGED_FILES[@]}"
           else
-            ./scripts/check-doc-consistency.sh $SKIP_FLAG
+            bash scripts/check-doc-consistency.sh $SKIP_FLAG
           fi
 
   deny:
@@ -299,7 +299,7 @@ jobs:
           echo "Extracted MSRV: $MSRV"
 
       - name: Verify MSRV consistency across configuration files
-        run: ./scripts/check-msrv-consistency.sh
+        run: bash scripts/check-msrv-consistency.sh
 
       - name: Install Rust toolchain at MSRV
         uses: dtolnay/rust-toolchain@v1
@@ -422,7 +422,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Run panic-policy check
-        run: ./scripts/check-no-panics.sh
+        run: bash scripts/check-no-panics.sh
 
   sbom:
     name: SBOM (CycloneDX)

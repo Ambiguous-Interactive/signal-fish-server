@@ -187,6 +187,22 @@ validate_awk_files() {
 # 2. Shell script validation (shellcheck)
 # -----------------------------------------------------------------------
 
+run_shellcheck() {
+    local shell="$1"
+    local severity="$2"
+    local script="$3"
+    local report
+
+    if report=$(shellcheck -s "$shell" "$severity" "$script" 2>&1); then
+        return 0
+    fi
+
+    fail "shellcheck errors in $script"
+    printf '%s\n' "$report" | sed -n '1,20p'
+    echo ""
+    return 1
+}
+
 validate_shell_scripts() {
     CHECKS_RUN=$((CHECKS_RUN + 1))
     info "Validating shell scripts with shellcheck..."
@@ -209,10 +225,7 @@ validate_shell_scripts() {
         [ -f "$script" ] || continue
         shell_checked=$((shell_checked + 1))
 
-        if ! shellcheck -s bash $sc_severity "$script" > /dev/null 2>&1; then
-            fail "shellcheck errors in $script"
-            shellcheck -s bash $sc_severity "$script" 2>&1 | head -20
-            echo ""
+        if ! run_shellcheck "bash" "$sc_severity" "$script"; then
             shell_errors=$((shell_errors + 1))
         fi
     done
@@ -222,30 +235,26 @@ validate_shell_scripts() {
         [ -f "$script" ] || continue
         shell_checked=$((shell_checked + 1))
 
-        if ! shellcheck -s bash $sc_severity "$script" > /dev/null 2>&1; then
-            fail "shellcheck errors in $script"
-            shellcheck -s bash $sc_severity "$script" 2>&1 | head -20
-            echo ""
+        if ! run_shellcheck "bash" "$sc_severity" "$script"; then
             shell_errors=$((shell_errors + 1))
         fi
     done
 
-    # Validate the pre-commit hook (uses /bin/sh, not bash)
-    if [ -f .githooks/pre-commit ]; then
+    # Validate all git hook wrappers. PowerShell policy lives in scripts/hooks/*.ps1;
+    # extensionless .githooks/* files remain small POSIX wrappers for Git.
+    for hook in .githooks/*; do
+        [ -f "$hook" ] || continue
         shell_checked=$((shell_checked + 1))
-        # Detect the shell from the shebang
+
         local hook_shell="sh"
-        if head -1 .githooks/pre-commit | grep -q 'bash'; then
+        if head -1 "$hook" | grep -q 'bash'; then
             hook_shell="bash"
         fi
 
-        if ! shellcheck -s "$hook_shell" $sc_severity .githooks/pre-commit > /dev/null 2>&1; then
-            fail "shellcheck errors in .githooks/pre-commit"
-            shellcheck -s "$hook_shell" $sc_severity .githooks/pre-commit 2>&1 | head -20
-            echo ""
+        if ! run_shellcheck "$hook_shell" "$sc_severity" "$hook"; then
             shell_errors=$((shell_errors + 1))
         fi
-    fi
+    done
 
     if [ "$shell_checked" -eq 0 ]; then
         info "No shell scripts found to check"
@@ -267,7 +276,7 @@ validate_markdown_links() {
     CHECKS_RUN=$((CHECKS_RUN + 1))
     info "Validating markdown relative links in docs/..."
 
-    if ./scripts/check-internal-links.sh --docs-only --quiet; then
+    if bash scripts/check-internal-links.sh --docs-only --quiet; then
         success "All docs/ internal markdown links are valid"
     else
         fail "Broken internal link(s) found in docs/ markdown files"
