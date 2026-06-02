@@ -53,11 +53,18 @@ The readiness check verifies:
 
 ### Pre-Commit
 
-The pre-commit hook runs `scripts/hooks/pre-commit.ps1` and checks:
+The pre-commit hook runs `scripts/hooks/pre-commit.ps1`. When production Rust
+files are staged, it runs only the code-path guards needed for last-resort
+safety and budget:
 
 - staged diff whitespace via `git diff --cached --check`
-- new panic-prone production Rust additions in `src/*.rs`
-- generated skills index freshness, with auto-repair
+- new panic-prone production Rust additions in `src/**/*.rs`, excluding test
+  files and staged `#[cfg(test)]`/test-function ranges
+
+When no production Rust files are staged, it also checks lightweight repository
+metadata guards:
+
+- generated skills index freshness when skill inputs changed, with auto-repair
 - staged `.llm/*.md` files stay at or below 300 lines
 - README Shields.io badges use `style=for-the-badge`
 - hook source does not reintroduce slow semantic or install commands

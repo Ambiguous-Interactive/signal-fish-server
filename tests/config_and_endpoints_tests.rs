@@ -8,8 +8,12 @@
 
 mod test_helpers;
 
+use axum::routing::get;
 use signal_fish_server::config::Config;
-use signal_fish_server::websocket::create_router;
+use signal_fish_server::websocket::{
+    create_router, create_standalone_router, websocket_handler_v3,
+};
+use std::fs;
 use test_helpers::{create_test_server, test_server_config};
 
 // ===========================================================================
@@ -127,7 +131,9 @@ fn test_config_rate_limit_section() {
         "rate_limit": {
             "max_room_creations": 20,
             "time_window": 120,
-            "max_join_attempts": 50
+            "max_join_attempts": 50,
+            "max_signals": 700,
+            "max_signal_errors": 70
         }
     }"#;
 
@@ -136,6 +142,39 @@ fn test_config_rate_limit_section() {
     assert_eq!(config.rate_limit.max_room_creations, 20);
     assert_eq!(config.rate_limit.time_window, 120);
     assert_eq!(config.rate_limit.max_join_attempts, 50);
+    assert_eq!(config.rate_limit.max_signals, 700);
+    assert_eq!(config.rate_limit.max_signal_errors, 70);
+}
+
+#[test]
+fn test_config_example_includes_all_rate_limit_fields() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.json");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    let value: serde_json::Value =
+        serde_json::from_str(&content).expect("config.example.json must be valid JSON");
+    let rate_limit = value
+        .get("rate_limit")
+        .and_then(serde_json::Value::as_object)
+        .expect("config.example.json must include a rate_limit object");
+
+    for key in [
+        "max_room_creations",
+        "time_window",
+        "max_join_attempts",
+        "max_signals",
+        "max_signal_errors",
+    ] {
+        assert!(
+            rate_limit.contains_key(key),
+            "config.example.json rate_limit must document `{key}`"
+        );
+    }
+
+    let config: Config =
+        serde_json::from_str(&content).expect("config.example.json must parse as Config");
+    assert_eq!(config.rate_limit.max_signals, 600);
+    assert_eq!(config.rate_limit.max_signal_errors, 60);
 }
 
 #[test]
@@ -358,6 +397,49 @@ async fn test_websocket_route_exists() {
         status,
         axum::http::StatusCode::NOT_FOUND,
         "/ws route should exist"
+    );
+}
+
+#[tokio::test]
+async fn test_production_style_router_has_top_level_v3_only() {
+    let server = create_test_server().await;
+    let enhanced_router = create_router("*").with_state(server.clone());
+    let app = axum::Router::new()
+        .nest("/v2", enhanced_router)
+        .route("/v3/ws", get(websocket_handler_v3))
+        .with_state(server);
+
+    let test_server = axum_test::TestServer::new(app);
+
+    let v2_response = test_server.get("/v2/ws").await;
+    assert_ne!(
+        v2_response.status_code(),
+        axum::http::StatusCode::NOT_FOUND,
+        "/v2/ws route should exist"
+    );
+
+    let v3_response = test_server.get("/v3/ws").await;
+    assert_ne!(
+        v3_response.status_code(),
+        axum::http::StatusCode::NOT_FOUND,
+        "/v3/ws route should exist at the top level"
+    );
+
+    let nested_v3_response = test_server.get("/v2/v3/ws").await;
+    nested_v3_response.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_standalone_router_exposes_v3_alias() {
+    let server = create_test_server().await;
+    let app = create_standalone_router("*").with_state(server);
+
+    let test_server = axum_test::TestServer::new(app);
+    let response = test_server.get("/v3/ws").await;
+    assert_ne!(
+        response.status_code(),
+        axum::http::StatusCode::NOT_FOUND,
+        "standalone router should expose /v3/ws"
     );
 }
 

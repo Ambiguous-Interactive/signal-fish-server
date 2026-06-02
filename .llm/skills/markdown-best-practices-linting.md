@@ -122,29 +122,16 @@ typos
 
 ---
 
-## Pre-commit Hook
+## Git Hooks
 
-Add to `.githooks/pre-commit` or `.git/hooks/pre-commit`:
+Do not add markdownlint, link checking, typos, Node, or Cargo invocations to
+`.githooks/pre-commit`. Git hooks are last-resort staged-file guards and target
+<1 second. Run markdown validation in agent workflow, local CI, and GitHub CI:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Check markdown files via the project script.
-# The script enforces the pinned markdownlint-cli2 version.
-if [ -x scripts/check-markdown.sh ]; then
-    if ! scripts/check-markdown.sh; then
-        echo "[pre-commit] ERROR: Markdown linting failed"
-        echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
-        exit 1
-    fi
-fi
-
-# Check for typos
-if command -v typos >/dev/null 2>&1; then
-    echo "[pre-commit] Checking for typos..."
-    typos
-fi
+./scripts/check-markdown.sh
+./scripts/check-markdown.sh fix
+./scripts/run-local-ci.sh
 ```
 
 ---

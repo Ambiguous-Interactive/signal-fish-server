@@ -1157,6 +1157,16 @@ fn golden_enum_error_code_all_variants() {
         (ErrorCode::TooManySpectators, r#""TOO_MANY_SPECTATORS""#),
         (ErrorCode::NotASpectator, r#""NOT_A_SPECTATOR""#),
         (ErrorCode::SpectatorJoinFailed, r#""SPECTATOR_JOIN_FAILED""#),
+        (ErrorCode::CrossRoomSignal, r#""CROSS_ROOM_SIGNAL""#),
+        (
+            ErrorCode::UnsupportedTransport,
+            r#""UNSUPPORTED_TRANSPORT""#,
+        ),
+        (
+            ErrorCode::SignalTargetNotFound,
+            r#""SIGNAL_TARGET_NOT_FOUND""#,
+        ),
+        (ErrorCode::SignalRateLimited, r#""SIGNAL_RATE_LIMITED""#),
         (ErrorCode::InternalError, r#""INTERNAL_ERROR""#),
         (ErrorCode::StorageError, r#""STORAGE_ERROR""#),
         (ErrorCode::ServiceUnavailable, r#""SERVICE_UNAVAILABLE""#),

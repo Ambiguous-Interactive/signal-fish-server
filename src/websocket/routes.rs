@@ -8,8 +8,26 @@ use std::sync::Arc;
 use super::handler::{websocket_handler, websocket_handler_v3};
 use super::metrics::{metrics_handler, prometheus_metrics_handler};
 
-/// Create the Axum router with WebSocket support
+/// Create the nestable Axum router with WebSocket support.
+///
+/// This router is safe to mount under `/v2`: it exposes `/ws`, `/health`, and
+/// metrics routes only. The protocol-v3 alias is intentionally added by
+/// [`create_standalone_router`] or by the top-level production router so nesting
+/// never creates an undocumented `/v2/v3/ws` endpoint.
 pub fn create_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>> {
+    create_router_inner(cors_origins, false)
+}
+
+/// Create a standalone router for library users that serve Signal Fish at the
+/// HTTP root rather than nesting [`create_router`] under `/v2`.
+pub fn create_standalone_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>> {
+    create_router_inner(cors_origins, true)
+}
+
+fn create_router_inner(
+    cors_origins: &str,
+    include_v3_alias: bool,
+) -> axum::Router<Arc<EnhancedGameServer>> {
     use tower_http::cors::{Any, CorsLayer};
     use tower_http::trace::TraceLayer;
 
@@ -33,23 +51,19 @@ pub fn create_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>
         }
     };
 
-    // NOTE ON PATH NESTING: this router is mounted by `src/main.rs` under
-    // `.nest("/v2", enhanced_router)`, so the routes below are reached as
-    // `/v2/ws`, `/v2/health`, etc. The `/v3/ws` route declared here therefore
-    // becomes `/v2/v3/ws` under that nesting — UNUSED in the production wiring.
-    // The real `/v3/ws` alias is mounted at the top level in `src/main.rs`
-    // (`.route("/v3/ws", get(websocket_handler_v3))`); both aliases share this
-    // same handler set, differing only in the default protocol version. The
-    // `/v3/ws` route is kept here because `run_server` serves this router
-    // un-nested, so library/standalone users reach `/ws` and `/v3/ws` directly.
-    axum::Router::new()
+    let router = axum::Router::new()
         .route("/ws", get(websocket_handler))
-        .route("/v3/ws", get(websocket_handler_v3))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
-        .route("/metrics/prom", get(prometheus_metrics_handler))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        .route("/metrics/prom", get(prometheus_metrics_handler));
+
+    let router = if include_v3_alias {
+        router.route("/v3/ws", get(websocket_handler_v3))
+    } else {
+        router
+    };
+
+    router.layer(cors).layer(TraceLayer::new_for_http())
 }
 
 /// Health check endpoint
@@ -93,7 +107,7 @@ pub async fn run_server(
     });
 
     // Create router with CORS configuration
-    let app = create_router(&cors_origins).with_state(game_server);
+    let app = create_standalone_router(&cors_origins).with_state(game_server);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;

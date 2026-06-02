@@ -27,79 +27,92 @@ impl EnhancedGameServer {
     pub async fn handle_signal(&self, from: &PlayerId, to: PlayerId, signal: serde_json::Value) {
         // 1. Sender must be in a room.
         let Some(from_room) = self.get_client_room(from).await else {
-            self.send_signal_error(from, "You are not in a room", ErrorCode::NotInRoom)
-                .await;
-            return;
-        };
-
-        // 2. Target must be in a room.
-        let Some(to_room) = self.get_client_room(&to).await else {
-            self.send_signal_error(
+            self.reject_signal(
                 from,
-                "Signal target is not in any room",
-                ErrorCode::SignalTargetNotFound,
+                to,
+                "You are not in a room",
+                ErrorCode::NotInRoom,
+                "sender_not_in_room",
             )
             .await;
             return;
         };
 
         // Self-signal guard: a peer cannot WebRTC to itself. Reject before
-        // consuming the rate-limit budget so a misbehaving client cannot burn
-        // its quota looping signals back to itself.
+        // target lookup so the diagnostic is deterministic.
         if *from == to {
-            tracing::debug!(%from, "Ignoring self-targeted signal");
-            self.send_signal_error(
+            self.reject_signal(
                 from,
+                to,
                 "Cannot signal yourself",
                 ErrorCode::SignalTargetNotFound,
+                "self_signal",
             )
             .await;
             return;
         }
+
+        // 2. Target must be in a room.
+        let Some(to_room) = self.get_client_room(&to).await else {
+            self.reject_signal(
+                from,
+                to,
+                "Signal target is not in any room",
+                ErrorCode::SignalTargetNotFound,
+                "target_not_in_room",
+            )
+            .await;
+            return;
+        };
 
         // 3. Same-room enforcement (PLAN invariant #6 / Appendix I).
         if from_room != to_room {
-            self.send_signal_error(
+            self.reject_signal(
                 from,
+                to,
                 "Cannot signal a peer in a different room",
                 ErrorCode::CrossRoomSignal,
+                "cross_room",
             )
             .await;
             return;
         }
 
-        // 4. Sender must have negotiated the WebRTC transport.
-        if !self.client_supports_transport(from, Transport::WebRtc) {
-            self.send_signal_error(
+        // 4. Sender must have negotiated v3 + WebRTC.
+        if !self.supports_webrtc_signaling(from) {
+            self.reject_signal(
                 from,
+                to,
                 "WebRTC transport was not negotiated for this connection",
                 ErrorCode::UnsupportedTransport,
+                "sender_unsupported_transport",
             )
             .await;
             return;
         }
 
-        // 5. Per-connection signal rate limit.
-        if let Err(err) = self.rate_limiter.check_signal(from).await {
-            self.send_signal_error(from, err.to_string(), ErrorCode::SignalRateLimited)
-                .await;
-            return;
-        }
-
-        // 6. Deliver only to a v3 + WebRTC target. A webrtc plan can never have
+        // 5. Deliver only to a v3 + WebRTC target. A webrtc plan can never have
         //    chosen a peer that lacks the WebRTC transport, but enforce
         //    defense-in-depth: a sender that targets a v2 or v3-relay-only peer
         //    is told the target was not found rather than delivering a `Signal`
         //    the target never opted into. This mirrors the late-join path, which
         //    likewise requires BOTH v3 AND WebRTC for each peer (Appendix K).
-        if !self.client_supports_v3(&to) || !self.client_supports_transport(&to, Transport::WebRtc)
-        {
-            self.send_signal_error(
+        if !self.supports_webrtc_signaling(&to) {
+            self.reject_signal(
                 from,
+                to,
                 "Signal target does not support WebRTC signaling",
                 ErrorCode::SignalTargetNotFound,
+                "target_unsupported_transport",
             )
             .await;
+            return;
+        }
+
+        // 6. Per-connection valid signal rate limit.
+        if let Err(err) = self.rate_limiter.check_signal(from).await {
+            self.send_signal_error(from, err.to_string(), ErrorCode::SignalRateLimited)
+                .await;
             return;
         }
 
@@ -131,48 +144,87 @@ impl EnhancedGameServer {
     /// caller (`handle_join_room`). Passing it in avoids a redundant
     /// `get_room_players` round-trip to the database.
     pub async fn handle_webrtc_late_join(&self, joiner: &PlayerId, members: &[PlayerInfo]) {
-        // The joiner itself must be v3 + WebRTC capable; otherwise nothing to do.
-        if !self.client_supports_v3(joiner)
-            || !self.client_supports_transport(joiner, Transport::WebRtc)
-        {
+        self.pair_webrtc_peer_with_members(joiner, members).await;
+    }
+
+    /// Whether this connection can participate in targeted WebRTC signaling.
+    pub(crate) fn supports_webrtc_signaling(&self, player_id: &PlayerId) -> bool {
+        self.client_supports_v3(player_id)
+            && self.client_supports_transport(player_id, Transport::WebRtc)
+    }
+
+    /// Pair one WebRTC-capable peer with every WebRTC-capable member in a room.
+    pub(crate) async fn pair_webrtc_peer_with_members(
+        &self,
+        peer: &PlayerId,
+        members: &[PlayerInfo],
+    ) {
+        if !self.supports_webrtc_signaling(peer) {
             return;
         }
 
         for member in members {
             let existing = member.id;
-            if existing == *joiner {
+            if existing == *peer {
                 continue;
             }
             // v2 / relay-only members never participate in signaling (gating).
-            if !self.client_supports_v3(&existing)
-                || !self.client_supports_transport(&existing, Transport::WebRtc)
-            {
+            if !self.supports_webrtc_signaling(&existing) {
                 continue;
             }
 
-            // Tell the existing peer about the joiner...
-            let _ = self
-                .message_coordinator
-                .send_to_player(
-                    &existing,
-                    Arc::new(ServerMessage::NewPeer {
-                        peer_id: *joiner,
-                        you_initiate: local_initiates(existing, *joiner),
-                    }),
-                )
-                .await;
-            // ...and the joiner about the existing peer. Exactly one of the two
-            // `you_initiate` flags is true (local_initiates is antisymmetric).
-            let _ = self
-                .message_coordinator
-                .send_to_player(
-                    joiner,
-                    Arc::new(ServerMessage::NewPeer {
-                        peer_id: existing,
-                        you_initiate: local_initiates(*joiner, existing),
-                    }),
-                )
-                .await;
+            self.send_new_peer_pair(peer, &existing).await;
+        }
+    }
+
+    async fn send_new_peer_pair(&self, peer: &PlayerId, existing: &PlayerId) {
+        // Tell the existing peer about the new/reconnected peer...
+        let _ = self
+            .message_coordinator
+            .send_to_player(
+                existing,
+                Arc::new(ServerMessage::NewPeer {
+                    peer_id: *peer,
+                    you_initiate: local_initiates(*existing, *peer),
+                }),
+            )
+            .await;
+        // ...and the peer about the existing peer. Exactly one of the two
+        // `you_initiate` flags is true (local_initiates is antisymmetric).
+        let _ = self
+            .message_coordinator
+            .send_to_player(
+                peer,
+                Arc::new(ServerMessage::NewPeer {
+                    peer_id: *existing,
+                    you_initiate: local_initiates(*peer, *existing),
+                }),
+            )
+            .await;
+    }
+
+    async fn reject_signal(
+        &self,
+        from: &PlayerId,
+        to: PlayerId,
+        message: &'static str,
+        error_code: ErrorCode,
+        reason: &'static str,
+    ) {
+        tracing::debug!(
+            %from,
+            %to,
+            %reason,
+            ?error_code,
+            "Rejected WebRTC signal"
+        );
+
+        match self.rate_limiter.check_signal_error(from).await {
+            Ok(()) => self.send_signal_error(from, message, error_code).await,
+            Err(err) => {
+                self.send_signal_error(from, err.to_string(), ErrorCode::SignalRateLimited)
+                    .await;
+            }
         }
     }
 

@@ -121,6 +121,9 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 Git hooks are fast last-resort guards only and target sub-second execution. Agents must
 catch formatting, clippy, tests, docs, and policy failures through the mandatory workflow
 and `./scripts/run-local-ci.sh`, not by relying on hooks to run slow semantic checks.
+When debugging hooks, run the PowerShell runner directly. Native helper functions must
+return exactly one object; discard async task completion values with `[void]` so callers
+can always read `.ExitCode`.
 
 ---
 
@@ -216,6 +219,17 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
 Key files at a glance: `src/main.rs` (entry), `src/server.rs` (room/player logic),
 `src/websocket/` (WS lifecycle), `src/protocol/` (messages and types),
 `src/config/` (all config structs), `src/auth/` (auth and rate limiting).
+
+Protocol v3 routing invariant: `websocket::create_router()` is nest-safe and
+must not expose `/v3/ws` by itself; production mounts it under `/v2` and adds
+top-level `/v3/ws` separately. Standalone/library servers that serve Signal Fish
+at the HTTP root should use `websocket::create_standalone_router()` when they
+want both `/ws` and `/v3/ws`.
+
+Signaling rate limits are split intentionally: `max_signals` counts valid
+deliverable WebRTC relays, while `max_signal_errors` counts rejected `Signal`
+attempts. Do not move target/transport validation in a way that lets invalid
+traffic avoid `max_signal_errors` or consume the valid ICE budget.
 
 ---
 

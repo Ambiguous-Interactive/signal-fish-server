@@ -239,18 +239,11 @@ npm install -g markdownlint-cli2@$(cat .markdownlint-version)
 | **MD041** | First line must be top-level heading | Add `# Title` as first line |
 | **MD046** | Code block style | Use fenced code blocks (\`\`\`) consistently |
 
-### Pre-commit Hook Integration
+### Git Hook Boundary
 
-```bash
-# .githooks/pre-commit
-if [ -x scripts/check-markdown.sh ]; then
-  echo "[pre-commit] Checking markdown files..."
-  if ! scripts/check-markdown.sh; then
-    echo "[pre-commit] To auto-fix: ./scripts/check-markdown.sh fix"
-    exit 1
-  fi
-fi
-```
+Do not add markdownlint or typos checks to `.githooks/pre-commit`. Hooks are
+last-resort staged-file guards and target <1 second. Run linting through agent
+workflow, local CI, and GitHub CI instead.
 
 ---
 

@@ -61,6 +61,7 @@ pub fn test_server_config() -> ServerConfig {
             time_window: Duration::from_secs(60),
             max_join_attempts: 20,
             max_signals: 600,
+            max_signal_errors: 60,
         },
         empty_room_timeout: Duration::from_secs(5), // Fast timeout for tests
         inactive_room_timeout: Duration::from_secs(10),

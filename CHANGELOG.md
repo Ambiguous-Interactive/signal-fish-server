@@ -27,18 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_protocol_version`. Added `protocol.min_protocol_version` (default 2) and
   `protocol.max_protocol_version` (default 3) config options with validation. Added a `/v3/ws`
   endpoint alias that shares the `/v2/ws` handler and defaults the protocol version to 3 when the
-  client omits it. This change is fully backward compatible: clients that omit the new fields
-  negotiate as pure v2 (relay-only) and observe byte-identical v2 behavior.
+  client omits it. The public router now mounts this alias only at the top level, avoiding a
+  nested `/v2/v3/ws` route. This change is fully backward compatible: clients that omit the new
+  fields on `/v2/ws` negotiate as pure v2 (relay-only) and observe byte-identical v2 behavior.
 - Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
   relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
   `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.
   On room join, existing v3 WebRTC peers and the joiner are paired via `ServerMessage::NewPeer
   { peer_id, you_initiate }`, where the deterministic glare rule (lesser UUID initiates) designates
   exactly one offerer per pair. Same-room enforcement, WebRTC-transport negotiation, and a
-  per-connection signal rate limit (`rate_limit.max_signals`, default 600) are enforced, surfacing
-  the new `CROSS_ROOM_SIGNAL`, `UNSUPPORTED_TRANSPORT`, `SIGNAL_TARGET_NOT_FOUND`, and
-  `SIGNAL_RATE_LIMITED` error codes. All signaling is gated to v3 + WebRTC peers, so v2 clients never
-  receive `Signal` or `NewPeer` and v2 wire behavior is byte-identical.
+  per-connection valid-signal rate limit (`rate_limit.max_signals`, default 600) are enforced.
+  Rejected signal attempts use a separate `rate_limit.max_signal_errors` budget (default 60) so
+  invalid targets and unsupported transports cannot bypass rate limiting or consume the valid ICE
+  relay budget. These checks surface the new `CROSS_ROOM_SIGNAL`, `UNSUPPORTED_TRANSPORT`,
+  `SIGNAL_TARGET_NOT_FOUND`, and `SIGNAL_RATE_LIMITED` error codes. All signaling is gated to v3 +
+  WebRTC peers, so v2 clients never receive `Signal` or `NewPeer` and v2 wire behavior is
+  byte-identical.
 
 ### Security
 
@@ -54,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and slicing.
 - Hardened internal Markdown link validation so local checks fail when a link target exists locally but is not tracked
   by Git, matching clean CI checkout behavior.
+- Fixed protocol v3 WebRTC reconnect behavior so restored peers are returned to room membership,
+  receive fresh `NewPeer` pairing, and keep the reconnected player identity for subsequent WebSocket
+  frames and disconnect cleanup.
+- Fixed cross-platform hook/link-checker issues: shared PowerShell native-process helpers now avoid
+  synchronous stream deadlocks, Bash hook scripts avoid Bash 4-only features, and the fast link
+  checker initializes empty file sets safely.
 
 ### Changed
 

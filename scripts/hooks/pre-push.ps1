@@ -11,6 +11,8 @@ $script:Passed = 0
 $script:Failed = 0
 $script:Skipped = 0
 
+. (Join-Path $PSScriptRoot "native-process.ps1")
+
 function Pass {
     param([string]$Name)
     Write-Host "PASS: $Name"
@@ -34,81 +36,6 @@ function Skip {
     )
     Write-Host "SKIP: $Name ($Reason)"
     $script:Skipped++
-}
-
-function Invoke-Native {
-    param(
-        [Parameter(Mandatory = $true)][string]$FileName,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
-    )
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $FileName
-    foreach ($argument in $Arguments) {
-        [void]$psi.ArgumentList.Add($argument)
-    }
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    $psi.StandardOutputEncoding = $utf8NoBom
-    $psi.StandardErrorEncoding = $utf8NoBom
-
-    $process = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-
-    [pscustomobject]@{
-        ExitCode = $process.ExitCode
-        Stdout = $stdout
-        Stderr = $stderr
-        Output = $stdout + $stderr
-    }
-}
-
-function Invoke-Git {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments)
-    $result = Invoke-Native -FileName "git" -Arguments $Arguments
-    if ($result.ExitCode -ne 0) {
-        throw "git $($Arguments -join ' ') failed:`n$($result.Output)"
-    }
-    $result
-}
-
-function Invoke-NativeWithInput {
-    param(
-        [Parameter(Mandatory = $true)][string]$FileName,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [Parameter(Mandatory = $true)][string]$InputText
-    )
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $FileName
-    foreach ($argument in $Arguments) {
-        [void]$psi.ArgumentList.Add($argument)
-    }
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    $psi.StandardOutputEncoding = $utf8NoBom
-    $psi.StandardErrorEncoding = $utf8NoBom
-
-    $process = [System.Diagnostics.Process]::Start($psi)
-    $process.StandardInput.Write($InputText)
-    $process.StandardInput.Close()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-
-    [pscustomobject]@{
-        ExitCode = $process.ExitCode
-        Stdout = $stdout
-        Stderr = $stderr
-        Output = $stdout + $stderr
-    }
 }
 
 function Split-NulOutput {
@@ -270,6 +197,7 @@ function Test-FastHookSource {
     $files = @(
         ".githooks/pre-commit",
         ".githooks/pre-push",
+        "scripts/hooks/native-process.ps1",
         "scripts/hooks/pre-commit.ps1",
         "scripts/hooks/pre-push.ps1"
     )

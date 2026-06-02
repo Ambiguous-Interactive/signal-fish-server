@@ -188,6 +188,10 @@ impl SpectatorService {
         }
     }
 
+    pub(crate) fn is_spectating(&self, player_id: &PlayerId) -> bool {
+        self.spectator_rooms.contains_key(player_id)
+    }
+
     pub(crate) async fn detach(
         &self,
         player_id: &PlayerId,

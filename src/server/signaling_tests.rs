@@ -37,9 +37,17 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
 }
 
 async fn create_test_server_with_signals(max_signals: u32) -> Arc<EnhancedGameServer> {
+    create_test_server_with_signal_limits(max_signals, 60).await
+}
+
+async fn create_test_server_with_signal_limits(
+    max_signals: u32,
+    max_signal_errors: u32,
+) -> Arc<EnhancedGameServer> {
     let config = ServerConfig {
         rate_limit_config: RateLimitConfig {
             max_signals,
+            max_signal_errors,
             ..RateLimitConfig::default()
         },
         ..ServerConfig::default()
@@ -84,6 +92,14 @@ fn v3_relay_only() -> NegotiatedProtocol {
     NegotiatedProtocol {
         version: 3,
         transports: vec![Transport::Relay],
+        topologies: vec![Topology::Relay],
+    }
+}
+
+fn v2_with_webrtc_transport() -> NegotiatedProtocol {
+    NegotiatedProtocol {
+        version: 2,
+        transports: vec![Transport::Relay, Transport::WebRtc],
         topologies: vec![Topology::Relay],
     }
 }
@@ -305,6 +321,34 @@ async fn signal_from_non_webrtc_sender_is_rejected() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn signal_sender_must_be_v3_even_if_webrtc_transport_is_present() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v2_with_webrtc_transport());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    server
+        .handle_signal(&alice, bob, json!({ "Offer": "x" }))
+        .await;
+
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::UnsupportedTransport));
+    assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn signal_to_v2_peer_reports_target_not_found() {
     // Appendix K gating: a v3 sender targeting a v2 (relay-only) peer in the
     // same room must NOT deliver — it is reported as target-not-found.
@@ -437,6 +481,73 @@ async fn signal_rate_limit_trips_after_budget() {
     let msg = recv(&mut alice_rx).await;
     assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
     assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn rejected_signal_attempts_are_rate_limited() {
+    let server = create_test_server_with_signal_limits(600, 1).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+
+    server
+        .handle_signal(&alice, PlayerId::new_v4(), json!({ "Offer": "bad-1" }))
+        .await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTargetNotFound));
+
+    server
+        .handle_signal(&alice, PlayerId::new_v4(), json!({ "Offer": "bad-2" }))
+        .await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn rejected_signals_do_not_consume_valid_signal_budget() {
+    let server = create_test_server_with_signal_limits(1, 4).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (legacy, mut legacy_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    // legacy stays default v2 / relay-only.
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    for player in [&alice, &legacy, &bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(player, room_id)
+            .await;
+    }
+
+    server
+        .handle_signal(&alice, legacy, json!({ "Offer": "bad-target" }))
+        .await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTargetNotFound));
+    assert_silent(&mut legacy_rx).await;
+
+    server
+        .handle_signal(&alice, bob, json!({ "IceCandidate": "valid" }))
+        .await;
+    assert!(matches!(
+        recv(&mut bob_rx).await.as_ref(),
+        ServerMessage::Signal { .. }
+    ));
+
+    server
+        .handle_signal(&alice, bob, json!({ "IceCandidate": "over-budget" }))
+        .await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
 }
 
 // ---------------------------------------------------------------------------
@@ -630,4 +741,270 @@ async fn late_join_noop_when_joiner_is_relay_only() {
     // A relay-only joiner triggers no NewPeer in either direction.
     assert_silent(&mut existing_rx).await;
     assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_restores_room_membership_and_webrtc_pairing() {
+    let server = create_test_server().await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    let reconnected = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(reconnected, "valid reconnect should report success");
+
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+            assert!(
+                payload
+                    .current_players
+                    .iter()
+                    .any(|player| player.id == reconnecting),
+                "reconnected payload should include restored player membership"
+            );
+        }
+        other => panic!("expected Reconnected, got {other:?}"),
+    }
+
+    match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::PlayerReconnected { player_id } => assert_eq!(*player_id, reconnecting),
+        other => panic!("expected PlayerReconnected, got {other:?}"),
+    }
+
+    let existing_flag = match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, reconnecting);
+            *you_initiate
+        }
+        other => panic!("existing expected NewPeer after reconnect, got {other:?}"),
+    };
+    let reconnecting_flag = match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, existing);
+            *you_initiate
+        }
+        other => panic!("reconnecting expected NewPeer after reconnect, got {other:?}"),
+    };
+    assert_ne!(existing_flag, reconnecting_flag);
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    assert!(
+        members.iter().any(|player| player.id == reconnecting),
+        "reconnected player must be restored in room storage for future pairing"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_from_roomed_temporary_connection_is_rejected_without_ghost_membership() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+
+    let target_room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&target_room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, target_room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, target_room_id, false, Some(reconnecting_info))
+        .await;
+    server
+        .database
+        .remove_player_from_room(&target_room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    let current_room_id = create_db_room(&server, current).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&current, current_room_id)
+        .await;
+
+    let reconnected = server
+        .handle_reconnect(&current, &reconnecting, &target_room_id, &token)
+        .await;
+    assert!(
+        !reconnected,
+        "reconnect from an already-roomed temporary client must fail"
+    );
+
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::ReconnectionFailed);
+        }
+        other => panic!("expected ReconnectionFailed, got {other:?}"),
+    }
+
+    let current_room_members = server
+        .database
+        .get_room_players(&current_room_id)
+        .await
+        .expect("current room players");
+    assert!(
+        current_room_members
+            .iter()
+            .any(|player| player.id == current),
+        "failed reconnect must not orphan the temporary player's existing room membership"
+    );
+    assert!(
+        server.connection_manager.has_client(&current),
+        "failed reconnect must leave the temporary connection registered"
+    );
+    assert!(
+        !server.connection_manager.has_client(&reconnecting),
+        "failed reconnect must not claim the disconnected player's id"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current_a, _current_a_rx) = register_client(&server).await;
+    let (current_b, _current_b_rx) = register_client(&server).await;
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    let server_a = Arc::clone(&server);
+    let server_b = Arc::clone(&server);
+    let token_a = token.clone();
+    let token_b = token.clone();
+    let reconnect_a = async move {
+        server_a
+            .handle_reconnect(&current_a, &reconnecting, &room_id, &token_a)
+            .await
+    };
+    let reconnect_b = async move {
+        server_b
+            .handle_reconnect(&current_b, &reconnecting, &room_id, &token_b)
+            .await
+    };
+
+    let (success_a, success_b) = tokio::join!(reconnect_a, reconnect_b);
+    let success_count = [success_a, success_b]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    assert_eq!(
+        success_count, 1,
+        "exactly one concurrent reconnect may claim a single-use token"
+    );
+    assert!(
+        server.connection_manager.has_client(&reconnecting),
+        "the winning reconnect should own the restored player id"
+    );
+    let remaining_temporary_connections = [current_a, current_b]
+        .into_iter()
+        .filter(|player_id| server.connection_manager.has_client(player_id))
+        .count();
+    assert_eq!(
+        remaining_temporary_connections, 1,
+        "the losing fresh connection should remain temporary; the winner should be reassigned"
+    );
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    assert_eq!(
+        members
+            .iter()
+            .filter(|player| player.id == reconnecting)
+            .count(),
+        1,
+        "same-token concurrent reconnects must not duplicate room membership"
+    );
 }

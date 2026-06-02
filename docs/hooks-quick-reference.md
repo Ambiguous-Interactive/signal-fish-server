@@ -17,7 +17,7 @@ multiple file contents.
 
 | Hook | Fast Checks |
 |------|-------------|
-| pre-commit | staged whitespace, production panic-pattern additions, skills index auto-repair, `.llm` file size, README badge style, hook speed policy |
+| pre-commit | production Rust commits: staged whitespace and panic-pattern additions; non-production-Rust commits: metadata guards such as skills index auto-repair, `.llm` file size, README badge style, and hook speed policy |
 | pre-push | pushed-file discovery, workflow direct-script invocation policy, hook speed policy |
 
 ## Required Agent Checks

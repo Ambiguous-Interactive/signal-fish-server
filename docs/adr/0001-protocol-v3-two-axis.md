@@ -91,8 +91,8 @@ stateless rule -- no perfect-negotiation dance:
   by lexicographic `PlayerId` UUID comparison. Exactly one of each pair offers.
 - **Host (star):** every non-host client offers to the `host`; the host offers to
   none and answers all. Clients never signal each other.
-- **Late join:** existing peers receive `NewPeer { peer_id, you_initiate }` using
-  the same rule; the joiner answers.
+- **Late join/reconnect:** both peers receive `NewPeer { peer_id, you_initiate }`
+  using the same deterministic rule, so either side may be the offerer.
 
 ### 6. Signaling integrity
 

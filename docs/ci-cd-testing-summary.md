@@ -26,14 +26,15 @@ Three new scripts for fast local validation:
 | `scripts/validate-lychee-config.sh` | Validate `.lychee.toml` configuration | `./scripts/validate-lychee-config.sh` |
 | `scripts/check-markdown.sh` | Markdown linting with auto-fix | `./scripts/check-markdown.sh [fix]` |
 
-### 3. Enhanced Pre-commit Hook
+### 3. Fast Pre-commit Hook
 
-Updated `.githooks/pre-commit` to include:
+Updated `.githooks/pre-commit` to keep only sub-second, staged-file guards:
 
-- Code formatting checks
-- Markdown linting (if pinned markdownlint-cli2 version installed)
-- Link checking on staged files (if lychee installed, offline mode for speed)
-- Panic-prone pattern detection
+- Staged whitespace checks
+- Panic-prone production Rust addition detection
+- Metadata guards for non-production-Rust commits: generated skills-index
+  freshness with auto-repair, `.llm` file size, README badge, and hook speed
+  policy checks
 
 ### 4. Comprehensive Documentation
 
@@ -90,8 +91,8 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 
 - Test validates `.lychee.toml` excludes placeholder URLs
 - Test warns if actual placeholder URLs exist in docs
-- Pre-commit hook catches broken internal links before commit
-- Fast local script for checking links on modified files
+- Agent workflow, local CI, and GitHub CI catch broken internal links before merge
+- Fast local script is available for explicit link checks on modified files
 
 ### 2. Markdown Lint Failures
 
@@ -101,7 +102,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 
 - Test validates all code blocks have language identifiers
 - Test checks for common markdown formatting issues
-- Pre-commit hook runs markdownlint on changed files
+- Agent workflow, local CI, and GitHub CI run markdownlint
 - Auto-fix script available for quick repairs
 
 ### 3. MSRV Inconsistencies
@@ -155,7 +156,7 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 
 ## Performance
 
-- **Pre-commit hook**: <5 seconds (with all tools installed)
+- **Pre-commit hook**: targets <1 second for staged last-resort guards; profile with `SIGNAL_FISH_HOOK_PROFILE=1` when slower
 - **Fast link check**: <10 seconds (offline mode, modified files only)
 - **Full test suite**: ~110 seconds (comprehensive validation)
 - **CI workflow**: 5-10 minutes (full integration testing)

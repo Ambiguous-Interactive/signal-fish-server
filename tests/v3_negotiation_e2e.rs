@@ -55,6 +55,30 @@ async fn start_auth_server() -> std::net::SocketAddr {
     start_server(game_server).await
 }
 
+async fn start_auth_disabled_server() -> std::net::SocketAddr {
+    let mut server_config: ServerConfig = test_server_config();
+    server_config.auth_enabled = false;
+
+    let mut protocol_config = test_protocol_config();
+    protocol_config.sdk_compatibility.enforce = false;
+
+    let game_server = EnhancedGameServer::new(
+        server_config,
+        protocol_config,
+        signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::AuthMaintenanceConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        Vec::new(),
+    )
+    .await
+    .expect("server builds");
+
+    start_server(game_server).await
+}
+
 async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
     use axum::routing::get;
 
@@ -165,9 +189,16 @@ async fn v2_client_omitting_fields_is_recorded_as_v2() {
 
     match authenticate(&mut ws, auth).await {
         ServerMessage::ProtocolInfo(info) => {
-            assert_eq!(info.protocol_version, Some(2));
-            assert_eq!(info.min_protocol_version, Some(2));
-            assert_eq!(info.max_protocol_version, Some(3));
+            assert_eq!(info.protocol_version, None);
+            assert_eq!(info.min_protocol_version, None);
+            assert_eq!(info.max_protocol_version, None);
+            let value = serde_json::to_value(&info).expect("serializes");
+            assert!(
+                value.get("protocol_version").is_none()
+                    && value.get("min_protocol_version").is_none()
+                    && value.get("max_protocol_version").is_none(),
+                "negotiated v2 ProtocolInfo must not serialize v3-only keys: {value}"
+            );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -221,10 +252,11 @@ async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
     match authenticate(&mut ws, auth).await {
         ServerMessage::ProtocolInfo(info) => {
             assert_eq!(
-                info.protocol_version,
-                Some(2),
+                info.protocol_version, None,
                 "explicit protocol_version:2 must beat the /v3/ws path default"
             );
+            assert_eq!(info.min_protocol_version, None);
+            assert_eq!(info.max_protocol_version, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -247,7 +279,59 @@ async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
 
     match authenticate(&mut ws, auth).await {
         ServerMessage::ProtocolInfo(info) => {
-            assert_eq!(info.protocol_version, Some(2));
+            assert_eq!(info.protocol_version, None);
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
+    let addr = start_auth_disabled_server().await;
+    let mut ws = connect(addr, "/v3/ws").await;
+
+    let auth = ClientMessage::Authenticate {
+        app_id: APP_ID.to_string(),
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version: None,
+        supported_transports: Some(vec![Transport::Relay, Transport::WebRtc]),
+        supported_topologies: Some(vec![Topology::Relay, Topology::Mesh]),
+    };
+
+    match authenticate(&mut ws, auth).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(
+                info.protocol_version,
+                Some(3),
+                "auth-disabled /v3/ws Authenticate must still apply the path default"
+            );
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn auth_disabled_v3_ws_respects_explicit_v2_without_version_fields() {
+    let addr = start_auth_disabled_server().await;
+    let mut ws = connect(addr, "/v3/ws").await;
+
+    let auth = ClientMessage::Authenticate {
+        app_id: APP_ID.to_string(),
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version: Some(2),
+        supported_transports: Some(vec![Transport::Relay, Transport::WebRtc]),
+        supported_topologies: Some(vec![Topology::Relay, Topology::Mesh]),
+    };
+
+    match authenticate(&mut ws, auth).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(info.protocol_version, None);
+            assert_eq!(info.min_protocol_version, None);
+            assert_eq!(info.max_protocol_version, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }

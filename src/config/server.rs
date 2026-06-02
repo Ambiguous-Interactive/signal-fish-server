@@ -4,8 +4,9 @@ use super::defaults::{
     default_empty_room_timeout, default_enable_reconnection, default_event_buffer_size,
     default_heartbeat_throttle_secs, default_inactive_room_timeout, default_max_join_attempts,
     default_max_players, default_max_room_creations, default_max_rooms_per_game,
-    default_max_signals, default_ping_timeout, default_rate_limit_time_window,
-    default_reconnection_window, default_region_id, default_room_cleanup_interval,
+    default_max_signal_errors, default_max_signals, default_ping_timeout,
+    default_rate_limit_time_window, default_reconnection_window, default_region_id,
+    default_room_cleanup_interval,
 };
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +90,9 @@ pub struct RateLimitConfig {
     /// Maximum number of WebRTC signaling messages per time window
     #[serde(default = "default_max_signals")]
     pub max_signals: u32,
+    /// Maximum number of rejected WebRTC signaling attempts per time window
+    #[serde(default = "default_max_signal_errors")]
+    pub max_signal_errors: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -98,6 +102,7 @@ impl Default for RateLimitConfig {
             time_window: default_rate_limit_time_window(),
             max_join_attempts: default_max_join_attempts(),
             max_signals: default_max_signals(),
+            max_signal_errors: default_max_signal_errors(),
         }
     }
 }

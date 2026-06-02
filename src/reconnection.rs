@@ -6,7 +6,7 @@
 /// - Player disconnection tracking
 /// - Reconnection window management
 use crate::metrics::ServerMetrics;
-use crate::protocol::{PlayerId, RoomId, ServerMessage};
+use crate::protocol::{PlayerId, PlayerInfo, RoomId, ServerMessage};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -135,6 +135,8 @@ pub struct DisconnectedPlayer {
     pub last_sequence: u64,
     /// Was player authority?
     pub was_authority: bool,
+    /// Room membership snapshot used to restore the player on reconnect.
+    pub player_info: Option<PlayerInfo>,
 }
 
 impl DisconnectedPlayer {
@@ -184,6 +186,7 @@ impl ReconnectionManager {
         player_id: PlayerId,
         room_id: RoomId,
         was_authority: bool,
+        player_info: Option<PlayerInfo>,
     ) -> String {
         let token = ReconnectionToken::new(player_id, room_id, self.reconnection_window);
         let token_string = token.token.clone();
@@ -197,6 +200,7 @@ impl ReconnectionManager {
             token,
             last_sequence,
             was_authority,
+            player_info,
         };
 
         let mut players = self.disconnected_players.write().await;
@@ -249,6 +253,49 @@ impl ReconnectionManager {
         Ok(player.clone())
     }
 
+    /// Atomically validate and consume a reconnection record.
+    ///
+    /// This is the server-side entry point for real reconnect attempts. It
+    /// prevents two fresh sockets from validating the same token concurrently
+    /// and both claiming the same restored player id.
+    pub async fn claim_reconnection(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        token: &str,
+    ) -> Result<DisconnectedPlayer, String> {
+        let mut disconnected = self.disconnected_players.write().await;
+
+        let Some(player) = disconnected.get(player_id) else {
+            self.metrics.increment_reconnection_validation_failure();
+            return Err("No disconnection record found".to_string());
+        };
+
+        if player.token.token != token {
+            self.metrics.increment_reconnection_validation_failure();
+            return Err("Invalid reconnection token".to_string());
+        }
+
+        if !player.token.is_valid(player_id, room_id) {
+            self.metrics.increment_reconnection_validation_failure();
+            return Err("Reconnection token is invalid or expired".to_string());
+        }
+
+        if player.is_expired(self.reconnection_window) {
+            self.metrics.increment_reconnection_validation_failure();
+            return Err("Reconnection window has expired".to_string());
+        }
+
+        let Some(claimed) = disconnected.remove(player_id) else {
+            self.metrics.increment_reconnection_validation_failure();
+            return Err("No disconnection record found".to_string());
+        };
+        drop(disconnected);
+        self.metrics.decrement_reconnection_sessions_active();
+
+        Ok(claimed)
+    }
+
     /// Complete reconnection and remove from disconnected players
     pub async fn complete_reconnection(&self, player_id: &PlayerId) {
         let mut players = self.disconnected_players.write().await;
@@ -277,6 +324,30 @@ impl ReconnectionManager {
         }
 
         tracing::info!(%player_id, "Player reconnection completed");
+    }
+
+    /// Complete a reconnection record that was already consumed by
+    /// [`Self::claim_reconnection`].
+    pub async fn complete_claimed_reconnection(&self, disconnected: &DisconnectedPlayer) {
+        let room_id = disconnected.room_id;
+        let others_waiting = self
+            .disconnected_players
+            .read()
+            .await
+            .values()
+            .any(|p| p.player_id != disconnected.player_id && p.room_id == room_id);
+
+        self.metrics.increment_reconnection_completions();
+
+        if !others_waiting {
+            let mut buffers = self.event_buffers.write().await;
+            buffers.remove(&room_id);
+        }
+
+        tracing::info!(
+            player_id = %disconnected.player_id,
+            "Player reconnection completed"
+        );
     }
 
     /// Get missed events for a reconnecting player
@@ -364,6 +435,7 @@ mod tests {
     use super::*;
     use crate::metrics::ServerMetrics;
     use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     #[test]
     #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
@@ -444,7 +516,7 @@ mod tests {
 
         // Register disconnection
         let token = manager
-            .register_disconnection(player_id, room_id, false)
+            .register_disconnection(player_id, room_id, false, None)
             .await;
 
         // Validate reconnection
@@ -458,6 +530,56 @@ mod tests {
 
         // Should no longer have pending reconnection
         assert!(!manager.has_pending_reconnection(&player_id).await);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
+    async fn test_reconnection_claim_is_single_use_under_concurrency() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = Arc::new(ReconnectionManager::new(300, 100, metrics));
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None)
+            .await;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let task_a = {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            let token = token.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                manager
+                    .claim_reconnection(&player_id, &room_id, &token)
+                    .await
+                    .is_ok()
+            })
+        };
+        let task_b = {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            let token = token.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                manager
+                    .claim_reconnection(&player_id, &room_id, &token)
+                    .await
+                    .is_ok()
+            })
+        };
+
+        let (claimed_a, claimed_b) = tokio::join!(task_a, task_b);
+        let successes = [claimed_a.unwrap(), claimed_b.unwrap()]
+            .into_iter()
+            .filter(|claimed| *claimed)
+            .count();
+        assert_eq!(successes, 1, "exactly one same-token claim may succeed");
+        assert!(!manager.has_pending_reconnection(&player_id).await);
+        assert!(manager
+            .claim_reconnection(&player_id, &room_id, &token)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@ $ErrorActionPreference = "Stop"
 $script:Errors = 0
 $script:Warnings = 0
 
+. (Join-Path $PSScriptRoot "hooks/native-process.ps1")
+
 function Info {
     param([string]$Message)
     Write-Host "[hook-ready] $Message"
@@ -29,37 +31,6 @@ function ErrorItem {
     param([string]$Message)
     Write-Host "[ERROR] $Message"
     $script:Errors++
-}
-
-function Invoke-Native {
-    param(
-        [Parameter(Mandatory = $true)][string]$FileName,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
-    )
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $FileName
-    foreach ($argument in $Arguments) {
-        [void]$psi.ArgumentList.Add($argument)
-    }
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    $psi.StandardOutputEncoding = $utf8NoBom
-    $psi.StandardErrorEncoding = $utf8NoBom
-
-    $process = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-
-    [pscustomobject]@{
-        ExitCode = $process.ExitCode
-        Stdout = $stdout
-        Stderr = $stderr
-        Output = $stdout + $stderr
-    }
 }
 
 function Command-Exists {

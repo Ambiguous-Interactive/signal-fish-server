@@ -122,6 +122,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH_RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`          | `5`       | Max room creations per IP per window                   |
 | `SIGNAL_FISH_RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`                 | `60`      | Rate limit window in seconds                           |
 | `SIGNAL_FISH_RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`           | `20`      | Max join attempts per IP per window                    |
+| `SIGNAL_FISH_RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`                 | `600`     | Max valid WebRTC signals per player per window         |
+| `SIGNAL_FISH_RATE_LIMIT__MAX_SIGNAL_ERRORS`      | `rate_limit.max_signal_errors`           | `60`      | Max rejected WebRTC signals per player per window      |
 | `SIGNAL_FISH_PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`          | `64`      | Max characters in a game name                          |
 | `SIGNAL_FISH_PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`              | `6`       | Length of generated room codes                         |
 | `SIGNAL_FISH_PROTOCOL__MAX_PLAYER_NAME_LENGTH`   | `protocol.max_player_name_length`        | `32`      | Max characters in a player name                        |
@@ -173,7 +175,9 @@ Complete reference of all configuration options with environment variable overri
   "rate_limit": {
     "max_room_creations": 5,
     "time_window": 60,
-    "max_join_attempts": 20
+    "max_join_attempts": 20,
+    "max_signals": 600,
+    "max_signal_errors": 60
   },
   "logging": {
     "enable_file_logging": true,
@@ -196,15 +200,19 @@ Complete reference of all configuration options with environment variable overri
   "rate_limit": {
     "max_room_creations": 5,
     "time_window": 60,
-    "max_join_attempts": 20
+    "max_join_attempts": 20,
+    "max_signals": 600,
+    "max_signal_errors": 60
   }
 }
 
 ```
 
 - `max_room_creations` - Max room creations per IP per time window
+- `max_join_attempts` - Max room join attempts per player per time window
+- `max_signals` - Max valid WebRTC signal relays per player per time window
+- `max_signal_errors` - Max rejected WebRTC signal attempts per player per time window
 - `time_window` - Rate limit window in seconds
-- `max_join_attempts` - Max join attempts per IP per time window
 
 ## Protocol Settings
 

@@ -283,7 +283,8 @@ Batching is transparent to clients.
 
 ## Rate Limiting
 
-In-memory rate limiting for room creation and join attempts.
+In-memory rate limiting for room creation, join attempts, valid WebRTC signal
+relays, and rejected WebRTC signal attempts.
 
 ```json
 
@@ -291,7 +292,9 @@ In-memory rate limiting for room creation and join attempts.
   "rate_limit": {
     "max_room_creations": 5,
     "time_window": 60,
-    "max_join_attempts": 20
+    "max_join_attempts": 20,
+    "max_signals": 600,
+    "max_signal_errors": 60
   }
 }
 
@@ -300,6 +303,8 @@ In-memory rate limiting for room creation and join attempts.
 - `max_room_creations` - Max rooms per IP per time window
 - `time_window` - Window duration in seconds
 - `max_join_attempts` - Max join attempts per IP per window
+- `max_signals` - Max valid WebRTC signal relays per player per window
+- `max_signal_errors` - Max rejected WebRTC signal attempts per player per window
 
 When auth is enabled, per-app rate limits apply:
 

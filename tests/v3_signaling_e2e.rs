@@ -10,7 +10,9 @@ mod test_helpers;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use signal_fish_server::config::AppAuthEntry;
-use signal_fish_server::protocol::{ClientMessage, PlayerId, ServerMessage, Topology, Transport};
+use signal_fish_server::protocol::{
+    ClientMessage, PlayerId, RoomId, ServerMessage, Topology, Transport,
+};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::Arc;
@@ -32,6 +34,10 @@ fn app_entry() -> AppAuthEntry {
 }
 
 async fn start_auth_server() -> std::net::SocketAddr {
+    start_auth_server_with_handle().await.0
+}
+
+async fn start_auth_server_with_handle() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
     let mut server_config: ServerConfig = test_server_config();
     server_config.auth_enabled = true;
 
@@ -52,7 +58,8 @@ async fn start_auth_server() -> std::net::SocketAddr {
     .await
     .expect("server builds");
 
-    start_server(game_server).await
+    let addr = start_server(game_server.clone()).await;
+    (addr, game_server)
 }
 
 async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
@@ -154,12 +161,12 @@ async fn authenticate_v3(ws: &mut WsStream) {
     }
 }
 
-/// Join (or create) a room, returning `(room_code, our_player_id)`.
+/// Join (or create) a room, returning `(room_id, room_code, our_player_id)`.
 async fn join_room(
     ws: &mut WsStream,
     room_code: Option<String>,
     player_name: &str,
-) -> (String, PlayerId) {
+) -> (RoomId, String, PlayerId) {
     send(
         ws,
         &ClientMessage::JoinRoom {
@@ -176,7 +183,7 @@ async fn join_room(
     .await;
 
     next_matching(ws, |msg| match msg {
-        ServerMessage::RoomJoined(p) => Some((p.room_code.clone(), p.player_id)),
+        ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code.clone(), p.player_id)),
         ServerMessage::RoomJoinFailed { reason, error_code } => {
             panic!("room join failed: {reason} ({error_code:?})")
         }
@@ -211,12 +218,12 @@ async fn two_v3_peers_relay_offer_answer_ice_and_are_paired_by_new_peer() {
     // Peer 1 creates the room.
     let mut peer1 = connect(addr).await;
     authenticate_v3(&mut peer1).await;
-    let (room_code, peer1_id) = join_room(&mut peer1, None, "PeerOne").await;
+    let (_room_id, room_code, peer1_id) = join_room(&mut peer1, None, "PeerOne").await;
 
     // Peer 2 joins the same room, which triggers the late-join NewPeer handshake.
     let mut peer2 = connect(addr).await;
     authenticate_v3(&mut peer2).await;
-    let (_code, peer2_id) = join_room(&mut peer2, Some(room_code), "PeerTwo").await;
+    let (_room_id, _code, peer2_id) = join_room(&mut peer2, Some(room_code), "PeerTwo").await;
     assert_ne!(peer1_id, peer2_id);
 
     // Both sides are told about each other, and exactly one is the offerer.
@@ -270,4 +277,84 @@ async fn two_v3_peers_relay_offer_answer_ice_and_are_paired_by_new_peer() {
     let (from, signal) = next_signal(&mut peer2).await;
     assert_eq!(from, peer1_id);
     assert_eq!(signal, ice, "ICE payload must be byte-preserved");
+}
+
+#[tokio::test]
+async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
+    let (addr, game_server) = start_auth_server_with_handle().await;
+
+    let mut peer1 = connect(addr).await;
+    authenticate_v3(&mut peer1).await;
+    let (_room_id, room_code, peer1_id) = join_room(&mut peer1, None, "PeerOne").await;
+
+    let mut old_peer2 = connect(addr).await;
+    authenticate_v3(&mut old_peer2).await;
+    let (room_id, _code, peer2_id) = join_room(&mut old_peer2, Some(room_code), "PeerTwo").await;
+
+    // Drain the original late-join pairing so reconnect notifications do not
+    // hide the post-reconnect signal assertion below.
+    let _ = next_new_peer(&mut peer1).await;
+    let _ = next_new_peer(&mut old_peer2).await;
+
+    let room = game_server
+        .database()
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    let peer2_info = room
+        .players
+        .get(&peer2_id)
+        .cloned()
+        .expect("peer2 in room before disconnect");
+
+    game_server.disconnect_client(&peer2_id).await;
+    let _ = old_peer2.close(None).await;
+
+    let token = game_server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(peer2_id, room_id, false, Some(peer2_info))
+        .await;
+
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    send(
+        &mut replacement,
+        &ClientMessage::Reconnect {
+            player_id: peer2_id,
+            room_id,
+            auth_token: token,
+        },
+    )
+    .await;
+
+    next_matching(&mut replacement, |msg| match msg {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, peer2_id);
+            Some(())
+        }
+        ServerMessage::ReconnectionFailed { reason, error_code } => {
+            panic!("reconnect failed: {reason} ({error_code:?})")
+        }
+        _ => None,
+    })
+    .await;
+
+    let ice = json!({ "IceCandidate": "candidate:restored-id" });
+    send(
+        &mut replacement,
+        &ClientMessage::Signal {
+            to: peer1_id,
+            signal: ice.clone(),
+        },
+    )
+    .await;
+
+    let (from, relayed_signal) = next_signal(&mut peer1).await;
+    assert_eq!(
+        from, peer2_id,
+        "post-reconnect signal must be routed under the restored player id"
+    );
+    assert_eq!(relayed_signal, ice);
 }

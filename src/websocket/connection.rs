@@ -8,8 +8,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, MessageBatcher};
@@ -104,16 +104,39 @@ pub(super) async fn handle_socket(
         }
     };
 
-    // Track authentication state
+    // Track authentication state.
     let mut authenticated = !server.config().auth_enabled; // Auto-authenticated if auth disabled
+    let mut authenticate_processed = false;
+    let mut received_application_message = false;
+
+    // When auth is disabled, legacy clients may skip Authenticate entirely. In
+    // that mode the endpoint default still applies, so `/v3/ws` starts as v3
+    // relay-only while `/v2/ws` remains pure v2. A later first Authenticate can
+    // still refine transports/topologies.
+    if authenticated {
+        let cfg = server.protocol_config();
+        let negotiated_version = cfg.negotiate_protocol_version(Some(default_protocol_version));
+        let (negotiated_transports, negotiated_topologies) =
+            negotiate_capabilities(negotiated_version, None, None);
+        server.set_client_protocol(
+            &player_id,
+            NegotiatedProtocol {
+                version: negotiated_version,
+                transports: negotiated_transports,
+                topologies: negotiated_topologies,
+            },
+        );
+    }
 
     // Track connection time for authentication timeout
     let connection_start = Instant::now();
     let auth_timeout = Duration::from_secs(server.config().websocket_config.auth_timeout_secs);
 
+    let effective_player_id = Arc::new(RwLock::new(player_id));
+
     // Spawn task to handle outgoing messages
     let server_clone = server.clone();
-    let player_id_clone = player_id;
+    let effective_player_id_for_send = Arc::clone(&effective_player_id);
     let send_task = tokio::spawn(async move {
         let config = server_clone.config();
         let batching_enabled = config.websocket_config.enable_batching;
@@ -136,24 +159,30 @@ pub(super) async fn handle_socket(
 
                             // Flush if batch is full or time threshold exceeded
                             if batcher.should_flush()
-                                && send_batch(
-                                    &mut sender,
-                                    &mut batcher,
-                                    &player_id_clone,
-                                    &server_clone,
-                                )
+                                && {
+                                    let current_player_id =
+                                        *effective_player_id_for_send.read().await;
+                                    send_batch(
+                                        &mut sender,
+                                        &mut batcher,
+                                        &current_player_id,
+                                        &server_clone,
+                                    )
                                     .await
                                     .is_err()
+                                }
                             {
                                 break;
                             }
                         } else {
                             // Channel closed, flush remaining messages and exit
                             if !batcher.is_empty() {
+                                let current_player_id =
+                                    *effective_player_id_for_send.read().await;
                                 let _ = send_batch(
                                     &mut sender,
                                     &mut batcher,
-                                    &player_id_clone,
+                                    &current_player_id,
                                     &server_clone,
                                 )
                                 .await;
@@ -165,14 +194,18 @@ pub(super) async fn handle_socket(
                     _ = flush_interval.tick() => {
                         if !batcher.is_empty()
                             && batcher.should_flush()
-                            && send_batch(
-                                &mut sender,
-                                &mut batcher,
-                                &player_id_clone,
-                                &server_clone,
-                            )
+                            && {
+                                let current_player_id =
+                                    *effective_player_id_for_send.read().await;
+                                send_batch(
+                                    &mut sender,
+                                    &mut batcher,
+                                    &current_player_id,
+                                    &server_clone,
+                                )
                                 .await
                                 .is_err()
+                            }
                         {
                             break;
                         }
@@ -182,7 +215,8 @@ pub(super) async fn handle_socket(
         } else {
             // Non-batching mode: send each message immediately (legacy behavior)
             while let Some(message) = rx.recv().await {
-                if send_single_message(&mut sender, message, &player_id_clone, &server_clone)
+                let current_player_id = *effective_player_id_for_send.read().await;
+                if send_single_message(&mut sender, message, &current_player_id, &server_clone)
                     .await
                     .is_err()
                 {
@@ -192,14 +226,17 @@ pub(super) async fn handle_socket(
         }
 
         // Cleanup when send task ends
-        server_clone.unregister_client(&player_id_clone).await;
+        let current_player_id = *effective_player_id_for_send.read().await;
+        server_clone.unregister_client(&current_player_id).await;
     });
 
     // Handle incoming messages
     let token_binding_for_receive = token_binding.clone();
     let server_clone = server.clone();
+    let effective_player_id_for_receive = Arc::clone(&effective_player_id);
     let auth_timeout_secs = server.config().websocket_config.auth_timeout_secs;
     let receive_task = tokio::spawn(async move {
+        let mut active_player_id = player_id;
         let token_binding = token_binding_for_receive;
         // Create authentication timeout timer
         let auth_deadline = tokio::time::sleep_until(connection_start + auth_timeout);
@@ -223,10 +260,10 @@ pub(super) async fn handle_socket(
                     }
                     () = &mut auth_deadline => {
                         // Authentication timeout
-                        tracing::warn!(%player_id, timeout_secs = auth_timeout_secs, "Authentication timeout, closing connection");
+                        tracing::warn!(%active_player_id, timeout_secs = auth_timeout_secs, "Authentication timeout, closing connection");
                         let _ = server_clone
                             .send_error_to_player(
-                                &player_id,
+                                &active_player_id,
                                 format!("Authentication timeout - must authenticate within {auth_timeout_secs} seconds"),
                                 Some(ErrorCode::AuthenticationTimeout),
                             )
@@ -240,7 +277,7 @@ pub(super) async fn handle_socket(
             let msg = match msg {
                 Ok(msg) => msg,
                 Err(e) => {
-                    tracing::warn!(%player_id, "WebSocket error: {}", e);
+                    tracing::warn!(%active_player_id, "WebSocket error: {}", e);
                     break;
                 }
             };
@@ -251,14 +288,14 @@ pub(super) async fn handle_socket(
                     let max_size = server_clone.config().max_message_size;
                     if text.len() > max_size {
                         tracing::warn!(
-                            %player_id,
+                            %active_player_id,
                             size = text.len(),
                             max = max_size,
                             "Message exceeds size limit"
                         );
                         let _ = server_clone
                             .send_error_to_player(
-                                &player_id,
+                                &active_player_id,
                                 format!(
                                     "Message too large ({} bytes, max {} bytes)",
                                     text.len(),
@@ -274,13 +311,13 @@ pub(super) async fn handle_socket(
                         Ok(message) => message,
                         Err(err) => {
                             tracing::warn!(
-                                %player_id,
+                                %active_player_id,
                                 error = %err,
                                 "Rejected client WebSocket frame"
                             );
                             let _ = server_clone
                                 .send_error_to_player(
-                                    &player_id,
+                                    &active_player_id,
                                     err.user_message().to_string(),
                                     Some(err.error_code()),
                                 )
@@ -302,8 +339,17 @@ pub(super) async fn handle_socket(
                             supported_transports,
                             supported_topologies,
                         } => {
-                            if authenticated {
-                                tracing::warn!(%player_id, "Client already authenticated");
+                            if server_clone.config().auth_enabled && authenticated {
+                                tracing::warn!(%active_player_id, "Client already authenticated");
+                                continue;
+                            }
+                            if !server_clone.config().auth_enabled
+                                && (authenticate_processed || received_application_message)
+                            {
+                                tracing::warn!(
+                                    %active_player_id,
+                                    "Authenticate must be the first client message"
+                                );
                                 continue;
                             }
 
@@ -319,7 +365,7 @@ pub(super) async fn handle_socket(
                                         Err(err) => {
                                             let error_message = err.to_string();
                                             tracing::warn!(
-                                                %player_id,
+                                                %active_player_id,
                                                 app_id = %app_id,
                                                 ?sdk_version,
                                                 ?platform,
@@ -338,7 +384,7 @@ pub(super) async fn handle_socket(
                                                         .increment_websocket_messages_dropped();
                                                 }
                                                 tracing::warn!(
-                                                    %player_id,
+                                                    %active_player_id,
                                                     error = %err,
                                                     "Failed to enqueue SDK compatibility error"
                                                 );
@@ -348,7 +394,9 @@ pub(super) async fn handle_socket(
                                     };
 
                                     authenticated = true;
-                                    server_clone.set_client_app_info(&player_id, info.clone());
+                                    authenticate_processed = true;
+                                    server_clone
+                                        .set_client_app_info(&active_player_id, info.clone());
                                     server_clone.apply_app_bandwidth_policy(&info);
                                     let supported_formats = server_clone
                                         .protocol_config()
@@ -368,7 +416,7 @@ pub(super) async fn handle_socket(
                                                 supported_list.join(", ")
                                             );
                                             tracing::warn!(
-                                                %player_id,
+                                                %active_player_id,
                                                 ?format,
                                                 ?supported_formats,
                                                 "Client requested unsupported game_data_format"
@@ -388,7 +436,7 @@ pub(super) async fn handle_socket(
                                                         .increment_websocket_messages_dropped();
                                                 }
                                                 tracing::warn!(
-                                                    %player_id,
+                                                    %active_player_id,
                                                     error = %err,
                                                     "Failed to enqueue game data format error"
                                                 );
@@ -397,8 +445,10 @@ pub(super) async fn handle_socket(
                                         }
                                         None => GameDataEncoding::Json,
                                     };
-                                    server_clone
-                                        .set_client_game_data_format(&player_id, negotiated_format);
+                                    server_clone.set_client_game_data_format(
+                                        &active_player_id,
+                                        negotiated_format,
+                                    );
 
                                     // Protocol version + capability negotiation (P1).
                                     // A missing `protocol_version` on the /v3 path is
@@ -421,7 +471,7 @@ pub(super) async fn handle_socket(
                                     let max_protocol_version = cfg.max_protocol_version;
 
                                     server_clone.set_client_protocol(
-                                        &player_id,
+                                        &active_player_id,
                                         NegotiatedProtocol {
                                             version: negotiated_version,
                                             transports: negotiated_transports.clone(),
@@ -430,7 +480,7 @@ pub(super) async fn handle_socket(
                                     );
 
                                     tracing::info!(
-                                        %player_id,
+                                        %active_player_id,
                                         app_name = %info.name,
                                         app_id = %app_id,
                                         ?sdk_version,
@@ -456,6 +506,19 @@ pub(super) async fn handle_socket(
                                         PlayerNameRulesPayload::from_protocol_config(
                                             server_clone.protocol_config(),
                                         );
+                                    let (
+                                        response_protocol_version,
+                                        response_min_protocol_version,
+                                        response_max_protocol_version,
+                                    ) = if negotiated_version >= 3 {
+                                        (
+                                            Some(negotiated_version),
+                                            Some(min_protocol_version),
+                                            Some(max_protocol_version),
+                                        )
+                                    } else {
+                                        (None, None, None)
+                                    };
                                     let protocol_info =
                                         ServerMessage::ProtocolInfo(ProtocolInfoPayload {
                                             platform: compatibility.platform.clone(),
@@ -468,9 +531,9 @@ pub(super) async fn handle_socket(
                                             notes: compatibility.notes.clone(),
                                             game_data_formats: supported_formats,
                                             player_name_rules: Some(player_name_rules),
-                                            protocol_version: Some(negotiated_version),
-                                            min_protocol_version: Some(min_protocol_version),
-                                            max_protocol_version: Some(max_protocol_version),
+                                            protocol_version: response_protocol_version,
+                                            min_protocol_version: response_min_protocol_version,
+                                            max_protocol_version: response_max_protocol_version,
                                         });
 
                                     if let Err(err) = tx_clone.try_send(Arc::new(auth_response)) {
@@ -480,7 +543,7 @@ pub(super) async fn handle_socket(
                                                 .increment_websocket_messages_dropped();
                                         }
                                         tracing::warn!(
-                                            %player_id,
+                                            %active_player_id,
                                             error = %err,
                                             "Failed to enqueue authentication success response"
                                         );
@@ -492,14 +555,14 @@ pub(super) async fn handle_socket(
                                                 .increment_websocket_messages_dropped();
                                         }
                                         tracing::warn!(
-                                            %player_id,
+                                            %active_player_id,
                                             error = %err,
                                             "Failed to enqueue protocol info response"
                                         );
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(%player_id, %app_id, "Authentication failed: {:?}", e);
+                                    tracing::warn!(%active_player_id, %app_id, "Authentication failed: {:?}", e);
 
                                     // Send error response.
                                     // The AppIdExpired, AppIdRevoked, and AppIdSuspended
@@ -538,7 +601,7 @@ pub(super) async fn handle_socket(
                                                 .increment_websocket_messages_dropped();
                                         }
                                         tracing::warn!(
-                                            %player_id,
+                                            %active_player_id,
                                             error = %err,
                                             "Failed to enqueue authentication failure response"
                                         );
@@ -551,10 +614,10 @@ pub(super) async fn handle_socket(
                         }
                         other => {
                             if !authenticated {
-                                tracing::warn!(%player_id, "Received message before authentication");
+                                tracing::warn!(%active_player_id, "Received message before authentication");
                                 let _ = server_clone
                                     .send_error_to_player(
-                                        &player_id,
+                                        &active_player_id,
                                         "Authentication required".to_string(),
                                         Some(ErrorCode::MissingAppId),
                                     )
@@ -562,16 +625,42 @@ pub(super) async fn handle_socket(
                                 break;
                             }
 
-                            server_clone.handle_client_message(&player_id, other).await;
+                            received_application_message = true;
+                            match other {
+                                ClientMessage::Reconnect {
+                                    player_id: reconnect_player_id,
+                                    room_id,
+                                    auth_token,
+                                } => {
+                                    if server_clone
+                                        .handle_reconnect(
+                                            &active_player_id,
+                                            &reconnect_player_id,
+                                            &room_id,
+                                            &auth_token,
+                                        )
+                                        .await
+                                    {
+                                        active_player_id = reconnect_player_id;
+                                        *effective_player_id_for_receive.write().await =
+                                            reconnect_player_id;
+                                    }
+                                }
+                                other => {
+                                    server_clone
+                                        .handle_client_message(&active_player_id, other)
+                                        .await;
+                                }
+                            }
                         }
                     }
                 }
                 Message::Binary(payload) => {
                     if !authenticated {
-                        tracing::warn!(%player_id, "Received binary message before authentication");
+                        tracing::warn!(%active_player_id, "Received binary message before authentication");
                         let _ = server_clone
                             .send_error_to_player(
-                                &player_id,
+                                &active_player_id,
                                 "Authentication required before sending binary data".to_string(),
                                 Some(ErrorCode::MissingAppId),
                             )
@@ -579,15 +668,16 @@ pub(super) async fn handle_socket(
                         break;
                     }
 
-                    let encoding = server_clone.client_game_data_format(&player_id);
+                    received_application_message = true;
+                    let encoding = server_clone.client_game_data_format(&active_player_id);
                     if encoding == GameDataEncoding::Json {
                         tracing::warn!(
-                            %player_id,
+                            %active_player_id,
                             "Client negotiated JSON game data but sent binary payload; dropping"
                         );
                         let _ = server_clone
                             .send_error_to_player(
-                                &player_id,
+                                &active_player_id,
                                 "Binary payloads are disabled for this connection".to_string(),
                                 Some(ErrorCode::InvalidInput),
                             )
@@ -597,17 +687,17 @@ pub(super) async fn handle_socket(
 
                     // Payload from axum WebSocket is already Bytes - pass directly for zero-copy
                     server_clone
-                        .handle_game_data_binary(&player_id, encoding, payload)
+                        .handle_game_data_binary(&active_player_id, encoding, payload)
                         .await;
                 }
                 Message::Close(_) => {
-                    tracing::info!(%player_id, "WebSocket connection closed");
+                    tracing::info!(%active_player_id, "WebSocket connection closed");
                     break;
                 }
                 Message::Pong(_) => {
                     // Handle pong as ping response
                     server_clone
-                        .handle_client_message(&player_id, ClientMessage::Ping)
+                        .handle_client_message(&active_player_id, ClientMessage::Ping)
                         .await;
                 }
                 _ => {
@@ -617,21 +707,24 @@ pub(super) async fn handle_socket(
         }
 
         // Cleanup when receive task ends
-        server_clone.unregister_client(&player_id).await;
+        server_clone.unregister_client(&active_player_id).await;
     });
 
     // Wait for either task to complete
     tokio::select! {
         _ = send_task => {
-            tracing::info!(%player_id, "Send task completed");
+            let current_player_id = *effective_player_id.read().await;
+            tracing::info!(%current_player_id, "Send task completed");
         }
         _ = receive_task => {
-            tracing::info!(%player_id, "Receive task completed");
+            let current_player_id = *effective_player_id.read().await;
+            tracing::info!(%current_player_id, "Receive task completed");
         }
     }
 
     // Ensure cleanup
-    server.unregister_client(&player_id).await;
+    let current_player_id = *effective_player_id.read().await;
+    server.unregister_client(&current_player_id).await;
 }
 
 #[cfg(test)]

@@ -86,6 +86,7 @@ mod tests {
         assert_eq!(config.rate_limit.time_window, 60);
         assert_eq!(config.rate_limit.max_join_attempts, 20);
         assert_eq!(config.rate_limit.max_signals, 600);
+        assert_eq!(config.rate_limit.max_signal_errors, 60);
 
         assert_eq!(config.protocol.max_game_name_length, 64);
         assert_eq!(config.protocol.room_code_length, 6);

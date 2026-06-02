@@ -38,12 +38,22 @@ performance, debugging hook failures, or validating hook permissions in CI.
 - Check only staged or pushed files and use NUL-delimited Git output for path safety
 - Force UTF-8 stdout/stderr decoding in native process helpers; never rely on
   platform-default code pages for generated-file comparisons
+- PowerShell helpers must return exactly one result object. Assign or `[void]`
+  any async `GetResult()`/native process completion calls so task result objects
+  do not leak onto the pipeline and turn `$result` into `Object[]`.
 - Batch staged blob reads with `git ls-files -s -z`, `git cat-file --batch-check`,
   and `git cat-file --batch`; cap aggregate bytes and avoid per-file `git show`
   loops in hooks
+- Staged Rust panic checks must be production-only and line-number aware: exclude
+  `*_test.rs`/`*_tests.rs` and skip additions inside staged `#[cfg(test)]` or
+  direct test-function ranges.
+- When production Rust files are staged, run only the code-path last-resort
+  guards and stop; metadata guards run for non-production-Rust commits so mixed
+  code/docs changes stay under budget.
 - Verify auto-repaired generated files by Git object id, not decoded text
 - Auto-repair only deterministic, fast generated artifacts that can be restaged safely
-- Run all fast checks even on failure, report summary at end
+- Fail fast after the first concrete blocker so hooks stay under the <1 second target;
+  rely on agent workflow/local CI for comprehensive reports
 
 ---
 
@@ -91,7 +101,7 @@ by a slow git hook.
 
 ## Canonical Code Samples
 
-- Full pre-commit reference implementation:
+- Minimal Git wrapper reference:
   [pre-commit-fast.sh](../code-samples/git-hooks/pre-commit-fast.sh)
 - Performance patterns and anti-patterns:
   [performance-patterns.sh](../code-samples/git-hooks/performance-patterns.sh)
@@ -102,18 +112,17 @@ by a slow git hook.
 
 ---
 
-## Critical Pattern: Keep Markdown Lint Output Visible
+## Critical Pattern: Keep Linter Output Visible
 
-Use output capture instead of suppressing stderr/stdout in failure paths.
+Use output capture instead of suppressing stderr/stdout in agent workflow, local
+CI, and CI failure paths. Do not put markdownlint in pre-commit.
 
 ```bash
-if [ -x scripts/check-markdown.sh ]; then
-  if ! MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1); then
-    echo "[pre-commit] ERROR: Markdown linting failed"
-    echo "$MARKDOWN_OUTPUT"
-    echo "[pre-commit] Fix: ./scripts/check-markdown.sh fix"
-    exit 1
-  fi
+if ! MARKDOWN_OUTPUT=$(./scripts/check-markdown.sh 2>&1); then
+  echo "[local-ci] ERROR: Markdown linting failed"
+  echo "$MARKDOWN_OUTPUT"
+  echo "[local-ci] Fix: ./scripts/check-markdown.sh fix"
+  exit 1
 fi
 ```
 

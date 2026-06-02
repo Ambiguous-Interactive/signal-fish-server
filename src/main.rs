@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
             time_window: tokio::time::Duration::from_secs(cfg.rate_limit.time_window),
             max_join_attempts: cfg.rate_limit.max_join_attempts,
             max_signals: cfg.rate_limit.max_signals,
+            max_signal_errors: cfg.rate_limit.max_signal_errors,
         },
         empty_room_timeout: tokio::time::Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: tokio::time::Duration::from_secs(cfg.server.inactive_room_timeout),

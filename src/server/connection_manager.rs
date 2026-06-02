@@ -297,14 +297,15 @@ impl ConnectionManager {
         current_player_id: &PlayerId,
         reconnect_player_id: &PlayerId,
         room_id: RoomId,
-    ) -> bool {
+    ) -> Option<mpsc::Sender<Arc<ServerMessage>>> {
         // Atomically remove the old entry (no separate get-then-remove race)
         if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
+            let sender = old_connection.sender.clone();
             let new_client = ClientConnection {
                 room_id: Some(room_id),
                 last_ping: Instant::now(),
                 last_heartbeat_update: None, // Reset on reconnection, will update immediately
-                sender: old_connection.sender,
+                sender: sender.clone(),
                 client_addr: old_connection.client_addr,
                 game_data_format: old_connection.game_data_format,
                 app_info: old_connection.app_info,
@@ -314,9 +315,9 @@ impl ConnectionManager {
             // IP slot is already reserved from the old entry -- no need to
             // release and re-reserve for the same IP address.
             self.clients.insert(*reconnect_player_id, new_client);
-            true
+            Some(sender)
         } else {
-            false
+            None
         }
     }
 
@@ -625,7 +626,7 @@ mod tests {
         let new_player_id = Uuid::new_v4();
 
         let reassigned = manager.reassign_connection(&original_id, &new_player_id, room_id);
-        assert!(reassigned, "Reassignment should succeed");
+        assert!(reassigned.is_some(), "Reassignment should succeed");
 
         // Original player should be gone
         assert!(
@@ -763,7 +764,9 @@ mod tests {
 
         let new_pid = Uuid::new_v4();
         let room = RoomId::new_v4();
-        assert!(manager.reassign_connection(&original, &new_pid, room));
+        assert!(manager
+            .reassign_connection(&original, &new_pid, room)
+            .is_some());
 
         // The migrated connection keeps its negotiated v3 capabilities.
         let proto = manager.protocol(&new_pid);

@@ -253,14 +253,14 @@ pub struct ProtocolInfoPayload {
     pub player_name_rules: Option<PlayerNameRulesPayload>,
     /// Protocol version negotiated for this connection (v3+ only).
     ///
-    /// `None` for pure v2 fixtures so the v2 golden snapshot stays byte-identical;
-    /// the live server always populates it with `Some(..)`.
+    /// `None` for negotiated v2 connections so the v2 wire contract stays
+    /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<u16>,
-    /// Lowest protocol version this deployment accepts.
+    /// Lowest protocol version this deployment accepts (v3+ only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_protocol_version: Option<u16>,
-    /// Highest protocol version this deployment speaks.
+    /// Highest protocol version this deployment speaks (v3+ only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_protocol_version: Option<u16>,
 }

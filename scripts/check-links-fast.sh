@@ -78,6 +78,8 @@ echo "========================================="
 echo ""
 
 # Determine which files to check
+TO_CHECK=()
+
 if [ ${#FILES[@]} -gt 0 ]; then
     # Check specific files provided as arguments
     echo "Checking specified files: ${FILES[*]}"
@@ -128,13 +130,7 @@ else
             -not -path "./test-fixtures/*" \
             -print0)
     else
-        STATUS_ENTRIES=()
-        mapfile -d '' STATUS_ENTRIES < <(git status --porcelain=v1 -z -- '*.md')
-        index=0
-        while [ "$index" -lt "${#STATUS_ENTRIES[@]}" ]; do
-            entry="${STATUS_ENTRIES[$index]}"
-            index=$((index + 1))
-
+        while IFS= read -r -d '' entry; do
             [ "${#entry}" -ge 4 ] || continue
             status="${entry:0:2}"
             markdown_file="${entry:3}"
@@ -152,9 +148,9 @@ else
             # In porcelain v1 -z output, rename/copy entries are followed by
             # the original path as a second NUL-delimited record.
             if [[ "$status" == R* || "$status" == C* || "$status" == ?R || "$status" == ?C ]]; then
-                index=$((index + 1))
+                IFS= read -r -d '' _original_path || true
             fi
-        done
+        done < <(git status --porcelain=v1 -z -- '*.md')
     fi
 fi
 
@@ -182,12 +178,6 @@ fi
 echo -e "${GREEN}✓ Internal links are valid${NC}"
 echo ""
 
-# Create temporary file for lychee input
-TEMP_FILE=$(mktemp)
-trap 'rm -f "$TEMP_FILE"' EXIT
-
-printf '%s\n' "${TO_CHECK[@]}" > "$TEMP_FILE"
-
 # Run lychee with configuration
 # Use --offline flag to skip external link checks for speed (local links only)
 # Remove --offline to check external links (slower but more thorough)
@@ -196,7 +186,7 @@ echo ""
 
 # For fast local checks, use --offline to skip network requests
 # This checks internal links and markdown structure only
-if lychee --config .lychee.toml --offline --verbose --no-progress --base "$REPO_ROOT" "${TO_CHECK[@]}"; then
+if lychee --config .lychee.toml --offline --verbose --no-progress --base-url "$REPO_ROOT" "${TO_CHECK[@]}"; then
     echo ""
     echo -e "${GREEN}✓ All local links are valid${NC}"
     echo ""

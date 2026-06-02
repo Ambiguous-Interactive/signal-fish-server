@@ -2973,16 +2973,18 @@ fn test_link_hook_snippet_initializes_failures_and_matches_behavior() {
     let content = read_file(&skill_path);
 
     assert!(
-        content.contains("FAILURES=0"),
-        "markdown-best-practices-links.md pre-commit snippet increments FAILURES but does not initialize it."
+        content.contains("Keep link validation out of git hooks")
+            && content.contains("scripts/check-links-fast.sh --staged")
+            && content.contains("scripts/check-internal-links.sh"),
+        "markdown-best-practices-links.md must direct link checking to agent/local-CI scripts, \
+         not git hooks."
     );
     assert!(
-        content.contains("# Check for links"),
-        "markdown-best-practices-links.md pre-commit snippet should describe lychee as link checking."
-    );
-    assert!(
-        !content.contains("# Check for typos\nif command -v lychee"),
-        "markdown-best-practices-links.md has a mismatched comment: lychee checks links, not typos."
+        !content.contains("Add to `.githooks/pre-commit`")
+            && !content.contains("FAILURES=0")
+            && !content.contains("if command -v lychee"),
+        "markdown-best-practices-links.md must not recommend adding lychee/link checks \
+         to pre-commit; hooks stay sub-second last-resort guards."
     );
 }
 
@@ -6290,6 +6292,49 @@ fn test_docs_relative_links_resolve_to_existing_files() {
 }
 
 #[test]
+fn test_direct_bash_command_tests_are_unix_gated() {
+    let root = repo_root();
+    let checked_files = ["tests/ci_config_tests.rs"];
+    let function_re = Regex::new(r"^\s*fn\s+[A-Za-z0-9_]+\s*\(").unwrap();
+    let mut violations = Vec::new();
+
+    for file in checked_files {
+        let content = read_file(&root.join(file));
+        let mut current_test_attrs: Vec<String> = Vec::new();
+        let mut current_fn_attrs: Vec<String> = Vec::new();
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("#[") {
+                current_fn_attrs.push(trimmed.to_string());
+                continue;
+            }
+            if function_re.is_match(line) {
+                current_test_attrs = current_fn_attrs.clone();
+                current_fn_attrs.clear();
+            } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
+                current_fn_attrs.clear();
+            }
+
+            if line.contains("Command::new(\"bash\")")
+                && !current_test_attrs.iter().any(|attr| attr == "#[cfg(unix)]")
+            {
+                violations.push(format!(
+                    "{file}:{}: direct bash command test must be #[cfg(unix)]-gated or use tests/common::bash_command()",
+                    line_idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Direct Bash invocations in Rust tests are not portable to Windows:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn test_internal_link_validators_check_tracked_targets() {
     let root = repo_root();
     let script_content = read_file(&root.join("scripts/check-internal-links.sh"));
@@ -6364,6 +6409,52 @@ fn test_internal_link_validators_check_tracked_targets() {
             "scripts/check-internal-links.sh must not use `{pattern}`.\n{reason}"
         );
     }
+}
+
+#[test]
+fn test_repo_shell_scripts_avoid_bash4_only_features() {
+    let root = repo_root();
+    let scripts_dir = root.join("scripts");
+    let mut violations = Vec::new();
+    let forbidden = [
+        ("mapfile", "Bash 4+; macOS system Bash is 3.2"),
+        ("readarray", "Bash 4+; macOS system Bash is 3.2"),
+        ("declare -A", "associative arrays require Bash 4+"),
+        ("local -n", "nameref variables require Bash 4.3+"),
+    ];
+
+    for entry in fs::read_dir(&scripts_dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", scripts_dir.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("failed to read scripts entry: {e}"));
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "sh") {
+            continue;
+        }
+        let content = read_file(&path);
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            for (pattern, reason) in forbidden {
+                if line.contains(pattern) {
+                    violations.push(format!(
+                        "{}:{}: uses `{pattern}` ({reason})",
+                        relative.display(),
+                        line_idx + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Shell scripts must stay compatible with Bash 3.2 on macOS runners:\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
@@ -9307,6 +9398,13 @@ fn test_pre_commit_runner_auto_repairs_skills_index() {
         content.contains("Repair-SkillsIndexIfNeeded"),
         "pre-commit runner must include generated skills-index freshness logic."
     );
+    assert!(
+        content.contains("SIGNAL_FISH_HOOK_PROFILE")
+            && content.contains("Write-Profile")
+            && content.contains("Invoke-Check"),
+        "pre-commit runner must keep opt-in per-check timing diagnostics so \
+         >1s hook regressions can be investigated without editing hook code."
+    );
 
     assert!(
         content.contains("New-SkillsIndexContent")
@@ -9324,28 +9422,523 @@ fn test_pre_commit_runner_auto_repairs_skills_index() {
             && content.contains("--batch-check=%(objectname) %(objecttype) %(objectsize)")
             && content.contains("IndexTextCache")
             && content.contains("MaxBatchedBlobBytes")
+            && content.contains("PreloadBatchThreshold")
             && content.contains("PreloadError")
             && content.contains("git cat-file --batch returned"),
-        "skills index generation must batch staged Git index reads, cap aggregate blob size, verify batch object ids, and cache staged text with graceful preload failure handling; per-file git show fanout makes hooks too slow."
+        "skills index generation must batch staged Git index reads, cap aggregate blob size, verify batch object ids, and cache staged text with graceful preload failure handling; broad per-file git show fanout makes hooks too slow, while tiny preload sets should avoid unnecessary batch setup."
+    );
+
+    let rust_budget_gate = content
+        .find("$hasProductionRust")
+        .expect("pre-commit must compute whether production Rust is staged");
+    let metadata_preload = content
+        .rfind("Add-StagedContentPreload")
+        .expect("pre-commit must keep metadata preload logic");
+    assert!(
+        rust_budget_gate < metadata_preload
+            && content[rust_budget_gate..metadata_preload].contains("Complete-PreCommit"),
+        "metadata and generated-file guards must stay behind the production-Rust \
+         budget gate so mixed code/docs commits remain sub-second."
+    );
+}
+
+#[test]
+fn test_pre_commit_runner_accepts_empty_preload_path_sets() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+
+    assert!(
+        content.contains("[AllowEmptyCollection()][string[]]$Pathspecs")
+            && content.contains("if ($Pathspecs.Count -eq 0)")
+            && content.contains("Add-IndexTextCache -Pathspecs $preloadPaths"),
+        "pre-commit staged-content preload must tolerate an empty path set; normal commits with no matching staged files must not fail PowerShell parameter binding."
     );
 }
 
 #[test]
 fn test_powershell_git_hook_helpers_force_utf8_output_decoding() {
     let root = repo_root();
-    let scripts = [
+    let helper = read_file(&root.join("scripts/hooks/native-process.ps1"));
+    assert!(
+        helper.contains("[System.Text.UTF8Encoding]::new($false)")
+            && helper.contains("StandardOutputEncoding")
+            && helper.contains("StandardErrorEncoding"),
+        "scripts/hooks/native-process.ps1 must force UTF-8 native process output decoding so Windows code pages cannot corrupt generated-file comparisons."
+    );
+
+    for script in [
         "scripts/hooks/pre-commit.ps1",
         "scripts/hooks/pre-push.ps1",
         "scripts/check-hook-readiness.ps1",
-    ];
-
-    for script in scripts {
+    ] {
         let content = read_file(&root.join(script));
         assert!(
-            content.contains("[System.Text.UTF8Encoding]::new($false)")
-                && content.contains("StandardOutputEncoding")
-                && content.contains("StandardErrorEncoding"),
-            "{script} must force UTF-8 native process output decoding so Windows code pages cannot corrupt generated-file comparisons."
+            content.contains("native-process.ps1"),
+            "{script} must use the shared UTF-8 native process helper."
+        );
+    }
+}
+
+#[test]
+fn test_powershell_native_process_helpers_are_shared_and_deadlock_safe() {
+    let root = repo_root();
+    let helper_path = root.join("scripts/hooks/native-process.ps1");
+    let helper = read_file(&helper_path);
+    let invoke_native_re = Regex::new(r"(?m)^function Invoke-Native\s*\{").unwrap();
+
+    assert!(
+        invoke_native_re.find_iter(&helper).count() == 1
+            && helper.contains("function Invoke-NativeWithInput")
+            && helper.contains("function Invoke-NativeBytesWithInput")
+            && helper.contains("function Invoke-Git"),
+        "scripts/hooks/native-process.ps1 must be the single shared native process helper."
+    );
+    assert!(
+        helper.contains("ReadToEndAsync()") && helper.contains("CopyToAsync($stdoutStream)"),
+        "PowerShell native process helpers must read stdout/stderr concurrently to avoid pipe deadlocks."
+    );
+
+    for script in [
+        "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-push.ps1",
+        "scripts/check-hook-readiness.ps1",
+    ] {
+        let content = read_file(&root.join(script));
+        assert!(
+            content.contains("native-process.ps1"),
+            "{script} must dot-source scripts/hooks/native-process.ps1 instead of duplicating helpers."
+        );
+        assert!(
+            !invoke_native_re.is_match(&content)
+                && !content.contains("function Invoke-NativeWithInput")
+                && !content.contains("function Invoke-NativeBytesWithInput")
+                && !content.contains("function Invoke-Git"),
+            "{script} must not duplicate native process helper implementations."
+        );
+    }
+}
+
+#[test]
+fn test_powershell_native_process_helpers_do_not_pollute_pipeline() {
+    let root = repo_root();
+    let helper = read_file(&root.join("scripts/hooks/native-process.ps1"));
+    let bare_task_result_re =
+        Regex::new(r"(?m)^\s*\$[A-Za-z0-9_]+Task\.GetAwaiter\(\)\.GetResult\(\)\s*$").unwrap();
+
+    assert!(
+        helper.contains("[void]$stdoutTask.GetAwaiter().GetResult()"),
+        "Invoke-NativeBytesWithInput must explicitly discard CopyToAsync task completion output.\n\
+         Leaving a task GetResult() on the PowerShell pipeline makes callers receive \
+         Object[] instead of a single result object with ExitCode/StdoutBytes."
+    );
+    assert!(
+        !bare_task_result_re.is_match(&helper),
+        "PowerShell native process helpers must not leave async task completion \
+         results on the output pipeline; assign or [void]-discard them so callers \
+         always receive exactly one result object."
+    );
+}
+
+#[test]
+fn test_powershell_native_bytes_helper_returns_single_result_object_when_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"
+                . ./scripts/hooks/native-process.ps1
+                function Assert-SingleResult($name, $result, [string[]]$properties) {
+                    if ($result -is [array]) {
+                        throw "$name returned an array with $($result.Count) items"
+                    }
+                    foreach ($property in $properties) {
+                        if ($null -eq $result.PSObject.Properties[$property]) {
+                            throw "$name result is missing $property"
+                        }
+                    }
+                    if ($result.ExitCode -ne 0) {
+                        throw "$name failed: $($result.Output)"
+                    }
+                }
+
+                $native = Invoke-Native -FileName "git" -Arguments @("--version")
+                Assert-SingleResult "Invoke-Native" $native @("ExitCode", "Stdout", "Stderr", "Output")
+                if (-not $native.Stdout.Contains("git version")) {
+                    throw "Invoke-Native did not capture stdout"
+                }
+
+                $withInput = Invoke-NativeWithInput -FileName "git" -Arguments @("hash-object", "--stdin") -InputText "contract"
+                Assert-SingleResult "Invoke-NativeWithInput" $withInput @("ExitCode", "Stdout", "Stderr", "Output")
+                if ([string]::IsNullOrWhiteSpace($withInput.Stdout)) {
+                    throw "Invoke-NativeWithInput did not capture stdout"
+                }
+
+                $objectId = (git rev-parse :AGENTS.md).Trim()
+                $bytes = Invoke-NativeBytesWithInput -FileName "git" -Arguments @("cat-file", "--batch") -InputText "$objectId`n"
+                Assert-SingleResult "Invoke-NativeBytesWithInput" $bytes @("ExitCode", "StdoutBytes", "Stderr", "Output")
+                if ($bytes.StdoutBytes.Length -le 0) {
+                    throw "Invoke-NativeBytesWithInput returned no stdout bytes"
+                }
+            "#,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell runtime contract test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "Invoke-NativeBytesWithInput must return one object with ExitCode and StdoutBytes.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r##"
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+                function Find-Line([string[]]$lines, [string]$needle) {
+                    for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index].Contains($needle)) { return $index + 1 }
+                    }
+                    throw "Missing line containing: $needle"
+                }
+
+                $content = @'
+fn production() {
+    panic!("prod");
+}
+
+#[cfg(test)]
+fn helper() {
+    let _ = "}";
+    let _ = result.expect("test helper");
+}
+
+#[cfg(all(test, feature = "x"))] impl Foo {
+    fn helper(&self) {
+        let _ = r#"{"#;
+        panic!("test impl");
+    }
+}
+
+#[cfg(not(test))]
+fn cfg_not_test() {
+    panic!("prod cfg not");
+}
+
+#[cfg(any(test, feature = "x"))]
+fn any_test_or_feature() {
+    panic!("any test or feature prod");
+}
+
+#[cfg(not(any(test, feature = "x")))]
+fn not_any_test_or_feature() {
+    panic!("not any test or feature prod");
+}
+
+// #[cfg(test)] appears in documentation, not as an attribute.
+fn commented_attribute_is_production() {
+    panic!("commented attr prod");
+}
+
+#[cfg(test)]
+fn lifetime_helper<'a>(input: &'a str) -> &'a str {
+    let _ = result.expect("test lifetime");
+    input
+}
+
+fn after_lifetime_helper() {
+    panic!("after lifetime prod");
+}
+'@
+                $lines = [string[]]($content -split "`r?`n")
+                $testLines = Get-RustTestLineSet -Content $content -MaxLine $lines.Count
+
+                Assert ($testLines.Contains((Find-Line $lines 'expect("test helper")'))) "cfg(test) fn body should be test code"
+                Assert ($testLines.Contains((Find-Line $lines 'panic!("test impl")'))) "cfg(all(test,...)) impl body should be test code"
+                Assert ($testLines.Contains((Find-Line $lines 'expect("test lifetime")'))) "cfg(test) lifetime helper body should be test code"
+                Assert (-not $testLines.Contains((Find-Line $lines 'panic!("prod");'))) "plain production panic should not be test code"
+                Assert (-not $testLines.Contains((Find-Line $lines 'panic!("prod cfg not")'))) "cfg(not(test)) should not be test code"
+                Assert (-not $testLines.Contains((Find-Line $lines 'panic!("any test or feature prod")'))) "cfg(any(test, feature)) can compile in production and should not be test-only"
+                Assert (-not $testLines.Contains((Find-Line $lines 'panic!("not any test or feature prod")'))) "cfg(not(any(test, feature))) can compile in production and should not be test-only"
+                Assert (-not $testLines.Contains((Find-Line $lines 'panic!("commented attr prod")'))) "commented cfg(test) text should not mark production as test code"
+                Assert (-not $testLines.Contains((Find-Line $lines 'panic!("after lifetime prod")'))) "lifetimes in cfg(test) items should not leak test range to following production items"
+
+                Assert (Test-ProductionRustSourcePath -Path "src/lib.rs") "src/lib.rs should be production"
+                Assert (-not (Test-ProductionRustSourcePath -Path "src/foo/tests.rs")) "src/foo/tests.rs should be test-only"
+                Assert (-not (Test-ProductionRustSourcePath -Path "src/foo_test.rs")) "src/foo_test.rs should be test-only"
+                Assert (-not (Test-ProductionRustSourcePath -Path "tests/integration.rs")) "tests/ should be test-only"
+            "##,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell rust classifier test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "PowerShell rust panic classifier should handle cfg(test), cfg(all(test,...)), \
+         cfg(not(test)), string/raw-string braces, and test file paths.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                function Reset-State {
+                    $script:Passed = 0
+                    $script:Failed = 0
+                    $script:Skipped = 0
+                    $script:IndexTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+                    $script:PreloadError = $null
+                }
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+
+                $productionContent = @'
+pub fn production() {
+    panic!("boom");
+}
+'@
+                $testContent = @'
+#[cfg(test)]
+fn helper() {
+    let _ = result.expect("test helper");
+}
+'@
+                $testFileContent = @'
+pub fn helper() {
+    panic!("test file");
+}
+'@
+                $commentedAttributeContent = @'
+// #[cfg(test)] appears in documentation, not as an attribute.
+pub fn production() {
+    panic!("commented attr prod");
+}
+'@
+                $lifetimeContent = @'
+#[cfg(test)]
+fn lifetime_helper<'a>(input: &'a str) -> &'a str {
+    let _ = result.expect("test lifetime");
+    input
+}
+
+pub fn after_lifetime_helper() {
+    panic!("after lifetime prod");
+}
+'@
+                $mixedCfgContent = @'
+#[cfg(any(test, feature = "x"))]
+pub fn any_test_or_feature() {
+    panic!("any test or feature prod");
+}
+
+#[cfg(not(any(test, feature = "x")))]
+pub fn not_any_test_or_feature() {
+    panic!("not any test or feature prod");
+}
+'@
+                $bypassSyntaxContent = @'
+pub fn production(result: Result<(), String>) {
+    panic ! ("spaced macro");
+    panic /*comment*/ ! ("commented macro");
+    let _ = result.unwrap /*comment*/ ();
+}
+'@
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $productionContent
+                function Get-StagedAddedLines {
+                    @'
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -0,0 +1,3 @@
++pub fn production() {
++    panic!("boom");
++}
+'@
+                }
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "production panic addition should fail"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs", "src/foo/tests.rs")
+                $script:IndexTextCache["src/lib.rs"] = $testContent
+                $script:IndexTextCache["src/foo/tests.rs"] = $testFileContent
+                function Get-StagedAddedLines {
+                    @'
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -0,0 +1,4 @@
++#[cfg(test)]
++fn helper() {
++    let _ = result.expect("test helper");
++}
+'@
+                }
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 0) "cfg(test) panic addition should not fail"
+                Assert ($script:Passed -eq 1) "cfg(test) panic addition should pass the check"
+
+                Reset-State
+                $script:StagedFiles = @("src/foo/tests.rs")
+                Test-RustAddedPanicPatterns
+                Assert ($script:Skipped -eq 1) "test-only files should skip production panic scan"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $commentedAttributeContent
+                function Get-StagedAddedLines {
+                    @'
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -0,0 +1,4 @@
++// #[cfg(test)] appears in documentation, not as an attribute.
++pub fn production() {
++    panic!("commented attr prod");
++}
+'@
+                }
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "commented cfg(test) text must not hide production panic additions"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $lifetimeContent
+                function Get-StagedAddedLines {
+                    @'
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -0,0 +1,8 @@
++#[cfg(test)]
++fn lifetime_helper<'a>(input: &'a str) -> &'a str {
++    let _ = result.expect("test lifetime");
++    input
++}
++
++pub fn after_lifetime_helper() {
++    panic!("after lifetime prod");
++}
+'@
+                }
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "lifetimes in cfg(test) items must not hide following production panic additions"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $mixedCfgContent
+                function Get-StagedAddedLines {
+                    @'
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -0,0 +1,9 @@
++#[cfg(any(test, feature = "x"))]
++pub fn any_test_or_feature() {
++    panic!("any test or feature prod");
++}
++
++#[cfg(not(any(test, feature = "x")))]
++pub fn not_any_test_or_feature() {
++    panic!("not any test or feature prod");
++}
+'@
+                }
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "mixed cfg(test, production) expressions must not hide production panic additions"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $bypassSyntaxContent
+                function Get-StagedAddedLines {
+                    @'
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -0,0 +1,5 @@
++pub fn production(result: Result<(), String>) {
++    panic ! ("spaced macro");
++    panic /*comment*/ ! ("commented macro");
++    let _ = result.unwrap /*comment*/ ();
++}
+'@
+                }
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "Rust whitespace/comment syntax must not bypass production panic detection"
+            "#,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell rust scanner test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "PowerShell rust panic scanner should use staged hunk line numbers and \
+         staged index content to distinguish production from test-only additions.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_powershell_hooks_do_not_use_synchronous_process_stream_reads() {
+    let root = repo_root();
+    for script in [
+        "scripts/hooks/native-process.ps1",
+        "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-push.ps1",
+        "scripts/check-hook-readiness.ps1",
+    ] {
+        let content = read_file(&root.join(script));
+        assert!(
+            !content.contains("StandardOutput.ReadToEnd()")
+                && !content.contains("StandardError.ReadToEnd()"),
+            "{script} must not synchronously read redirected stdout/stderr; use ReadToEndAsync to avoid deadlocks."
         );
     }
 }
@@ -9365,7 +9958,6 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     );
 
     for required_trigger in [
-        ".llm/context.md",
         "scripts/generate-skills-index.sh",
         ":(glob).llm/skills/*.md",
     ] {
@@ -9374,10 +9966,15 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
             "skills index trigger list must include: {required_trigger}"
         );
     }
+    assert!(
+        !content.contains("$_ -eq \".llm/context.md\""),
+        ".llm/context.md edits must not trigger skills index regeneration; \
+         the generated index is derived only from .llm/skills/*.md and the generator script."
+    );
 
     assert!(
         content.contains("Skip \"Skills index freshness\""),
-        "skills index check should skip cleanly when no skills/context/index inputs are staged."
+        "skills index check should skip cleanly when no skills/index inputs are staged."
     );
 }
 
@@ -9388,10 +9985,34 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
     let content = read_file(&hook_path);
 
     assert!(
-        content.contains("$_.StartsWith(\"src/\")")
+        content.contains("Test-ProductionRustSourcePath")
+            && content.contains("SourceOnly")
             && content.contains("no production Rust files staged")
-            && content.contains(":(glob)src/**/*.rs"),
-        "pre-commit panic-pattern scans must be scoped to production Rust sources so test-only Rust edits do not pay a needless diff cost."
+            && content.contains("_tests.rs")
+            && content.contains("Test-RustCfgTestAttributeLine")
+            && content.contains("Test-RustCfgExpressionRequiresTest")
+            && content.contains("Split-RustCfgArguments")
+            && content.contains("Get-RustItemEndLine")
+            && content.contains("Get-RustTestLineSet")
+            && content.contains("maxCandidateLineByFile")
+            && content.contains("testLinesByFile")
+            && content.contains("-MaxLine $maxCandidateLineByFile[$candidate.File]")
+            && content.contains("Sort-Object -Property File, Line")
+            && content.contains(
+                "$pickaxePattern = \"unwrap|expect|panic|todo|unimplemented|unreachable\""
+            )
+            && content.contains("-PickaxePattern $pickaxePattern")
+            && content.contains("\\.(?:unwrap|expect)\\b")
+            && content.contains("$rustWhitespace!")
+            && content.contains("\"--no-ext-diff\", \"--no-textconv\"")
+            && content.contains("Add-IndexTextCache -Pathspecs $candidateFiles")
+            && content.contains("$candidateFiles.Count -gt 2")
+            && content.contains("^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@")
+            && content.contains("Contains($candidate.Line)"),
+        "pre-commit panic-pattern scans must be line-number aware and scoped to \
+         production Rust additions only. Test-only files and #[cfg(test)]/#[test] \
+         blocks must not fail the last-resort hook; small candidate sets may use \
+         direct index reads while larger sets must be batched to avoid git show fanout."
     );
 }
 
@@ -9401,6 +10022,7 @@ fn test_git_hooks_reject_slow_semantic_commands() {
     let checked_files = [
         ".githooks/pre-commit",
         ".githooks/pre-push",
+        "scripts/hooks/native-process.ps1",
         "scripts/hooks/pre-commit.ps1",
         "scripts/hooks/pre-push.ps1",
     ];
@@ -9430,6 +10052,45 @@ fn test_git_hooks_reject_slow_semantic_commands() {
                 line_idx + 1
             );
         }
+    }
+}
+
+#[test]
+fn test_root_pr_description_drafts_are_not_tracked() {
+    let root = repo_root();
+    let draft_paths = [
+        "pr-description.md",
+        "pr-body.md",
+        "pull-request-description.md",
+    ];
+    let output = Command::new("git")
+        .args(["ls-files", "--"])
+        .args(draft_paths)
+        .current_dir(&root)
+        .output()
+        .expect("git ls-files should run");
+    assert!(
+        output.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tracked = String::from_utf8_lossy(&output.stdout);
+    let tracked_existing: Vec<_> = tracked
+        .lines()
+        .filter(|path| root.join(path).exists())
+        .collect();
+    assert!(
+        tracked_existing.is_empty(),
+        "Root PR draft files must not be tracked while present in the working tree:\n{}",
+        tracked_existing.join("\n")
+    );
+
+    let gitignore = read_file(&root.join(".gitignore"));
+    for draft_path in draft_paths {
+        assert!(
+            gitignore.contains(&format!("/{draft_path}")),
+            ".gitignore must keep /{draft_path} ignored for local PR body drafts."
+        );
     }
 }
 

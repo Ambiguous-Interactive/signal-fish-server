@@ -124,7 +124,7 @@ Implement comprehensive CI/CD preventative measures across six layers:
 
 **Integration:**
 
-- Pre-commit hook runs markdown linting (if pinned markdownlint-cli2 version is installed)
+- Agent workflow, local CI, and GitHub CI run markdown linting; git hooks stay limited to sub-second staged-file guards
 - CI validates markdown files on every PR
 - VS Code extension recommendations for real-time linting
 
@@ -319,7 +319,7 @@ fn test_msrv_consistency_across_config_files() {
    - New workflow-hygiene.yml workflow syntax is valid
    - Scripts are executable and shellcheck clean
    - Tests run as part of `cargo test`
-   - Pre-commit hook includes markdown linting
+   - Pre-commit hook remains limited to fast staged-file guards
 
 4. ✅ **Documentation is clear**
    - ADR explains rationale and implementation
@@ -330,7 +330,7 @@ fn test_msrv_consistency_across_config_files() {
 5. ✅ **Developer tooling configured**
    - VS Code extensions recommended (markdownlint, spell checker)
    - VS Code settings configured for markdown formatting
-   - Pre-commit hook updated with markdown linting
+   - Markdown linting runs through agent workflow, local CI, and GitHub CI
 
 ### Testing Performed
 

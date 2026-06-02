@@ -27,7 +27,10 @@ pub enum ClientMessage {
         /// Preferred game data encoding (defaults to JSON text frames)
         #[serde(skip_serializing_if = "Option::is_none")]
         game_data_format: Option<GameDataEncoding>,
-        /// Highest protocol version the client speaks. Absent ⇒ pure v2.
+        /// Highest protocol version the client speaks.
+        ///
+        /// When absent, the endpoint default is used (`/v2/ws` => v2,
+        /// `/v3/ws` => v3), then clamped by server protocol configuration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_version: Option<u16>,
         /// Data-path transports the client supports. Absent ⇒ relay-only (v2).

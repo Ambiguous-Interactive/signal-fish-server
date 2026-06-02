@@ -93,7 +93,9 @@ services:
   "rate_limit": {
     "max_room_creations": 5,
     "time_window": 60,
-    "max_join_attempts": 20
+    "max_join_attempts": 20,
+    "max_signals": 600,
+    "max_signal_errors": 60
   },
   "logging": {
     "dir": "logs",

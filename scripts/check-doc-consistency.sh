@@ -419,7 +419,10 @@ is_internal_path() {
 
 collect_changed_files() {
     if [ "$CHANGED_MODE" = "staged" ]; then
-        mapfile -t CHANGED_FILES < <(git diff --cached --name-only --diff-filter=ACMRTUXB)
+        CHANGED_FILES=()
+        while IFS= read -r changed_file; do
+            CHANGED_FILES+=("$changed_file")
+        done < <(git diff --cached --name-only --diff-filter=ACMRTUXB)
     fi
 }
 

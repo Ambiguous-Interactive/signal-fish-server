@@ -235,14 +235,25 @@ Tests that ensure LLM skill files stay in sync with tooling and policy:
 
 ## Pre-commit Hooks
 
-The pre-commit hook (`.githooks/pre-commit`) runs fast checks before each commit:
+The pre-commit hook (`.githooks/pre-commit`) is a sub-second last-resort guard.
+It checks staged content only and delegates slow semantic validation to agent
+workflow, `scripts/run-local-ci.sh`, and CI.
 
 ### What It Checks
 
-1. **Code formatting** (`cargo fmt --check`)
-2. **Panic-prone patterns** (`scripts/check-no-panics.sh`)
-3. **Markdown linting** (`markdownlint-cli2`) - if pinned version from `.markdownlint-version` is installed
-4. **Link checking** (`lychee --offline`) - if installed, on staged files only
+For production Rust commits:
+
+1. **Panic-prone production Rust additions** in staged `src/**/*.rs` files,
+   excluding test-only files and staged test-code ranges
+2. **Staged whitespace errors** (`git diff --cached --check`)
+
+For commits without production Rust files staged:
+
+1. **Hook speed policy** for hook runner source files
+2. **Staged whitespace errors** (`git diff --cached --check`)
+3. **Generated skills index freshness** with deterministic index auto-repair
+4. **Staged `.llm/*.md` file size policy**
+5. **README badge style policy**
 
 ### Installation
 
@@ -255,17 +266,10 @@ git config core.hooksPath
 # Should output: .githooks
 ```
 
-### Link Checking in Pre-commit
+### Link Checking
 
-The pre-commit hook runs link checks in offline mode for speed:
-
-```bash
-# Only checks staged markdown files
-# Uses --offline flag to skip network requests (fast)
-# Validates internal links and markdown structure only
-```
-
-To check external links manually:
+Link checks stay out of git hooks. Run them through local CI or directly when
+working on docs:
 
 ```bash
 # Check specific file with full link checking
@@ -394,8 +398,8 @@ Validate and auto-fix markdown files.
 ### 4. Panic Policy Checking: `scripts/check-no-panics.sh`
 
 Enforce zero-panic production code by detecting panic-prone patterns.
-This script runs both as a pre-commit hook and as the `panic-policy`
-job in CI (`ci.yml`).
+Git hooks run only a staged addition guard for production Rust. This script is
+the slower full panic-policy checker used by agent workflow, local CI, and CI.
 
 **Usage:**
 
@@ -781,20 +785,23 @@ Pre-commit hooks catch issues before they reach CI:
 - Saves CI resources
 - Encourages good practices
 
-**Design principle:** Hooks should be fast (<5 seconds) and non-blocking for edge cases.
+**Design principle:** Hooks target <1 second and stop at the first concrete
+failure. They only run staged-file guards that are cheap and deterministic;
+link checks, markdown linting, Rust formatting, clippy, and tests stay in agent
+workflow, local CI, and GitHub CI.
 
-### Why Offline Link Checking in Pre-commit?
+### Why Keep Link Checking Out of Pre-commit?
 
-Offline mode checks internal links only, skipping external URLs:
+Link checks need broader repository context, optional external tools, and
+sometimes network access. Keeping them out of hooks preserves native
+Linux/macOS/Windows hook speed and avoids dependency repair during commit.
 
 **Benefits:**
 
-- Fast (no network requests)
-- Works without internet connection
-- Catches most common errors (broken internal links)
-- Full checks still run in CI
-
-**Tradeoff:** Doesn't catch broken external links until CI runs.
+- Hooks stay deterministic and sub-second for common staged changes
+- Link checking can provide full diagnostics without blocking every commit
+- Agent workflow and CI can run the right checker for the changed files
+- Full external checks still run in CI
 
 ### Why File-based Counters in Shell Scripts?
 
@@ -895,7 +902,7 @@ This testing infrastructure provides defense in depth against CI/CD issues:
 
 | Layer | Purpose | Speed | Coverage |
 |-------|---------|-------|----------|
-| **Pre-commit hooks** | Fast feedback during development | <5s | Basic checks on changed files |
+| **Pre-commit hooks** | Last-resort staged-file guards | <1s | Cheap checks on changed files |
 | **Helper scripts** | Quick validation during development | <10s | Targeted checks on specific areas |
 | **Unit tests** | Comprehensive validation | ~30s | All configuration and patterns |
 | **CI workflows** | Final validation before merge | 5-10min | Full integration testing |

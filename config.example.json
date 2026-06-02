@@ -17,7 +17,8 @@
     "max_room_creations": 5,
     "time_window": 60,
     "max_join_attempts": 20,
-    "max_signals": 600
+    "max_signals": 600,
+    "max_signal_errors": 60
   },
   "protocol": {
     "max_game_name_length": 64,
@@ -33,7 +34,7 @@
     "filename": "server.log",
     "rotation": "daily",
     "enable_file_logging": true,
-    "format": "Json"
+    "format": "json"
   },
   "security": {
     "cors_origins": "*",
