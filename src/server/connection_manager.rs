@@ -22,9 +22,8 @@ use super::RegisterClientError;
 pub(crate) struct NegotiatedProtocol {
     pub version: u16,
     pub transports: Vec<Transport>,
-    // `topologies` is negotiated and persisted in P1; the session-plan/topology
-    // selection logic that reads it lands in P3 (see PLAN.md §P3).
-    #[allow(dead_code)]
+    /// Session topologies the client supports; consumed by the P3 session-plan
+    /// selection path (`session_policy::choose_session_plan`).
     pub topologies: Vec<Topology>,
 }
 
@@ -199,7 +198,6 @@ impl ConnectionManager {
 
     // Read the full negotiated protocol for a connection. Consumed by the P3
     // session-plan/topology selection path (see PLAN.md §P3).
-    #[allow(dead_code)]
     pub fn protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.clients
             .get(player_id)

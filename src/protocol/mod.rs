@@ -15,11 +15,11 @@ pub use error_codes::ErrorCode;
 
 // From types
 pub use types::{
-    ConnectionInfo, GameDataEncoding, PeerConnectionInfo, PlayerId, PlayerInfo,
+    ConnectionInfo, GameDataEncoding, IceServer, PeerConnectionInfo, PlayerId, PlayerInfo,
     PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId,
-    SpectatorInfo, SpectatorStateChangeReason, Topology, Transport, DEFAULT_MAX_GAME_NAME_LENGTH,
-    DEFAULT_MAX_PLAYERS_LIMIT, DEFAULT_MAX_PLAYER_NAME_LENGTH, DEFAULT_REGION_ID,
-    DEFAULT_ROOM_CODE_LENGTH,
+    SessionPeer, SessionPlanPayload, SpectatorInfo, SpectatorStateChangeReason, Topology,
+    Transport, DEFAULT_MAX_GAME_NAME_LENGTH, DEFAULT_MAX_PLAYERS_LIMIT,
+    DEFAULT_MAX_PLAYER_NAME_LENGTH, DEFAULT_REGION_ID, DEFAULT_ROOM_CODE_LENGTH,
 };
 
 // From messages

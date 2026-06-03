@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    TransportSecurityConfig,
+    SessionConfig, TransportSecurityConfig,
 };
 use crate::database::DatabaseConfig;
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
@@ -20,6 +20,7 @@ async fn create_test_server_with_config(config: ServerConfig) -> Arc<EnhancedGam
         config,
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
+        SessionConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),

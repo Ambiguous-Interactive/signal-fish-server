@@ -1,21 +1,34 @@
-//! Targeted WebRTC signal relay (Protocol v3, PLAN §P2).
+//! Targeted WebRTC signal relay (Protocol v3, PLAN §P2/§P3).
 //!
-//! Relays opaque WebRTC signals (offer/answer/trickle-ICE) to a specific peer
-//! in the same room and designates exactly one offerer per pair on late join.
-//! Every code path here is gated on negotiated v3 + WebRTC capability so v2
-//! clients never observe `Signal`/`NewPeer` (Appendix K).
+//! Relays opaque WebRTC signals (offer/answer/trickle-ICE) to a specific peer in
+//! the same room ([`EnhancedGameServer::handle_signal`]) and, when a peer joins
+//! or reconnects into an **already-active** P2P session, designates exactly one
+//! offerer per pair ([`EnhancedGameServer::handle_webrtc_late_join`]).
+//!
+//! Initial pairing for a freshly finalized lobby is delivered by the
+//! per-recipient `SessionPlan` (see `session_policy.rs`); `NewPeer` is reserved
+//! for the late-join / reconnect case. A room is "active" iff its
+//! `lobby_state == Finalized` AND its recomputed plan is non-relay, so late join
+//! is finalization-gated and topology-aware (mesh pairs every peer; host pairs
+//! clients with the host only; relay-resolved rooms emit none — PLAN Appendix L
+//! decision #4, Appendix E). Every code path is gated on negotiated v3 + WebRTC
+//! capability so v2 clients never observe `Signal`/`NewPeer` (Appendix K).
 
 use std::sync::Arc;
 
-use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, ServerMessage, Transport};
+use crate::protocol::{
+    room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, ServerMessage, Topology,
+    Transport,
+};
 
+use super::session_policy::choose_session_plan;
 use super::EnhancedGameServer;
 
 /// Glare-avoidance offerer designation (Appendix E mesh rule).
 ///
 /// For a pair of peers, exactly one side must send the offer. The local peer
 /// initiates iff its id sorts before the remote peer's id (UUID compare). This
-/// is stateless and symmetric: `local_initiates(a, b) != local_initiates(b, a)`
+/// is stateless and antisymmetric: `local_initiates(a, b) != local_initiates(b, a)`
 /// for any `a != b`, and `local_initiates(x, x) == false`.
 pub(crate) fn local_initiates(local: PlayerId, remote: PlayerId) -> bool {
     local < remote
@@ -133,18 +146,69 @@ impl EnhancedGameServer {
             .await;
     }
 
-    /// On a successful room join, pair the joiner with every existing WebRTC peer
-    /// so each pair establishes exactly one offerer (Appendix E late-join rule).
+    /// Pair a joiner/reconnector into an **already-active** P2P session,
+    /// designating exactly one offerer per pair (Appendix E late-join rule).
     ///
-    /// P2 gates this purely on negotiated WebRTC capability. P3 will refine the
-    /// trigger to consult the chosen per-room SessionPlan (mesh/host/relay) — see
-    /// PLAN §P3 — so that, e.g., a relay-only room emits no `NewPeer`.
+    /// Initial pairing for a freshly finalized lobby is the `SessionPlan`'s job
+    /// (`session_policy.rs`); this path only fires once the room is live, so it is
+    /// gated and topology-aware (PLAN Appendix L decision #4):
     ///
-    /// `members` is the room's current player list, already fetched by the
-    /// caller (`handle_join_room`). Passing it in avoids a redundant
-    /// `get_room_players` round-trip to the database.
-    pub async fn handle_webrtc_late_join(&self, joiner: &PlayerId, members: &[PlayerInfo]) {
-        self.pair_webrtc_peer_with_members(joiner, members).await;
+    /// 1. The joiner must have negotiated v3 + WebRTC.
+    /// 2. The room must be `Finalized` — premature lobby-fill pairing is
+    ///    suppressed (the `SessionPlan` delivers initial pairing at finalize).
+    /// 3. The room's recomputed plan decides the shape:
+    ///    - **Relay floor** ⇒ no `NewPeer` (the active session is relay).
+    ///    - **Mesh** ⇒ pair the joiner with every other WebRTC member (UUID glare
+    ///      rule, exactly one offerer per pair).
+    ///    - **Host** ⇒ star pairing around the elected host: the host pairs with
+    ///      every client; a client pairs with the host only (clients never offer
+    ///      to each other).
+    ///
+    /// `members` is the room's current player list, already fetched by the caller
+    /// (`handle_join_room` / reconnect), avoiding a redundant `get_room_players`
+    /// round-trip. `room` supplies `lobby_state`, `game_name`, and the explicit
+    /// `authority_player` for host election.
+    pub async fn handle_webrtc_late_join(
+        &self,
+        room: &Room,
+        joiner: &PlayerId,
+        members: &[PlayerInfo],
+    ) {
+        // 1. The joiner itself must be v3 + WebRTC.
+        if !self.supports_webrtc_signaling(joiner) {
+            return;
+        }
+
+        // 2. Only pair into an active (finalized) session; the SessionPlan owns
+        //    finalize-time initial pairing, so lobby-fill joins emit nothing.
+        if room.lobby_state != LobbyState::Finalized {
+            return;
+        }
+
+        // 3. Recompute the room's plan over the identical inputs `emit_session_plan`
+        //    uses, then pair according to its topology.
+        let decision = choose_session_plan(
+            &room.game_name,
+            room.authority_player,
+            self.session_members_from(members),
+            &self.session_config,
+        );
+
+        match decision.topology {
+            // Active session is relay: no P2P pairing.
+            Topology::Relay => {}
+            // Mesh: every pair establishes exactly one offerer (UUID rule).
+            Topology::Mesh => self.pair_webrtc_peer_with_members(joiner, members).await,
+            // Host: star pairing around the elected host.
+            Topology::Host => {
+                let Some(host) = decision.host else {
+                    // A host plan with no elected host is degenerate; emit nothing
+                    // rather than fabricate pairings.
+                    return;
+                };
+                self.pair_webrtc_peer_with_host(joiner, host, members).await;
+            }
+        }
     }
 
     /// Whether this connection can participate in targeted WebRTC signaling.
@@ -198,6 +262,71 @@ impl EnhancedGameServer {
                 Arc::new(ServerMessage::NewPeer {
                     peer_id: *existing,
                     you_initiate: local_initiates(*peer, *existing),
+                }),
+            )
+            .await;
+    }
+
+    /// Star-pair a joiner into an active `host`-topology session.
+    ///
+    /// If the joiner IS the host it pairs with every (WebRTC-capable) client;
+    /// otherwise it pairs only with the host. Direction is fixed by the star
+    /// rule (Appendix E host): the client offers, the host answers.
+    pub(crate) async fn pair_webrtc_peer_with_host(
+        &self,
+        joiner: &PlayerId,
+        host: PlayerId,
+        members: &[PlayerInfo],
+    ) {
+        if !self.supports_webrtc_signaling(joiner) {
+            return;
+        }
+
+        if *joiner == host {
+            // The host (re)joined: pair it with every WebRTC-capable client.
+            for member in members {
+                let client = member.id;
+                if client == host || !self.supports_webrtc_signaling(&client) {
+                    continue;
+                }
+                self.send_host_peer_pair(&client, &host).await;
+            }
+        } else {
+            // A client (re)joined: pair it only with the host (if the host is
+            // present and WebRTC-capable).
+            if members.iter().any(|member| member.id == host)
+                && self.supports_webrtc_signaling(&host)
+            {
+                self.send_host_peer_pair(joiner, &host).await;
+            }
+        }
+    }
+
+    /// Emit the `NewPeer` pair for a (client, host) edge in a star topology.
+    ///
+    /// Unlike [`Self::send_new_peer_pair`] (mesh, UUID glare rule), the direction
+    /// is fixed: the client offers to the host (`you_initiate: true`) and the host
+    /// answers (`you_initiate: false`).
+    async fn send_host_peer_pair(&self, client: &PlayerId, host: &PlayerId) {
+        // The client offers to the host.
+        let _ = self
+            .message_coordinator
+            .send_to_player(
+                client,
+                Arc::new(ServerMessage::NewPeer {
+                    peer_id: *host,
+                    you_initiate: true,
+                }),
+            )
+            .await;
+        // The host answers the client.
+        let _ = self
+            .message_coordinator
+            .send_to_player(
+                host,
+                Arc::new(ServerMessage::NewPeer {
+                    peer_id: *client,
+                    you_initiate: false,
                 }),
             )
             .await;

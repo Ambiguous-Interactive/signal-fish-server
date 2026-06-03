@@ -12,9 +12,24 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::distributed::DistributedLock;
-use crate::protocol::{PlayerId, RoomId};
+use crate::protocol::{PlayerId, PlayerInfo, RoomId};
 
 use super::MessageCoordinator;
+
+/// Snapshot of a room at finalization, surfaced so the capability-aware server
+/// layer can compute and emit the v3 SessionPlan after `GameStarting`.
+///
+/// Returned by [`RoomOperationCoordinatorTrait::handle_player_ready`] only on the
+/// finalize path (all players ready); the non-finalize path returns `None`.
+#[derive(Debug, Clone)]
+pub struct FinalizedRoom {
+    /// The room's game name (used for per-game topology selection).
+    pub game_name: String,
+    /// The current authority player, if any (preferred host in `host` topology).
+    pub authority_player: Option<PlayerId>,
+    /// The finalized member list (the players that received `GameStarting`).
+    pub members: Vec<PlayerInfo>,
+}
 
 /// Trait for room operation coordination
 #[async_trait]
@@ -40,13 +55,17 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
         become_authority: bool,
     ) -> Result<(bool, Option<String>)>;
 
-    /// Handle player ready state change
+    /// Handle player ready state change.
+    ///
+    /// Returns `Ok(Some(FinalizedRoom))` when this toggle finalized the room
+    /// (all players ready → `GameStarting` broadcast), so the caller can emit the
+    /// v3 SessionPlan; otherwise `Ok(None)`.
     async fn handle_player_ready(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
         app_id: Option<Uuid>,
-    ) -> Result<()>;
+    ) -> Result<Option<FinalizedRoom>>;
 
     /// Clear ready players for a room
     async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()>;
@@ -289,7 +308,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         room_id: &RoomId,
         player_id: &PlayerId,
         _app_id: Option<Uuid>,
-    ) -> Result<()> {
+    ) -> Result<Option<FinalizedRoom>> {
         // For in-memory implementation, simulate player ready toggle
         let lock_key = format!("room_ready_state:{room_id}");
         let _lock_handle = self
@@ -352,6 +371,11 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
         // If all players are ready, transition to game starting
         if all_ready {
+            // Snapshot the finalized membership BEFORE consuming `room_players`
+            // into the `GameStarting` peer list, so the capability-aware server
+            // layer can compute and emit the v3 SessionPlan afterwards.
+            let finalized_members = room_players.clone();
+
             // Use P2P connection info from players (no relay server support in signal-fish-server)
             let peer_connections: Vec<crate::protocol::PeerConnectionInfo> = room_players
                 .into_iter()
@@ -374,10 +398,21 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             // Clear ready players for this room since game is starting
             let mut ready_map = self.ready_players.write().await;
             ready_map.remove(room_id);
+            drop(ready_map);
+
+            tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled; room finalized (in-memory)");
+
+            // Surface the snapshot so the server can emit the v3 SessionPlan
+            // (per-recipient) AFTER the unchanged GameStarting broadcast above.
+            return Ok(Some(FinalizedRoom {
+                game_name: room.game_name.clone(),
+                authority_player: room.authority_player,
+                members: finalized_members,
+            }));
         }
 
         tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
-        Ok(())
+        Ok(None)
     }
 
     async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()> {

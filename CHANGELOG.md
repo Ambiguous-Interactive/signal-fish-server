@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client omits it. The public router now mounts this alias only at the top level, avoiding a
   nested `/v2/v3/ws` route. This change is fully backward compatible: clients that omit the new
   fields on `/v2/ws` negotiate as pure v2 (relay-only) and observe byte-identical v2 behavior.
+- Added per-room session plan / topology selection (protocol v3 phase P3). At lobby
+  finalization (all players ready), the server now computes a single room-wide plan from the
+  intersection of every member's negotiated capabilities and sends a per-recipient
+  `ServerMessage::SessionPlan` (`{topology, transport, host?, peers, ice_servers?, fallback}`)
+  to each v3-capable member, alongside the unchanged `GameStarting`. The selection ladder is
+  `mesh+webrtc` → `host+webrtc` → `host+direct` → `relay` floor, where any member lacking the
+  required capability (or a disabled transport) downgrades the whole room to relay; host election
+  prefers the authority, else the earliest joiner (smaller UUID tie-break); each recipient's
+  `peers[].initiate` is set by the deterministic glare rule (mesh: lesser UUID offers; host:
+  clients offer to the host, the host offers to none). A room that resolves to the relay floor
+  emits no `SessionPlan` and behaves byte-identically to v2 — v2 (and v3-relay-only) clients never
+  receive one. Initial pairing is delivered exclusively by this `SessionPlan` at finalize; the
+  late-join / reconnect `ServerMessage::NewPeer` path is now finalization-gated and topology-aware
+  (it fires only for a join or reconnect into an already-`Finalized` room and pairs per the room's
+  recomputed plan: mesh pairs the joiner with every other WebRTC peer, host pairs a client with the
+  elected host only — clients never offer to each other — and a relay-resolved room emits no
+  `NewPeer`). This supersedes the P2 behavior where `NewPeer` fired on every lobby-fill join. Added
+  a `[session]` config block (`default_topology`, `game_topology_mappings`, `enable_webrtc`,
+  `enable_direct`, `ice_servers`) with validation; the new `IceServer`, `SessionPeer`, and
+  `SessionPlanPayload` types are additive over the frozen v2 wire format (`host`/`ice_servers`/
+  credentials omitted when absent).
 - Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
   relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
   `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.

@@ -118,6 +118,74 @@ pub enum Topology {
     Mesh,
 }
 
+/// A single ICE (STUN/TURN) server entry delivered inside a [`SessionPlanPayload`].
+///
+/// Mirrors the browser `RTCIceServer` shape (Appendix A/B): `urls` holds one or
+/// more STUN/TURN endpoints, and `username`/`credential` carry short-lived TURN
+/// credentials when present. Both auth fields are omitted from the wire when
+/// absent (public STUN needs no credentials). These are v3-only control payloads,
+/// so — like [`ProtocolInfoPayload`] — no rkyv derives are added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IceServer {
+    /// STUN/TURN URLs for this server (e.g. `stun:stun.l.google.com:19302`).
+    pub urls: Vec<String>,
+    /// TURN username (omitted for credential-less STUN servers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// TURN credential (omitted for credential-less STUN servers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
+/// One peer a recipient should connect to under the chosen session topology.
+///
+/// Part of a per-recipient [`SessionPlanPayload`] (Appendix B/E): the same room
+/// produces a different `peers` list (and `initiate` flags) for each member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPeer {
+    /// The other peer's id.
+    pub player_id: PlayerId,
+    /// The other peer's display name.
+    pub player_name: String,
+    /// True if this peer is the session's authoritative host.
+    ///
+    /// In `host` topology this marks the elected host (the session authority): a
+    /// client's single peer (the host) is `true`, and the host's client peers are
+    /// `false`. In `mesh` it reflects the room's designated authority flag and is
+    /// informational only (mesh has no central host).
+    pub is_authority: bool,
+    /// Whether the recipient sends the WebRTC offer to this peer.
+    ///
+    /// Computed per recipient by the deterministic glare rule (Appendix E) so
+    /// exactly one side of each pair offers: "you send the offer to this peer".
+    pub initiate: bool,
+}
+
+/// The per-recipient session directive emitted at lobby finalization (v3 only).
+///
+/// Sent alongside the unchanged `GameStarting` to each v3-capable member of a
+/// room whose negotiated plan is *not* the relay floor (Appendix A/B/D/E). It
+/// tells the recipient which topology/transport to use, who (if anyone) the host
+/// is, which peers to connect to (with per-recipient `initiate` flags), the ICE
+/// servers to gather against, and the universal `fallback` transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPlanPayload {
+    /// Chosen session topology (`relay`, `host`, or `mesh`).
+    pub topology: Topology,
+    /// Chosen data-path transport (`relay`, `direct`, or `webrtc`).
+    pub transport: Transport,
+    /// The elected host, present only for `host` topology.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<PlayerId>,
+    /// Peers this recipient should connect to (excludes the recipient itself).
+    pub peers: Vec<SessionPeer>,
+    /// ICE (STUN/TURN) servers for WebRTC; empty (and omitted) for non-WebRTC plans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice_servers: Vec<IceServer>,
+    /// The universal fallback transport — always [`Transport::Relay`], the floor.
+    pub fallback: Transport,
+}
+
 /// Connection information for P2P establishment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

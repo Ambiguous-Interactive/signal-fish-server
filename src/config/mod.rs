@@ -13,6 +13,7 @@
 //! - [`protocol`]: Protocol settings (SDK compatibility, player names)
 //! - [`security`]: Security and authentication settings
 //! - [`crate::config::relay`]: Relay type configuration
+//! - [`session`]: Session topology / transport selection (protocol v3)
 //! - [`logging`]: Logging configuration
 //! - [`coordination`]: Cross-instance coordination settings
 //! - [`metrics`]: Metrics configuration
@@ -31,6 +32,7 @@ pub mod protocol;
 pub mod relay;
 pub mod security;
 pub mod server;
+pub mod session;
 pub mod types;
 pub mod validation;
 pub mod websocket;
@@ -59,6 +61,8 @@ pub use security::{
 };
 
 pub use server::{RateLimitConfig, ServerConfig};
+
+pub use session::SessionConfig;
 
 pub use types::Config;
 

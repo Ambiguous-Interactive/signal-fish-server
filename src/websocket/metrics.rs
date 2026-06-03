@@ -197,6 +197,7 @@ mod tests {
             config,
             crate::config::ProtocolConfig::default(),
             crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
             DatabaseConfig::InMemory,
             crate::config::MetricsConfig::default(),
             crate::config::AuthMaintenanceConfig::default(),

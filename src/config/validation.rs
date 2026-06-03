@@ -137,6 +137,9 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // Protocol version-bounds validation
     config.protocol.validate()?;
 
+    // Session topology/transport policy validation
+    config.session.validate()?;
+
     Ok(())
 }
 

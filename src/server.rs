@@ -43,6 +43,9 @@ mod relay_policy;
 mod room_service;
 #[cfg(test)]
 mod room_service_tests;
+mod session_policy;
+#[cfg(test)]
+mod session_policy_tests;
 mod signaling;
 #[cfg(test)]
 mod signaling_tests;
@@ -68,6 +71,8 @@ pub struct EnhancedGameServer {
     protocol_config: crate::config::ProtocolConfig,
     /// Relay type configuration for game-specific networking
     relay_type_config: crate::config::RelayTypeConfig,
+    /// Session topology/transport selection policy (protocol v3)
+    session_config: crate::config::SessionConfig,
     /// Rate limiter for room operations
     rate_limiter: Arc<RoomRateLimiter>,
     /// Server metrics
@@ -168,6 +173,7 @@ impl EnhancedGameServer {
         config: ServerConfig,
         protocol_config: crate::config::ProtocolConfig,
         relay_type_config: crate::config::RelayTypeConfig,
+        session_config: crate::config::SessionConfig,
         database_config: DatabaseConfig,
         metrics_config: crate::config::MetricsConfig,
         _auth_config: crate::config::AuthMaintenanceConfig,
@@ -262,6 +268,7 @@ impl EnhancedGameServer {
             config,
             protocol_config,
             relay_type_config,
+            session_config,
             rate_limiter,
             metrics,
             message_coordinator,
@@ -330,8 +337,8 @@ impl EnhancedGameServer {
 
     /// Fetch the negotiated protocol capabilities for a client (defaults to v2 relay-only).
     ///
-    /// Built in P1; consumed by the P3 session-plan/topology selection path.
-    #[allow(dead_code)]
+    /// Built in P1; consumed by the P3 session-plan/topology selection path
+    /// (`session_policy::EnhancedGameServer::emit_session_plan`).
     pub(crate) fn client_protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.connection_manager.protocol(player_id)
     }
