@@ -9,15 +9,15 @@
 //! # Module Structure
 //!
 //! - [`crate::config::types`]: Root `Config` struct
-//! - [`server`]: Server behavior configuration (rooms, players, timeouts)
-//! - [`protocol`]: Protocol settings (SDK compatibility, player names)
-//! - [`security`]: Security and authentication settings
+//! - [`crate::config::server`]: Server behavior configuration (rooms, players, timeouts)
+//! - [`crate::config::protocol`]: Protocol settings (SDK compatibility, player names)
+//! - [`crate::config::security`]: Security and authentication settings
 //! - [`crate::config::relay`]: Relay type configuration
-//! - [`session`]: Session topology / transport selection (protocol v3)
-//! - [`logging`]: Logging configuration
-//! - [`coordination`]: Cross-instance coordination settings
-//! - [`metrics`]: Metrics configuration
-//! - [`websocket`]: WebSocket connection settings
+//! - [`crate::config::session`]: Session topology / transport selection (protocol v3)
+//! - [`crate::config::logging`]: Logging configuration
+//! - [`crate::config::coordination`]: Cross-instance coordination settings
+//! - [`crate::config::metrics`]: Metrics configuration
+//! - [`crate::config::websocket`]: WebSocket connection settings
 //! - [`crate::config::loader`]: Configuration loading functions
 //! - [`crate::config::validation`]: Configuration validation functions
 //! - [`crate::config::defaults`]: Default value functions

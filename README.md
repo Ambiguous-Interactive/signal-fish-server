@@ -445,6 +445,9 @@ backend if you need persistence beyond the built-in `InMemoryDatabase`.
 
 - Rust 1.88.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
+- `python3` and `bash` to run the full test suite — a CI-config test invokes
+  `scripts/check-miri-compat.sh` (the Miri wall-clock guard); both ship in the
+  dev container and on GitHub runners
 
 ### Build
 

@@ -117,6 +117,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+      # Fast pre-flight: fail in seconds (before the multi-minute toolchain
+      # install + Miri interpret) when a non-ignored test reaches a wall-clock
+      # call. The same script is the single source of truth for the blocking
+      # `test_wall_clock_tests_ignored_under_miri` check in the main test suite,
+      # so this job and the required check never drift.
       - name: Check Miri compatibility annotations
         run: bash scripts/check-miri-compat.sh
       - name: Install Rust nightly toolchain with Miri
@@ -160,6 +165,26 @@ jobs:
           echo "=== miri-output.txt failure markers ==="
           grep -nE "FAILED|failures:|panicked at|error:|undefined behavior|unsupported operation" \
             miri-output.txt || true
+          # Wall-clock / RNG isolation errors are the most common Miri failure here.
+          # Surface the offending test and a targeted remediation so the fix is
+          # obvious without re-reading the whole interpreter trace.
+          if grep -qE "clock_gettime|unsupported operation.*REALTIME|SystemTime|getrandom" miri-output.txt; then
+            echo "=== Likely cause: a library unit test reached a wall-clock / OS-entropy syscall ==="
+            echo "Miri runs with isolation enabled, so 'clock_gettime(REALTIME)' (Utc::now/SystemTime::now) aborts the test binary."
+            echo "Failing test(s) immediately preceding the isolation error:"
+            grep -nE "^test .* \.\.\.|running [0-9]+ tests" miri-output.txt | tail -n 5 || true
+            echo "Remediation:"
+            echo "  - If the timestamp is incidental, replace the wall-clock call with a deterministic fixture so the test runs under Miri (preferred — keeps coverage)."
+            echo "  - If the test genuinely needs real time/entropy, add #[cfg_attr(miri, ignore)] to that test."
+            echo "  - Run 'bash scripts/check-miri-compat.sh' locally; it flags this class before the slow Miri job."
+          elif grep -qE "unsupported operation" miri-output.txt; then
+            echo "=== Likely cause: a test reached an operation Miri's isolation does not support ==="
+            echo "Common triggers: wall-clock/entropy syscalls, filesystem or network I/O, signals, or"
+            echo "platform intrinsics. Miri aborts the whole test binary on the first such operation."
+            echo "Operation(s) reported:"
+            grep -nE "unsupported operation[^\"]*" miri-output.txt | tail -n 5 || true
+            echo "Remediation: make the test deterministic / isolation-safe, or add #[cfg_attr(miri, ignore)] to it."
+          fi
           echo "=== miri-output.txt tail -n 200 ==="
           tail -n 200 miri-output.txt
 

@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{read_file, repo_root};
+use common::{bash_command, read_file, repo_root};
 use regex::Regex;
 
 /// Check whether `cargo-deny` is installed by running `cargo deny --version`.
@@ -11466,87 +11466,54 @@ fn test_proptest_tests_ignored_under_miri() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_wall_clock_tests_ignored_under_miri() {
-    // Regression guard: tests that use wall-clock APIs (Room::new, Utc::now,
-    // SystemTime::now) must opt out of Miri with #[cfg_attr(miri, ignore)].
-    // Miri blocks clock_gettime(CLOCK_REALTIME) in isolation mode.
+    // Blocking, discovery-based regression guard for the Miri wall-clock class.
+    //
+    // This replaces a hand-maintained allow-list of test names (which silently
+    // missed wall-clock calls reached through fixture helpers — the exact gap
+    // that let a Miri break slip into CI). The authoritative logic lives in
+    // scripts/check-miri-compat.sh, which walks every test module and follows
+    // helper calls transitively. Running the same script here (a required check)
+    // and as the Advanced Safety (Miri) pre-flight keeps the two in lockstep.
+    //
+    // Gated to unix: the script needs bash + python3, which the Windows CI
+    // runners lack. The check inspects platform-independent Rust source, so
+    // running it on the Linux/macOS legs fully covers the guarantee. The
+    // dedicated parser-contract regression lives in tests/miri_compat_gate_tests.rs.
     let root = repo_root();
-    let required_miri_ignored_tests: [(&str, &[&str]); 2] = [
-        (
-            "src/protocol/mod.rs",
-            &[
-                "test_room_creation",
-                "test_player_management",
-                "test_authority_management",
-                "test_authority_management_disabled",
-                "test_player_name_uniqueness",
-                "test_authority_protocol_basic_rules",
-                "test_authority_protocol_single_authority_rule",
-                "test_authority_protocol_no_auto_reassignment",
-                "test_authority_protocol_room_support_validation",
-                "test_lobby_state_transitions",
-                "test_lobby_ready_state_changes",
-                "test_peer_connections",
-                "test_lobby_edge_cases",
-            ],
-        ),
-        (
-            "src/reconnection.rs",
-            &[
-                "test_reconnection_token_creation",
-                "test_reconnection_token_validation",
-                "test_event_buffer_push",
-                "test_event_buffer_get_events_after",
-                "test_reconnection_manager_flow",
-                "test_event_buffering",
-            ],
-        ),
-    ];
-
-    let mut violations = Vec::new();
-
-    for (relative_file, test_names) in required_miri_ignored_tests {
-        let source_file = root.join(relative_file);
-        let content = read_file(&source_file);
-        let lines: Vec<&str> = content.lines().collect();
-
-        for test_name in test_names {
-            let marker = format!("fn {test_name}(");
-            let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
-                violations.push(format!(
-                    "{}: missing expected test function `{}`",
-                    source_file.display(),
-                    test_name
-                ));
-                continue;
-            };
-
-            let search_start = line_idx.saturating_sub(4);
-            let has_miri_ignore = lines
-                .iter()
-                .take(line_idx)
-                .skip(search_start)
-                .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
-
-            if !has_miri_ignore {
-                violations.push(format!(
-                    "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
-                     Miri clock_gettime isolation failures",
-                    source_file.display(),
-                    line_idx + 1,
-                    test_name
-                ));
-            }
-        }
-    }
-
+    let script = root.join("scripts/check-miri-compat.sh");
     assert!(
-        violations.is_empty(),
-        "Wall-clock-dependent tests missing Miri ignore annotations:\n\n{}\n\n\
-         Fix: add #[cfg_attr(miri, ignore)] above each listed #[test] or \
-         #[tokio::test] function.",
-        violations.join("\n")
+        script.exists(),
+        "scripts/check-miri-compat.sh must exist to guard Miri wall-clock compatibility"
     );
+
+    let output = bash_command()
+        .arg(&script)
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match output.status.code() {
+        Some(0) => {}
+        // Exit 2 is an environment error (python3 missing), not a real violation;
+        // surface that distinctly so the failure is not mislabeled as wall-clock.
+        Some(2) => panic!(
+            "check-miri-compat.sh could not run (python3 unavailable). Install python3 \
+             so the Miri wall-clock guard can execute.\nstderr: {stderr}"
+        ),
+        _ => panic!(
+            "Non-ignored library tests must not reach a wall-clock call (Utc::now / \
+             SystemTime::now): Miri runs the library tests with isolation enabled and \
+             clock_gettime(CLOCK_REALTIME) aborts the whole run.\n\
+             Fix each finding by replacing the wall-clock call with a deterministic \
+             constant (preferred — keeps the test running under Miri) or adding \
+             #[cfg_attr(miri, ignore)].\n\n\
+             --- check-miri-compat.sh stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        ),
+    }
 }
 
 // ============================================================================

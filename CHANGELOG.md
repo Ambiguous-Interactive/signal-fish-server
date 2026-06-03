@@ -93,6 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed cross-platform hook/link-checker issues: shared PowerShell native-process helpers now avoid
   synchronous stream deadlocks, Bash hook scripts avoid Bash 4-only features, and the fast link
   checker initializes empty file sets safely.
+- Fixed the Rustdoc Validation CI failure by repairing two broken intra-doc links introduced by the
+  protocol v3 work: the `config` module overview now uses explicit `crate::config::*` paths (a bare
+  `` [`session`] `` did not resolve), and `config::session` no longer links to the private
+  `server::session_policy` module.
+- Fixed the Advanced Safety (Miri) CI failure: the protocol v3 session-policy tests reached
+  `chrono::Utc::now()` through a fixture helper, which aborts under Miri's REALTIME-clock isolation.
+  The pure-logic tests now build fixtures from a deterministic `base_time()` constant, so they run
+  under Miri and no longer depend on real-clock skew for host-election tie-breaks.
 
 ### Changed
 

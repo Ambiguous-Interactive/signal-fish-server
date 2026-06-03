@@ -29,6 +29,16 @@ use super::session_policy::{choose_session_plan, elect_host, SessionMember};
 // Pure-logic fixtures.
 // ---------------------------------------------------------------------------
 
+/// A fixed, deterministic base instant for test fixtures.
+///
+/// Using a constant instead of `Utc::now()` keeps the pure-logic tests
+/// reproducible (host-election tie-breaks never depend on real-clock skew) and
+/// free of wall-clock syscalls, so they run identically under Miri's isolated
+/// interpreter, which cannot service `clock_gettime(REALTIME)`.
+fn base_time() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp is valid")
+}
+
 /// A member that supports v3 + the given transports/topologies.
 fn member(
     id: PlayerId,
@@ -41,7 +51,7 @@ fn member(
         player_id: id,
         player_name: name.to_string(),
         is_authority: false,
-        joined_at: chrono::Utc::now(),
+        joined_at: base_time(),
         version,
         transports,
         topologies,
@@ -85,211 +95,284 @@ fn host_config() -> SessionConfig {
 
 // ---------------------------------------------------------------------------
 // Selection table (Appendix D).
+//
+// The capability ladder (mesh+webrtc -> host+webrtc -> host+direct -> relay
+// floor) is a pure function of {members' capabilities, config gates, per-game
+// mapping}. It is expressed once as a data table so every rung — and every
+// downgrade trigger — is asserted uniformly; adding a row is the canonical way
+// to cover a new selection scenario.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn all_v3_mesh_webrtc_selects_mesh_webrtc() {
-    let members = vec![
-        v3_full(PlayerId::new_v4(), "A"),
-        v3_full(PlayerId::new_v4(), "B"),
-    ];
-    let decision = choose_session_plan("game", None, members, &mesh_config());
-    assert_eq!(decision.topology, Topology::Mesh);
-    assert_eq!(decision.transport, Transport::WebRtc);
-    assert!(decision.host.is_none());
-    // ICE servers are present for a webrtc plan.
-    assert_eq!(decision.ice_servers.len(), 1);
+/// One member's advertised capabilities for a selection-table row.
+struct MemberSpec {
+    version: u16,
+    transports: Vec<Transport>,
+    topologies: Vec<Topology>,
+}
+
+/// Shorthand for a [`MemberSpec`] row.
+fn spec(version: u16, transports: Vec<Transport>, topologies: Vec<Topology>) -> MemberSpec {
+    MemberSpec {
+        version,
+        transports,
+        topologies,
+    }
+}
+
+/// A fully-capable v3 member spec (relay+webrtc+direct, relay+host+mesh).
+fn full_spec() -> MemberSpec {
+    spec(
+        3,
+        vec![Transport::Relay, Transport::WebRtc, Transport::Direct],
+        vec![Topology::Relay, Topology::Host, Topology::Mesh],
+    )
+}
+
+/// A host+direct-capable v3 member spec (no WebRTC transport, no mesh topology).
+fn host_direct_spec() -> MemberSpec {
+    spec(
+        3,
+        vec![Transport::Relay, Transport::Direct],
+        vec![Topology::Relay, Topology::Host],
+    )
+}
+
+/// Expected outcome of [`choose_session_plan`] for one selection-table row.
+struct Expect {
+    topology: Topology,
+    transport: Transport,
+    has_host: bool,
+    has_ice: bool,
+}
+
+struct SelectionCase {
+    name: &'static str,
+    game: &'static str,
+    members: Vec<MemberSpec>,
+    config: SessionConfig,
+    expect: Expect,
 }
 
 #[test]
-fn default_host_with_webrtc_selects_host_webrtc() {
-    let members = vec![
-        v3_full(PlayerId::new_v4(), "A"),
-        v3_full(PlayerId::new_v4(), "B"),
-    ];
-    let decision = choose_session_plan("game", None, members, &host_config());
-    assert_eq!(decision.topology, Topology::Host);
-    assert_eq!(decision.transport, Transport::WebRtc);
-    assert!(decision.host.is_some());
-}
-
-#[test]
-fn host_with_only_direct_selects_host_direct() {
-    // Members support host topology + Direct but NOT WebRTC; webrtc still enabled
-    // in config but the capability ladder falls through to host+direct.
-    let members = vec![
-        member(
-            PlayerId::new_v4(),
-            "A",
-            3,
-            vec![Transport::Relay, Transport::Direct],
-            vec![Topology::Relay, Topology::Host],
-        ),
-        member(
-            PlayerId::new_v4(),
-            "B",
-            3,
-            vec![Transport::Relay, Transport::Direct],
-            vec![Topology::Relay, Topology::Host],
-        ),
-    ];
-    let decision = choose_session_plan("game", None, members, &host_config());
-    assert_eq!(decision.topology, Topology::Host);
-    assert_eq!(decision.transport, Transport::Direct);
-    assert!(decision.host.is_some());
-    // Direct transport carries no ICE servers.
-    assert!(decision.ice_servers.is_empty());
-}
-
-#[test]
-fn single_relay_only_member_downgrades_to_relay() {
-    // One v2 / relay-only member forces the whole room to the floor.
-    let members = vec![
-        v3_full(PlayerId::new_v4(), "A"),
-        member(
-            PlayerId::new_v4(),
-            "Legacy",
-            2,
-            vec![Transport::Relay],
-            vec![Topology::Relay],
-        ),
-    ];
-    let decision = choose_session_plan("game", None, members, &mesh_config());
-    assert_eq!(decision.topology, Topology::Relay);
-    assert_eq!(decision.transport, Transport::Relay);
-    assert!(decision.host.is_none());
-    assert!(decision.ice_servers.is_empty());
-}
-
-#[test]
-fn one_v3_member_without_webrtc_transport_downgrades_mesh() {
-    // v3 + mesh topology but missing the WebRTC transport on one member.
-    let members = vec![
-        v3_full(PlayerId::new_v4(), "A"),
-        member(
-            PlayerId::new_v4(),
-            "B",
-            3,
-            vec![Transport::Relay],
-            vec![Topology::Relay, Topology::Mesh],
-        ),
-    ];
-    let decision = choose_session_plan("game", None, members, &mesh_config());
-    assert_eq!(decision.topology, Topology::Relay);
-    assert_eq!(decision.transport, Transport::Relay);
-}
-
-#[test]
-fn enable_webrtc_false_downgrades_mesh_to_relay() {
-    let members = vec![
-        v3_full(PlayerId::new_v4(), "A"),
-        v3_full(PlayerId::new_v4(), "B"),
-    ];
-    let cfg = SessionConfig {
-        enable_webrtc: false,
-        ..mesh_config()
-    };
-    let decision = choose_session_plan("game", None, members, &cfg);
-    // No webrtc allowed and mesh has no non-webrtc path => relay floor.
-    assert_eq!(decision.topology, Topology::Relay);
-    assert_eq!(decision.transport, Transport::Relay);
-}
-
-#[test]
-fn enable_direct_false_blocks_host_direct() {
-    // host+direct-capable members, webrtc disabled, direct disabled => relay.
-    let members = vec![
-        member(
-            PlayerId::new_v4(),
-            "A",
-            3,
-            vec![Transport::Relay, Transport::Direct],
-            vec![Topology::Relay, Topology::Host],
-        ),
-        member(
-            PlayerId::new_v4(),
-            "B",
-            3,
-            vec![Transport::Relay, Transport::Direct],
-            vec![Topology::Relay, Topology::Host],
-        ),
-    ];
-    let cfg = SessionConfig {
-        enable_webrtc: false,
-        enable_direct: false,
-        ..host_config()
-    };
-    let decision = choose_session_plan("game", None, members, &cfg);
-    assert_eq!(decision.topology, Topology::Relay);
-    assert_eq!(decision.transport, Transport::Relay);
-}
-
-#[test]
-fn enable_direct_false_alone_blocks_host_direct_path() {
-    // webrtc enabled but members lack webrtc; direct disabled => relay (the
-    // host+direct rung is gated off even though members support direct).
-    let members = vec![
-        member(
-            PlayerId::new_v4(),
-            "A",
-            3,
-            vec![Transport::Relay, Transport::Direct],
-            vec![Topology::Relay, Topology::Host],
-        ),
-        member(
-            PlayerId::new_v4(),
-            "B",
-            3,
-            vec![Transport::Relay, Transport::Direct],
-            vec![Topology::Relay, Topology::Host],
-        ),
-    ];
-    let cfg = SessionConfig {
-        enable_webrtc: true,
-        enable_direct: false,
-        ..host_config()
-    };
-    let decision = choose_session_plan("game", None, members, &cfg);
-    assert_eq!(decision.topology, Topology::Relay);
-    assert_eq!(decision.transport, Transport::Relay);
-}
-
-#[test]
-fn game_topology_mapping_overrides_default() {
-    // default_topology = relay, but the per-game mapping requests mesh.
-    let mut mappings = HashMap::new();
-    mappings.insert("FastFPS".to_string(), Topology::Mesh);
-    let cfg = SessionConfig {
+fn selection_table_resolves_each_rung_and_downgrade() {
+    let stun = vec![IceServer {
+        urls: vec!["stun:host".to_string()],
+        username: None,
+        credential: None,
+    }];
+    let mapped_cfg = || SessionConfig {
         default_topology: Topology::Relay,
-        game_topology_mappings: mappings,
-        ice_servers: vec![IceServer {
-            urls: vec!["stun:host".to_string()],
-            username: None,
-            credential: None,
-        }],
+        game_topology_mappings: HashMap::from([("FastFPS".to_string(), Topology::Mesh)]),
+        ice_servers: stun.clone(),
         ..SessionConfig::default()
     };
-    let members = vec![
-        v3_full(PlayerId::new_v4(), "A"),
-        v3_full(PlayerId::new_v4(), "B"),
+
+    let cases = vec![
+        SelectionCase {
+            name: "all-v3 mesh+webrtc selects mesh+webrtc",
+            game: "game",
+            members: vec![full_spec(), full_spec()],
+            config: mesh_config(),
+            expect: Expect {
+                topology: Topology::Mesh,
+                transport: Transport::WebRtc,
+                has_host: false,
+                has_ice: true,
+            },
+        },
+        SelectionCase {
+            name: "default host with webrtc selects host+webrtc",
+            game: "game",
+            members: vec![full_spec(), full_spec()],
+            config: host_config(),
+            expect: Expect {
+                topology: Topology::Host,
+                transport: Transport::WebRtc,
+                has_host: true,
+                has_ice: true,
+            },
+        },
+        SelectionCase {
+            // Members support host+direct but NOT webrtc; the ladder falls
+            // through from host+webrtc to host+direct (which carries no ICE).
+            name: "host-only-direct members select host+direct",
+            game: "game",
+            members: vec![host_direct_spec(), host_direct_spec()],
+            config: host_config(),
+            expect: Expect {
+                topology: Topology::Host,
+                transport: Transport::Direct,
+                has_host: true,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // One v2 / relay-only member forces the whole room to the floor.
+            name: "single relay-only member downgrades to relay",
+            game: "game",
+            members: vec![
+                full_spec(),
+                spec(2, vec![Transport::Relay], vec![Topology::Relay]),
+            ],
+            config: mesh_config(),
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // v3 + mesh topology but missing the WebRTC transport on one member.
+            name: "member without webrtc transport downgrades mesh to relay",
+            game: "game",
+            members: vec![
+                full_spec(),
+                spec(
+                    3,
+                    vec![Transport::Relay],
+                    vec![Topology::Relay, Topology::Mesh],
+                ),
+            ],
+            config: mesh_config(),
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // No webrtc allowed and mesh has no non-webrtc path => relay floor.
+            name: "enable_webrtc=false downgrades mesh to relay",
+            game: "game",
+            members: vec![full_spec(), full_spec()],
+            config: SessionConfig {
+                enable_webrtc: false,
+                ..mesh_config()
+            },
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // host+direct-capable members, webrtc disabled, direct disabled => relay.
+            name: "enable_webrtc=false + enable_direct=false blocks host+direct",
+            game: "game",
+            members: vec![host_direct_spec(), host_direct_spec()],
+            config: SessionConfig {
+                enable_webrtc: false,
+                enable_direct: false,
+                ..host_config()
+            },
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // webrtc enabled but members lack webrtc; direct disabled => relay
+            // (the host+direct rung is gated off even though members support direct).
+            name: "enable_direct=false alone blocks the host+direct path",
+            game: "game",
+            members: vec![host_direct_spec(), host_direct_spec()],
+            config: SessionConfig {
+                enable_webrtc: true,
+                enable_direct: false,
+                ..host_config()
+            },
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // default_topology = relay, but the per-game mapping requests mesh.
+            name: "per-game mapping upgrades the mapped game to mesh",
+            game: "FastFPS",
+            members: vec![full_spec(), full_spec()],
+            config: mapped_cfg(),
+            expect: Expect {
+                topology: Topology::Mesh,
+                transport: Transport::WebRtc,
+                has_host: false,
+                has_ice: true,
+            },
+        },
+        SelectionCase {
+            // An unmapped game uses the relay default.
+            name: "per-game mapping leaves an unmapped game on the relay default",
+            game: "OtherGame",
+            members: vec![full_spec(), full_spec()],
+            config: mapped_cfg(),
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            name: "empty room resolves to relay",
+            game: "game",
+            members: Vec::new(),
+            config: mesh_config(),
+            expect: Expect {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                has_host: false,
+                has_ice: false,
+            },
+        },
     ];
 
-    // The mapped game upgrades to mesh.
-    let mapped = choose_session_plan("FastFPS", None, members.clone(), &cfg);
-    assert_eq!(mapped.topology, Topology::Mesh);
-    assert_eq!(mapped.transport, Transport::WebRtc);
+    for case in cases {
+        let members = case
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                member(
+                    PlayerId::new_v4(),
+                    &format!("P{i}"),
+                    s.version,
+                    s.transports.clone(),
+                    s.topologies.clone(),
+                )
+            })
+            .collect();
+        let decision = choose_session_plan(case.game, None, members, &case.config);
 
-    // An unmapped game uses the relay default.
-    let unmapped = choose_session_plan("OtherGame", None, members, &cfg);
-    assert_eq!(unmapped.topology, Topology::Relay);
-}
-
-#[test]
-fn empty_members_resolve_to_relay() {
-    let decision = choose_session_plan("game", None, Vec::new(), &mesh_config());
-    assert_eq!(decision.topology, Topology::Relay);
-    assert_eq!(decision.transport, Transport::Relay);
-    assert!(decision.host.is_none());
+        assert_eq!(
+            decision.topology, case.expect.topology,
+            "topology [{}]",
+            case.name
+        );
+        assert_eq!(
+            decision.transport, case.expect.transport,
+            "transport [{}]",
+            case.name
+        );
+        assert_eq!(
+            decision.host.is_some(),
+            case.expect.has_host,
+            "host presence [{}]",
+            case.name
+        );
+        assert_eq!(
+            !decision.ice_servers.is_empty(),
+            case.expect.has_ice,
+            "ice presence [{}]",
+            case.name
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +383,7 @@ fn empty_members_resolve_to_relay() {
 fn host_election_prefers_authority_over_earlier_joiner() {
     let early = PlayerId::new_v4();
     let authority = PlayerId::new_v4();
-    let now = chrono::Utc::now();
+    let now = base_time();
 
     let mut early_member = v3_full(early, "Early");
     early_member.joined_at = now - chrono::Duration::seconds(100);
@@ -317,7 +400,7 @@ fn host_election_prefers_authority_over_earlier_joiner() {
 fn host_election_uses_earliest_joiner_without_authority() {
     let early = PlayerId::new_v4();
     let late = PlayerId::new_v4();
-    let now = chrono::Utc::now();
+    let now = base_time();
 
     let mut early_member = v3_full(early, "Early");
     early_member.joined_at = now - chrono::Duration::seconds(50);
@@ -332,7 +415,7 @@ fn host_election_uses_earliest_joiner_without_authority() {
 
 #[test]
 fn host_election_breaks_timestamp_ties_by_smaller_uuid() {
-    let now = chrono::Utc::now();
+    let now = base_time();
     let id_a = PlayerId::new_v4();
     let id_b = PlayerId::new_v4();
     let smaller = id_a.min(id_b);
@@ -348,7 +431,7 @@ fn host_election_breaks_timestamp_ties_by_smaller_uuid() {
 
 #[test]
 fn host_election_is_deterministic_regardless_of_order() {
-    let now = chrono::Utc::now();
+    let now = base_time();
     let id_a = PlayerId::new_v4();
     let id_b = PlayerId::new_v4();
     let id_c = PlayerId::new_v4();
@@ -376,7 +459,7 @@ fn elect_host_prefers_explicit_authority_over_earliest_joiner() {
     // The explicit authority must win even though another member joined earlier.
     let authority = PlayerId::new_v4();
     let early = PlayerId::new_v4();
-    let now = chrono::Utc::now();
+    let now = base_time();
 
     let mut authority_member = v3_full(authority, "Authority");
     authority_member.joined_at = now; // joined later
@@ -396,7 +479,7 @@ fn elect_host_falls_through_to_earliest_joiner_when_authority_absent() {
     let absent_authority = PlayerId::new_v4();
     let early = PlayerId::new_v4();
     let late = PlayerId::new_v4();
-    let now = chrono::Utc::now();
+    let now = base_time();
 
     let mut early_member = v3_full(early, "Early");
     early_member.joined_at = now - chrono::Duration::seconds(50);
@@ -656,7 +739,7 @@ fn player_info(id: PlayerId, name: &str, is_authority: bool) -> PlayerInfo {
         name: name.to_string(),
         is_authority,
         is_ready: true,
-        connected_at: chrono::Utc::now(),
+        connected_at: base_time(),
         connection_info: None,
         region_id: "region-a".to_string(),
     }

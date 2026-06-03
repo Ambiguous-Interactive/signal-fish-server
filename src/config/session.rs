@@ -1,6 +1,6 @@
 //! Session topology / transport selection configuration (Protocol v3, PLAN §P3).
 //!
-//! Drives [`crate::server::session_policy::choose_session_plan`]: the preferred
+//! Drives the server's `choose_session_plan` selection: the preferred
 //! topology per game, whether WebRTC / Direct upgrades are permitted, and the
 //! ICE servers advertised to clients when a WebRTC plan is chosen. Every upgrade
 //! gracefully degrades to the relay floor, so even a fully-disabled deployment
