@@ -241,6 +241,9 @@ while the original reconnect task can still continue. `handle_reconnect` uses
 a drop guard to release abandoned claims and completes the claim as soon as
 connection reassignment succeeds.
 
+Session-plan topology/transport selection invariants are documented in
+[Protocol v3 Session-Plan Selection](skills/protocol-v3-session-plan.md).
+
 ---
 
 ## Protocol Quick Reference

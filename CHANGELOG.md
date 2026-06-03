@@ -72,6 +72,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the protocol v3 session-plan selection ladder so a `desired` topology acts as a _ceiling_
+  rather than an exact match: a `mesh`-preferring room that cannot run mesh now correctly falls back
+  to `host+webrtc`, then `host+direct`, before the relay floor — instead of collapsing straight to
+  relay (the previous code gated the host rungs on `desired == host`). This matches ADR-0001 §1 and
+  the documented `mesh+webrtc → host+webrtc → host+direct → relay` ladder. The ladder is now expressed
+  as a single data-driven constant (`UPGRADE_LADDER`) walked by topology-richness rank, the four legal
+  `(topology, transport)` pairings are enforced by `is_valid_pair` plus a `debug_assert!`, and an
+  exhaustive selection-invariant test guards the whole class of topology/transport drift.
+- Fixed `handle_webrtc_late_join` emitting WebRTC `NewPeer` control messages for a non-WebRTC active
+  session. Late-join pairing is now gated on the plan's _transport_
+  (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == webrtc`) rather than its _topology_,
+  so a `host+direct` (LAN) room — a non-relay topology whose transport is not WebRTC — no longer pushes
+  clients into WebRTC negotiation. This mirrors `emit_session_plan`, which advertises ICE only for a
+  WebRTC transport.
+- Hardened `session.ice_servers` validation to reject any blank or whitespace-only URL (even alongside
+  valid ones) and to report an empty `urls` list distinctly, instead of accepting a server as long as
+  a single URL was non-blank. Blank URLs are propagated verbatim to clients and break `RTCIceServer`
+  parsing, so they are now a configuration error with an index-pointed message.
 - Fixed README protocol-reference formatting for the `Reconnect` row and typical session-flow diagram alignment.
 - Fixed config-token drift by documenting canonical lowercase/snake_case values, making related
   config enum deserialization tolerate legacy mixed-case tokens, and adding doc/reference guards.

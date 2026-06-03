@@ -156,8 +156,11 @@ impl EnhancedGameServer {
     /// 1. The joiner must have negotiated v3 + WebRTC.
     /// 2. The room must be `Finalized` — premature lobby-fill pairing is
     ///    suppressed (the `SessionPlan` delivers initial pairing at finalize).
-    /// 3. The room's recomputed plan decides the shape:
-    ///    - **Relay floor** ⇒ no `NewPeer` (the active session is relay).
+    /// 3. The recomputed plan must use the **WebRTC transport**. `NewPeer` is a
+    ///    WebRTC-signaling control message, so a non-WebRTC active session emits
+    ///    none — both the relay floor *and* a `Host + Direct` (LAN) session, even
+    ///    though `Host + Direct` is a non-relay *topology*.
+    /// 4. The plan's **topology** then shapes the WebRTC pairing:
     ///    - **Mesh** ⇒ pair the joiner with every other WebRTC member (UUID glare
     ///      rule, exactly one offerer per pair).
     ///    - **Host** ⇒ star pairing around the elected host: the host pairs with
@@ -186,7 +189,7 @@ impl EnhancedGameServer {
         }
 
         // 3. Recompute the room's plan over the identical inputs `emit_session_plan`
-        //    uses, then pair according to its topology.
+        //    uses.
         let decision = choose_session_plan(
             &room.game_name,
             room.authority_player,
@@ -194,8 +197,20 @@ impl EnhancedGameServer {
             &self.session_config,
         );
 
+        // 4. `NewPeer` is a WebRTC-signaling control message, so only pair when the
+        //    active session actually uses the WebRTC transport. A relay-floor or
+        //    `Host + Direct` (LAN) plan must never push clients into WebRTC
+        //    negotiation — even though `Host + Direct` is a non-relay *topology*.
+        //    This mirrors `emit_session_plan`, which advertises ICE only for a
+        //    WebRTC transport.
+        if !decision.uses_webrtc_signaling() {
+            return;
+        }
+
+        // 5. The transport is WebRTC; the topology shapes the pairing.
         match decision.topology {
-            // Active session is relay: no P2P pairing.
+            // Unreachable: a WebRTC transport never pairs with a relay topology
+            // (`is_valid_pair`). Kept for an exhaustive, future-proof match.
             Topology::Relay => {}
             // Mesh: every pair establishes exactly one offerer (UUID rule).
             Topology::Mesh => self.pair_webrtc_peer_with_members(joiner, members).await,

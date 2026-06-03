@@ -23,7 +23,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
-use super::session_policy::{choose_session_plan, elect_host, SessionMember};
+use super::session_policy::{
+    choose_session_plan, elect_host, is_valid_pair, SessionMember, RELAY_FLOOR, UPGRADE_LADDER,
+};
 
 // ---------------------------------------------------------------------------
 // Pure-logic fixtures.
@@ -243,10 +245,60 @@ fn selection_table_resolves_each_rung_and_downgrade() {
             },
         },
         SelectionCase {
-            // No webrtc allowed and mesh has no non-webrtc path => relay floor.
-            name: "enable_webrtc=false downgrades mesh to relay",
+            // `desired` is a *ceiling*: a mesh-preferring room with WebRTC disabled
+            // walks past mesh+webrtc and host+webrtc to land on host+direct (members
+            // are fully capable and direct stays enabled). It must NOT collapse
+            // straight to relay (ADR-0001 §1 ladder — the bug Copilot flagged).
+            name: "mesh ceiling with webrtc disabled falls back to host+direct",
             game: "game",
             members: vec![full_spec(), full_spec()],
+            config: SessionConfig {
+                enable_webrtc: false,
+                ..mesh_config()
+            },
+            expect: Expect {
+                topology: Topology::Host,
+                transport: Transport::Direct,
+                has_host: true,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
+            // `desired` mesh, but one member lacks the mesh *topology* while still
+            // supporting host+webrtc: the ladder falls mesh→host+webrtc, not to
+            // relay (WebRTC stays enabled).
+            name: "mesh ceiling falls back to host+webrtc when a member lacks mesh topology",
+            game: "game",
+            members: vec![
+                full_spec(),
+                spec(
+                    3,
+                    vec![Transport::Relay, Transport::WebRtc],
+                    vec![Topology::Relay, Topology::Host],
+                ),
+            ],
+            config: mesh_config(),
+            expect: Expect {
+                topology: Topology::Host,
+                transport: Transport::WebRtc,
+                has_host: true,
+                has_ice: true,
+            },
+        },
+        SelectionCase {
+            // mesh ceiling, WebRTC disabled: host+direct is the only viable rung,
+            // but one member lacks the host *topology*, so every rung fails and the
+            // room correctly lands on the relay floor (fallback needs capability).
+            name: "mesh ceiling with webrtc disabled downgrades to relay when a member lacks host",
+            game: "game",
+            members: vec![
+                full_spec(),
+                spec(
+                    3,
+                    vec![Transport::Relay, Transport::Direct],
+                    vec![Topology::Relay, Topology::Mesh],
+                ),
+            ],
             config: SessionConfig {
                 enable_webrtc: false,
                 ..mesh_config()
@@ -320,6 +372,24 @@ fn selection_table_resolves_each_rung_and_downgrade() {
             },
         },
         SelectionCase {
+            // A per-game mapping is a ceiling too: the mapped game prefers mesh, but
+            // with WebRTC disabled it falls to host+direct (not relay), exactly like
+            // a default-topology mesh ceiling would.
+            name: "per-game mesh mapping with webrtc disabled falls back to host+direct",
+            game: "FastFPS",
+            members: vec![full_spec(), full_spec()],
+            config: SessionConfig {
+                enable_webrtc: false,
+                ..mapped_cfg()
+            },
+            expect: Expect {
+                topology: Topology::Host,
+                transport: Transport::Direct,
+                has_host: true,
+                has_ice: false,
+            },
+        },
+        SelectionCase {
             name: "empty room resolves to relay",
             game: "game",
             members: Vec::new(),
@@ -373,6 +443,146 @@ fn selection_table_resolves_each_rung_and_downgrade() {
             case.name
         );
     }
+}
+
+/// Exhaustively asserts the selection invariant: across every `desired` ceiling,
+/// both transport gates, and a representative spread of member capabilities,
+/// [`choose_session_plan`] only ever yields a *legal* (topology, transport) pair
+/// and the cross-field couplings hold — relay topology ⇔ relay transport, a host
+/// topology always elects a host, ICE accompanies only WebRTC, and the chosen
+/// topology never exceeds the desired ceiling. This is the machine-checked guard
+/// for the whole class of "topology/transport drift" bugs.
+///
+/// It guards *legality and overshoot* (every pair is legal; topology never exceeds
+/// the ceiling). The downgrade *ladder* itself — that a mesh ceiling falls to host
+/// before relay — is pinned separately by
+/// `selection_table_resolves_each_rung_and_downgrade`.
+#[test]
+fn selection_only_ever_yields_a_legal_pair() {
+    let member_sets: Vec<Vec<MemberSpec>> = vec![
+        vec![],
+        vec![full_spec()],
+        vec![full_spec(), full_spec()],
+        vec![full_spec(), host_direct_spec()],
+        vec![host_direct_spec(), host_direct_spec()],
+        vec![
+            full_spec(),
+            spec(2, vec![Transport::Relay], vec![Topology::Relay]),
+        ],
+        vec![
+            full_spec(),
+            spec(
+                3,
+                vec![Transport::Relay, Transport::WebRtc],
+                vec![Topology::Relay, Topology::Host],
+            ),
+        ],
+    ];
+
+    for desired in [Topology::Relay, Topology::Host, Topology::Mesh] {
+        for enable_webrtc in [false, true] {
+            for enable_direct in [false, true] {
+                for set in &member_sets {
+                    let config = SessionConfig {
+                        default_topology: desired,
+                        enable_webrtc,
+                        enable_direct,
+                        ice_servers: vec![IceServer {
+                            urls: vec!["stun:host".to_string()],
+                            username: None,
+                            credential: None,
+                        }],
+                        ..SessionConfig::default()
+                    };
+                    let members = set
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            member(
+                                PlayerId::new_v4(),
+                                &format!("P{i}"),
+                                s.version,
+                                s.transports.clone(),
+                                s.topologies.clone(),
+                            )
+                        })
+                        .collect();
+                    let decision = choose_session_plan("game", None, members, &config);
+                    let label = format!(
+                        "desired={desired:?} webrtc={enable_webrtc} direct={enable_direct} \
+                         members={}",
+                        set.len()
+                    );
+
+                    assert!(
+                        is_valid_pair(decision.topology, decision.transport),
+                        "illegal pair {:?}/{:?} [{label}]",
+                        decision.topology,
+                        decision.transport,
+                    );
+                    assert_eq!(
+                        decision.topology == Topology::Relay,
+                        decision.transport == Transport::Relay,
+                        "relay topology and relay transport must coincide [{label}]",
+                    );
+                    assert_eq!(
+                        decision.topology == Topology::Host,
+                        decision.host.is_some(),
+                        "a host is elected exactly when the topology is host [{label}]",
+                    );
+                    assert!(
+                        decision.ice_servers.is_empty() || decision.transport == Transport::WebRtc,
+                        "ICE servers must accompany only a WebRTC transport [{label}]",
+                    );
+                    // The chosen topology never exceeds the `desired` ceiling.
+                    let within_ceiling = match desired {
+                        Topology::Relay => decision.topology == Topology::Relay,
+                        Topology::Host => {
+                            matches!(decision.topology, Topology::Relay | Topology::Host)
+                        }
+                        Topology::Mesh => true,
+                    };
+                    assert!(
+                        within_ceiling,
+                        "chosen topology {:?} exceeds desired ceiling {desired:?} [{label}]",
+                        decision.topology,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Pins the ladder constants to the ADR-0001 §1 waterfall so the single source of
+/// truth cannot silently drift from the documented design, and spot-checks that
+/// only the four legal pairs pass [`is_valid_pair`].
+#[test]
+fn ladder_is_the_documented_adr_waterfall() {
+    assert_eq!(
+        UPGRADE_LADDER,
+        [
+            (Topology::Mesh, Transport::WebRtc),
+            (Topology::Host, Transport::WebRtc),
+            (Topology::Host, Transport::Direct),
+        ],
+        "the upgrade ladder must match ADR-0001 §1 (mesh+webrtc → host+webrtc → host+direct)",
+    );
+    assert_eq!(RELAY_FLOOR, (Topology::Relay, Transport::Relay));
+
+    for rung in UPGRADE_LADDER {
+        assert!(
+            is_valid_pair(rung.0, rung.1),
+            "ladder rung {rung:?} must be legal"
+        );
+    }
+    assert!(is_valid_pair(RELAY_FLOOR.0, RELAY_FLOOR.1));
+
+    // Representative illegal pairings must be rejected.
+    assert!(!is_valid_pair(Topology::Mesh, Transport::Direct));
+    assert!(!is_valid_pair(Topology::Mesh, Transport::Relay));
+    assert!(!is_valid_pair(Topology::Host, Transport::Relay));
+    assert!(!is_valid_pair(Topology::Relay, Transport::WebRtc));
+    assert!(!is_valid_pair(Topology::Relay, Transport::Direct));
 }
 
 // ---------------------------------------------------------------------------

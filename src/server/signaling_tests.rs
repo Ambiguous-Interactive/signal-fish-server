@@ -118,6 +118,19 @@ fn host_session_config() -> SessionConfig {
     }
 }
 
+/// A `host`-preferring `SessionConfig` with WebRTC disabled, so an all-v3 room
+/// whose members support host+direct resolves to `host + direct` (LAN) — a
+/// non-relay *topology* whose *transport* is not WebRTC.
+fn host_direct_session_config() -> SessionConfig {
+    SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ice_servers: Vec::new(),
+        ..SessionConfig::default()
+    }
+}
+
 /// Fetch a room and mark it `Finalized` so late-join pairing engages (it only
 /// fires for an active, finalized session). Storage state is irrelevant to
 /// `handle_webrtc_late_join`, which reads `lobby_state` from the passed `Room`.
@@ -205,6 +218,18 @@ fn v3_webrtc_host() -> NegotiatedProtocol {
         version: 3,
         transports: vec![Transport::Relay, Transport::WebRtc],
         topologies: vec![Topology::Relay, Topology::Host, Topology::Mesh],
+    }
+}
+
+/// A v3 client advertising WebRTC *and* Direct transports plus the `host`
+/// topology. It clears the late-join WebRTC gate (it supports WebRTC), so a room
+/// that nonetheless resolves to `host + direct` (the deployment disabled WebRTC)
+/// isolates the plan's *transport* gate rather than the per-peer capability gate.
+fn v3_webrtc_direct_host() -> NegotiatedProtocol {
+    NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
     }
 }
 
@@ -885,6 +910,53 @@ async fn late_join_finalized_host_room_pairs_client_with_host_only() {
         other => panic!("host expected NewPeer(client, initiate=false), got {other:?}"),
     }
 
+    assert_silent(&mut client_rx).await;
+    assert_silent(&mut host_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_finalized_host_direct_room_emits_no_new_peer() {
+    // Regression (Copilot): a Finalized room that resolves to `host + direct`
+    // (WebRTC disabled in config) must emit NO `NewPeer`. `NewPeer` is a
+    // WebRTC-signaling control message and this room's transport is Direct, not
+    // WebRTC. Both members advertise the WebRTC transport, so the per-peer gate
+    // (`supports_webrtc_signaling`) passes — only the plan's *transport* gate
+    // suppresses pairing. Before the fix this wrongly emitted WebRTC `NewPeer`
+    // for a non-WebRTC session because the match keyed on topology alone.
+    let server = create_test_server_with_session(host_direct_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (client, mut client_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc_direct_host());
+    server.set_client_protocol(&client, v3_webrtc_direct_host());
+
+    let room_id = create_db_room(&server, host).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(client, "client"))
+        .await
+        .expect("add client");
+    server
+        .connection_manager
+        .assign_client_to_room(&host, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&client, room_id)
+        .await;
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let mut room = finalized_room(&server, &room_id).await;
+    room.authority_player = Some(host);
+    server
+        .handle_webrtc_late_join(&room, &client, &members)
+        .await;
+
+    // host + direct ⇒ no WebRTC signaling ⇒ neither side is paired.
     assert_silent(&mut client_rx).await;
     assert_silent(&mut host_rx).await;
 }

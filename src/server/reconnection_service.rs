@@ -516,10 +516,11 @@ impl EnhancedGameServer {
             }
         }
 
-        // Topology-aware re-pairing into an active session: if the room is
-        // finalized and runs a non-relay plan, deliver `NewPeer` per the chosen
+        // Transport-aware re-pairing into an active session: if the room is
+        // finalized and runs a WebRTC plan, deliver `NewPeer` per the chosen
         // topology (mesh pairs all peers; host pairs the reconnector with the
-        // host). A non-finalized or relay-resolved room emits nothing (PLAN §P3).
+        // host). A non-finalized room, the relay floor, or a host+direct (LAN)
+        // plan emits nothing — `NewPeer` is WebRTC-only (PLAN §P3).
         self.handle_webrtc_late_join(&room, reconnect_player_id, &current_players)
             .await;
 

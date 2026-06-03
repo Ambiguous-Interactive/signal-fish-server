@@ -78,17 +78,83 @@ fn all_support(members: &[SessionMember], topology: Topology, transport: Transpo
         })
 }
 
-/// Choose the room-wide session plan from member capabilities (Appendix D).
+/// The session-upgrade ladder (ADR-0001 §1), richest rung first.
 ///
-/// The desired topology comes from the per-game override, falling back to the
-/// configured default. The ladder prefers richer topologies but the relay floor
-/// always wins ties — any member lacking the required capability (or a disabled
-/// transport) downgrades the whole room to `(Relay, Relay)`:
+/// Each entry is a legal `(topology, transport)` pair the room may settle on, in
+/// strict preference order. [`choose_session_plan`] selects the first rung that
+/// fits the room's `desired` ceiling, has its transport enabled, and is supported
+/// by every member. Holding the ladder in one constant makes it the single source
+/// of truth shared by the selector, its doc comment, the CHANGELOG, and the
+/// selection tests — `ladder_is_the_documented_adr_waterfall` fails on any drift.
+pub(crate) const UPGRADE_LADDER: [(Topology, Transport); 3] = [
+    (Topology::Mesh, Transport::WebRtc),
+    (Topology::Host, Transport::WebRtc),
+    (Topology::Host, Transport::Direct),
+];
+
+/// The universal floor: server WebSocket relay, always available (ADR-0001 §3).
 ///
-/// 1. `Mesh` + WebRTC — if enabled and all members support mesh+webrtc.
-/// 2. `Host` + WebRTC — else, if enabled and all support host+webrtc.
-/// 3. `Host` + Direct — else, if enabled and all support host+direct (LAN).
-/// 4. `Relay` + Relay — the universal floor.
+/// Selected only when no [`UPGRADE_LADDER`] rung fits. A relay-floor room emits no
+/// `SessionPlan`, so v3 clients relay byte-identically to v2.
+pub(crate) const RELAY_FLOOR: (Topology, Transport) = (Topology::Relay, Transport::Relay);
+
+/// Richness rank of a topology ceiling: `Relay < Host < Mesh` (ADR-0001 §1).
+///
+/// `desired` is a *ceiling*, so a room may settle on any topology whose rank is
+/// `<=` the desired rank (a mesh-preferring room can fall back to host). Written
+/// as an explicit match — not the wire enum's declaration order — so reordering
+/// [`Topology`] variants can never silently reshape selection.
+const fn topology_rank(topology: Topology) -> u8 {
+    match topology {
+        Topology::Relay => 0,
+        Topology::Host => 1,
+        Topology::Mesh => 2,
+    }
+}
+
+/// Whether `cfg` permits the given data-path transport. `Relay` is the mandatory
+/// floor (always permitted); `Direct` and `WebRtc` are opt-in upgrade gates.
+const fn transport_enabled(cfg: &SessionConfig, transport: Transport) -> bool {
+    match transport {
+        Transport::Relay => true,
+        Transport::Direct => cfg.enable_direct,
+        Transport::WebRtc => cfg.enable_webrtc,
+    }
+}
+
+/// Whether `(topology, transport)` is one of the four legal session pairs — the
+/// three [`UPGRADE_LADDER`] rungs plus the [`RELAY_FLOOR`].
+///
+/// Every other combination (e.g. `Mesh + Direct`, `Host + Relay`) is illegal and
+/// must never reach a client: downstream consumers — late-join WebRTC pairing, ICE
+/// emission, the relay-floor short-circuit — rely on this topology/transport
+/// coupling. Backs the `debug_assert!` in [`choose_session_plan`] and the
+/// exhaustive `selection_only_ever_yields_a_legal_pair` invariant test.
+#[must_use]
+pub(crate) fn is_valid_pair(topology: Topology, transport: Transport) -> bool {
+    UPGRADE_LADDER
+        .into_iter()
+        .chain(std::iter::once(RELAY_FLOOR))
+        .any(|rung| rung == (topology, transport))
+}
+
+/// Choose the room-wide session plan from member capabilities (ADR-0001, Appendix D).
+///
+/// `desired` (the per-game override, else the configured default) is a *ceiling*,
+/// not an exact match: the room settles on the richest [`UPGRADE_LADDER`] rung that
+/// is **no richer than `desired`**, has its transport enabled, and is supported by
+/// *every* member. A rung fails when any single member lacks its topology/transport
+/// (or the transport is disabled); the walk then continues to the next rung, reaching
+/// the universal [`RELAY_FLOOR`] only when no rung fits. With the richest-first ladder
+/// that is exactly (ADR-0001 §1):
+///
+/// 1. `Mesh` + WebRTC — `desired == Mesh`, webrtc enabled, all support mesh+webrtc.
+/// 2. `Host` + WebRTC — `desired ∈ {Mesh, Host}`, webrtc enabled, all support host+webrtc.
+/// 3. `Host` + Direct — `desired ∈ {Mesh, Host}`, direct enabled, all support host+direct (LAN).
+/// 4. `Relay` + Relay — the universal floor (always available).
+///
+/// So a `Mesh`-preferring room that cannot run mesh still falls back to a host
+/// topology before the relay floor, instead of collapsing straight to relay.
 ///
 /// `authority` is the room's explicitly designated authority player (e.g.
 /// `Room::authority_player`); under `host` topology it is preferred as the host
@@ -107,24 +173,22 @@ pub(crate) fn choose_session_plan(
         .copied()
         .unwrap_or(cfg.default_topology);
 
-    let (topology, transport) = if desired == Topology::Mesh
-        && cfg.enable_webrtc
-        && all_support(&members, Topology::Mesh, Transport::WebRtc)
-    {
-        (Topology::Mesh, Transport::WebRtc)
-    } else if desired == Topology::Host
-        && cfg.enable_webrtc
-        && all_support(&members, Topology::Host, Transport::WebRtc)
-    {
-        (Topology::Host, Transport::WebRtc)
-    } else if desired == Topology::Host
-        && cfg.enable_direct
-        && all_support(&members, Topology::Host, Transport::Direct)
-    {
-        (Topology::Host, Transport::Direct)
-    } else {
-        (Topology::Relay, Transport::Relay)
-    };
+    // Walk the richest-first ladder and settle on the first rung that fits the
+    // `desired` ceiling, has its transport enabled, and is supported by *every*
+    // member; otherwise fall to the universal relay floor (ADR-0001 §1/§3).
+    let (topology, transport) = UPGRADE_LADDER
+        .into_iter()
+        .find(|&(topology, transport)| {
+            topology_rank(topology) <= topology_rank(desired)
+                && transport_enabled(cfg, transport)
+                && all_support(&members, topology, transport)
+        })
+        .unwrap_or(RELAY_FLOOR);
+
+    debug_assert!(
+        is_valid_pair(topology, transport),
+        "choose_session_plan must yield a legal (topology, transport) pair"
+    );
 
     let host = if topology == Topology::Host {
         elect_host(authority, &members)
@@ -172,6 +236,28 @@ pub(crate) fn elect_host(
 }
 
 impl SessionPlanDecision {
+    /// Whether the room resolved to the universal relay floor.
+    ///
+    /// A relay-floor room emits no `SessionPlan` (v3 clients relay exactly like
+    /// v2). Equivalent to the transport being [`Transport::Relay`]: the floor is
+    /// the only legal relay pairing ([`is_valid_pair`]).
+    #[must_use]
+    pub(crate) fn is_relay(&self) -> bool {
+        self.topology == Topology::Relay
+    }
+
+    /// Whether this plan uses server-mediated WebRTC signaling.
+    ///
+    /// This is the gate for emitting `Signal` / `NewPeer` control messages: it is
+    /// true **iff** the chosen transport is [`Transport::WebRtc`]. A `Host + Direct`
+    /// (LAN) plan is non-relay yet is *not* WebRTC, so it must never trigger WebRTC
+    /// pairing — keying off topology alone would misfire (see
+    /// [`EnhancedGameServer::handle_webrtc_late_join`]).
+    #[must_use]
+    pub(crate) fn uses_webrtc_signaling(&self) -> bool {
+        self.transport == Transport::WebRtc
+    }
+
     /// Build the per-recipient [`SessionPlanPayload`] for `recipient` (Appendix E).
     ///
     /// The `fallback` is always [`Transport::Relay`] (the floor). The peer list
@@ -302,7 +388,7 @@ impl EnhancedGameServer {
 
         // Relay floor: no SessionPlan is sent. v3 clients fall back to relaying
         // game data exactly like v2 (the floor never closes).
-        if decision.topology == Topology::Relay {
+        if decision.is_relay() {
             tracing::debug!(
                 %room_id,
                 "Room finalized to the relay floor; no v3 SessionPlan emitted"

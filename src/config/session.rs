@@ -49,15 +49,27 @@ impl Default for SessionConfig {
 impl SessionConfig {
     /// Validate session policy.
     ///
-    /// A malformed ICE server (no non-empty URL) is useless and rejected. A
-    /// non-`Relay` desired topology with *both* transports disabled is only
-    /// warned about — the selection ladder safely downgrades such a room to the
-    /// relay floor, so it is a misconfiguration, not a fatal error.
+    /// Each advertised ICE server must have a usable `urls` list, because the URLs
+    /// are propagated verbatim to clients: the list must be non-empty and every
+    /// entry must be non-blank. A blank or whitespace-only URL — even alongside
+    /// valid ones — is rejected, since it would break client-side `RTCIceServer`
+    /// parsing/connection. Deeper URL checks (scheme, deduplication) are deferred
+    /// to P4, which wires in real STUN/TURN. A non-`Relay` desired topology with
+    /// *both* transports disabled is only warned about — the selection ladder
+    /// safely downgrades such a room to the relay floor, so it is a
+    /// misconfiguration, not a fatal error.
     #[must_use = "validation result must be checked; a malformed ICE server is an error"]
     pub fn validate(&self) -> anyhow::Result<()> {
         for (index, server) in self.ice_servers.iter().enumerate() {
-            if !server.urls.iter().any(|url| !url.trim().is_empty()) {
-                anyhow::bail!("session.ice_servers[{index}] must have at least one non-empty URL");
+            if server.urls.is_empty() {
+                anyhow::bail!("session.ice_servers[{index}].urls must list at least one URL");
+            }
+            for (url_index, url) in server.urls.iter().enumerate() {
+                if url.trim().is_empty() {
+                    anyhow::bail!(
+                        "session.ice_servers[{index}].urls[{url_index}] must not be blank"
+                    );
+                }
             }
         }
 
@@ -142,6 +154,108 @@ mod tests {
             ..SessionConfig::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_blank_url_mixed_with_valid_url() {
+        // A valid URL must not "rescue" a blank sibling: the blank entry is still
+        // propagated verbatim to clients and would break `RTCIceServer` parsing.
+        let cfg = SessionConfig {
+            ice_servers: vec![IceServer {
+                urls: vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "   ".to_string(),
+                ],
+                username: None,
+                credential: None,
+            }],
+            ..SessionConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("a blank URL alongside a valid one is rejected");
+        assert!(
+            err.to_string().contains("ice_servers[0].urls[1]"),
+            "error must point at the offending URL index: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_reports_empty_urls_list_distinctly() {
+        let cfg = SessionConfig {
+            ice_servers: vec![IceServer {
+                urls: vec![],
+                username: None,
+                credential: None,
+            }],
+            ..SessionConfig::default()
+        };
+        let err = cfg.validate().expect_err("an empty urls list is rejected");
+        assert!(
+            err.to_string().contains("must list at least one URL"),
+            "error must use the distinct empty-list message, not the blank-URL one: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_ascii_and_control_whitespace_urls() {
+        // The non-blank check relies on `str::trim()`, which also strips tabs,
+        // newlines, NBSP (U+00A0), and the ideographic space (U+3000). Pin that so
+        // a future switch to manual ASCII-space stripping cannot let them through.
+        for blank in ["\t", "\n", "\u{00A0}", "\u{3000}"] {
+            let cfg = SessionConfig {
+                ice_servers: vec![IceServer {
+                    urls: vec![blank.to_string()],
+                    username: None,
+                    credential: None,
+                }],
+                ..SessionConfig::default()
+            };
+            assert!(
+                cfg.validate().is_err(),
+                "whitespace-only URL {blank:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_flags_the_blank_server_among_several() {
+        // First server valid, second carries a blank URL: validation must still
+        // fail and point at the second server's offending entry.
+        let cfg = SessionConfig {
+            ice_servers: vec![
+                stun("stun:stun.l.google.com:19302"),
+                IceServer {
+                    urls: vec!["turn:turn.example.com".to_string(), String::new()],
+                    username: Some("u".to_string()),
+                    credential: Some("c".to_string()),
+                },
+            ],
+            ..SessionConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("a blank URL in a later server is rejected");
+        assert!(
+            err.to_string().contains("ice_servers[1].urls[1]"),
+            "error must point at the second server's blank URL: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_multiple_nonblank_urls() {
+        let cfg = SessionConfig {
+            ice_servers: vec![IceServer {
+                urls: vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "turn:turn.example.com:3478".to_string(),
+                ],
+                username: Some("user".to_string()),
+                credential: Some("pass".to_string()),
+            }],
+            ..SessionConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
