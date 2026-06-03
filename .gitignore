@@ -25,6 +25,9 @@ target
 
 pre-commit.txt
 pre-push.txt
+/pr-description.md
+/pr-body.md
+/pull-request-description.md
 
 # Logs
 logs/

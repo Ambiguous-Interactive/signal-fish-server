@@ -187,6 +187,22 @@ validate_awk_files() {
 # 2. Shell script validation (shellcheck)
 # -----------------------------------------------------------------------
 
+run_shellcheck() {
+    local shell="$1"
+    local severity="$2"
+    local script="$3"
+    local report
+
+    if report=$(shellcheck -s "$shell" "$severity" "$script" 2>&1); then
+        return 0
+    fi
+
+    fail "shellcheck errors in $script"
+    printf '%s\n' "$report" | sed -n '1,20p'
+    echo ""
+    return 1
+}
+
 validate_shell_scripts() {
     CHECKS_RUN=$((CHECKS_RUN + 1))
     info "Validating shell scripts with shellcheck..."
@@ -209,10 +225,7 @@ validate_shell_scripts() {
         [ -f "$script" ] || continue
         shell_checked=$((shell_checked + 1))
 
-        if ! shellcheck -s bash $sc_severity "$script" > /dev/null 2>&1; then
-            fail "shellcheck errors in $script"
-            shellcheck -s bash $sc_severity "$script" 2>&1 | head -20
-            echo ""
+        if ! run_shellcheck "bash" "$sc_severity" "$script"; then
             shell_errors=$((shell_errors + 1))
         fi
     done
@@ -222,30 +235,26 @@ validate_shell_scripts() {
         [ -f "$script" ] || continue
         shell_checked=$((shell_checked + 1))
 
-        if ! shellcheck -s bash $sc_severity "$script" > /dev/null 2>&1; then
-            fail "shellcheck errors in $script"
-            shellcheck -s bash $sc_severity "$script" 2>&1 | head -20
-            echo ""
+        if ! run_shellcheck "bash" "$sc_severity" "$script"; then
             shell_errors=$((shell_errors + 1))
         fi
     done
 
-    # Validate the pre-commit hook (uses /bin/sh, not bash)
-    if [ -f .githooks/pre-commit ]; then
+    # Validate all git hook wrappers. PowerShell policy lives in scripts/hooks/*.ps1;
+    # extensionless .githooks/* files remain small POSIX wrappers for Git.
+    for hook in .githooks/*; do
+        [ -f "$hook" ] || continue
         shell_checked=$((shell_checked + 1))
-        # Detect the shell from the shebang
+
         local hook_shell="sh"
-        if head -1 .githooks/pre-commit | grep -q 'bash'; then
+        if head -1 "$hook" | grep -q 'bash'; then
             hook_shell="bash"
         fi
 
-        if ! shellcheck -s "$hook_shell" $sc_severity .githooks/pre-commit > /dev/null 2>&1; then
-            fail "shellcheck errors in .githooks/pre-commit"
-            shellcheck -s "$hook_shell" $sc_severity .githooks/pre-commit 2>&1 | head -20
-            echo ""
+        if ! run_shellcheck "$hook_shell" "$sc_severity" "$hook"; then
             shell_errors=$((shell_errors + 1))
         fi
-    fi
+    done
 
     if [ "$shell_checked" -eq 0 ]; then
         info "No shell scripts found to check"
@@ -267,82 +276,10 @@ validate_markdown_links() {
     CHECKS_RUN=$((CHECKS_RUN + 1))
     info "Validating markdown relative links in docs/..."
 
-    local link_errors=0
-    local links_checked=0
-    local files_checked=0
-
-    # Check all markdown files in docs/ directory
-    for md_file in docs/*.md docs/**/*.md; do
-        [ -f "$md_file" ] || continue
-        files_checked=$((files_checked + 1))
-
-        local base_dir
-        base_dir=$(dirname "$md_file")
-
-        # Extract relative links from markdown: [text](relative/path)
-        # Skip external URLs (http/https), anchor-only (#), and empty links
-        while IFS= read -r link_match; do
-            [ -z "$link_match" ] && continue
-
-            # Extract the URL portion from [text](url)
-            local url
-            url=$(echo "$link_match" | sed -E 's/.*\(([^)]+)\).*/\1/')
-
-            # Skip external URLs and anchors
-            case "$url" in
-                http://*|https://*|mailto:*|\#*) continue ;;
-            esac
-
-            # Warn about machine-specific absolute paths (not portable)
-            case "$url" in
-                /workspaces/*|/home/*|/Users/*|/tmp/*)
-                    warn "Non-portable absolute path in $md_file: [$url] -- use a relative path instead"
-                    continue
-                    ;;
-                /*)
-                    # Other absolute paths are skipped silently (e.g., root-relative paths)
-                    continue
-                    ;;
-            esac
-
-            # Strip anchor portion for file existence check
-            local file_part="${url%%#*}"
-            [ -z "$file_part" ] && continue
-
-            links_checked=$((links_checked + 1))
-
-            # Resolve the path relative to the markdown file's directory
-            local resolved_path="$base_dir/$file_part"
-
-            # Check if the resolved file exists
-            if [ ! -f "$resolved_path" ] && [ ! -d "$resolved_path" ]; then
-                fail "Broken link in $md_file: [$url] (resolves to $resolved_path)"
-                link_errors=$((link_errors + 1))
-
-                # Provide helpful fix suggestion for common .llm path issues
-                if echo "$url" | grep -q '\.llm/' && ! echo "$url" | grep -q '^\.\./'; then
-                    printf '  %bFix%b: Change "%s" to "../%s"\n' "$YELLOW" "$NC" "$url" "$url"
-                fi
-            fi
-
-            # Special check: docs/ files linking to .llm/ must use ../ prefix
-            if echo "$url" | grep -qE '^\.llm/'; then
-                fail "Invalid relative link in $md_file: [$url] -- links from docs/ to .llm/ must use ../ prefix"
-                printf '  %bFix%b: Change "%s" to "../%s"\n' "$YELLOW" "$NC" "$url" "$url"
-                link_errors=$((link_errors + 1))
-            fi
-        done < <(grep -oE '\[[^]]*\]\([^)]+\)' "$md_file" 2>/dev/null || true)
-    done
-
-    if [ "$files_checked" -eq 0 ]; then
-        info "No markdown files found in docs/"
-        return
-    fi
-
-    if [ "$link_errors" -eq 0 ]; then
-        success "All $links_checked link(s) in $files_checked docs file(s) are valid"
+    if bash scripts/check-internal-links.sh --docs-only --quiet; then
+        success "All docs/ internal markdown links are valid"
     else
-        fail "$link_errors broken link(s) found in docs/ markdown files"
+        fail "Broken internal link(s) found in docs/ markdown files"
     fi
 }
 

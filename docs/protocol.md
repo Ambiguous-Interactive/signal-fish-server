@@ -408,20 +408,21 @@ Game data relayed from another player.
 
 ### GameDataBinary
 
-Binary game data payload from another player. Uses bytes for zero-copy cloning during broadcast.
+Binary game data payload from another player. This server message variant is an
+internal broadcast carrier only; MessagePack-capable clients receive a WebSocket
+binary frame containing a bare MessagePack map with `from_player`, `encoding`,
+and `payload` fields. It is not wrapped in the JSON `{ "type": ..., "data": ... }`
+envelope.
 
-```json
-
-{
-  "type": "GameDataBinary",
-  "data": {
-    "from_player": "player-id",
-    "encoding": "message_pack",
-    "payload": "<base64-encoded-bytes>"
-  }
-}
-
+```text
+MessagePack map:
+  from_player: player-id
+  encoding: message_pack
+  payload: raw bytes
 ```
+
+Clients that did not negotiate `game_data_format: "message_pack"` receive the
+JSON `GameData` fallback instead.
 
 ### LobbyStateChanged
 

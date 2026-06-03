@@ -222,6 +222,13 @@ impl EnhancedGameServer {
                     )
                     .await;
 
+                // Additively notify v3 WebRTC peers so the joiner and each
+                // existing peer establish exactly one offerer (PLAN §P2,
+                // Appendix E). Purely additive: gated to v3 + WebRTC peers, so
+                // v2 message ordering and bytes are untouched.
+                self.handle_webrtc_late_join(player_id, &current_players)
+                    .await;
+
                 // Check if room should transition to lobby state
                 if room.should_enter_lobby() {
                     if let Err(e) = self
@@ -382,40 +389,39 @@ impl EnhancedGameServer {
                 if let Err(reason) =
                     validation::validate_player_name_uniqueness(player_name, &room.players)
                 {
-                    let _ = self.distributed_lock.release(&lock_handle).await;
-                    return Err(anyhow::anyhow!(reason));
-                }
+                    Err(anyhow::anyhow!(reason))
+                } else {
+                    let player_info = PlayerInfo {
+                        id: *player_id,
+                        name: player_name.to_string(),
+                        is_authority: false,
+                        is_ready: false,
+                        connected_at: chrono::Utc::now(),
+                        connection_info: None,
+                        region_id: room.region_id.clone(),
+                    };
 
-                let player_info = PlayerInfo {
-                    id: *player_id,
-                    name: player_name.to_string(),
-                    is_authority: false,
-                    is_ready: false,
-                    connected_at: chrono::Utc::now(),
-                    connection_info: None,
-                    region_id: room.region_id.clone(),
-                };
-
-                match self
-                    .database
-                    .add_player_to_room(&room.id, player_info.clone())
-                    .await
-                {
-                    Ok(true) => {
-                        self.metrics.increment_rooms_joined();
-                        self.metrics.increment_players_joined();
-                        room.players.insert(*player_id, player_info);
-                        if self.room_application_id(&room.id).is_none() {
-                            if let Some(persisted_app) = room.application_id {
-                                self.room_applications.insert(room.id, persisted_app);
-                            } else if let Some(app_id) = client_app_id {
-                                self.record_room_application(&room.id, app_id).await;
+                    match self
+                        .database
+                        .add_player_to_room(&room.id, player_info.clone())
+                        .await
+                    {
+                        Ok(true) => {
+                            self.metrics.increment_rooms_joined();
+                            self.metrics.increment_players_joined();
+                            room.players.insert(*player_id, player_info);
+                            if self.room_application_id(&room.id).is_none() {
+                                if let Some(persisted_app) = room.application_id {
+                                    self.room_applications.insert(room.id, persisted_app);
+                                } else if let Some(app_id) = client_app_id {
+                                    self.record_room_application(&room.id, app_id).await;
+                                }
                             }
+                            Ok(room)
                         }
-                        Ok(room)
+                        Ok(false) => Err(anyhow::anyhow!("Room is full")),
+                        Err(e) => Err(e),
                     }
-                    Ok(false) => Err(anyhow::anyhow!("Room is full")),
-                    Err(e) => Err(e),
                 }
             }
             Ok(None) => {
@@ -436,59 +442,70 @@ impl EnhancedGameServer {
                     }
                 }
 
-                let current_room_count = self.database.get_game_room_count(game_name).await?;
-                if current_room_count >= self.config.max_rooms_per_game {
-                    self.metrics.increment_room_cap_denials();
-                    if let Some(lock) = &game_cap_lock {
-                        let _ = self.distributed_lock.release(lock).await;
-                    }
-                    return Err(anyhow::anyhow!(MaxRoomsPerGameExceededError {
-                        game_name: game_name.to_string(),
-                        current: current_room_count,
-                        limit: self.config.max_rooms_per_game,
-                    }));
-                }
-
-                let relay_type = self.resolve_relay_type(game_name);
-                let client_app_id = self.client_app_id(player_id);
-                let region_id = self.region_id().to_string();
-                let created_room = self
-                    .database
-                    .create_room(
-                        game_name.to_string(),
-                        Some(room_code.to_string()),
-                        max_players,
-                        supports_authority,
-                        *player_id,
-                        relay_type,
-                        region_id.clone(),
-                        client_app_id,
-                    )
-                    .await;
-
-                if let Some(lock) = &game_cap_lock {
-                    let _ = self.distributed_lock.release(lock).await;
-                }
-
-                match created_room {
-                    Ok(mut room) => {
-                        self.metrics.increment_rooms_created();
-                        self.metrics.increment_players_joined();
-                        if let Some(app_id) = client_app_id {
-                            self.record_room_application(&room.id, app_id).await;
+                match self.database.get_game_room_count(game_name).await {
+                    Ok(current_room_count)
+                        if current_room_count >= self.config.max_rooms_per_game =>
+                    {
+                        self.metrics.increment_room_cap_denials();
+                        if let Some(lock) = &game_cap_lock {
+                            let _ = self.distributed_lock.release(lock).await;
                         }
-                        if let Err(e) = self
+                        Err(anyhow::anyhow!(MaxRoomsPerGameExceededError {
+                            game_name: game_name.to_string(),
+                            current: current_room_count,
+                            limit: self.config.max_rooms_per_game,
+                        }))
+                    }
+                    Ok(_) => {
+                        let relay_type = self.resolve_relay_type(game_name);
+                        let client_app_id = self.client_app_id(player_id);
+                        let region_id = self.region_id().to_string();
+                        let created_room = self
                             .database
-                            .update_player_name(&room.id, player_id, player_name)
-                            .await
-                        {
-                            tracing::warn!(%player_id, "Failed to update creator name: {}", e);
-                        } else if let Some(creator_info) = room.players.get_mut(player_id) {
-                            creator_info.name = player_name.to_string();
+                            .create_room(
+                                game_name.to_string(),
+                                Some(room_code.to_string()),
+                                max_players,
+                                supports_authority,
+                                *player_id,
+                                relay_type,
+                                region_id.clone(),
+                                client_app_id,
+                            )
+                            .await;
+
+                        if let Some(lock) = &game_cap_lock {
+                            let _ = self.distributed_lock.release(lock).await;
                         }
-                        Ok(room)
+
+                        match created_room {
+                            Ok(mut room) => {
+                                self.metrics.increment_rooms_created();
+                                self.metrics.increment_players_joined();
+                                if let Some(app_id) = client_app_id {
+                                    self.record_room_application(&room.id, app_id).await;
+                                }
+                                if let Err(e) = self
+                                    .database
+                                    .update_player_name(&room.id, player_id, player_name)
+                                    .await
+                                {
+                                    tracing::warn!(%player_id, "Failed to update creator name: {}", e);
+                                } else if let Some(creator_info) = room.players.get_mut(player_id) {
+                                    creator_info.name = player_name.to_string();
+                                }
+                                Ok(room)
+                            }
+                            Err(e) => Err(anyhow::anyhow!(e)),
+                        }
                     }
-                    Err(e) => Err(anyhow::anyhow!(e)),
+                    Err(err) => {
+                        tracing::error!("Failed to read room count for cap enforcement: {}", err);
+                        if let Some(lock) = &game_cap_lock {
+                            let _ = self.distributed_lock.release(lock).await;
+                        }
+                        Err(err)
+                    }
                 }
             }
             Err(e) => Err(e),

@@ -22,6 +22,6 @@ mod sending;
 mod token_binding;
 
 // Re-export public API to maintain backward compatibility
-pub use handler::websocket_handler;
+pub use handler::{websocket_handler, websocket_handler_v3};
 pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};
-pub use routes::{create_router, run_server};
+pub use routes::{create_router, create_standalone_router, run_server};

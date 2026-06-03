@@ -109,6 +109,7 @@ axum-test = "20.1"
 proptest = "1.11"
 once_cell = "1.21"
 criterion = "0.8"
+trybuild = "1.0"
 
 [[bin]]
 name = "signal-fish-server"

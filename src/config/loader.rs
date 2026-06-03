@@ -14,8 +14,9 @@ use std::path::Path;
 /// 5) config.json next to the executable (application directory)
 /// 6) Defaults compiled into the binary
 ///
-/// Additionally, individual fields can be overridden by environment variables with prefix SIGNAL_FISH
-/// using "__" as a nested separator, e.g. `SIGNAL_FISH__PORT=8080` or `SIGNAL_FISH__LOGGING__LEVEL=debug`.
+/// Additionally, individual fields can be overridden by environment variables
+/// with the `SIGNAL_FISH__` prefix, e.g. `SIGNAL_FISH__PORT=8080` or
+/// `SIGNAL_FISH__LOGGING__LEVEL=debug`.
 /// Any errors while reading/parsing are printed to stderr and defaults are used.
 ///
 /// **Note:** Validation errors from [`validate_config_security`] are logged to stderr but are
@@ -68,7 +69,7 @@ pub fn load() -> Config {
         }
     }
 
-    // Environment overrides with prefix SIGNAL_FISH and nested separator __
+    // Environment overrides with prefix SIGNAL_FISH__ and nested separator __
     apply_env_overrides(&mut merged);
 
     let config = match serde_json::from_value::<Config>(merged) {
@@ -139,8 +140,17 @@ fn merge_values(target: &mut Value, source: Value) {
 }
 
 fn apply_env_overrides(root: &mut Value) {
-    for (key, raw_value) in std::env::vars() {
-        let Some(stripped) = key.strip_prefix("SIGNAL_FISH__") else {
+    apply_env_overrides_from_iter(root, std::env::vars());
+}
+
+fn apply_env_overrides_from_iter<I, K, V>(root: &mut Value, vars: I)
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    for (key, raw_value) in vars {
+        let Some(stripped) = key.as_ref().strip_prefix("SIGNAL_FISH__") else {
             continue;
         };
 
@@ -154,7 +164,7 @@ fn apply_env_overrides(root: &mut Value) {
             continue;
         }
 
-        let value = parse_env_value(&raw_value);
+        let value = parse_env_value(&segments, raw_value.as_ref());
         set_nested_value(root, &segments, value);
     }
 }
@@ -166,9 +176,13 @@ fn env_var_truthy(value: &str) -> bool {
     )
 }
 
-fn parse_env_value(raw: &str) -> Value {
+fn parse_env_value(segments: &[String], raw: &str) -> Value {
     let trimmed = raw.trim();
-    if trimmed.contains(',') {
+    if let Ok(value) = serde_json::from_str(trimmed) {
+        return value;
+    }
+
+    if is_legacy_comma_array_override(segments) && trimmed.contains(',') {
         let items = trimmed
             .split(',')
             .map(|segment| parse_scalar(segment.trim()))
@@ -177,6 +191,17 @@ fn parse_env_value(raw: &str) -> Value {
     }
 
     parse_scalar(trimmed)
+}
+
+fn is_legacy_comma_array_override(segments: &[String]) -> bool {
+    const LEGACY_COMMA_ARRAY_PATHS: &[&[&str]] = &[
+        &["protocol", "player_name_validation", "allowed_symbols"],
+        &["metrics", "dashboard_cache_history_fields"],
+    ];
+
+    LEGACY_COMMA_ARRAY_PATHS
+        .iter()
+        .any(|path| segments.iter().map(String::as_str).eq(path.iter().copied()))
 }
 
 fn parse_scalar(raw: &str) -> Value {
@@ -225,4 +250,113 @@ fn ensure_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
     value
         .as_object_mut()
         .expect("value should be coerced into an object")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::defaults::DashboardHistoryField;
+    use crate::config::logging::LogFormat;
+
+    fn config_with_env(vars: &[(&str, &str)]) -> Config {
+        let mut merged =
+            serde_json::to_value(Config::default()).expect("default config serializes");
+        apply_env_overrides_from_iter(&mut merged, vars.iter().copied());
+        serde_json::from_value(merged).expect("env overrides deserialize as Config")
+    }
+
+    #[test]
+    fn field_overrides_require_canonical_double_underscore_prefix() {
+        let config = config_with_env(&[("SIGNAL_FISH_LOGGING__FORMAT", "text")]);
+        assert_eq!(
+            config.logging.format,
+            LogFormat::Json,
+            "single-underscore SIGNAL_FISH_LOGGING__FORMAT must not override config"
+        );
+
+        let config = config_with_env(&[("SIGNAL_FISH__LOGGING__FORMAT", "text")]);
+        assert_eq!(
+            config.logging.format,
+            LogFormat::Text,
+            "canonical SIGNAL_FISH__LOGGING__FORMAT must override config"
+        );
+    }
+
+    #[test]
+    fn env_overrides_preserve_comma_strings_and_parse_json_values() {
+        let config = config_with_env(&[
+            (
+                "SIGNAL_FISH__SECURITY__CORS_ORIGINS",
+                "https://game.example,https://beta.example",
+            ),
+            (
+                "SIGNAL_FISH__PROTOCOL__PLAYER_NAME_VALIDATION__ALLOWED_SYMBOLS",
+                r##"["#","@"]"##,
+            ),
+            (
+                "SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_FIELDS",
+                r#"["active_rooms","rooms_created"]"#,
+            ),
+            (
+                "SIGNAL_FISH__SECURITY__AUTHORIZED_APPS",
+                r#"[
+                    {
+                        "app_id": "game-one",
+                        "app_secret": "game-one-secret-with-32-bytes",
+                        "app_name": "Game One"
+                    },
+                    {
+                        "app_id": "game-two",
+                        "app_secret": "game-two-secret-with-32-bytes",
+                        "app_name": "Game Two"
+                    }
+                ]"#,
+            ),
+        ]);
+
+        assert_eq!(
+            config.security.cors_origins,
+            "https://game.example,https://beta.example"
+        );
+        assert_eq!(
+            config.protocol.player_name_validation.allowed_symbols,
+            vec!['#', '@']
+        );
+        assert_eq!(
+            config.metrics.dashboard_cache_history_fields,
+            vec![
+                DashboardHistoryField::ActiveRooms,
+                DashboardHistoryField::RoomsCreated
+            ]
+        );
+        assert_eq!(config.security.authorized_apps.len(), 2);
+        assert_eq!(config.security.authorized_apps[0].app_id, "game-one");
+        assert_eq!(config.security.authorized_apps[1].app_name, "Game Two");
+    }
+
+    #[test]
+    fn env_overrides_keep_legacy_comma_lists_type_scoped() {
+        let config = config_with_env(&[
+            (
+                "SIGNAL_FISH__PROTOCOL__PLAYER_NAME_VALIDATION__ALLOWED_SYMBOLS",
+                "#,@",
+            ),
+            (
+                "SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_FIELDS",
+                "active_rooms,rooms_created",
+            ),
+        ]);
+
+        assert_eq!(
+            config.protocol.player_name_validation.allowed_symbols,
+            vec!['#', '@']
+        );
+        assert_eq!(
+            config.metrics.dashboard_cache_history_fields,
+            vec![
+                DashboardHistoryField::ActiveRooms,
+                DashboardHistoryField::RoomsCreated
+            ]
+        );
+    }
 }

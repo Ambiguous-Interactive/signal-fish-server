@@ -6,7 +6,7 @@ use super::room_state::LobbyState;
 use super::types::{
     ConnectionInfo, GameDataEncoding, PeerConnectionInfo, PlayerId, PlayerInfo,
     ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SpectatorInfo,
-    SpectatorStateChangeReason,
+    SpectatorStateChangeReason, Topology, Transport,
 };
 
 /// Message types sent from client to server
@@ -27,6 +27,18 @@ pub enum ClientMessage {
         /// Preferred game data encoding (defaults to JSON text frames)
         #[serde(skip_serializing_if = "Option::is_none")]
         game_data_format: Option<GameDataEncoding>,
+        /// Highest protocol version the client speaks.
+        ///
+        /// When absent, the endpoint default is used (`/v2/ws` => v2,
+        /// `/v3/ws` => v3), then clamped by server protocol configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u16>,
+        /// Data-path transports the client supports. Absent ⇒ relay-only (v2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supported_transports: Option<Vec<Transport>>,
+        /// Session topologies the client supports. Absent ⇒ relay-only (v2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supported_topologies: Option<Vec<Topology>>,
     },
     /// Join or create a room for a specific game
     JoinRoom {
@@ -44,6 +56,15 @@ pub enum ClientMessage {
     LeaveRoom,
     /// Send game data to other players in the room
     GameData { data: serde_json::Value },
+    /// Relay an opaque WebRTC signal to a specific peer in the same room (v3 only).
+    ///
+    /// The `signal` payload is never parsed by the server — it is forwarded
+    /// verbatim. By convention it is matchbox-compatible, i.e. one of
+    /// `{"Offer":"..."}`, `{"Answer":"..."}`, or `{"IceCandidate":"..."}`.
+    Signal {
+        to: PlayerId,
+        signal: serde_json::Value,
+    },
     /// Request to become or connect to authoritative server
     AuthorityRequest { become_authority: bool },
     /// Signal readiness to start the game in lobby
@@ -168,8 +189,12 @@ pub enum ServerMessage {
         from_player: PlayerId,
         data: serde_json::Value,
     },
-    /// Binary game data payload from another player
-    /// Uses `Bytes` for zero-copy cloning during broadcast
+    /// Binary game data payload from another player.
+    ///
+    /// This is an in-memory broadcast carrier. Negotiated MessagePack clients
+    /// receive a bare binary WebSocket frame from `websocket::sending`, not this
+    /// enum variant serialized through the `{type, data}` envelope. Uses `Bytes`
+    /// for zero-copy cloning during broadcast.
     GameDataBinary {
         from_player: PlayerId,
         encoding: GameDataEncoding,
@@ -197,6 +222,25 @@ pub enum ServerMessage {
     /// Game is starting with peer connection information
     GameStarting {
         peer_connections: Vec<PeerConnectionInfo>,
+    },
+    /// Relayed opaque WebRTC signal from another peer in the same room (v3 only).
+    ///
+    /// The `signal` payload is forwarded verbatim from the sender's
+    /// [`ClientMessage::Signal`] and is never inspected by the server. By
+    /// convention it is matchbox-compatible (`{"Offer":"..."}` |
+    /// `{"Answer":"..."}` | `{"IceCandidate":"..."}`).
+    Signal {
+        from: PlayerId,
+        signal: serde_json::Value,
+    },
+    /// A new peer is available for a direct (WebRTC) connection (v3 only).
+    ///
+    /// `you_initiate` designates exactly one side of each pair as the offerer,
+    /// avoiding glare (Appendix E mesh rule: the recipient initiates iff its id
+    /// is the lesser of the two UUIDs).
+    NewPeer {
+        peer_id: PlayerId,
+        you_initiate: bool,
     },
     /// Pong response to ping
     Pong,

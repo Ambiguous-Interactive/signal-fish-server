@@ -101,7 +101,7 @@ ws://localhost:3536/v2/ws
 
 Signal Fish Server is configured through a JSON config file and environment variable overrides.
 On startup the server looks for `config.json` in the working directory. See
-[`config.example.json`](config.example.json) for a complete reference with all default values.
+[`config.example.json`](config.example.json) for a complete local-development reference.
 
 ### Example Configuration
 
@@ -124,7 +124,9 @@ On startup the server looks for `config.json` in the working directory. See
   "rate_limit": {
     "max_room_creations": 5,
     "time_window": 60,
-    "max_join_attempts": 20
+    "max_join_attempts": 20,
+    "max_signals": 600,
+    "max_signal_errors": 60
   },
   "protocol": {
     "max_game_name_length": 64,
@@ -138,7 +140,7 @@ On startup the server looks for `config.json` in the working directory. See
     "filename": "server.log",
     "rotation": "daily",
     "enable_file_logging": true,
-    "format": "Json"
+    "format": "json"
   },
   "security": {
     "cors_origins": "*",
@@ -190,39 +192,49 @@ On startup the server looks for `config.json` in the working directory. See
 ### Environment Variable Overrides
 
 Any configuration field can be overridden with an environment variable using the
-`SIGNAL_FISH_` prefix. Nested fields use double underscores (`__`) as separators.
-Values are parsed as the type expected by the corresponding config field.
+`SIGNAL_FISH__` prefix. Nested fields use double underscores (`__`) as separators.
+Values are parsed as the type expected by the corresponding config field. Common
+overrides are listed below; see [Configuration](docs/configuration.md) for the
+complete reference.
 
 | Environment Variable                             | Config Path                        | Default   | Description                                         |
 | ------------------------------------------------ | ---------------------------------- | --------- | --------------------------------------------------- |
-| `SIGNAL_FISH_PORT`                               | `port`                             | `3536`    | Server listen port                                  |
-| `SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS`        | `server.default_max_players`       | `8`       | Default max players per room                        |
-| `SIGNAL_FISH_SERVER__PING_TIMEOUT`               | `server.ping_timeout`              | `30`      | Seconds before a silent client is dropped           |
-| `SIGNAL_FISH_SERVER__ROOM_CLEANUP_INTERVAL`      | `server.room_cleanup_interval`     | `60`      | Seconds between room cleanup sweeps                 |
-| `SIGNAL_FISH_SERVER__MAX_ROOMS_PER_GAME`         | `server.max_rooms_per_game`        | `1000`    | Max rooms allowed per game name                     |
-| `SIGNAL_FISH_SERVER__EMPTY_ROOM_TIMEOUT`         | `server.empty_room_timeout`        | `300`     | Seconds before an empty room is removed             |
-| `SIGNAL_FISH_SERVER__INACTIVE_ROOM_TIMEOUT`      | `server.inactive_room_timeout`     | `3600`    | Seconds before an inactive room is removed          |
-| `SIGNAL_FISH_SERVER__RECONNECTION_WINDOW`        | `server.reconnection_window`       | `300`     | Seconds a reconnection token stays valid            |
-| `SIGNAL_FISH_SERVER__EVENT_BUFFER_SIZE`          | `server.event_buffer_size`         | `100`     | Max events buffered for reconnection replay         |
-| `SIGNAL_FISH_SERVER__ENABLE_RECONNECTION`        | `server.enable_reconnection`       | `true`    | Enable reconnection support                         |
-| `SIGNAL_FISH_SERVER__HEARTBEAT_THROTTLE_SECS`    | `server.heartbeat_throttle_secs`   | `30`      | Min seconds between heartbeat logs                  |
-| `SIGNAL_FISH_SERVER__REGION_ID`                  | `server.region_id`                 | `default` | Region identifier for metrics                       |
-| `SIGNAL_FISH_RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`    | `5`       | Max room creations per IP per window                |
-| `SIGNAL_FISH_RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`           | `60`      | Rate limit window in seconds                        |
-| `SIGNAL_FISH_RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`     | `20`      | Max join attempts per IP per window                 |
-| `SIGNAL_FISH_PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`    | `64`      | Max characters in a game name                       |
-| `SIGNAL_FISH_PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Length of generated room codes                      |
-| `SIGNAL_FISH_PROTOCOL__MAX_PLAYER_NAME_LENGTH`   | `protocol.max_player_name_length`  | `32`      | Max characters in a player name                     |
-| `SIGNAL_FISH_PROTOCOL__MAX_PLAYERS_LIMIT`        | `protocol.max_players_limit`       | `100`     | Hard ceiling on players per room                    |
-| `SIGNAL_FISH_SECURITY__CORS_ORIGINS`             | `security.cors_origins`            | `*`       | Allowed CORS origins (comma-separated or `*`)       |
-| `SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH`   | `security.require_websocket_auth`  | `false`   | Require app authentication on WebSocket connect     |
-| `SIGNAL_FISH_SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`    | `false`   | Require auth token for metrics endpoints            |
-| `SIGNAL_FISH_SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
-| `SIGNAL_FISH_SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `10`      | Max concurrent connections from one IP              |
-| `SIGNAL_FISH_WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `true`    | Enable outbound message batching                    |
-| `SIGNAL_FISH_WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
-| `SIGNAL_FISH_WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
-| `SIGNAL_FISH_WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
+| `SIGNAL_FISH__PORT`                               | `port`                             | `3536`    | Server listen port                                  |
+| `SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS`        | `server.default_max_players`       | `8`       | Default max players per room                        |
+| `SIGNAL_FISH__SERVER__PING_TIMEOUT`               | `server.ping_timeout`              | `30`      | Seconds before a silent client is dropped           |
+| `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL`      | `server.room_cleanup_interval`     | `60`      | Seconds between room cleanup sweeps                 |
+| `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME`         | `server.max_rooms_per_game`        | `1000`    | Max rooms allowed per game name                     |
+| `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT`         | `server.empty_room_timeout`        | `300`     | Seconds before an empty room is removed             |
+| `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT`      | `server.inactive_room_timeout`     | `3600`    | Seconds before an inactive room is removed          |
+| `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW`        | `server.reconnection_window`       | `300`     | Seconds a reconnection token stays valid            |
+| `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE`          | `server.event_buffer_size`         | `100`     | Max events buffered for reconnection replay         |
+| `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION`        | `server.enable_reconnection`       | `true`    | Enable reconnection support                         |
+| `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS`    | `server.heartbeat_throttle_secs`   | `30`      | Min seconds between heartbeat logs                  |
+| `SIGNAL_FISH__SERVER__REGION_ID`                  | `server.region_id`                 | `default` | Region identifier for metrics                       |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`    | `5`       | Max room creations per player per window            |
+| `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`           | `60`      | Rate limit window in seconds                        |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`     | `20`      | Max join attempts per player per window             |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max valid WebRTC signals per player per window      |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS`      | `rate_limit.max_signal_errors`     | `60`      | Max rejected WebRTC signals per player per window   |
+| `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`    | `64`      | Max characters in a game name                       |
+| `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Length of generated room codes                      |
+| `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH`   | `protocol.max_player_name_length`  | `32`      | Max characters in a player name                     |
+| `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT`        | `protocol.max_players_limit`       | `100`     | Hard ceiling on players per room                    |
+| `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames                 |
+| `SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION`     | `protocol.min_protocol_version`    | `2`       | Lowest accepted protocol version                    |
+| `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION`     | `protocol.max_protocol_version`    | `3`       | Highest negotiated protocol version                 |
+| `SIGNAL_FISH__LOGGING__LEVEL`                     | `logging.level`                    | `null`    | Log level override (`trace`, `debug`, `info`, `warn`, `error`) |
+| `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING`       | `logging.enable_file_logging`      | `true`    | Enable rolling file logs                            |
+| `SIGNAL_FISH__LOGGING__FORMAT`                    | `logging.format`                   | `json`    | Log output format (`json` or `text`)                |
+| `SIGNAL_FISH__SECURITY__CORS_ORIGINS`             | `security.cors_origins`            | `http://localhost:3000,http://localhost:5173` | Allowed CORS origins (comma-separated or `*`)       |
+| `SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH`   | `security.require_websocket_auth`  | `true`    | Require app authentication on WebSocket connect     |
+| `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`    | `true`    | Require auth token for metrics endpoints            |
+| `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `10`      | Max concurrent connections from one IP              |
+| `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `true`    | Enable outbound message batching                    |
+| `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
+| `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
+| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
 | `RUST_LOG`                                       | --                                 | `info`    | Standard `tracing` log filter                       |
 
 ### CLI Flags
@@ -408,7 +420,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move { cleanup.cleanup_task().await });
 
     // Build the Axum router
-    let router = websocket::create_router(&cfg.security.cors_origins)
+    let router = websocket::create_standalone_router(&cfg.security.cors_origins)
         .with_state(game_server);
 
     // Start listening
@@ -518,9 +530,10 @@ signal-fish-server/
 
 ## Authentication
 
-Authentication is **disabled by default**. To enable it, set
-`security.require_websocket_auth` to `true` in your config file and add
-entries to the `security.authorized_apps` array.
+The compiled config default requires WebSocket authentication. The development
+example config opts out with `security.require_websocket_auth: false`; remove
+that override or set it to `true`, then add entries to the
+`security.authorized_apps` array.
 
 When authentication is enabled, clients must send an `Authenticate` message
 immediately after connecting. The server validates the `app_id` against the

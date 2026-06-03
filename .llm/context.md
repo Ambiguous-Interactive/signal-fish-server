@@ -118,6 +118,13 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance. See skill for full table.
 
+Git hooks are fast last-resort guards only and target sub-second execution. Agents must
+catch formatting, clippy, tests, docs, and policy failures through the mandatory workflow
+and `./scripts/run-local-ci.sh`, not by relying on hooks to run slow semantic checks.
+When debugging hooks, run the PowerShell runner directly. Native helper functions must
+return exactly one object; discard async task completion values with `[void]` so callers
+can always read `.ExitCode`.
+
 ---
 
 ## Software Design Philosophy
@@ -169,6 +176,7 @@ Key rules (details in skills above):
 
 Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, README updates if user-facing.
 Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/changelog/protocol doc drift.
+Config and binary wire-format drift rules -> [config-wire-format-drift.md](config-wire-format-drift.md).
 
 ### Code Fence and CI Pitfalls
 
@@ -212,6 +220,26 @@ Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/chang
 Key files at a glance: `src/main.rs` (entry), `src/server.rs` (room/player logic),
 `src/websocket/` (WS lifecycle), `src/protocol/` (messages and types),
 `src/config/` (all config structs), `src/auth/` (auth and rate limiting).
+
+Protocol v3 routing invariant: `websocket::create_router()` is nest-safe and
+must not expose `/v3/ws` by itself; production mounts it under `/v2` and adds
+top-level `/v3/ws` separately. Standalone/library servers that serve Signal Fish
+at the HTTP root should use `websocket::create_standalone_router()` when they
+want both `/ws` and `/v3/ws`.
+
+Signaling rate limits are split intentionally: `max_signals` counts valid
+deliverable WebRTC relays, while `max_signal_errors` counts rejected `Signal`
+attempts. Do not move target/transport validation in a way that lets invalid
+traffic avoid `max_signal_errors` or consume the valid ICE budget.
+
+Reconnection claims are intentionally two-phase: `claim_reconnection` reserves
+the pending record to prevent duplicate winners, but only successful reconnects
+remove it. Every post-claim failure path must release the claim and roll back
+room-side restoration so clients can retry with the same token until the
+reconnection window expires. Do not make active claims stealable or reusable
+while the original reconnect task can still continue. `handle_reconnect` uses
+a drop guard to release abandoned claims and completes the claim as soon as
+connection reassignment succeeds.
 
 ---
 

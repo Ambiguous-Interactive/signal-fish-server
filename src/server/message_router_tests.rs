@@ -46,6 +46,9 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
                 sdk_version: None,
                 platform: None,
                 game_data_format: None,
+                protocol_version: None,
+                supported_transports: None,
+                supported_topologies: None,
             },
         )
         .await;
@@ -57,6 +60,44 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
             .is_none(),
         "authenticate after registration should not send a response"
     );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn client_protocol_round_trips_through_server() {
+    use crate::protocol::{Topology, Transport};
+    use crate::server::NegotiatedProtocol;
+
+    let server = create_test_server().await;
+    let (sender, _receiver) = mpsc::channel(4);
+    let addr: SocketAddr = "127.0.0.1:50050".parse().unwrap();
+    let player_id = server
+        .connection_manager
+        .register_client(sender, addr, server.instance_id)
+        .await
+        .expect("client registration succeeds");
+
+    // Defaults: pure v2, relay-only.
+    assert!(!server.client_supports_v3(&player_id));
+    let default_proto = server.client_protocol(&player_id);
+    assert_eq!(default_proto.version, 2);
+    assert!(server.client_supports_transport(&player_id, Transport::Relay));
+    assert!(!server.client_supports_transport(&player_id, Transport::WebRtc));
+
+    // After negotiating v3 + webrtc the pass-throughs reflect it.
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::WebRtc],
+            topologies: vec![Topology::Relay, Topology::Mesh],
+        },
+    );
+    assert!(server.client_supports_v3(&player_id));
+    assert!(server.client_supports_transport(&player_id, Transport::WebRtc));
+    let proto = server.client_protocol(&player_id);
+    assert_eq!(proto.version, 3);
+    assert_eq!(proto.topologies, vec![Topology::Relay, Topology::Mesh]);
 }
 
 #[tokio::test]

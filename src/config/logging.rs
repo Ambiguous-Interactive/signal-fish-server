@@ -167,10 +167,43 @@ impl fmt::Display for LogLevel {
 }
 
 /// Log format enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
     #[default]
     Json,
     Text,
+}
+
+impl LogFormat {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Text => "text",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LogFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let s = s.trim().to_lowercase();
+        match s.as_str() {
+            "json" => Ok(Self::Json),
+            "text" => Ok(Self::Text),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid log format '{other}', expected one of: json, text"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }

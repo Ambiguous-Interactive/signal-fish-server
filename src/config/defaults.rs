@@ -6,6 +6,8 @@
 
 use super::logging::LogFormat;
 use super::security::ClientAuthMode;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 // =============================================================================
 // Port & Root Config
@@ -77,6 +79,14 @@ pub const fn default_max_join_attempts() -> u32 {
     20
 }
 
+pub const fn default_max_signals() -> u32 {
+    600
+}
+
+pub const fn default_max_signal_errors() -> u32 {
+    60
+}
+
 // =============================================================================
 // Protocol Defaults
 // =============================================================================
@@ -103,6 +113,14 @@ pub const fn default_enable_message_pack_game_data() -> bool {
 
 pub const fn default_sdk_enforce() -> bool {
     true
+}
+
+pub const fn default_min_protocol_version() -> u16 {
+    super::protocol::SERVER_MIN_PROTOCOL_VERSION
+}
+
+pub const fn default_max_protocol_version() -> u16 {
+    super::protocol::SERVER_MAX_PROTOCOL_VERSION
 }
 
 // =============================================================================
@@ -227,7 +245,8 @@ pub fn default_dashboard_history_fields() -> Vec<DashboardHistoryField> {
 }
 
 /// Dashboard history field (used by metrics config defaults).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum DashboardHistoryField {
     ActiveRooms,
     RoomsByGame,
@@ -235,6 +254,64 @@ pub enum DashboardHistoryField {
     GamePercentiles,
     ActiveConnections,
     RoomsCreated,
+}
+
+impl DashboardHistoryField {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActiveRooms => "active_rooms",
+            Self::RoomsByGame => "rooms_by_game",
+            Self::PlayerPercentiles => "player_percentiles",
+            Self::GamePercentiles => "game_percentiles",
+            Self::ActiveConnections => "active_connections",
+            Self::RoomsCreated => "rooms_created",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DashboardHistoryField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let token = raw.trim();
+
+        if token.eq_ignore_ascii_case("active_rooms") || token.eq_ignore_ascii_case("ActiveRooms") {
+            Ok(Self::ActiveRooms)
+        } else if token.eq_ignore_ascii_case("rooms_by_game")
+            || token.eq_ignore_ascii_case("RoomsByGame")
+        {
+            Ok(Self::RoomsByGame)
+        } else if token.eq_ignore_ascii_case("player_percentiles")
+            || token.eq_ignore_ascii_case("PlayerPercentiles")
+        {
+            Ok(Self::PlayerPercentiles)
+        } else if token.eq_ignore_ascii_case("game_percentiles")
+            || token.eq_ignore_ascii_case("GamePercentiles")
+        {
+            Ok(Self::GamePercentiles)
+        } else if token.eq_ignore_ascii_case("active_connections")
+            || token.eq_ignore_ascii_case("ActiveConnections")
+        {
+            Ok(Self::ActiveConnections)
+        } else if token.eq_ignore_ascii_case("rooms_created")
+            || token.eq_ignore_ascii_case("RoomsCreated")
+        {
+            Ok(Self::RoomsCreated)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "invalid dashboard history field '{raw}', expected one of: active_rooms, rooms_by_game, player_percentiles, game_percentiles, active_connections, rooms_created"
+            )))
+        }
+    }
+}
+
+impl fmt::Display for DashboardHistoryField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // =============================================================================

@@ -83,6 +83,10 @@ jobs:
       - name: Run clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Check optional feature matrix
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/check-feature-matrix.sh
+
   nextest:
     name: Nextest (${{ matrix.os }})
     if: github.event_name != 'schedule'
@@ -117,7 +121,7 @@ jobs:
 
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml
-        run: cargo nextest run --locked --all-features
+        run: cargo nextest run --profile ci --locked --all-features
 
   doc-consistency:
     name: Doc Consistency
@@ -205,9 +209,9 @@ jobs:
             SKIP_FLAG="--skip-changelog-gate"
           fi
           if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
-            ./scripts/check-doc-consistency.sh $SKIP_FLAG --changed-files "${CHANGED_FILES[@]}"
+            bash scripts/check-doc-consistency.sh $SKIP_FLAG --changed-files "${CHANGED_FILES[@]}"
           else
-            ./scripts/check-doc-consistency.sh $SKIP_FLAG
+            bash scripts/check-doc-consistency.sh $SKIP_FLAG
           fi
 
   deny:
@@ -295,78 +299,7 @@ jobs:
           echo "Extracted MSRV: $MSRV"
 
       - name: Verify MSRV consistency across configuration files
-        run: |
-          set -euo pipefail
-          MSRV="${{ steps.msrv.outputs.msrv }}"
-
-          # Track failures
-          FAILED=0
-
-          echo "Verifying MSRV consistency: $MSRV"
-          echo "=========================================="
-
-          # Check rust-toolchain.toml
-          if [ -f rust-toolchain.toml ]; then
-            TOOLCHAIN_VERSION=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
-            if [ "$TOOLCHAIN_VERSION" != "$MSRV" ]; then
-              echo "✗ FAIL: rust-toolchain.toml channel=$TOOLCHAIN_VERSION (expected $MSRV)"
-              FAILED=1
-            else
-              echo "✓ PASS: rust-toolchain.toml"
-            fi
-          else
-            echo "✗ FAIL: rust-toolchain.toml not found"
-            FAILED=1
-          fi
-
-          # Check clippy.toml
-          if [ -f clippy.toml ]; then
-            CLIPPY_MSRV=$(grep '^msrv = ' clippy.toml | sed -E 's/msrv = "(.+)"/\1/')
-            if [ "$CLIPPY_MSRV" != "$MSRV" ]; then
-              echo "✗ FAIL: clippy.toml msrv=$CLIPPY_MSRV (expected $MSRV)"
-              FAILED=1
-            else
-              echo "✓ PASS: clippy.toml"
-            fi
-          else
-            echo "⚠ WARNING: clippy.toml not found"
-          fi
-
-          # Check Dockerfile
-          if [ -f Dockerfile ]; then
-            # Extract Rust version from FROM rust:X.Y line (handles both 1.88 and 1.88.0 formats)
-            DOCKERFILE_RUST=$(grep '^FROM rust:' Dockerfile | head -1 | sed -E 's/FROM rust:([0-9]+\.[0-9]+).*/\1/')
-            # Normalize MSRV to major.minor for comparison (1.88.0 -> 1.88)
-            # Docker images use shortened versions (rust:1.88) while MSRV uses full semver (1.88.0)
-            MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
-            if [ "$DOCKERFILE_RUST" != "$MSRV_SHORT" ]; then
-              echo "✗ FAIL: Dockerfile rust:$DOCKERFILE_RUST (expected rust:$MSRV_SHORT from MSRV $MSRV)"
-              FAILED=1
-            else
-              echo "✓ PASS: Dockerfile"
-            fi
-          else
-            echo "⚠ WARNING: Dockerfile not found"
-          fi
-
-          echo "=========================================="
-
-          if [ $FAILED -ne 0 ]; then
-            echo ""
-            echo "ERROR: MSRV inconsistency detected!"
-            echo "All configuration files must use the same Rust version as Cargo.toml"
-            echo "Expected MSRV: $MSRV"
-            echo ""
-            echo "To fix:"
-            echo "1. Update rust-toolchain.toml: channel = \"$MSRV\""
-            echo "2. Update clippy.toml: msrv = \"$MSRV\""
-            echo "3. Update Dockerfile: FROM rust:$MSRV-bookworm"
-            echo ""
-            echo "See .llm/skills/msrv-management.md for details"
-            exit 1
-          fi
-
-          echo "All MSRV configuration checks passed ✓"
+        run: bash scripts/check-msrv-consistency.sh
 
       - name: Install Rust toolchain at MSRV
         uses: dtolnay/rust-toolchain@v1
@@ -489,7 +422,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Run panic-policy check
-        run: ./scripts/check-no-panics.sh
+        run: bash scripts/check-no-panics.sh
 
   sbom:
     name: SBOM (CycloneDX)

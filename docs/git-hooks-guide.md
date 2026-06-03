@@ -1,645 +1,149 @@
 # Git Hooks Guide - Signal Fish Server
 
-This guide explains how to install, configure, and troubleshoot git hooks for the Signal Fish Server project.
+This project treats git hooks as fast, last-resort safeguards. They catch cheap
+staged or pushed-file mistakes, but they do not replace agent verification,
+local CI, or GitHub CI.
 
-## Overview
+## Design Contract
 
-Pre-commit hooks run automatically before each commit to catch issues early and maintain code quality.
-Our hooks prevent the types of issues that have caused CI failures in the past.
+- Target hook runtime: less than 1 second.
+- Hook logic is PowerShell 7 (`pwsh`) for native Linux, macOS, and Windows use.
+- Extensionless files in `.githooks/` are tiny POSIX wrappers because Git
+  executes hook files directly.
+- Hooks must not run `cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc`,
+  `npm install`, `npm ci`, or `npx`.
+- Hooks must not bootstrap tools from the network.
+- Staged and pushed path discovery uses NUL-delimited Git output.
+- PowerShell native-process helpers set stdout/stderr decoding to UTF-8.
+- Checks that read multiple staged blobs batch Git index access with
+  `git ls-files -s -z`, `git cat-file --batch-check`, and
+  `git cat-file --batch`; avoid per-file `git show` loops in hooks.
+- Batched blob reads cap aggregate bytes before loading content.
+- Safe deterministic recovery is allowed. The pre-commit hook regenerates and
+  stages `.llm/skills/index.md` when skill inputs changed, then verifies the
+  repaired index entry by Git object id.
+
+The failure captured in `pre-commit.txt` is the reference incident: a Windows
+pre-commit run spent 20.99 seconds in `cargo clippy --fix` and still could not
+repair a cfg-specific unused variable. Clippy is therefore enforced by agent
+workflow and CI, not by git hooks.
 
 ## Installation
 
-### Quick Start
-
 ```bash
-# From the repository root
 ./scripts/enable-hooks.sh
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
 ```
 
-This configures git to use the hooks in `.githooks/pre-commit`.
-
-### Verify Installation
+To repair hook setup:
 
 ```bash
-# Check that hooks are enabled
-git config --local core.hooksPath
-# Should output: .githooks
-
-# Test the hook (make a dummy change)
-echo "# test" >> README.md
-git add README.md
-git commit -m "test"  # Hook will run
-git reset HEAD~1      # Undo test commit
-git restore README.md # Restore file
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair
 ```
 
-## What Gets Checked
+The readiness check verifies:
 
-The pre-commit hook runs these checks (in order):
+- `core.hooksPath` is `.githooks`
+- `.githooks/pre-commit` and `.githooks/pre-push` exist
+- hook executable bits are correct in the Git index
+- required tools `git` and `pwsh` are available
+- optional local-CI tools are visible when installed
 
-### 1. Code Formatting (cargo fmt)
+## What Runs
 
-**What it checks:** Rust code follows standard formatting conventions.
+### Pre-Commit
 
-**When it runs:** Always (on every commit).
+The pre-commit hook runs `scripts/hooks/pre-commit.ps1`. When production Rust
+files are staged, it runs only the code-path guards needed for last-resort
+safety and budget:
 
-**How to fix:**
+- staged diff whitespace via `git diff --cached --check`
+- new panic-prone production Rust additions in `src/**/*.rs`, excluding test
+  files and staged `#[cfg(test)]`/test-function ranges
+
+When no production Rust files are staged, it also checks lightweight repository
+metadata guards:
+
+- generated skills index freshness when skill inputs changed, with auto-repair
+- staged `.llm/*.md` files stay at or below 300 lines
+- README Shields.io badges use `style=for-the-badge`
+- hook source does not reintroduce slow semantic or install commands
+
+### Pre-Push
+
+The pre-push hook runs `scripts/hooks/pre-push.ps1` and checks:
+
+- changed files across all commits introduced by the push, including new branch pushes
+- workflow `run:` lines do not invoke local scripts directly through executable bits
+- hook source does not reintroduce slow semantic or install commands
+
+## Required Verification Before Handoff
+
+Agents and developers must run semantic checks outside hooks:
 
 ```bash
-cargo fmt
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+./scripts/run-local-ci.sh
 ```
 
-**Example error:**
+`scripts/run-local-ci.sh` owns slower policy checks including markdownlint,
+workflow hygiene, doc/changelog consistency, doc policy tests, Dockerfile
+portability, advisory checks, and README badge checks.
 
-```text
-✗ FAIL: Code formatting
-[pre-commit] ERROR: Run 'cargo fmt' to fix formatting issues.
-```
+## Markdownlint
 
-### 2. Clippy Lints (cargo clippy)
+Markdownlint remains fail-closed in local CI and CI. It is intentionally not run
+inside git hooks.
 
-**What it checks:** Code quality and potential bugs using Rust's official linter.
-
-**When it runs:** When `.rs` files are staged for commit.
-
-**How to fix:**
-
-```bash
-# Auto-fix most issues
-cargo clippy --fix --allow-dirty --all-targets --all-features
-
-# Or manually fix based on warnings
-cargo clippy --all-targets --all-features
-```
-
-**Example error:**
-
-```text
-✗ FAIL: Clippy lints
-[pre-commit] ERROR: Fix clippy warnings before committing.
-```
-
-**Common clippy issues:**
-
-- `uninlined_format_args`: Use `format!("{x}")` instead of `format!("{}", x)`
-- `unnecessary_unwrap`: Use `?` operator or pattern matching instead
-- `redundant_clone`: Remove unnecessary `.clone()` calls
-
-### 3. Panic-Prone Patterns
-
-**What it checks:** Production code doesn't use `.unwrap()`, `panic!()`, or `.expect()`.
-
-**When it runs:** Always (on every commit).
-
-**How to fix:**
-
-```rust
-// ❌ Bad: Can panic at runtime
-let value = some_option.unwrap();
-
-// ✅ Good: Use ? operator
-let value = some_option?;
-
-// ✅ Good: Pattern matching
-let value = match some_option {
-    Some(v) => v,
-    None => return Err(Error::MissingValue),
-};
-```
-
-**Example error:**
-
-```text
-✗ FAIL: Panic patterns
-[pre-commit] ERROR: Remove .unwrap(), panic!(), expect() from production code.
-```
-
-### 4. MSRV Consistency
-
-**What it checks:** Minimum Supported Rust Version (MSRV) is consistent across:
-
-- `Cargo.toml` (`rust-version`)
-- `rust-toolchain.toml` (channel)
-- `clippy.toml` (msrv)
-<!-- markdownlint-disable-next-line MD044 -- rust:X.Y.Z is a Docker image name -->
-- `Dockerfile` (`FROM rust:X.Y.Z`)
-
-**When it runs:** When `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, or `Dockerfile` are modified.
-
-**How to fix:**
-
-```bash
-# Check for inconsistencies
-./scripts/check-msrv-consistency.sh
-
-# Update all files to match Cargo.toml
-# See output for specific instructions
-```
-
-**Example error:**
-
-```text
-✗ FAIL: MSRV consistency
-[pre-commit] ERROR: MSRV mismatch across configuration files.
-```
-
-**Real-world issue this prevents:**
-
-In commit `1c8ed3b`, we had `Dockerfile` using `rust:1.88` while `Cargo.toml` specified `1.88.0`.
-This check catches such inconsistencies.
-
-### 5. Workflow AWK Validation
-
-**What it checks:** AWK scripts in GitHub Actions workflows are syntactically valid and portable.
-
-**When it runs:** When `.github/workflows/*.yml` files are modified.
-
-**How to fix:**
-
-```bash
-# Validate AWK scripts
-./scripts/validate-workflow-awk.sh
-
-# Common fixes:
-# - Use /^```[Rr]ust/ instead of /^```[Rr]ust(,.*)?$/
-# - Use printf "%c", 0 instead of printf "\0"
-# - Use sub()/gsub() instead of match()
-```
-
-**Example error:**
-
-```text
-✗ FAIL: AWK validation
-[pre-commit] ERROR: AWK script syntax errors in workflow files.
-```
-
-**Real-world issue this prevents:**
-
-In commit `1c8ed3b`,
-we changed `/^```[Rr]ust(,.*)?$/` to `/^```[Rr]ust/` to handle variations like `rust ignore` vs `rust,ignore`.
-This check catches regex patterns that are too strict.
-
-### 6. Markdown Linting
-
-**What it checks:** Markdown files follow formatting standards (headings, lists, code blocks).
-
-**When it runs:** When `.md` files are modified
-(requires pinned `markdownlint-cli2` version from `.markdownlint-version`).
-
-**If tool is missing/wrong version:** The hook fails closed to prevent CI-only markdownlint regressions.
-
-**How to fix:**
-
-```bash
-# Auto-fix markdown issues
-./scripts/check-markdown.sh fix
-
-# Or manually check
-./scripts/check-markdown.sh
-```
-
-**Example error:**
-
-```text
-✗ FAIL: Markdown linting
-[pre-commit] ERROR: Markdown files have formatting issues.
-```
-
-**Install pinned markdownlint version (script prefers local `node_modules/.bin`):**
+Install the pinned version locally:
 
 ```bash
 npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
-# or, if you prefer global tooling:
+```
+
+Or install the pinned version globally:
+
+```bash
 npm install -g markdownlint-cli2@$(cat .markdownlint-version)
-```
-
-### 7. Link Checking (Warning Only)
-
-**What it checks:** Links in markdown files are valid (offline mode).
-
-**When it runs:** When `.md` files are modified (requires `lychee`).
-
-**Note:** This is a **warning only** in pre-commit (offline mode for speed). Full link checking runs in CI.
-
-**Install lychee:**
-
-```bash
-cargo install lychee
-```
-
-## Bypassing Hooks (Not Recommended)
-
-In rare cases, you may need to bypass hooks:
-
-```bash
-# Skip all pre-commit checks
-git commit --no-verify
-
-# Or use alias
-git commit -n
-```
-
-**⚠️ WARNING:** Only bypass hooks if:
-
-- You're committing work-in-progress that you'll fix before merging
-- The hook is incorrectly flagging valid code (report this as a bug)
-- You're in an emergency hotfix situation
-
-**Never bypass hooks on commits that will be merged to main.**
-
-## Running Checks Manually
-
-### Individual Checks
-
-```bash
-# Format code
-cargo fmt
-
-# Run clippy
-cargo clippy --all-targets --all-features
-
-# Check for panics
-./scripts/check-no-panics.sh patterns
-
-# Check MSRV
-./scripts/check-msrv-consistency.sh
-
-# Validate AWK scripts
-./scripts/validate-workflow-awk.sh
-
-# Check markdown
-./scripts/check-markdown.sh
-```
-
-### All Checks (Local CI)
-
-```bash
-# Run all CI checks locally
-./scripts/run-local-ci.sh
-
-# Fast mode (skip tests)
-./scripts/run-local-ci.sh --fast
-
-# Auto-fix mode
-./scripts/run-local-ci.sh --fix
 ```
 
 ## Troubleshooting
 
-### Hook Doesn't Run
+### PowerShell Missing
 
-**Problem:** Committing succeeds without running checks.
-
-**Solution:**
+Hooks require PowerShell 7+ (`pwsh`):
 
 ```bash
-# Verify hooks are enabled
+pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+```
+
+Install from Microsoft’s PowerShell documentation.
+
+### Hook Setup Drift
+
+```bash
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair
 git config --local core.hooksPath
-# Should output: .githooks
-
-# Re-enable if not set
-./scripts/enable-hooks.sh
-
-# Check hook is executable
-ls -la .githooks/pre-commit
-# Should show: -rwxr-xr-x
+git ls-files --stage .githooks/pre-commit .githooks/pre-push
 ```
 
-### "Permission Denied" Error
+Expected hook index mode is `100755`.
 
-**Problem:**
+### Slow Hook
 
-```text
-.githooks/pre-commit: Permission denied
-```
+If a hook exceeds the sub-second budget, inspect the hook source for slow
+commands, per-file process fanout, or unbatched staged-blob reads. Move slow
+semantic checks to `scripts/run-local-ci.sh` or CI. The static test suite
+rejects common slow commands in `.githooks/*` and `scripts/hooks/*.ps1`.
 
-**Solution:**
+### Bypass
 
 ```bash
-# Make hook executable
-chmod +x .githooks/pre-commit
-
-# Or re-run enable script
-./scripts/enable-hooks.sh
+git commit --no-verify
+git push --no-verify
 ```
 
-### Hook Takes Too Long
-
-**Problem:** Pre-commit hook runs for several minutes.
-
-**Context:** Some checks (especially clippy on large changesets) can be slow.
-
-**Solutions:**
-
-1. **Use `--fast` mode for quick commits:**
-
-   ```bash
-   # Run faster checks only
-   git commit --no-verify  # Skip all hooks
-   ./scripts/run-local-ci.sh --fast  # Then run fast checks
-   ```
-
-2. **Run clippy incrementally:**
-
-   ```bash
-   # Run clippy on specific package
-   cargo clippy -p signal-fish-server
-   ```
-
-3. **Commit smaller changesets:**
-   - Break large changes into smaller, focused commits
-   - This makes each pre-commit check faster
-
-### Clippy Fails with "Cannot Fix Automatically"
-
-**Problem:**
-
-```text
-error: `cargo fix` is not compatible with --all-targets
-```
-
-**Solution:**
-
-```bash
-# Run clippy without auto-fix to see warnings
-cargo clippy --all-targets --all-features
-
-# Manually fix issues based on output
-# Then commit
-```
-
-### MSRV Check Fails After Rust Update
-
-**Problem:**
-
-```text
-✗ FAIL: rust-toolchain.toml channel=1.87.0 (expected 1.88.0)
-```
-
-**Solution:**
-
-```text
-# Update all MSRV references
-# 1. Edit rust-toolchain.toml
-channel = "1.88.0"
-
-# 2. Edit clippy.toml
-msrv = "1.88.0"
-
-# 3. Edit Dockerfile
-FROM rust:1.88.0-bookworm
-
-# Verify consistency
-./scripts/check-msrv-consistency.sh
-```
-
-### AWK Validation Fails
-
-**Problem:**
-
-```text
-✗ FAIL: AWK validation
-doc-validation.yml:210 - AWK syntax error
-```
-
-**Solution:**
-
-1. **Check AWK syntax:**
-
-   ```bash
-   # Extract the AWK script and test it
-   awk 'YOUR_SCRIPT_HERE' < /dev/null
-   ```
-
-2. **Common AWK portability issues:**
-
-   ```awk
-   # ❌ Bad: GNU-specific match()
-   match($0, /pattern/)
-
-   # ✅ Good: POSIX sub()
-   sub(/pattern/, "replacement")
-
-   # ❌ Bad: \0 in printf (not POSIX)
-   printf "text\0"
-
-   # ✅ Good: Use %c with 0
-   printf "text%c", 0
-
-   # ❌ Bad: Too strict regex
-   /^```[Rr]ust(,.*)?$/
-
-   # ✅ Good: Prefix match
-   /^```[Rr]ust/
-   ```
-
-3. **Test with different AWK implementations:**
-
-   ```bash
-   # Test with mawk (POSIX-compliant)
-   mawk 'YOUR_SCRIPT' < input.txt
-
-   # Test with gawk (GNU AWK)
-   gawk 'YOUR_SCRIPT' < input.txt
-   ```
-
-### Markdown Linting Fails
-
-**Problem:**
-
-```text
-README.md:42 MD022/blanks-around-headings
-```
-
-**Solution:**
-
-```bash
-# Auto-fix markdown issues
-./scripts/check-markdown.sh fix
-
-# Or manually check what's wrong
-./scripts/check-markdown.sh
-```
-
-**Common markdown issues:**
-
-- `MD022`: Missing blank lines around headings
-- `MD032`: Missing blank lines around lists
-- `MD040`: Missing language in fenced code blocks
-- `MD041`: First line must be a top-level heading
-
-### Hook Fails in CI but Not Locally
-
-**Problem:** Pre-commit passes locally but CI fails.
-
-**Causes:**
-
-1. **Different Rust versions:**
-
-   ```bash
-   # Check your Rust version
-   rustc --version
-
-   # Should match rust-toolchain.toml
-   cat rust-toolchain.toml
-   ```
-
-2. **Uncommitted changes:**
-
-   ```bash
-   # Check git status
-   git status
-
-   # Ensure all changes are committed
-   git add -A
-   git commit
-   ```
-
-3. **Local dependencies not in Cargo.lock:**
-
-   ```bash
-   # Update lockfile
-   cargo update
-
-   # Commit the updated Cargo.lock
-   git add Cargo.lock
-   git commit -m "Update Cargo.lock"
-   ```
-
-## Performance Tips
-
-### Make Hooks Faster
-
-1. **Only check staged files:**
-   - The hook already does this for clippy, markdown, and links
-   - Avoids checking unchanged code
-
-2. **Use incremental compilation:**
-
-   ```bash
-   # Enable in ~/.cargo/config.toml
-   [build]
-   incremental = true
-   ```
-
-3. **Cache cargo artifacts:**
-   - Already configured in repository
-   - Speeds up subsequent runs
-
-### When to Run Full CI Locally
-
-Run `./scripts/run-local-ci.sh` before:
-
-- Opening a pull request
-- Pushing to main
-- After major refactoring
-- When in doubt about code quality
-
-## Integration with CI/CD
-
-### Pre-commit vs CI
-
-| Check                | Pre-commit | CI  | Notes                                    |
-| -------------------- | ---------- | --- | ---------------------------------------- |
-| cargo fmt            | ✓          | ✓   | Fast, always run                         |
-| cargo clippy         | ✓          | ✓   | Staged files only in pre-commit          |
-| Tests                | ✗          | ✓   | Too slow for pre-commit                  |
-| MSRV verification    | ✓          | ✓   | Only if config files changed (pre-commit)|
-| AWK validation       | ✓          | ✓   | Only if workflows changed (pre-commit)   |
-| Markdown linting     | ✓          | ✓   | Only if .md files changed (pre-commit)   |
-| Link checking (full) | ✗          | ✓   | Offline only in pre-commit (warning)     |
-| cargo-deny           | ✗          | ✓   | Security audits run in CI only           |
-| Docker build         | ✗          | ✓   | Too slow for pre-commit                  |
-
-### Philosophy
-
-**Pre-commit:** Fast feedback (< 30 seconds), catches common mistakes
-
-**CI:** Comprehensive checks (1-3 minutes), ensures production quality
-
-## Customization
-
-### Disable Specific Checks
-
-Edit `.githooks/pre-commit` to comment out checks:
-
-```bash
-# Check 2: Clippy lints (disabled for this project)
-# if [ -n "$STAGED_RS_FILES" ]; then
-#   ...
-# fi
-```
-
-### Add Custom Checks
-
-Add to `.githooks/pre-commit`:
-
-```bash
-# Check N: Your custom check
-echo "${BLUE}[N/7]${NC} Running custom check..."
-if your-check-command; then
-    check_pass "Custom check"
-else
-    check_fail "Custom check" "Explanation of what went wrong"
-fi
-```
-
-## Related Documentation
-
-- [Mandatory Workflow](../.llm/skills/mandatory-workflow.md) - Required checks before every commit
-- [CI CD Troubleshooting Categories](../.llm/skills/ci-cd-troubleshooting-categories.md) - Debugging CI failures
-- [MSRV Management](../.llm/skills/msrv-management.md) - Rust version management
-
-## FAQ
-
-### Q: Can I use `git commit -a` with hooks?
-
-**A:** Yes, `git commit -a` (commit all modified files) works fine with hooks.
-The hook checks all staged files, whether staged manually with `git add` or automatically with `-a`.
-
-### Q: Do hooks run on `git commit --amend`?
-
-**A:** Yes, by default. To skip: `git commit --amend --no-verify`
-
-### Q: Do hooks run on merge commits?
-
-**A:** Yes, hooks run on all commits including merges.
-However, the hook only checks **new changes** (files you modified), not the entire merged state.
-
-### Q: What if I need to commit broken code temporarily?
-
-**A:** Use a feature branch:
-
-```bash
-# Create WIP branch
-git checkout -b wip/my-feature
-
-# Commit with hook bypass
-git commit --no-verify -m "WIP: broken but saving progress"
-
-# Later, fix and rebase/squash before merging
-```
-
-### Q: Can hooks auto-fix issues and commit them?
-
-**A:** No. Hooks should never modify your working directory automatically.
-They detect issues; you fix them manually or with auto-fix commands, then recommit.
-
-## Support
-
-If you encounter issues not covered in this guide:
-
-1. Check `.githooks/pre-commit` source code for details
-2. Run checks individually to isolate the problem
-3. Review recent commits for similar issues
-4. Ask in team chat or create an issue
-
-## Historical Context
-
-These hooks were enhanced after encountering three types of CI failures:
-
-1. **Clippy format args** (commit `1c8ed3b`): `format!("{}", x)` instead of `format!("{x}")`
-2. **MSRV mismatch** (commit `1c8ed3b`): `Dockerfile` using `1.88` instead of `1.88.0`
-3. **AWK regex too strict** (commit `1c8ed3b`): Pattern didn't match `rust ignore` (space-separated)
-
-The current hooks prevent all three categories of issues.
+Use bypass only for hook false positives or emergency work. Run local CI before
+handoff or merge.

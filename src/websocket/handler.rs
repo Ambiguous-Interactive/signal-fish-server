@@ -10,13 +10,43 @@ use std::sync::Arc;
 use super::connection::handle_socket;
 use super::token_binding::{client_requested_subprotocol, negotiate_token_binding};
 
-/// WebSocket handler for the game protocol
+/// WebSocket handler for the `/v2/ws` endpoint.
+///
+/// Clients that omit `Authenticate.protocol_version` on this path are treated as
+/// pure v2 (the negotiation floor).
 pub async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    connect_info: ConnectInfo<SocketAddr>,
+    state: State<Arc<EnhancedGameServer>>,
+    headers: HeaderMap,
+    fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+) -> Response {
+    websocket_handler_with_default(ws, connect_info, state, headers, fingerprint, 2).await
+}
+
+/// WebSocket handler for the `/v3/ws` alias.
+///
+/// Shares the exact same connection loop as `/v2/ws`; the only difference is the
+/// fallback protocol version used when the client omits `protocol_version`. The
+/// server still clamps the result into the configured `[min, max]` range, so this
+/// alias never forces a version the deployment does not support.
+pub async fn websocket_handler_v3(
+    ws: WebSocketUpgrade,
+    connect_info: ConnectInfo<SocketAddr>,
+    state: State<Arc<EnhancedGameServer>>,
+    headers: HeaderMap,
+    fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+) -> Response {
+    websocket_handler_with_default(ws, connect_info, state, headers, fingerprint, 3).await
+}
+
+async fn websocket_handler_with_default(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(server): State<Arc<EnhancedGameServer>>,
     headers: HeaderMap,
     fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    default_protocol_version: u16,
 ) -> Response {
     let token_binding_cfg = server.token_binding_config().clone();
     let client_offered_binding =
@@ -39,5 +69,13 @@ pub async fn websocket_handler(
         ws
     };
 
-    upgrade.on_upgrade(move |socket| handle_socket(socket, server, addr, binding_session))
+    upgrade.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            server,
+            addr,
+            binding_session,
+            default_protocol_version,
+        )
+    })
 }

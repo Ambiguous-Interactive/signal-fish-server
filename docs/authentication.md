@@ -1,6 +1,8 @@
 # Authentication
 
-Authentication is **disabled by default**. Enable it to secure your server and enforce per-app rate limits.
+The compiled config default requires WebSocket authentication. The example
+configuration opts out for local development; production deployments should keep
+auth enabled and enforce per-app rate limits.
 
 ## Enabling Authentication
 
@@ -178,7 +180,7 @@ Override app secrets via environment:
 
 ```bash
 # Not recommended - shown for reference only
-SIGNAL_FISH_SECURITY__AUTHORIZED_APPS='[{"app_id":"my-game","app_secret":"env-secret",...}]'
+SIGNAL_FISH__SECURITY__AUTHORIZED_APPS='[{"app_id":"my-game","app_secret":"env-secret",...}]'
 
 ```
 

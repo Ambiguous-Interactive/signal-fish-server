@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Build the Axum router
-    let router = websocket::create_router(&cfg.security.cors_origins)
+    let router = websocket::create_standalone_router(&cfg.security.cors_origins)
         .with_state(game_server);
 
     // Start listening
@@ -222,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/status", get(api_status));
 
     // Add Signal Fish routes
-    let signal_fish_routes = websocket::create_router("*")
+    let signal_fish_routes = websocket::create_standalone_router("*")
         .with_state(game_server);
 
     // Merge routers

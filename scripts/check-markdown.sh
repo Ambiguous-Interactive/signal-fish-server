@@ -188,19 +188,36 @@ echo "Runner: $MARKDOWNLINT_MODE"
 echo "Version: $INSTALLED_MARKDOWNLINT_VERSION (required: $REQUIRED_MARKDOWNLINT_VERSION)"
 echo ""
 
-MARKDOWNLINT_GLOBS=(
-    '**/*.md'
-    '#target/**'
-    '#third_party/**'
-    '#node_modules/**'
-    '#.github/test-fixtures/**'
-    '#test-fixtures/**'
-)
+MARKDOWNLINT_INPUTS=()
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r -d '' markdown_file; do
+        case "$markdown_file" in
+            target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*)
+                continue
+                ;;
+        esac
+        MARKDOWNLINT_INPUTS+=("$markdown_file")
+    done < <(git ls-files -z -- '*.md')
+else
+    MARKDOWNLINT_INPUTS=(
+        '**/*.md'
+        '#target/**'
+        '#third_party/**'
+        '#node_modules/**'
+        '#.github/test-fixtures/**'
+        '#test-fixtures/**'
+    )
+fi
+
+if [ "${#MARKDOWNLINT_INPUTS[@]}" -eq 0 ]; then
+    echo -e "${YELLOW}No markdown files found to lint${NC}"
+    exit 0
+fi
 
 # Run markdownlint-cli2
 if [ "$FIX_MODE" = true ]; then
     echo "Running markdownlint-cli2 with auto-fix..."
-    if "${MARKDOWNLINT_CMD[@]}" --fix "${MARKDOWNLINT_GLOBS[@]}"; then
+    if "${MARKDOWNLINT_CMD[@]}" --fix "${MARKDOWNLINT_INPUTS[@]}"; then
         if [ -x ./scripts/check-markdown-link-text.sh ]; then
             echo "Running markdown link text auto-fix..."
             ./scripts/check-markdown-link-text.sh --fix
@@ -213,7 +230,7 @@ if [ "$FIX_MODE" = true ]; then
     fi
 else
     echo "Running markdownlint-cli2..."
-    if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_GLOBS[@]}"; then
+    if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_INPUTS[@]}"; then
         if [ -x ./scripts/check-markdown-link-text.sh ]; then
             echo "Running markdown link text policy checks..."
             ./scripts/check-markdown-link-text.sh

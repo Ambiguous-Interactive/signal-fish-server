@@ -264,6 +264,12 @@ else
     FAILED_CHECKS+=("doc-consistency")
 fi
 
+# Check 16: Documentation consistency policy tests
+if [ "$FAST_MODE" = false ]; then
+    run_check "doc-policy-tests" "Running docs/changelog policy tests" \
+        cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
+fi
+
 # Summary
 echo "=========================================="
 echo -e "${BOLD}Summary${NC}"

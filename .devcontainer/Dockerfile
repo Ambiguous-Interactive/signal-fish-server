@@ -4,7 +4,21 @@
 FROM mcr.microsoft.com/devcontainers/rust:2-bookworm
 # Project MSRV: 1.88.0 — this image must provide >= 1.88
 
-# System dependencies for building with mold linker and TLS
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG TARGETARCH
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_AMD64_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_ARM64_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+ARG LYCHEE_VERSION=0.24.2
+ARG LYCHEE_X86_64_SHA256=1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
+ARG LYCHEE_AARCH64_SHA256=91a7bd65685da41b90ccb9bc867a3d649a7818042dae04ff405e55a25bddee4c
+ARG POWERSHELL_VERSION=7.6.2
+ARG POWERSHELL_X64_SHA256=6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292
+ARG POWERSHELL_ARM64_SHA256=a8d4e386dfafda385d0604045eed03ce6f3a843d45fc8f0b9588b836ca17cdb8
+
+# System dependencies for building with mold linker, TLS, validation tooling,
+# and the native libraries required by the PowerShell/.NET runtime on Debian 12.
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get install -y --no-install-recommends \
     mold \
@@ -14,8 +28,77 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     curl \
     git \
     ca-certificates \
+    gawk \
+    libgssapi-krb5-2 \
+    libicu72 \
+    libssl3 \
+    libstdc++6 \
+    ripgrep \
+    shellcheck \
+    tzdata \
+    yamllint \
+    zlib1g \
     && apt-get autoremove -y && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
+
+# Non-Debian dev tools: install pinned upstream release binaries with checksum
+# verification. This keeps rebuilds fast and supports both linux/amd64 and linux/arm64.
+RUN set -eux; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+    amd64) \
+    actionlint_arch="amd64"; \
+    actionlint_sha256="$ACTIONLINT_AMD64_SHA256"; \
+    lychee_target="x86_64-unknown-linux-gnu"; \
+    lychee_sha256="$LYCHEE_X86_64_SHA256"; \
+    powershell_arch="x64"; \
+    powershell_sha256="$POWERSHELL_X64_SHA256"; \
+    ;; \
+    arm64) \
+    actionlint_arch="arm64"; \
+    actionlint_sha256="$ACTIONLINT_ARM64_SHA256"; \
+    lychee_target="aarch64-unknown-linux-gnu"; \
+    lychee_sha256="$LYCHEE_AARCH64_SHA256"; \
+    powershell_arch="arm64"; \
+    powershell_sha256="$POWERSHELL_ARM64_SHA256"; \
+    ;; \
+    *) \
+    echo "Unsupported target architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; \
+    exit 1; \
+    ;; \
+    esac; \
+    tmp_dir="$(mktemp -d)"; \
+    cd "$tmp_dir"; \
+    actionlint_archive="actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz"; \
+    curl -fsSL -o "$actionlint_archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${actionlint_archive}"; \
+    echo "${actionlint_sha256}  ${actionlint_archive}" | sha256sum -c -; \
+    tar -xzf "$actionlint_archive" actionlint; \
+    install -m 0755 actionlint /usr/local/bin/actionlint; \
+    lychee_archive="lychee-${lychee_target}.tar.gz"; \
+    lychee_dir="lychee-${lychee_target}"; \
+    curl -fsSL -o "$lychee_archive" "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/${lychee_archive}"; \
+    echo "${lychee_sha256}  ${lychee_archive}" | sha256sum -c -; \
+    tar -xzf "$lychee_archive" "${lychee_dir}/lychee"; \
+    install -m 0755 "${lychee_dir}/lychee" /usr/local/bin/lychee; \
+    powershell_archive="powershell-${POWERSHELL_VERSION}-linux-${powershell_arch}.tar.gz"; \
+    curl -fsSL -o "$powershell_archive" "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershell_archive}"; \
+    echo "${powershell_sha256}  ${powershell_archive}" | sha256sum -c -; \
+    mkdir -p /opt/microsoft/powershell/7; \
+    tar -xzf "$powershell_archive" -C /opt/microsoft/powershell/7; \
+    chmod 0755 /opt/microsoft/powershell/7/pwsh; \
+    ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh; \
+    cd /; \
+    rm -rf "$tmp_dir"
+
+# Build-time smoke checks for developer tooling expected by hooks and scripts.
+RUN set -eux; \
+    rg --version; \
+    shellcheck --version; \
+    actionlint -version; \
+    lychee --version; \
+    yamllint --version; \
+    gawk --version; \
+    awk 'BEGIN { print "awk ok" }'; \
+    pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSEdition; $PSVersionTable.PSVersion.ToString()'
 
 # Rust components
 RUN rustup component add \

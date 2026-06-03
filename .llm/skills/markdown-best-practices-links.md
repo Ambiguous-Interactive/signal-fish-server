@@ -239,33 +239,12 @@ markdownlint-cli2 --fix '**/*.md' '#target/**'
 
 ---
 
-## Pre-commit Hook for Link Checking
+## Link Checking Workflow
 
-Add to `.githooks/pre-commit`:
-
-```bash
-# Track blocking checks
-FAILURES=0
-
-# Check for links
-if command -v lychee >/dev/null 2>&1; then
-    echo "[pre-commit] Checking links (offline mode)..."
-    STAGED_MD=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
-    if [ -n "$STAGED_MD" ]; then
-        # shellcheck disable=SC2086
-        if ! lychee --offline --config .lychee.toml $STAGED_MD >/dev/null 2>&1; then
-            echo "[pre-commit] ERROR: Link checking failed"
-            FAILURES=$((FAILURES + 1))
-        fi
-    fi
-else
-    echo "[pre-commit] Skipping link check (lychee not installed)"
-fi
-
-if [ "$FAILURES" -ne 0 ]; then
-    exit 1
-fi
-```
+Keep link validation out of git hooks. Hooks are sub-second last-resort guards;
+run link checks from agent workflow, `scripts/run-local-ci.sh`, or explicit
+scripts such as `scripts/check-links-fast.sh --staged` and
+`scripts/check-internal-links.sh`.
 
 ---
 

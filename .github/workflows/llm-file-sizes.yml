@@ -40,10 +40,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Run LLM file size checks
-        run: ./scripts/check-llm-file-sizes.sh
+        run: bash scripts/check-llm-file-sizes.sh
 
       - name: Run LLM example extraction checks
-        run: ./scripts/check-llm-example-files.sh
+        run: bash scripts/check-llm-example-files.sh
 
       - name: Summary
         if: always()

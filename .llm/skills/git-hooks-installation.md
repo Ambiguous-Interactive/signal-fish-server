@@ -27,18 +27,21 @@ permissions, or onboarding team members to use pre-commit checks.
 
 ## TL;DR
 
-**Two Permissions Required:**
+**Required hook shape:**
 
-1. **Filesystem permission**: `chmod +x .githooks/pre-commit`
-2. **Git index permission**: `git update-index --chmod=+x .githooks/pre-commit`
+1. `.githooks/*` files are tiny extensionless Git entrypoints.
+2. Hook policy logic lives in `scripts/hooks/*.ps1` and runs on PowerShell 7+.
+3. Slow semantic checks stay out of hooks; hooks target <1 second.
+4. Use `scripts/check-hook-readiness.ps1 -Repair` for automated setup repair.
 
-**Without both, hooks work locally but fail for others (or in CI).**
+On Unix filesystems, hooks also need executable bits in both the filesystem and
+Git index. Without both, hooks can work locally but fail for others.
 
 Additional requirements:
 
 - Store hooks in `.githooks/` (not `.git/hooks/`)
 - Configure git: `git config core.hooksPath .githooks`
-- Use `#!/usr/bin/env bash` shebang (portable across platforms)
+- Delegate policy logic to PowerShell 7 (`pwsh`) instead of writing new Bash hook logic
 
 ---
 
@@ -55,13 +58,19 @@ error: cannot run .git/hooks/pre-commit: Permission denied
 
 ### The Solution
 
-#### Step 1: Set filesystem permission
+#### Step 1: Prefer automated repair
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair
+```
+
+#### Step 2: Set filesystem permission manually when needed
 
 ```bash
 chmod +x .githooks/pre-commit
 ```
 
-#### Step 2: Tell Git to track the executable bit
+#### Step 3: Tell Git to track the executable bit
 
 ```bash
 git update-index --chmod=+x .githooks/pre-commit
@@ -82,16 +91,12 @@ git ls-files -s .githooks/pre-commit
 # WRONG: Only sets filesystem permission
 touch .githooks/pre-commit
 chmod +x .githooks/pre-commit
-git add .githooks/pre-commit
-git commit -m "Add pre-commit hook"
 # Works locally, but fails when others clone!
 
 # CORRECT: Sets both permissions
 touch .githooks/pre-commit
 chmod +x .githooks/pre-commit
 git update-index --chmod=+x .githooks/pre-commit
-git add .githooks/pre-commit
-git commit -m "Add pre-commit hook"
 ```
 
 ---
@@ -116,41 +121,27 @@ git commit -m "Add pre-commit hook"
 
 ## Installation Script
 
-**Create `scripts/enable-hooks.sh`:**
+**Keep `scripts/enable-hooks.sh` as a tiny setup helper:**
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
 echo "Enabling git hooks..."
 
 # Configure git to use .githooks directory
 git config core.hooksPath .githooks
 
-# Ensure hooks are executable (filesystem permission)
-chmod +x .githooks/*
-
-# Ensure hooks have executable bit in git (git permission)
-for hook in .githooks/*; do
-  git update-index --chmod=+x "$hook"
-done
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair
 
 echo "Git hooks enabled successfully"
-echo ""
-echo "Configured hooks:"
-ls -la .githooks/
-echo ""
-echo "To bypass hooks (emergencies only):"
-echo "  git commit --no-verify"
 ```
 
-**Make installation script executable:**
+**Make installation script executable when adding or changing it:**
 
 ```bash
 chmod +x scripts/enable-hooks.sh
 git update-index --chmod=+x scripts/enable-hooks.sh
-git add scripts/enable-hooks.sh
-git commit -m "Add hook installation script"
 ```
 
 ---
@@ -170,9 +161,10 @@ git commit -m "Add hook installation script"
 
 This configures git to use pre-commit hooks that validate:
 
-- Code formatting (`cargo fmt --check`)
-- Markdown linting (if pinned markdownlint-cli2 version is installed)
-- Panic-prone patterns
+- Staged whitespace
+- Panic-prone production Rust additions
+- Generated skills index freshness with auto-repair
+- `.llm` file size, README badge, and hook speed policy
 
 **To bypass hooks (emergencies only):**
 
@@ -185,44 +177,32 @@ git commit --no-verify
 
 ## Cross-Platform Compatibility
 
-### Shebang Line
+### Hook Entrypoints
 
 ```bash
-# CORRECT: Works on macOS, Linux, BSD
-#!/usr/bin/env bash
-set -euo pipefail
+# CORRECT: extensionless Git hook wrapper delegates to PowerShell
+#!/bin/sh
+exec pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+  -File scripts/hooks/pre-commit.ps1
 
-# WRONG: Assumes bash location
-#!/bin/bash
+# WRONG: putting policy logic directly in Bash
+cargo test --locked --all-features
 ```
 
-**Why:** `/bin/bash` may not exist on all systems (e.g., FreeBSD uses `/usr/local/bin/bash`).
+**Why:** Git hooks are extensionless entrypoints. Keep wrappers tiny and put
+cross-platform logic in versioned PowerShell scripts.
 
 ### Platform-Specific Checks
 
-```bash
-# Check if command exists before using
-if [ -x scripts/check-markdown.sh ]; then
-  ./scripts/check-markdown.sh
-else
-  echo "Skipping markdown check (check-markdown.sh not found)"
-fi
-
-# Platform-specific paths
-if [ "$(uname)" = "Darwin" ]; then
-  CLIPBOARD=pbcopy
-else
-  CLIPBOARD=xclip
-fi
-```
+Keep platform-specific and optional-tool checks out of git hooks. Use
+`scripts/check-hook-readiness.ps1` for hook setup and `scripts/run-local-ci.sh`
+for slower workflow validation.
 
 ### Windows Considerations
 
-- Git Bash (MINGW) — hooks work with bash scripts
-- PowerShell — hooks need `.ps1` extension
-- WSL — works like Linux
-
-Hooks work best on Unix-like systems (macOS, Linux, WSL).
+- Require Git and PowerShell 7+ (`pwsh`) as the only hook runtime dependencies
+- Do not require Node, Cargo, devcontainers, WSL, or auto-installed toolchains in hooks
+- Validate optional workflow tools in readiness/local CI, not in pre-commit
 
 ---
 
@@ -230,12 +210,13 @@ Hooks work best on Unix-like systems (macOS, Linux, WSL).
 
 Before committing new hooks:
 
-- [ ] Shebang uses `#!/usr/bin/env bash`
-- [ ] Strict mode: `set -euo pipefail`
+- [ ] Extensionless `.githooks/*` wrapper delegates to `pwsh`
+- [ ] PowerShell runner uses strict mode and shared native process helpers
 - [ ] Filesystem permission set: `chmod +x .githooks/pre-commit`
 - [ ] Git index permission set: `git update-index --chmod=+x .githooks/pre-commit`
-- [ ] Hook tested locally: `./.githooks/pre-commit`
-- [ ] Hook executes in < 5 seconds
+- [ ] Readiness repair passes: `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair`
+- [ ] Hook tested locally: `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1`
+- [ ] Hook targets <1 second; profile with `SIGNAL_FISH_HOOK_PROFILE=1` if slower
 - [ ] Installation script updated (if needed)
 - [ ] Documentation updated (README or docs/development.md)
 

@@ -91,11 +91,13 @@ VALID_USAGES=0
 
 for workflow in "${WORKFLOW_FILES[@]}"; do
     WORKFLOW_NAME=$(basename "$workflow")
-    TOTAL_LINES=$(wc -l < "$workflow")
 
     # Read the file into an array for line-by-line lookahead.
     # Index 0 = line 1 of the file.
-    mapfile -t LINES < "$workflow"
+    LINES=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        LINES+=("$line")
+    done < "$workflow"
 
     for (( i = 0; i < ${#LINES[@]}; i++ )); do
         line="${LINES[$i]}"

@@ -134,6 +134,9 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // WebSocket configuration validation
     config.websocket.validate()?;
 
+    // Protocol version-bounds validation
+    config.protocol.validate()?;
+
     Ok(())
 }
 
