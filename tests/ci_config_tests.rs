@@ -16,7 +16,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{bash_command, read_file, repo_root};
+#[cfg(unix)]
+use common::bash_command;
+use common::{read_file, repo_root};
 use regex::Regex;
 
 /// Check whether `cargo-deny` is installed by running `cargo deny --version`.
@@ -1365,6 +1367,139 @@ fn test_ci_workflow_has_required_jobs() {
 }
 
 #[test]
+fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        workflow.contains("Show Rust tool versions")
+            && workflow.contains("rustc -Vv")
+            && workflow.contains("cargo clippy -V")
+            && workflow.contains("cargo fmt --version"),
+        "ci.yml lint job must print Rust tool versions before linting so \
+         platform-only clippy failures include enough environment context."
+    );
+
+    let clippy_start = workflow
+        .find("      - name: Run clippy")
+        .expect("ci.yml must contain a Run clippy step");
+    let after_start = &workflow[clippy_start..];
+    let clippy_end = after_start
+        .find("\n      - name: Check optional feature matrix")
+        .expect("Run clippy step must be followed by optional feature matrix step");
+    let clippy_step = &after_start[..clippy_end];
+
+    for required in [
+        "shell: bash",
+        "set -o pipefail",
+        "set +e",
+        "cargo clippy --locked --all-targets --all-features -- -D warnings",
+        "tee clippy-output.txt",
+        "pipeline_status=(\"${PIPESTATUS[@]}\")",
+        "clippy_status=\"${pipeline_status[0]}\"",
+        "tee_status=\"${pipeline_status[1]}\"",
+        "status=\"$clippy_status\"",
+        "status=\"$tee_status\"",
+        "set -e",
+        "GITHUB_STEP_SUMMARY",
+        "Clippy failure diagnostics",
+        "Runner OS: $RUNNER_OS",
+        "ansi_escape=\"$(printf '\\033')\"",
+        "sed -E",
+        "head -n 120",
+        "|| true",
+        "exit \"$status\"",
+    ] {
+        assert!(
+            clippy_step.contains(required),
+            "ci.yml Run clippy step must contain `{required}` for robust failure diagnostics.\n\
+             Step block:\n{clippy_step}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_ci_clippy_shell_status_handling_preserves_pipeline_failures() {
+    let cases = [
+        (
+            "clippy_failure_preserved",
+            5,
+            "tee clippy-output.txt",
+            5,
+            "summary=yes",
+        ),
+        (
+            "tee_failure_preserved",
+            0,
+            "bash -c 'cat >/dev/null; exit 7'",
+            7,
+            "summary=no",
+        ),
+        (
+            "success_remains_success",
+            0,
+            "tee clippy-output.txt",
+            0,
+            "summary=no",
+        ),
+    ];
+
+    for (name, clippy_exit, tee_command, expected_exit, expected_summary) in cases {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("signal-fish-clippy-status-")
+            .tempdir()
+            .unwrap_or_else(|e| panic!("failed to create temp dir: {e}"));
+        let script = format!(
+            r#"
+set -o pipefail
+set +e
+bash -c 'printf "error: fixture\n"; exit {clippy_exit}' 2>&1 | {tee_command}
+pipeline_status=("${{PIPESTATUS[@]}}")
+clippy_status="${{pipeline_status[0]}}"
+tee_status="${{pipeline_status[1]}}"
+status="$clippy_status"
+if [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ]; then
+  status="$tee_status"
+fi
+set -e
+if [ "$clippy_status" -ne 0 ]; then
+  echo "summary=yes"
+else
+  echo "summary=no"
+fi
+echo "clippy=$clippy_status tee=$tee_status status=$status"
+exit "$status"
+"#
+        );
+
+        let output = bash_command()
+            .arg("-c")
+            .arg(script)
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap_or_else(|e| panic!("{name}: failed to run status contract script: {e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(expected_exit),
+            "{name}: shell status contract produced wrong exit code.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains(expected_summary),
+            "{name}: shell status contract produced wrong summary state.\n\
+             Expected marker: {expected_summary}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("status={expected_exit}")),
+            "{name}: shell status contract did not report final status.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn test_ci_workflow_matrix_os_values_match_constant() {
     // Validates that the MATRIX_OS_VALUES constant matches the actual
     // strategy.matrix.os lists in ci.yml. If these drift apart, the
@@ -2262,8 +2397,6 @@ fn test_readme_shields_badges_use_for_the_badge_style() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_passes_on_repository() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2271,7 +2404,7 @@ fn test_check_readme_badges_script_passes_on_repository() {
         "scripts/check-readme-badges.sh must exist to validate README badge styles"
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("README.md")
         .current_dir(&root)
@@ -2351,8 +2484,6 @@ fn test_shields_style_matcher_uses_query_parameter_boundaries() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_passes_when_no_shields_urls() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2366,7 +2497,7 @@ fn test_check_readme_badges_script_passes_when_no_shields_urls() {
         "# README\n\nNo shields badges in this file.\n",
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg(temp_markdown.path())
         .current_dir(&root)
@@ -2392,8 +2523,6 @@ fn test_check_readme_badges_script_passes_when_no_shields_urls() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_fails_when_style_param_missing() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2407,7 +2536,7 @@ fn test_check_readme_badges_script_fails_when_style_param_missing() {
         r#"<img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue">"#,
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg(temp_markdown.path())
         .current_dir(&root)
@@ -2433,8 +2562,6 @@ fn test_check_readme_badges_script_fails_when_style_param_missing() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2449,7 +2576,7 @@ fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
         "<img src=\"https://img.shields.io/badge/docs-GitHub%20Pages-blue\t?style=for-the-badge\">",
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg(temp_markdown.path())
         .current_dir(&root)
@@ -2478,8 +2605,6 @@ fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2493,7 +2618,7 @@ fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
         "# README\n\nThis file intentionally has no badges.\n",
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("--require-at-least-one")
         .arg(temp_markdown.path())
@@ -2520,8 +2645,6 @@ fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_rejects_multiple_positional_args() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2529,7 +2652,7 @@ fn test_check_readme_badges_script_rejects_multiple_positional_args() {
         "scripts/check-readme-badges.sh must exist to validate README badge styles"
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("README.md")
         .arg("Cargo.toml")
@@ -6266,7 +6389,7 @@ fn test_docs_relative_links_resolve_to_existing_files() {
         return;
     }
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args(["scripts/check-internal-links.sh", "--docs-only", "--quiet"])
         .current_dir(&root)
         .output()
@@ -6294,12 +6417,13 @@ fn test_docs_relative_links_resolve_to_existing_files() {
 #[test]
 fn test_direct_bash_command_tests_are_unix_gated() {
     let root = repo_root();
-    let checked_files = ["tests/ci_config_tests.rs"];
+    let checked_files = top_level_rust_test_files(&root);
     let function_re = Regex::new(r"^\s*fn\s+[A-Za-z0-9_]+\s*\(").unwrap();
     let mut violations = Vec::new();
 
-    for file in checked_files {
-        let content = read_file(&root.join(file));
+    for path in checked_files {
+        let content = read_file(&path);
+        let file = relative_path_for_display(&root, &path);
         let mut current_test_attrs: Vec<String> = Vec::new();
         let mut current_fn_attrs: Vec<String> = Vec::new();
 
@@ -6332,6 +6456,461 @@ fn test_direct_bash_command_tests_are_unix_gated() {
         "Direct Bash invocations in Rust tests are not portable to Windows:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn test_bash_command_imports_match_platform_gating() {
+    let root = repo_root();
+    let mut violations = Vec::new();
+
+    for path in top_level_rust_test_files(&root) {
+        let content = read_file(&path);
+        let file = relative_path_for_display(&root, &path);
+        violations.extend(bash_command_import_platform_violations(&file, &content));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Rust test imports must use the same platform cfg as their shell-helper call sites.\n\
+         This prevents Windows clippy from failing with unused platform-specific imports.\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_bash_command_import_platform_detector_data_driven_cases() {
+    let cases = [
+        (
+            "rejects import compiled on windows with only unix-gated call",
+            r#"
+mod common;
+use common::{bash_command, read_file};
+
+#[test]
+#[cfg(unix)]
+fn script_test() {
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "accepts matching unix-gated import",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+use common::read_file;
+
+#[test]
+#[cfg(unix)]
+fn script_test() {
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper used by windows-compiled test",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "ignores string and comment mentions",
+            r##"
+mod common;
+use common::{bash_command, repo_root};
+
+#[test]
+fn non_script_test() {
+    let text = "tests/common::bash_command()";
+    let raw = r#"bash_command()"#;
+    // bash_command()
+    /*
+       bash_command()
+    */
+    assert!(!text.is_empty() && !raw.is_empty());
+}
+"##,
+            true,
+        ),
+    ];
+
+    for (name, content, should_reject) in cases {
+        let violations = bash_command_import_platform_violations("fixture.rs", content);
+        assert_eq!(
+            !violations.is_empty(),
+            should_reject,
+            "{name}: unexpected detector result: {violations:?}"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct CommonBashCommandImport {
+    line: usize,
+    is_unix_gated: bool,
+}
+
+fn bash_command_import_platform_violations(file: &str, content: &str) -> Vec<String> {
+    if has_crate_unix_cfg(content) {
+        return Vec::new();
+    }
+
+    let call_sites = bash_command_call_sites(content);
+    let has_windows_compiled_call = call_sites
+        .iter()
+        .any(|(_line, is_unix_gated)| !is_unix_gated);
+    let mut violations = Vec::new();
+
+    for import in common_bash_command_imports(content) {
+        if import.is_unix_gated || has_windows_compiled_call {
+            continue;
+        }
+
+        let call_lines = call_sites
+            .iter()
+            .map(|(line, _)| line.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call_summary = if call_lines.is_empty() {
+            "no helper call sites found".to_string()
+        } else {
+            format!("helper call line(s): {call_lines}")
+        };
+        violations.push(format!(
+            "{file}:{}: `bash_command` is imported on Windows, but Windows has {call_summary}. \
+             Gate the import with #[cfg(unix)] when all helper calls are Unix-only.",
+            import.line
+        ));
+    }
+
+    violations
+}
+
+fn top_level_rust_test_files(root: &Path) -> Vec<PathBuf> {
+    let tests_dir = root.join("tests");
+    let mut files = fs::read_dir(&tests_dir)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", tests_dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("Failed to read tests/ entry: {e}"))
+                .path()
+        })
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn relative_path_for_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn attrs_include_unix_cfg(attrs: &[String]) -> bool {
+    attrs.iter().any(|attr| attr_excludes_windows(attr))
+}
+
+fn has_crate_unix_cfg(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#![") {
+            if attr_excludes_windows(trimmed) {
+                return true;
+            }
+            continue;
+        }
+        break;
+    }
+
+    false
+}
+
+fn attr_excludes_windows(attr: &str) -> bool {
+    let Some(expression) = cfg_expression(attr) else {
+        return false;
+    };
+    let expression = expression
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+
+    if expression.starts_with("any(") {
+        return false;
+    }
+    if expression.contains("not(unix)") || expression.contains("target_family!=\"windows\"") {
+        return false;
+    }
+
+    expression == "unix"
+        || expression == "not(windows)"
+        || expression == "target_family=\"unix\""
+        || expression == "not(target_os=\"windows\")"
+        || (expression.starts_with("all(")
+            && (expression.contains("unix") || expression.contains("target_family=\"unix\""))
+            && !expression.contains("not("))
+}
+
+fn cfg_expression(attr: &str) -> Option<&str> {
+    let trimmed = attr.trim();
+    let expression = trimmed
+        .strip_prefix("#[cfg(")
+        .or_else(|| trimmed.strip_prefix("#![cfg("))?;
+    expression.strip_suffix(")]")
+}
+
+fn common_bash_command_imports(content: &str) -> Vec<CommonBashCommandImport> {
+    let code_lines = rust_code_lines_without_comments_or_literals(content);
+    let mut imports = Vec::new();
+    let mut pending_attrs: Vec<String> = Vec::new();
+    let mut import_start_line = 0;
+    let mut import_is_unix_gated = false;
+    let mut import_block = String::new();
+
+    for (line_idx, (raw_line, code_line)) in content.lines().zip(code_lines.iter()).enumerate() {
+        let raw_trimmed = raw_line.trim();
+        let trimmed = code_line.trim();
+
+        if !import_block.is_empty() {
+            import_block.push(' ');
+            import_block.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                if import_block.contains("bash_command") {
+                    imports.push(CommonBashCommandImport {
+                        line: import_start_line,
+                        is_unix_gated: import_is_unix_gated,
+                    });
+                }
+                import_block.clear();
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("#[") && !trimmed.starts_with("#![") {
+            pending_attrs.push(raw_trimmed.to_string());
+            continue;
+        }
+
+        if trimmed.starts_with("use common::") {
+            import_start_line = line_idx + 1;
+            import_is_unix_gated = attrs_include_unix_cfg(&pending_attrs);
+            import_block.push_str(trimmed);
+            pending_attrs.clear();
+            if trimmed.ends_with(';') {
+                if import_block.contains("bash_command") {
+                    imports.push(CommonBashCommandImport {
+                        line: import_start_line,
+                        is_unix_gated: import_is_unix_gated,
+                    });
+                }
+                import_block.clear();
+            }
+            continue;
+        }
+
+        if !trimmed.is_empty() && !trimmed.starts_with("//") {
+            pending_attrs.clear();
+        }
+    }
+
+    imports
+}
+
+fn bash_command_call_sites(content: &str) -> Vec<(usize, bool)> {
+    let code_lines = rust_code_lines_without_comments_or_literals(content);
+    let helper_call_re = Regex::new(r"\bbash_command\s*\(").unwrap();
+    let function_re = Regex::new(r"^\s*fn\s+[A-Za-z0-9_]+\s*\(").unwrap();
+    let mut pending_attrs: Vec<String> = Vec::new();
+    let mut current_fn_attrs: Vec<String> = Vec::new();
+    let mut call_sites = Vec::new();
+
+    for (line_idx, (raw_line, code_line)) in content.lines().zip(code_lines.iter()).enumerate() {
+        let trimmed = raw_line.trim();
+        let code_trimmed = code_line.trim();
+
+        if trimmed.starts_with("#[") && !trimmed.starts_with("#![") {
+            pending_attrs.push(trimmed.to_string());
+            continue;
+        }
+
+        if function_re.is_match(code_line) {
+            current_fn_attrs = pending_attrs.clone();
+            pending_attrs.clear();
+        } else if !code_trimmed.is_empty() {
+            pending_attrs.clear();
+        }
+
+        if code_trimmed.starts_with("use ") {
+            continue;
+        }
+
+        if helper_call_re.is_match(code_line) {
+            call_sites.push((line_idx + 1, attrs_include_unix_cfg(&current_fn_attrs)));
+        }
+    }
+
+    call_sites
+}
+
+fn rust_code_lines_without_comments_or_literals(content: &str) -> Vec<String> {
+    let mut state = RustLexState::default();
+    content
+        .lines()
+        .map(|line| strip_rust_line_comments_and_literals(line, &mut state))
+        .collect()
+}
+
+#[derive(Default)]
+struct RustLexState {
+    block_comment_depth: usize,
+    normal_string: Option<NormalStringState>,
+    raw_string_hashes: Option<usize>,
+}
+
+struct NormalStringState {
+    terminator: u8,
+    escaped: bool,
+}
+
+fn strip_rust_line_comments_and_literals(line: &str, state: &mut RustLexState) -> String {
+    let bytes = line.as_bytes();
+    let mut output = String::with_capacity(line.len());
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        if let Some(hashes) = state.raw_string_hashes {
+            if raw_string_ends_at(bytes, idx, hashes) {
+                state.raw_string_hashes = None;
+                idx += 1 + hashes;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if let Some(string_state) = &mut state.normal_string {
+            let byte = bytes[idx];
+            if string_state.escaped {
+                string_state.escaped = false;
+            } else if byte == b'\\' {
+                string_state.escaped = true;
+            } else if byte == string_state.terminator {
+                state.normal_string = None;
+            }
+            idx += 1;
+            continue;
+        }
+
+        if state.block_comment_depth > 0 {
+            if bytes[idx..].starts_with(b"/*") {
+                state.block_comment_depth += 1;
+                idx += 2;
+            } else if bytes[idx..].starts_with(b"*/") {
+                state.block_comment_depth -= 1;
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if bytes[idx..].starts_with(b"//") {
+            break;
+        }
+        if bytes[idx..].starts_with(b"/*") {
+            state.block_comment_depth = 1;
+            idx += 2;
+            continue;
+        }
+        if let Some((after_start, hashes)) = raw_string_starts_at(bytes, idx) {
+            state.raw_string_hashes = Some(hashes);
+            idx = after_start;
+            continue;
+        }
+        if bytes[idx..].starts_with(b"b\"") {
+            state.normal_string = Some(NormalStringState {
+                terminator: b'"',
+                escaped: false,
+            });
+            idx += 2;
+            continue;
+        }
+        if bytes[idx] == b'"' {
+            state.normal_string = Some(NormalStringState {
+                terminator: b'"',
+                escaped: false,
+            });
+            idx += 1;
+            continue;
+        }
+        if bytes[idx] == b'\'' && char_literal_starts_at(bytes, idx) {
+            state.normal_string = Some(NormalStringState {
+                terminator: b'\'',
+                escaped: false,
+            });
+            idx += 1;
+            continue;
+        }
+
+        output.push(char::from(bytes[idx]));
+        idx += 1;
+    }
+
+    output
+}
+
+fn raw_string_starts_at(bytes: &[u8], idx: usize) -> Option<(usize, usize)> {
+    let mut cursor = idx;
+    if bytes.get(cursor) == Some(&b'b') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+    cursor += 1;
+
+    let mut hashes = 0;
+    while bytes.get(cursor) == Some(&b'#') {
+        hashes += 1;
+        cursor += 1;
+    }
+
+    if bytes.get(cursor) == Some(&b'"') {
+        Some((cursor + 1, hashes))
+    } else {
+        None
+    }
+}
+
+fn raw_string_ends_at(bytes: &[u8], idx: usize, hashes: usize) -> bool {
+    bytes.get(idx) == Some(&b'"')
+        && bytes
+            .get(idx + 1..idx + 1 + hashes)
+            .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+}
+
+fn char_literal_starts_at(bytes: &[u8], idx: usize) -> bool {
+    let Some(next) = bytes.get(idx + 1) else {
+        return false;
+    };
+    !matches!(
+        next,
+        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'\''
+    )
 }
 
 #[test]
@@ -6532,7 +7111,7 @@ fn test_internal_link_checker_handles_common_markdown_inline_link_forms() {
         )
     });
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args([
             "scripts/check-internal-links.sh",
             "--no-git-tracked-check",
@@ -6567,7 +7146,7 @@ fn test_internal_link_checker_handles_common_markdown_inline_link_forms() {
         )
     });
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args([
             "scripts/check-internal-links.sh",
             "--no-git-tracked-check",
@@ -6635,7 +7214,7 @@ fn test_internal_link_checker_rejects_repo_escaping_relative_links() {
         )
     });
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args(["scripts/check-internal-links.sh", "--quiet"])
         .arg(&markdown_path)
         .current_dir(&root)
@@ -10507,12 +11086,10 @@ fn test_check_no_panics_script_structure() {
 #[test]
 #[cfg(unix)]
 fn test_check_no_panics_script_patterns_pass() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-no-panics.sh");
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("patterns")
         .current_dir(&root)
@@ -10591,8 +11168,6 @@ fn test_pinned_nightly_staleness_warning() {
 #[test]
 #[cfg(unix)]
 fn test_scripts_pass_basic_syntax_check() {
-    use std::process::Command;
-
     let root = repo_root();
     let scripts_dir = root.join("scripts");
 
@@ -10616,7 +11191,7 @@ fn test_scripts_pass_basic_syntax_check() {
     for entry in &entries {
         let path = entry.path();
         // Use bash -n for syntax check (always available, unlike shellcheck)
-        let output = Command::new("bash")
+        let output = bash_command()
             .arg("-n")
             .arg(&path)
             .output()

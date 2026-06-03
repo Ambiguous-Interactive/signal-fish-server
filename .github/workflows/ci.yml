@@ -77,11 +77,44 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Show Rust tool versions
+        shell: bash
+        run: |
+          rustc -Vv
+          cargo -V
+          cargo clippy -V
+          cargo fmt --version
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee clippy-output.txt
+          pipeline_status=("${PIPESTATUS[@]}")
+          clippy_status="${pipeline_status[0]}"
+          tee_status="${pipeline_status[1]}"
+          status="$clippy_status"
+          if [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ]; then
+            status="$tee_status"
+          fi
+          set -e
+          if [ "$clippy_status" -ne 0 ]; then
+            {
+              echo "### Clippy failure diagnostics"
+              echo
+              echo "Runner OS: $RUNNER_OS"
+              echo "Rust toolchain: ${{ steps.toolchain.outputs.channel }}"
+              echo
+              echo '```text'
+              ansi_escape="$(printf '\033')"
+              sed -E "s/${ansi_escape}\[[0-9;]*[A-Za-z]//g" clippy-output.txt | sed -n '/error/,$p' | head -n 120 || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
 
       - name: Check optional feature matrix
         if: matrix.os == 'ubuntu-latest'
