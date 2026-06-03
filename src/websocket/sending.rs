@@ -145,19 +145,19 @@ pub(super) async fn send_text_message(
 /// wrapper. Golden wire tests must freeze the bytes produced from this struct,
 /// not the enum variant.
 #[derive(Serialize)]
-pub struct BinaryGameDataFrame<'a> {
-    pub from_player: PlayerId,
-    pub encoding: GameDataEncoding,
+struct BinaryGameDataFrame<'a> {
+    from_player: PlayerId,
+    encoding: GameDataEncoding,
     #[serde(with = "serde_bytes")]
-    pub payload: &'a [u8],
+    payload: &'a [u8],
 }
 
 /// Encodes a binary game-data frame exactly as production puts it on the wire.
 ///
-/// This is the single source of truth for the binary send path and is exposed
-/// (via [`crate::websocket::encode_binary_game_data`]) so integration golden
-/// tests can freeze the real wire bytes rather than the in-memory enum form.
-pub fn encode_binary_game_data(
+/// This is the single source of truth for the binary send path. Keep this
+/// private to the websocket module so the wire frame layout can be tested
+/// without becoming public library API.
+pub(super) fn encode_binary_game_data(
     from_player: PlayerId,
     encoding: GameDataEncoding,
     payload: &[u8],
@@ -193,5 +193,90 @@ fn decode_binary_to_json(
             // Clients using Rkyv should NOT fall back to JSON - they should use native rkyv decoding.
             Err("Rkyv payloads cannot be converted to JSON - use native rkyv decoding".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use uuid::Uuid;
+
+    const PLAYER_A_STR: &str = "00000000-0000-0000-0000-00000000000a";
+
+    fn player_a() -> Uuid {
+        Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_000a)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct DecodedBinaryGameDataFrame {
+        from_player: PlayerId,
+        encoding: GameDataEncoding,
+        #[serde(with = "serde_bytes")]
+        payload: Vec<u8>,
+    }
+
+    #[test]
+    fn binary_game_data_encoder_emits_bare_message_pack_frame() {
+        let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+        let wire = encode_binary_game_data(player_a(), GameDataEncoding::MessagePack, payload)
+            .expect("production binary encode");
+
+        assert_eq!(
+            hex(&wire),
+            "83ab66726f6d5f706c61796572c4100000000000000000000000000000000aa8656e636f64696e67ac6d6573736167655f7061636ba77061796c6f6164c40401020304",
+            "binary wire frame drift (BREAKING v2 wire change?)"
+        );
+
+        let decoded: DecodedBinaryGameDataFrame =
+            rmp_serde::from_slice(&wire).expect("bare binary frame decodes");
+        assert_eq!(
+            decoded,
+            DecodedBinaryGameDataFrame {
+                from_player: player_a(),
+                encoding: GameDataEncoding::MessagePack,
+                payload: payload.to_vec(),
+            }
+        );
+
+        let frame = BinaryGameDataFrame {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload,
+        };
+        assert_eq!(
+            serde_json::to_value(frame).expect("json value"),
+            serde_json::json!({
+                "from_player": PLAYER_A_STR,
+                "encoding": "message_pack",
+                "payload": [1, 2, 3, 4]
+            }),
+            "binary frame field-name/casing drift (BREAKING v2 wire change?)"
+        );
+    }
+
+    #[test]
+    fn passthrough_binary_encodings_return_payload_unchanged() {
+        let payload: &[u8] = br#"{"move":"up"}"#;
+
+        assert_eq!(
+            encode_binary_game_data(player_a(), GameDataEncoding::Json, payload)
+                .expect("json passthrough"),
+            payload.to_vec()
+        );
+        assert_eq!(
+            encode_binary_game_data(player_a(), GameDataEncoding::Rkyv, payload)
+                .expect("rkyv passthrough"),
+            payload.to_vec()
+        );
     }
 }

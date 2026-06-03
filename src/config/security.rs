@@ -6,6 +6,7 @@ use super::defaults::{
 };
 use crate::security::token_binding::TokenBindingScheme;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Security configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -128,13 +129,52 @@ impl Default for TokenBindingConfig {
 }
 
 /// Client authentication mode for TLS.
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ClientAuthMode {
     #[default]
     None,
     Optional,
     Require,
+}
+
+impl ClientAuthMode {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Optional => "optional",
+            Self::Require => "require",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientAuthMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let token = raw.trim();
+
+        if token.eq_ignore_ascii_case("none") {
+            Ok(Self::None)
+        } else if token.eq_ignore_ascii_case("optional") {
+            Ok(Self::Optional)
+        } else if token.eq_ignore_ascii_case("require") {
+            Ok(Self::Require)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "invalid client auth mode '{raw}', expected one of: none, optional, require"
+            )))
+        }
+    }
+}
+
+impl fmt::Display for ClientAuthMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A single authorized application entry loaded from configuration.

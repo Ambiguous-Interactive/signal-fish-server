@@ -1,6 +1,7 @@
 mod test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use signal_fish_server::protocol::*;
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
@@ -10,6 +11,20 @@ use test_helpers::{
 };
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
+type WsReceiver = futures_util::stream::SplitStream<WsStream>;
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct BinaryGameDataFrame {
+    from_player: PlayerId,
+    encoding: GameDataEncoding,
+    #[serde(with = "serde_bytes")]
+    payload: Vec<u8>,
+}
 
 /// Helper to create a test server and return its address
 async fn start_test_server() -> std::net::SocketAddr {
@@ -62,22 +77,7 @@ async fn start_server_with_instance(game_server: Arc<EnhancedGameServer>) -> std
 }
 
 /// Helper to connect a WebSocket client
-async fn connect_client(
-    addr: std::net::SocketAddr,
-    path: &str,
-) -> (
-    futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        Message,
-    >,
-    futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
-) {
+async fn connect_client(addr: std::net::SocketAddr, path: &str) -> (WsSink, WsReceiver) {
     let url = format!("ws://{addr}{path}");
     println!("Connecting to WebSocket URL: {url}");
 
@@ -94,17 +94,8 @@ async fn connect_client(
 
 /// Helper to send a message and return the response
 async fn send_and_receive(
-    sender: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        Message,
-    >,
-    receiver: &mut futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
+    sender: &mut WsSink,
+    receiver: &mut WsReceiver,
     message: ClientMessage,
 ) -> Result<ServerMessage, Box<dyn std::error::Error>> {
     let json = serde_json::to_string(&message)?;
@@ -120,6 +111,89 @@ async fn send_and_receive(
         Ok(None) => Err("Connection closed".into()),
         Err(_) => Err("Timeout waiting for response".into()),
     }
+}
+
+async fn receive_server_message(receiver: &mut WsReceiver) -> ServerMessage {
+    match tokio::time::timeout(tokio::time::Duration::from_secs(5), receiver.next()).await {
+        Ok(Some(msg)) => {
+            let text = msg
+                .expect("websocket message")
+                .into_text()
+                .expect("text frame");
+            serde_json::from_str(&text).expect("valid ServerMessage")
+        }
+        Ok(None) => panic!("Connection closed while waiting for server message"),
+        Err(_) => panic!("Timeout waiting for server message"),
+    }
+}
+
+async fn authenticate_for_message_pack(sender: &mut WsSink, receiver: &mut WsReceiver) {
+    let auth = ClientMessage::Authenticate {
+        app_id: "binary-e2e-app".to_string(),
+        sdk_version: Some("1.0.0".to_string()),
+        platform: Some("test".to_string()),
+        game_data_format: Some(GameDataEncoding::MessagePack),
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+    };
+
+    let json = serde_json::to_string(&auth).expect("auth serializes");
+    sender.send(Message::Text(json.into())).await.unwrap();
+
+    let first = receive_server_message(receiver).await;
+    assert!(
+        matches!(first, ServerMessage::Authenticated { .. }),
+        "expected Authenticated first, got {first:?}"
+    );
+
+    match receive_server_message(receiver).await {
+        ServerMessage::ProtocolInfo(info) => assert!(
+            info.game_data_formats
+                .contains(&GameDataEncoding::MessagePack),
+            "server must advertise message_pack support: {info:?}"
+        ),
+        other => panic!("expected ProtocolInfo after auth, got {other:?}"),
+    }
+}
+
+async fn receive_binary_game_data_wire_frame(receiver: &mut WsReceiver) -> Vec<u8> {
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            match receiver.next().await {
+                Some(Ok(Message::Binary(bytes))) => return bytes.to_vec(),
+                Some(Ok(Message::Text(text))) => {
+                    if text.contains(r#""type":"GameDataBinary""#) {
+                        panic!(
+                            "GameDataBinary is an in-memory carrier and must not be sent as a text envelope"
+                        );
+                    }
+
+                    let server_msg: ServerMessage = serde_json::from_str(&text)
+                        .expect("valid ServerMessage while waiting for binary game data");
+                    match server_msg {
+                        ServerMessage::PlayerJoined { .. }
+                        | ServerMessage::LobbyStateChanged { .. }
+                        | ServerMessage::AuthorityChanged { .. }
+                        | ServerMessage::AuthorityResponse { .. }
+                        | ServerMessage::GameStarting { .. } => {}
+                        other => panic!(
+                            "unexpected text message while waiting for binary game data: {other:?}"
+                        ),
+                    }
+                }
+                Some(Ok(other)) => {
+                    panic!("unexpected websocket frame while waiting for binary game data: {other:?}")
+                }
+                Some(Err(err)) => {
+                    panic!("websocket error while waiting for binary game data: {err}")
+                }
+                None => panic!("connection closed while waiting for binary game data"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for binary game data")
 }
 
 #[tokio::test]
@@ -348,6 +422,66 @@ async fn test_game_data_broadcasting() {
         Ok(None) => panic!("Connection closed while waiting for game data"),
         Err(_) => panic!("Timeout waiting for game data"),
     }
+}
+
+#[tokio::test]
+async fn test_binary_game_data_broadcasting_uses_bare_message_pack_frame() {
+    let addr =
+        start_test_server_with_config_and_protocol(test_server_config(), test_protocol_config())
+            .await;
+
+    let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
+    let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
+
+    authenticate_for_message_pack(&mut sender1, &mut receiver1).await;
+    authenticate_for_message_pack(&mut sender2, &mut receiver2).await;
+
+    let join_msg = ClientMessage::JoinRoom {
+        game_name: "binary_data_test".to_string(),
+        room_code: Some("BIN1".to_string()),
+        player_name: "Player1".to_string(),
+        max_players: Some(2),
+        supports_authority: Some(true),
+        relay_transport: None,
+    };
+    let player1_id = match send_and_receive(&mut sender1, &mut receiver1, join_msg)
+        .await
+        .unwrap()
+    {
+        ServerMessage::RoomJoined(payload) => payload.player_id,
+        other => panic!("Expected RoomJoined for player 1, got {other:?}"),
+    };
+
+    let join_msg2 = ClientMessage::JoinRoom {
+        game_name: "binary_data_test".to_string(),
+        room_code: Some("BIN1".to_string()),
+        player_name: "Player2".to_string(),
+        max_players: Some(2),
+        supports_authority: Some(true),
+        relay_transport: None,
+    };
+    let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
+        .await
+        .unwrap();
+
+    let payload = vec![0x01, 0x02, 0x03, 0x04];
+    sender1
+        .send(Message::Binary(payload.clone().into()))
+        .await
+        .unwrap();
+
+    let wire = receive_binary_game_data_wire_frame(&mut receiver2).await;
+    let frame: BinaryGameDataFrame =
+        rmp_serde::from_slice(&wire).expect("bare MessagePack game-data frame");
+
+    assert_eq!(
+        frame,
+        BinaryGameDataFrame {
+            from_player: player1_id,
+            encoding: GameDataEncoding::MessagePack,
+            payload,
+        }
+    );
 }
 
 #[tokio::test]

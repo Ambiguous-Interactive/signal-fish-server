@@ -4,14 +4,50 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::fmt;
 use thiserror::Error;
 
 /// Supported token binding signature schemes.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenBindingScheme {
     #[default]
     SecWebsocketKeySha256,
+}
+
+impl TokenBindingScheme {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::SecWebsocketKeySha256 => "sec_websocket_key_sha256",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenBindingScheme {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let token = raw.trim();
+
+        if token.eq_ignore_ascii_case("sec_websocket_key_sha256")
+            || token.eq_ignore_ascii_case("SecWebsocketKeySha256")
+        {
+            Ok(Self::SecWebsocketKeySha256)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "invalid token binding scheme '{raw}', expected: sec_websocket_key_sha256"
+            )))
+        }
+    }
+}
+
+impl fmt::Display for TokenBindingScheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Proof object embedded in every token-bound client frame.

@@ -176,6 +176,7 @@ Key rules (details in skills above):
 
 Every feature/bugfix requires: doc comments with examples, CHANGELOG entry, README updates if user-facing.
 Run `./scripts/check-doc-consistency.sh` before handoff to prevent version/changelog/protocol doc drift.
+Config and binary wire-format drift rules -> [config-wire-format-drift.md](config-wire-format-drift.md).
 
 ### Code Fence and CI Pitfalls
 

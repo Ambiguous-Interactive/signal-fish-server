@@ -537,7 +537,7 @@ JSON-formatted structured logs for production observability:
     "dir": "logs",
     "filename": "server.log",
     "rotation": "daily",
-    "format": "Json"
+    "format": "json"
   }
 }
 

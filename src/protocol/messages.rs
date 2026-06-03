@@ -189,8 +189,12 @@ pub enum ServerMessage {
         from_player: PlayerId,
         data: serde_json::Value,
     },
-    /// Binary game data payload from another player
-    /// Uses `Bytes` for zero-copy cloning during broadcast
+    /// Binary game data payload from another player.
+    ///
+    /// This is an in-memory broadcast carrier. Negotiated MessagePack clients
+    /// receive a bare binary WebSocket frame from `websocket::sending`, not this
+    /// enum variant serialized through the `{type, data}` envelope. Uses `Bytes`
+    /// for zero-copy cloning during broadcast.
     GameDataBinary {
         from_player: PlayerId,
         encoding: GameDataEncoding,

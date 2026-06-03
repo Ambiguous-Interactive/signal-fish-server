@@ -7,13 +7,22 @@ use super::defaults::{
 use serde::{Deserialize, Serialize};
 
 /// Coordination configuration for cross-instance messaging.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CoordinationConfig {
     #[serde(default)]
     pub dedup_cache: DedupCacheConfig,
     /// Interval between cross-instance membership snapshots (seconds).
     #[serde(default = "default_membership_snapshot_interval_secs")]
     pub membership_snapshot_interval_secs: u64,
+}
+
+impl Default for CoordinationConfig {
+    fn default() -> Self {
+        Self {
+            dedup_cache: DedupCacheConfig::default(),
+            membership_snapshot_interval_secs: default_membership_snapshot_interval_secs(),
+        }
+    }
 }
 
 /// Deduplication cache configuration.

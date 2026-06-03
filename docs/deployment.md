@@ -37,9 +37,9 @@ docker run -d \
 
 docker run -d \
   -p 3536:3536 \
-  -e SIGNAL_FISH_PORT=8080 \
-  -e SIGNAL_FISH_SERVER__DEFAULT_MAX_PLAYERS=16 \
-  -e SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
+  -e SIGNAL_FISH__PORT=8080 \
+  -e SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 \
+  -e SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
   ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 ```
@@ -63,7 +63,7 @@ services:
     environment:
 
       - RUST_LOG=info
-      - SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true
+      - SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true
 
     restart: unless-stopped
     healthcheck:
@@ -101,7 +101,7 @@ services:
     "dir": "logs",
     "enable_file_logging": true,
     "rotation": "daily",
-    "format": "Json"
+    "format": "json"
   },
   "security": {
     "cors_origins": "https://yourgame.com",
@@ -206,7 +206,7 @@ signal.yourgame.com {
       ],
       "environment": [
         {
-          "name": "SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH",
+          "name": "SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH",
           "value": "true"
         }
       ],
@@ -233,7 +233,7 @@ gcloud run deploy signal-fish \
   --platform managed \
   --region us-central1 \
   --port 3536 \
-  --set-env-vars SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
+  --set-env-vars SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
   --allow-unauthenticated \
   --max-instances 10
 
@@ -268,7 +268,7 @@ spec:
 
         env:
 
-        - name: SIGNAL_FISH_SECURITY__REQUIRE_WEBSOCKET_AUTH
+        - name: SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH
 
           value: "true"
         volumeMounts:
@@ -405,7 +405,7 @@ Enable file logging:
     "dir": "logs",
     "filename": "server.log",
     "rotation": "daily",
-    "format": "Json"
+    "format": "json"
   }
 }
 

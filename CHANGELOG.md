@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed README protocol-reference formatting for the `Reconnect` row and typical session-flow diagram alignment.
+- Fixed config-token drift by documenting canonical lowercase/snake_case values, making related
+  config enum deserialization tolerate legacy mixed-case tokens, and adding doc/reference guards.
+- Fixed `CoordinationConfig::default()` so `membership_snapshot_interval_secs` uses the documented
+  30-second default instead of `0`.
 - Fixed CI documentation failures by removing broken ADR links to an untracked local planning file and aligning ADR
   markdown with the repository lint rules.
 - Fixed the production panic-policy violation in WebSocket capability deduplication by removing direct vector indexing

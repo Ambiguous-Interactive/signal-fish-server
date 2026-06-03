@@ -27,9 +27,6 @@ use signal_fish_server::protocol::{
     RoomJoinedPayload, ServerMessage, SpectatorInfo, SpectatorJoinedPayload,
     SpectatorStateChangeReason,
 };
-// Production binary-frame send path. Binary game data is NOT enveloped in the
-// `ServerMessage` enum on the wire — see `golden_server_game_data_binary`.
-use signal_fish_server::websocket::{encode_binary_game_data, BinaryGameDataFrame};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -606,55 +603,6 @@ fn golden_server_game_data() {
     assert_msgpack(&msg, "82a474797065a847616d6544617461a46461746182ab66726f6d5f706c61796572c4100000000000000000000000000000000aa46461746181a46d6f7665a27570");
 }
 
-/// GameDataBinary is special: it does NOT travel through the `{type,data}`
-/// envelope on the wire. `src/websocket/sending.rs::send_single_message`
-/// intercepts `ServerMessage::GameDataBinary` and, for MessagePack-capable
-/// clients, serializes a BARE `BinaryGameDataFrame { from_player, encoding,
-/// payload }` via `rmp_serde::to_vec_named` (no `type`/`data` wrapper). For
-/// binary-incapable (JSON/text) clients it decodes the payload and emits a
-/// `ServerMessage::GameData` text frame instead. This test freezes BOTH real
-/// production wire forms, by calling the exact production encoder.
-#[test]
-fn golden_server_game_data_binary_wire_frame() {
-    let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
-
-    // (1) Binary wire form for MessagePack-capable clients: the BARE frame
-    // bytes produced by the production encoder. Note there is NO leading
-    // `82a474797065ae47616d654461746142696e617279...` enum envelope here.
-    let wire = encode_binary_game_data(player_a(), GameDataEncoding::MessagePack, payload)
-        .expect("production binary encode");
-    assert_eq!(
-        hex(&wire),
-        "83ab66726f6d5f706c61796572c4100000000000000000000000000000000aa8656e636f64696e67ac6d6573736167655f7061636ba77061796c6f6164c40401020304",
-        "binary wire frame drift (BREAKING v2 wire change?)"
-    );
-
-    // The same bytes, asserted against the bare struct serialized exactly as
-    // production does it, to lock the field-name/key surface of the frame.
-    let frame = BinaryGameDataFrame {
-        from_player: player_a(),
-        encoding: GameDataEncoding::MessagePack,
-        payload,
-    };
-    assert_msgpack(
-        &frame,
-        "83ab66726f6d5f706c61796572c4100000000000000000000000000000000aa8656e636f64696e67ac6d6573736167655f7061636ba77061796c6f6164c40401020304",
-    );
-    // The bare frame's JSON shape (serde_bytes -> array). This is the on-wire
-    // struct, NOT an enum envelope.
-    assert_json(
-        &frame,
-        json!({
-            "from_player": PLAYER_A_STR,
-            "encoding": "message_pack",
-            "payload": [1, 2, 3, 4]
-        }),
-        &format!(
-            r#"{{"from_player":"{PLAYER_A_STR}","encoding":"message_pack","payload":[1,2,3,4]}}"#
-        ),
-    );
-}
-
 /// JSON-fallback wire form: for binary-incapable clients, production decodes the
 /// payload and emits a `ServerMessage::GameData` text frame (the standard
 /// enveloped form). We freeze that exact fallback frame here.
@@ -679,10 +627,11 @@ fn golden_server_game_data_binary_json_fallback() {
 }
 
 /// In-memory representation ONLY — NOT the wire form. The `ServerMessage::
-/// GameDataBinary` enum variant is never serialized to the wire as-is (see
-/// `golden_server_game_data_binary_wire_frame`). Frozen purely to detect
-/// accidental changes to the in-memory enum's serde shape, e.g. if someone
-/// removes the interception in `send_single_message`.
+/// GameDataBinary` enum variant is never serialized to the wire as-is. The
+/// production binary frame is frozen in `src/websocket/sending.rs` unit tests
+/// and covered end-to-end by `test_binary_game_data_broadcasting_uses_bare_message_pack_frame`.
+/// This snapshot only detects accidental changes to the in-memory enum's serde
+/// shape, e.g. if someone removes the interception in `send_single_message`.
 #[test]
 fn golden_server_game_data_binary_in_memory_repr_not_wire() {
     let msg = ServerMessage::GameDataBinary {
