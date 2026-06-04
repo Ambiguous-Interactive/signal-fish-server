@@ -291,6 +291,30 @@ pub struct PeerConnectionInfo {
     pub connection_info: Option<ConnectionInfo>,
 }
 
+impl PeerConnectionInfo {
+    /// Build wire-level peer connection data from a room member snapshot.
+    pub fn from_player(player: &PlayerInfo, relay_type: &str) -> Self {
+        Self {
+            player_id: player.id,
+            player_name: player.name.clone(),
+            is_authority: player.is_authority,
+            relay_type: relay_type.to_owned(),
+            connection_info: player.connection_info.clone(),
+        }
+    }
+
+    /// Build wire-level peer connection data for each room member.
+    pub fn from_players<'a>(
+        players: impl IntoIterator<Item = &'a PlayerInfo>,
+        relay_type: &str,
+    ) -> Vec<Self> {
+        players
+            .into_iter()
+            .map(|player| Self::from_player(player, relay_type))
+            .collect()
+    }
+}
+
 /// Rate limit information for an application
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct RateLimitInfo {
@@ -361,5 +385,127 @@ impl PlayerNameRulesPayload {
             allowed_symbols: rules.allowed_symbols.clone(),
             additional_allowed_characters: rules.additional_allowed_characters.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    struct PeerConnectionCase {
+        name: &'static str,
+        player: PlayerInfo,
+        relay_type: &'static str,
+        expected_connection_info: serde_json::Value,
+    }
+
+    fn player_fixture(
+        id: PlayerId,
+        name: &str,
+        is_authority: bool,
+        connection_info: Option<ConnectionInfo>,
+    ) -> PlayerInfo {
+        PlayerInfo {
+            id,
+            name: name.to_string(),
+            is_authority,
+            is_ready: true,
+            connected_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            connection_info,
+            region_id: "test-region".to_string(),
+        }
+    }
+
+    #[test]
+    fn peer_connection_info_from_player_maps_wire_fields() {
+        let cases = [
+            PeerConnectionCase {
+                name: "authority without connection metadata",
+                player: player_fixture(
+                    PlayerId::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa),
+                    "Authority",
+                    true,
+                    None,
+                ),
+                relay_type: "matchbox",
+                expected_connection_info: serde_json::Value::Null,
+            },
+            PeerConnectionCase {
+                name: "peer with direct connection metadata",
+                player: player_fixture(
+                    PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb),
+                    "Peer",
+                    false,
+                    Some(ConnectionInfo::Direct {
+                        host: "10.0.0.5".to_string(),
+                        port: 7777,
+                    }),
+                ),
+                relay_type: "custom-relay",
+                expected_connection_info: json!({
+                    "type": "direct",
+                    "host": "10.0.0.5",
+                    "port": 7777
+                }),
+            },
+        ];
+
+        for case in cases {
+            let peer = PeerConnectionInfo::from_player(&case.player, case.relay_type);
+
+            assert_eq!(
+                peer.player_id, case.player.id,
+                "{}: player_id must come from the room member snapshot",
+                case.name
+            );
+            assert_eq!(
+                peer.player_name, case.player.name,
+                "{}: player_name must come from the room member snapshot",
+                case.name
+            );
+            assert_eq!(
+                peer.is_authority, case.player.is_authority,
+                "{}: authority flag must come from the room member snapshot",
+                case.name
+            );
+            assert_eq!(
+                peer.relay_type, case.relay_type,
+                "{}: relay_type must come from the finalized room",
+                case.name
+            );
+            assert_eq!(
+                serde_json::to_value(&peer.connection_info).unwrap(),
+                case.expected_connection_info,
+                "{}: connection_info must preserve the player's P2P metadata",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn peer_connection_info_from_players_preserves_member_order() {
+        let players = [
+            player_fixture(
+                PlayerId::from_u128(0x11111111111111111111111111111111),
+                "First",
+                true,
+                None,
+            ),
+            player_fixture(
+                PlayerId::from_u128(0x22222222222222222222222222222222),
+                "Second",
+                false,
+                None,
+            ),
+        ];
+
+        let peers = PeerConnectionInfo::from_players(players.iter(), "matchbox");
+
+        assert_eq!(peers.len(), players.len());
+        assert_eq!(peers[0].player_id, players[0].id);
+        assert_eq!(peers[1].player_id, players[1].id);
+        assert!(peers.iter().all(|peer| peer.relay_type == "matchbox"));
     }
 }

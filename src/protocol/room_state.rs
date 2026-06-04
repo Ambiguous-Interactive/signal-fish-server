@@ -394,16 +394,7 @@ impl Room {
     /// Get peer connection information for all players
     #[allow(dead_code)]
     pub fn get_peer_connections(&self) -> Vec<PeerConnectionInfo> {
-        self.players
-            .values()
-            .map(|player| PeerConnectionInfo {
-                player_id: player.id,
-                player_name: player.name.clone(),
-                is_authority: player.is_authority,
-                relay_type: self.relay_type.clone(),
-                connection_info: player.connection_info.clone(),
-            })
-            .collect()
+        PeerConnectionInfo::from_players(self.players.values(), &self.relay_type)
     }
 
     /// Check if room is finalized and ready for cleanup

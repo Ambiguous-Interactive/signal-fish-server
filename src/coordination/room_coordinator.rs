@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::distributed::DistributedLock;
-use crate::protocol::{PlayerId, PlayerInfo, RoomId};
+use crate::protocol::{PeerConnectionInfo, PlayerId, PlayerInfo, RoomId};
 
 use super::MessageCoordinator;
 
@@ -371,22 +371,11 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
         // If all players are ready, transition to game starting
         if all_ready {
-            // Snapshot the finalized membership BEFORE consuming `room_players`
-            // into the `GameStarting` peer list, so the capability-aware server
-            // layer can compute and emit the v3 SessionPlan afterwards.
-            let finalized_members = room_players.clone();
+            let finalized_members = room_players;
 
             // Use P2P connection info from players (no relay server support in signal-fish-server)
-            let peer_connections: Vec<crate::protocol::PeerConnectionInfo> = room_players
-                .into_iter()
-                .map(|player| crate::protocol::PeerConnectionInfo {
-                    player_id: player.id,
-                    player_name: player.name,
-                    is_authority: player.is_authority,
-                    relay_type: room.relay_type.clone(),
-                    connection_info: player.connection_info,
-                })
-                .collect();
+            let peer_connections =
+                PeerConnectionInfo::from_players(&finalized_members, &room.relay_type);
 
             let game_start_message =
                 Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
@@ -421,5 +410,325 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         ready_map.remove(room_id);
         tracing::info!(%room_id, "Cleared ready players from coordinator (in-memory)");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coordination::{MembershipUpdate, MessageCoordinator};
+    use crate::database::{GameDatabase, InMemoryDatabase};
+    use crate::distributed::{DistributedLock, LockHandle, SequencedMessage};
+    use crate::protocol::{ConnectionInfo, LobbyState, PeerConnectionInfo, ServerMessage};
+    use async_trait::async_trait;
+    use std::collections::BTreeMap;
+    use tokio::sync::{mpsc, Mutex};
+
+    #[derive(Debug, Clone)]
+    struct BroadcastEvent {
+        room_id: RoomId,
+        message: ServerMessage,
+    }
+
+    #[derive(Default)]
+    struct RecordingMessageCoordinator {
+        broadcasts: Mutex<Vec<BroadcastEvent>>,
+    }
+
+    impl RecordingMessageCoordinator {
+        async fn broadcasts(&self) -> Vec<BroadcastEvent> {
+            self.broadcasts.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl MessageCoordinator for RecordingMessageCoordinator {
+        async fn send_to_player(
+            &self,
+            _player_id: &PlayerId,
+            _message: Arc<ServerMessage>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn broadcast_to_room(
+            &self,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
+        ) -> Result<()> {
+            self.broadcasts.lock().await.push(BroadcastEvent {
+                room_id: *room_id,
+                message: (*message).clone(),
+            });
+            Ok(())
+        }
+
+        async fn broadcast_to_room_except(
+            &self,
+            _room_id: &RoomId,
+            _except_player: &PlayerId,
+            _message: Arc<ServerMessage>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn register_local_client(
+            &self,
+            _player_id: PlayerId,
+            _room_id: Option<RoomId>,
+            _sender: mpsc::Sender<Arc<ServerMessage>>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn unregister_local_client(&self, _player_id: &PlayerId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn should_process_message(&self, _message: &SequencedMessage) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn mark_message_processed(&self, _message: &SequencedMessage) -> Result<()> {
+            Ok(())
+        }
+
+        async fn handle_bus_message(&self, _message: SequencedMessage) -> Result<()> {
+            Ok(())
+        }
+
+        async fn handle_membership_update(&self, _update: MembershipUpdate) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopDistributedLock;
+
+    #[async_trait]
+    impl DistributedLock for NoopDistributedLock {
+        async fn acquire(&self, key: &str, ttl: Duration) -> Result<LockHandle> {
+            Ok(LockHandle::new(key.to_string(), ttl))
+        }
+
+        async fn try_acquire(&self, key: &str, ttl: Duration) -> Result<Option<LockHandle>> {
+            Ok(Some(LockHandle::new(key.to_string(), ttl)))
+        }
+
+        async fn extend(&self, _handle: &LockHandle, _ttl: Duration) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn release(&self, _handle: &LockHandle) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn is_locked(&self, _key: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn cleanup_expired_locks(&self) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct MemberSnapshot {
+        name: String,
+        is_authority: bool,
+        connection_info: serde_json::Value,
+    }
+
+    fn player_fixture(
+        id: PlayerId,
+        name: &str,
+        is_authority: bool,
+        connection_info: Option<ConnectionInfo>,
+    ) -> PlayerInfo {
+        PlayerInfo {
+            id,
+            name: name.to_string(),
+            is_authority,
+            is_ready: false,
+            connected_at: chrono::Utc::now(),
+            connection_info,
+            region_id: "test-region".to_string(),
+        }
+    }
+
+    fn member_snapshot(player: &PlayerInfo) -> MemberSnapshot {
+        MemberSnapshot {
+            name: player.name.clone(),
+            is_authority: player.is_authority,
+            connection_info: serde_json::to_value(&player.connection_info)
+                .expect("connection info serializes"),
+        }
+    }
+
+    fn peer_snapshot(peer: &PeerConnectionInfo) -> MemberSnapshot {
+        MemberSnapshot {
+            name: peer.player_name.clone(),
+            is_authority: peer.is_authority,
+            connection_info: serde_json::to_value(&peer.connection_info)
+                .expect("connection info serializes"),
+        }
+    }
+
+    fn finalized_member_map(members: &[PlayerInfo]) -> BTreeMap<PlayerId, MemberSnapshot> {
+        members
+            .iter()
+            .map(|player| (player.id, member_snapshot(player)))
+            .collect()
+    }
+
+    fn peer_connection_map(peers: &[PeerConnectionInfo]) -> BTreeMap<PlayerId, MemberSnapshot> {
+        peers
+            .iter()
+            .map(|peer| (peer.player_id, peer_snapshot(peer)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn handle_player_ready_finalizes_with_member_snapshot_matching_game_starting_peers() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+        );
+        let authority = PlayerId::from_u128(0x11111111111111111111111111111111);
+        let peer_a = PlayerId::from_u128(0x22222222222222222222222222222222);
+        let peer_b = PlayerId::from_u128(0x33333333333333333333333333333333);
+        const PLAYER_COUNT: u8 = 3;
+        let players = [authority, peer_a, peer_b];
+
+        let room = database
+            .create_room(
+                "finalize-game".to_string(),
+                Some("FINAL1".to_string()),
+                PLAYER_COUNT,
+                true,
+                authority,
+                "custom-relay".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+
+        assert!(database
+            .update_player_name(&room.id, &authority, "Authority")
+            .await
+            .expect("authority name update succeeds"));
+        assert!(database
+            .update_player_connection_info(
+                &room.id,
+                &authority,
+                ConnectionInfo::Direct {
+                    host: "10.0.0.1".to_string(),
+                    port: 7777,
+                },
+            )
+            .await
+            .expect("authority connection update succeeds"));
+
+        for player in [
+            player_fixture(
+                peer_a,
+                "Peer A",
+                false,
+                Some(ConnectionInfo::WebRTC {
+                    sdp: Some("offer-sdp".to_string()),
+                    ice_candidates: vec!["candidate-a".to_string()],
+                }),
+            ),
+            player_fixture(peer_b, "Peer B", false, None),
+        ] {
+            assert!(database
+                .add_player_to_room(&room.id, player)
+                .await
+                .expect("adding player succeeds"));
+        }
+
+        database
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("lobby transition succeeds");
+
+        for player_id in [authority, peer_a] {
+            let result = ready_coordinator
+                .handle_player_ready(&room.id, &player_id, None)
+                .await
+                .expect("ready toggle succeeds");
+            assert!(
+                result.is_none(),
+                "room should not finalize until every player is ready"
+            );
+        }
+
+        let finalized = ready_coordinator
+            .handle_player_ready(&room.id, &peer_b, None)
+            .await
+            .expect("final ready toggle succeeds")
+            .expect("last ready toggle finalizes the room");
+
+        let broadcasts = coordinator.broadcasts().await;
+        assert_eq!(
+            broadcasts.len(),
+            4,
+            "three ready toggles should broadcast lobby state, and finalization should broadcast GameStarting"
+        );
+        assert!(
+            broadcasts.iter().all(|event| event.room_id == room.id),
+            "every broadcast should target the finalized room"
+        );
+
+        for event in &broadcasts[..2] {
+            assert!(
+                matches!(
+                    &event.message,
+                    ServerMessage::LobbyStateChanged {
+                        lobby_state: LobbyState::Lobby,
+                        all_ready: false,
+                        ..
+                    }
+                ),
+                "non-final ready toggles must broadcast non-final lobby state: {:?}",
+                event.message
+            );
+        }
+
+        match &broadcasts[2].message {
+            ServerMessage::LobbyStateChanged {
+                lobby_state,
+                ready_players,
+                all_ready,
+            } => {
+                assert_eq!(*lobby_state, LobbyState::Lobby);
+                assert_eq!(ready_players.len(), players.len());
+                assert!(*all_ready);
+            }
+            other => panic!("expected final LobbyStateChanged before GameStarting, got {other:?}"),
+        }
+
+        let peer_connections = match &broadcasts[3].message {
+            ServerMessage::GameStarting { peer_connections } => peer_connections,
+            other => panic!("expected GameStarting after final LobbyStateChanged, got {other:?}"),
+        };
+
+        assert_eq!(finalized.game_name, "finalize-game");
+        assert_eq!(finalized.authority_player, Some(authority));
+        assert_eq!(finalized.members.len(), players.len());
+        assert_eq!(
+            finalized_member_map(&finalized.members),
+            peer_connection_map(peer_connections),
+            "FinalizedRoom members must match the same room-player snapshot used for GameStarting peers"
+        );
+        assert!(
+            peer_connections
+                .iter()
+                .all(|peer| peer.relay_type == "custom-relay"),
+            "peer connections must carry the finalized room relay type"
+        );
     }
 }
