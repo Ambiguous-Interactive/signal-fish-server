@@ -236,8 +236,10 @@ pub enum ServerMessage {
     /// A new peer is available for a direct (WebRTC) connection (v3 only).
     ///
     /// `you_initiate` designates exactly one side of each pair as the offerer,
-    /// avoiding glare (Appendix E mesh rule: the recipient initiates iff its id
-    /// is the lesser of the two UUIDs).
+    /// avoiding glare. In `mesh` topology the recipient initiates iff its id is
+    /// the lesser of the two UUIDs (Appendix E glare rule); in `host` topology
+    /// the direction is fixed — the client initiates to the host and the host
+    /// answers, regardless of UUID order.
     NewPeer {
         peer_id: PlayerId,
         you_initiate: bool,

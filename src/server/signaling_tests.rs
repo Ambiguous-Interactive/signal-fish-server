@@ -1266,8 +1266,9 @@ async fn pair_webrtc_peer_with_host_host_joiner_pairs_every_client() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_restores_room_membership_and_webrtc_pairing() {
-    // Reconnect re-pairing is now finalization + topology gated: only a Finalized
-    // room with a non-relay plan re-pairs via NewPeer. Set up a mesh server and a
+    // Reconnect re-pairing is now finalization + transport gated: only a Finalized
+    // room whose plan uses the WebRTC transport re-pairs via NewPeer (mesh+webrtc
+    // here; a non-relay `host+direct` plan would not). Set up a mesh server and a
     // finalized 2-player room so the reconnecting peer is re-meshed with the
     // existing peer.
     let server = create_test_server_with_session(mesh_session_config()).await;

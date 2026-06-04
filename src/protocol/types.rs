@@ -154,10 +154,12 @@ pub struct SessionPeer {
     /// `false`. In `mesh` it reflects the room's designated authority flag and is
     /// informational only (mesh has no central host).
     pub is_authority: bool,
-    /// Whether the recipient sends the WebRTC offer to this peer.
+    /// Whether the recipient sends the WebRTC offer to this peer ("you send the
+    /// offer to this peer"), so exactly one side of each pair offers.
     ///
-    /// Computed per recipient by the deterministic glare rule (Appendix E) so
-    /// exactly one side of each pair offers: "you send the offer to this peer".
+    /// In `mesh` topology this follows the deterministic glare rule (Appendix E:
+    /// the lesser UUID initiates); in `host` topology the direction is fixed —
+    /// each client initiates to the host and the host answers.
     pub initiate: bool,
 }
 

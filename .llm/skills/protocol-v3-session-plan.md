@@ -55,8 +55,20 @@ start WebRTC negotiation for a LAN session.
 - `emit_session_plan` advertises ICE servers only for a WebRTC transport, and skips
   emission entirely on the relay floor (`is_relay()`).
 
+The two gates are distinct and must not be conflated: `is_relay()` (topology) gates
+`SessionPlan` emission — which a `Host + Direct` room _does_ receive — while
+`uses_webrtc_signaling()` (transport) gates `NewPeer` / `Signal`, which it does
+**not**. Their truth table over the four legal pairs is pinned by the
+`emission_gates_track_relay_topology_and_webrtc_transport` test.
+
 Prefer the `is_relay()` / `uses_webrtc_signaling()` accessors over ad-hoc
-`topology ==` comparisons at every decision point.
+`topology ==` comparisons at every decision point. When documenting these gates in
+prose (module docs, CHANGELOG, wire-type docs), **defer to the accessor name**
+rather than re-deriving the condition as "non-relay" / "non-WebRTC" — that
+independent restatement is exactly what drifted (a "non-relay" plan is not the same
+set as a "WebRTC" plan; `Host + Direct` is the discriminator). Likewise, document
+`initiate` / `you_initiate` direction per topology: mesh follows the UUID glare rule,
+host fixes it (client offers, host answers).
 
 ## Config validation (`SessionConfig::validate`)
 

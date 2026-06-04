@@ -7,12 +7,15 @@
 //!
 //! Initial pairing for a freshly finalized lobby is delivered by the
 //! per-recipient `SessionPlan` (see `session_policy.rs`); `NewPeer` is reserved
-//! for the late-join / reconnect case. A room is "active" iff its
-//! `lobby_state == Finalized` AND its recomputed plan is non-relay, so late join
-//! is finalization-gated and topology-aware (mesh pairs every peer; host pairs
-//! clients with the host only; relay-resolved rooms emit none — PLAN Appendix L
-//! decision #4, Appendix E). Every code path is gated on negotiated v3 + WebRTC
-//! capability so v2 clients never observe `Signal`/`NewPeer` (Appendix K).
+//! for the late-join / reconnect case. Late-join pairing fires iff the room's
+//! `lobby_state == Finalized` AND its recomputed plan uses the WebRTC transport
+//! (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == WebRtc`) —
+//! so it is finalization-gated and transport-gated, then shaped by topology
+//! (mesh pairs every peer; host pairs clients with the host only). Both the
+//! relay floor *and* a `Host + Direct` (LAN) session emit none — even though
+//! `Host + Direct` is a non-relay *topology* — PLAN Appendix L decision #4,
+//! Appendix E. Every code path is gated on negotiated v3 + WebRTC capability so
+//! v2 clients never observe `Signal`/`NewPeer` (Appendix K).
 
 use std::sync::Arc;
 

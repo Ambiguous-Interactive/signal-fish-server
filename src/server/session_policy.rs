@@ -241,6 +241,12 @@ impl SessionPlanDecision {
     /// A relay-floor room emits no `SessionPlan` (v3 clients relay exactly like
     /// v2). Equivalent to the transport being [`Transport::Relay`]: the floor is
     /// the only legal relay pairing ([`is_valid_pair`]).
+    ///
+    /// This is **not** the same gate as [`Self::uses_webrtc_signaling`]: a
+    /// `Host + Direct` plan is non-relay (so it *does* receive a `SessionPlan`)
+    /// yet is non-WebRTC (so it emits no `NewPeer`/`Signal`). The two gates'
+    /// truth table over the four legal pairs is pinned by the
+    /// `emission_gates_track_relay_topology_and_webrtc_transport` test.
     #[must_use]
     pub(crate) fn is_relay(&self) -> bool {
         self.topology == Topology::Relay
@@ -251,8 +257,10 @@ impl SessionPlanDecision {
     /// This is the gate for emitting `Signal` / `NewPeer` control messages: it is
     /// true **iff** the chosen transport is [`Transport::WebRtc`]. A `Host + Direct`
     /// (LAN) plan is non-relay yet is *not* WebRTC, so it must never trigger WebRTC
-    /// pairing — keying off topology alone would misfire (see
-    /// [`EnhancedGameServer::handle_webrtc_late_join`]).
+    /// pairing — keying off topology (or [`Self::is_relay`]) alone would misfire
+    /// (see [`EnhancedGameServer::handle_webrtc_late_join`]). The truth table
+    /// versus [`Self::is_relay`] is pinned by the
+    /// `emission_gates_track_relay_topology_and_webrtc_transport` test.
     #[must_use]
     pub(crate) fn uses_webrtc_signaling(&self) -> bool {
         self.transport == Transport::WebRtc

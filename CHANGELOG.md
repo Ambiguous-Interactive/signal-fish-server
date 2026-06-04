@@ -42,11 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clients offer to the host, the host offers to none). A room that resolves to the relay floor
   emits no `SessionPlan` and behaves byte-identically to v2 — v2 (and v3-relay-only) clients never
   receive one. Initial pairing is delivered exclusively by this `SessionPlan` at finalize; the
-  late-join / reconnect `ServerMessage::NewPeer` path is now finalization-gated and topology-aware
-  (it fires only for a join or reconnect into an already-`Finalized` room and pairs per the room's
-  recomputed plan: mesh pairs the joiner with every other WebRTC peer, host pairs a client with the
-  elected host only — clients never offer to each other — and a relay-resolved room emits no
-  `NewPeer`). This supersedes the P2 behavior where `NewPeer` fired on every lobby-fill join. Added
+  late-join / reconnect `ServerMessage::NewPeer` path is now finalization-gated and transport-gated
+  (it fires only for a join or reconnect into an already-`Finalized` room whose recomputed plan uses
+  the WebRTC transport, then pairs per the plan's topology: mesh pairs the joiner with every other
+  WebRTC peer, host pairs a client with the elected host only — clients never offer to each other —
+  while a non-WebRTC plan, the relay floor _or_ a `host+direct` (LAN) session, emits no `NewPeer`).
+  This supersedes the P2 behavior where `NewPeer` fired on every lobby-fill join. Added
   a `[session]` config block (`default_topology`, `game_topology_mappings`, `enable_webrtc`,
   `enable_direct`, `ice_servers`) with validation; the new `IceServer`, `SessionPeer`, and
   `SessionPlanPayload` types are additive over the frozen v2 wire format (`host`/`ice_servers`/
@@ -56,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.
   On room join, existing v3 WebRTC peers and the joiner are paired via `ServerMessage::NewPeer
   { peer_id, you_initiate }`, where the deterministic glare rule (lesser UUID initiates) designates
-  exactly one offerer per pair. Same-room enforcement, WebRTC-transport negotiation, and a
+  exactly one offerer per pair; P3's host topology later fixes this direction for star sessions
+  (the client offers, the host answers). Same-room enforcement, WebRTC-transport negotiation, and a
   per-connection valid-signal rate limit (`rate_limit.max_signals`, default 600) are enforced.
   Rejected signal attempts use a separate `rate_limit.max_signal_errors` budget (default 60) so
   invalid targets and unsupported transports cannot bypass rate limiting or consume the valid ICE
@@ -85,7 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == webrtc`) rather than its _topology_,
   so a `host+direct` (LAN) room — a non-relay topology whose transport is not WebRTC — no longer pushes
   clients into WebRTC negotiation. This mirrors `emit_session_plan`, which advertises ICE only for a
-  WebRTC transport.
+  WebRTC transport. The two emission gates (`is_relay` for `SessionPlan`, `uses_webrtc_signaling` for
+  `NewPeer`/`Signal`) and their `host+direct` divergence are now pinned by a data-driven truth-table
+  test, and the module/protocol doc comments corrected to describe the late-join gate as the WebRTC
+  transport rather than a "non-relay" plan (a `host+direct` room is non-relay yet emits no `NewPeer`).
 - Hardened `session.ice_servers` validation to reject any blank or whitespace-only URL (even alongside
   valid ones) and to report an empty `urls` list distinctly, instead of accepting a server as long as
   a single URL was non-blank. Blank URLs are propagated verbatim to clients and break `RTCIceServer`

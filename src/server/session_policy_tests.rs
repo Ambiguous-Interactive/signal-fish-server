@@ -24,7 +24,8 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
 use super::session_policy::{
-    choose_session_plan, elect_host, is_valid_pair, SessionMember, RELAY_FLOOR, UPGRADE_LADDER,
+    choose_session_plan, elect_host, is_valid_pair, SessionMember, SessionPlanDecision,
+    RELAY_FLOOR, UPGRADE_LADDER,
 };
 
 // ---------------------------------------------------------------------------
@@ -582,6 +583,60 @@ fn ladder_is_the_documented_adr_waterfall() {
     assert!(!is_valid_pair(Topology::Host, Transport::Relay));
     assert!(!is_valid_pair(Topology::Relay, Transport::WebRtc));
     assert!(!is_valid_pair(Topology::Relay, Transport::Direct));
+}
+
+/// Pins the two emission gates' truth table across all four legal pairs, derived
+/// from the single source of truth ([`UPGRADE_LADDER`] plus [`RELAY_FLOOR`]) so a
+/// ladder edit reshapes it automatically (mirrors [`is_valid_pair`]).
+///
+/// Distinct from `selection_only_ever_yields_a_legal_pair`, which reads the
+/// `topology` / `transport` fields and so cannot catch an inverted accessor body:
+/// this calls `is_relay()` / `uses_webrtc_signaling()` directly. It pins the
+/// discriminator the doc drift hinged on — `Host + Direct` is non-relay yet
+/// non-WebRTC (it gets a `SessionPlan` but no `NewPeer`).
+#[test]
+fn emission_gates_track_relay_topology_and_webrtc_transport() {
+    let mut non_relay_non_webrtc = Vec::new();
+
+    for (topology, transport) in UPGRADE_LADDER
+        .into_iter()
+        .chain(std::iter::once(RELAY_FLOOR))
+    {
+        let decision = SessionPlanDecision {
+            topology,
+            transport,
+            host: None,
+            ice_servers: Vec::new(),
+            members: Vec::new(),
+        };
+
+        assert_eq!(
+            decision.is_relay(),
+            topology == Topology::Relay,
+            "is_relay() must be true iff the topology is Relay ({topology:?}/{transport:?})",
+        );
+        assert_eq!(
+            decision.uses_webrtc_signaling(),
+            transport == Transport::WebRtc,
+            "uses_webrtc_signaling() must be true iff the transport is WebRtc \
+             ({topology:?}/{transport:?})",
+        );
+
+        if !decision.is_relay() && !decision.uses_webrtc_signaling() {
+            non_relay_non_webrtc.push((topology, transport));
+        }
+    }
+
+    // The whole point of two separate gates: a non-relay plan does NOT imply
+    // WebRTC signaling. `Host + Direct` is the discriminating rung — gating
+    // late-join `NewPeer` on `is_relay()` (instead of `uses_webrtc_signaling()`)
+    // would wrongly push a LAN session into WebRTC negotiation.
+    assert_eq!(
+        non_relay_non_webrtc,
+        vec![(Topology::Host, Transport::Direct)],
+        "exactly one legal pair is non-relay yet non-WebRTC: Host + Direct (a \
+         SessionPlan is emitted but no NewPeer/Signal)",
+    );
 }
 
 // ---------------------------------------------------------------------------
