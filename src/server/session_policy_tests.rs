@@ -34,9 +34,8 @@ use super::session_policy::{
 /// A fixed, deterministic base instant for test fixtures.
 ///
 /// Using a constant instead of `Utc::now()` keeps the pure-logic tests
-/// reproducible (host-election tie-breaks never depend on real-clock skew) and
-/// free of wall-clock syscalls, so they run identically under Miri's isolated
-/// interpreter, which cannot service `clock_gettime(REALTIME)`.
+/// reproducible: host-election tie-breaks resolve on the fixture data alone and
+/// never depend on real-clock skew between two `Utc::now()` calls.
 fn base_time() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp is valid")
 }

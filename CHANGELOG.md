@@ -122,6 +122,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Simplified the Miri (Advanced Safety) job to run with `MIRIFLAGS=-Zmiri-disable-isolation`,
+  which lets the interpreter service wall-clock (`clock_gettime`), entropy (`getrandom`), and
+  `getcwd` syscalls instead of aborting on them. This structurally eliminates the entire
+  "test reached an isolated syscall" failure class, so the bespoke guard for it — a discovery
+  scanner (`scripts/check-miri-compat.sh`), its parser-contract regression
+  (`tests/miri_compat_gate_tests.rs`), the blocking `test_wall_clock_tests_ignored_under_miri`
+  check, the CI pre-flight step, and ~30 per-test `#[cfg_attr(miri, ignore)]` annotations — was
+  removed. Ordinary time/UUID-using unit tests — including `tokio::spawn` concurrency tests on the
+  default current-thread runtime, a useful target for Miri's data-race detection — now run under
+  Miri (increasing undefined-behavior coverage); only `proptest!` cases stay annotated for this
+  reason (hundreds of generated cases are too slow under the interpreter). Pre-existing
+  `#[cfg_attr(miri, ignore)]` annotations on async tests that need real I/O, timers, or multi-thread
+  runtimes are unrelated and untouched. A new `test_ci_safety_runs_miri_with_isolation_disabled`
+  pins the flag against regression.
 - Moved the optional feature compile matrix out of the default Rust test suite and into a single CI script step to avoid
   repeated nested Cargo builds in nextest, coverage, MSRV, Miri, and sanitizer jobs.
 - Upgraded `sha2` from `0.10.9` to `0.11.0` and `hmac` from `0.12.1` to `0.13.0-rc.6` to align

@@ -6,7 +6,8 @@
   | Core
 -->
 
-**Trigger**: When editing `server/session_policy.rs`, `server/signaling.rs`, or any code that reads a `SessionPlanDecision` / `SessionPlanPayload`.
+**Trigger**: When editing `server/session_policy.rs`, `server/signaling.rs`, or any
+code that reads a `SessionPlanDecision` / `SessionPlanPayload`.
 
 ---
 
@@ -46,7 +47,7 @@ the exhaustive `selection_only_ever_yields_a_legal_pair` test. Never hand-build 
 `Signal` and `NewPeer` are WebRTC-signaling control messages. Decisions to emit
 them must gate on the **transport**, via `SessionPlanDecision::uses_webrtc_signaling`
 (`transport == WebRtc`) — never on topology alone. `Host + Direct` is a non-relay
-*topology* whose transport is **not** WebRTC, so keying off topology would wrongly
+_topology_ whose transport is **not** WebRTC, so keying off topology would wrongly
 start WebRTC negotiation for a LAN session.
 
 - `handle_webrtc_late_join` checks `uses_webrtc_signaling()` before shaping pairing

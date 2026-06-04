@@ -8996,17 +8996,25 @@ fn test_ci_safety_pr_triggers_are_code_scoped() {
 }
 
 #[test]
-fn test_ci_safety_runs_miri_compat_preflight() {
+fn test_ci_safety_runs_miri_with_isolation_disabled() {
+    // The Miri job runs with `-Zmiri-disable-isolation`. This is what
+    // structurally eliminates the entire "test reached an isolated syscall"
+    // failure class (wall-clock `clock_gettime`, entropy `getrandom`, `getcwd`):
+    // with isolation off, the interpreter services those syscalls instead of
+    // aborting the test binary, so ordinary time/UUID-using unit tests run under
+    // Miri without per-test annotations or a separate compatibility scanner.
+    // Guard the flag here so the class cannot silently regress.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
 
     assert!(
-        content.contains("bash scripts/check-miri-compat.sh"),
-        "ci-safety.yml should run scripts/check-miri-compat.sh before the slow \
-         Miri interpreter step so incompatible tests fail fast with local \
-         remediation guidance. Invoke through bash so CI does not depend on \
-         checkout executable-bit metadata.\nFile: {}",
+        content.contains("-Zmiri-disable-isolation"),
+        "ci-safety.yml must run Miri with MIRIFLAGS=-Zmiri-disable-isolation so \
+         wall-clock / entropy / getcwd syscalls do not abort the interpreter. \
+         Without it, any unit test reaching Utc::now()/SystemTime::now()/getrandom \
+         re-introduces the isolation failure class this flag was added to kill.\n\
+         File: {}",
         workflow_path.display()
     );
 }
@@ -11889,13 +11897,15 @@ fn test_proptest_tests_ignored_under_miri() {
     // This test ensures that all `#[test]` functions inside `proptest!` blocks
     // have `#[cfg_attr(miri, ignore)]` annotations.
     //
-    // Background: Proptest's failure-persistence layer calls `std::env::current_dir()`
-    // to absolutize source file paths. Miri blocks `getcwd` in isolation mode,
-    // causing the entire test binary to abort. This is not a per-test failure --
-    // it kills every test in the binary.
+    // Background: a proptest case runs hundreds of generated inputs per test.
+    // Under Miri's interpreter (10-50x slower) that is far too slow for the job's
+    // time budget, and proptest's input-space exploration is orthogonal to Miri's
+    // purpose (detecting undefined behavior on one concrete execution). So each
+    // `#[test]` inside a `proptest!` block stays annotated `#[cfg_attr(miri,
+    // ignore)]` to keep the Miri job fast and focused.
     //
-    // The fix is to annotate each `#[test]` inside a `proptest!` block with
-    // `#[cfg_attr(miri, ignore)]` so Miri skips those tests entirely.
+    // (Ordinary tests need no annotation: the Miri job runs with
+    // `-Zmiri-disable-isolation`, so wall-clock / entropy / getcwd syscalls work.)
 
     let root = repo_root();
     let src_dir = root.join("src");
@@ -12021,16 +12031,13 @@ fn test_proptest_tests_ignored_under_miri() {
              - Tests with #[cfg_attr(miri, ignore)]: {}\n\
              - Tests missing annotation: {}\n\n\
              Why this is required:\n\
-             - Proptest's failure-persistence layer calls std::env::current_dir()\n\
-             - Miri blocks getcwd in isolation mode\n\
-             - This aborts the ENTIRE test binary, not just one test\n\
+             - A proptest test runs hundreds of generated cases per test\n\
+             - Under Miri's interpreter (10-50x slower) that blows the job's time budget\n\
+             - Proptest's input-space exploration is orthogonal to Miri's UB detection\n\
              - Adding #[cfg_attr(miri, ignore)] skips the test under Miri\n\n\
              Fix: Add #[cfg_attr(miri, ignore)] to each #[test] inside proptest! blocks.\n\
-             Also add an explanatory comment above the proptest! macro:\n\
-             // NOTE: All proptest tests are excluded from Miri runs via\n\
-             // `#[cfg_attr(miri, ignore)]`. Proptest's failure-persistence layer calls\n\
-             // `std::env::current_dir()` (getcwd), which is blocked by Miri isolation\n\
-             // and aborts the entire test binary.",
+             Also add an explanatory comment on each annotation, e.g.:\n\
+             // proptest runs hundreds of cases — too slow under Miri",
             violations.join("\n"),
             total_proptest_blocks,
             total_tests_in_proptest,
@@ -12040,56 +12047,13 @@ fn test_proptest_tests_ignored_under_miri() {
     }
 }
 
-#[test]
-#[cfg(unix)]
-fn test_wall_clock_tests_ignored_under_miri() {
-    // Blocking, discovery-based regression guard for the Miri wall-clock class.
-    //
-    // This replaces a hand-maintained allow-list of test names (which silently
-    // missed wall-clock calls reached through fixture helpers — the exact gap
-    // that let a Miri break slip into CI). The authoritative logic lives in
-    // scripts/check-miri-compat.sh, which walks every test module and follows
-    // helper calls transitively. Running the same script here (a required check)
-    // and as the Advanced Safety (Miri) pre-flight keeps the two in lockstep.
-    //
-    // Gated to unix: the script needs bash + python3, which the Windows CI
-    // runners lack. The check inspects platform-independent Rust source, so
-    // running it on the Linux/macOS legs fully covers the guarantee. The
-    // dedicated parser-contract regression lives in tests/miri_compat_gate_tests.rs.
-    let root = repo_root();
-    let script = root.join("scripts/check-miri-compat.sh");
-    assert!(
-        script.exists(),
-        "scripts/check-miri-compat.sh must exist to guard Miri wall-clock compatibility"
-    );
-
-    let output = bash_command()
-        .arg(&script)
-        .current_dir(&root)
-        .output()
-        .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    match output.status.code() {
-        Some(0) => {}
-        // Exit 2 is an environment error (python3 missing), not a real violation;
-        // surface that distinctly so the failure is not mislabeled as wall-clock.
-        Some(2) => panic!(
-            "check-miri-compat.sh could not run (python3 unavailable). Install python3 \
-             so the Miri wall-clock guard can execute.\nstderr: {stderr}"
-        ),
-        _ => panic!(
-            "Non-ignored library tests must not reach a wall-clock call (Utc::now / \
-             SystemTime::now): Miri runs the library tests with isolation enabled and \
-             clock_gettime(CLOCK_REALTIME) aborts the whole run.\n\
-             Fix each finding by replacing the wall-clock call with a deterministic \
-             constant (preferred — keeps the test running under Miri) or adding \
-             #[cfg_attr(miri, ignore)].\n\n\
-             --- check-miri-compat.sh stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-        ),
-    }
-}
+// The Miri wall-clock guard (a discovery scanner + this blocking test) was
+// retired when the Advanced Safety (Miri) job adopted `-Zmiri-disable-isolation`.
+// With isolation disabled the interpreter services clock_gettime/getrandom/getcwd
+// directly, so a unit test reaching Utc::now()/SystemTime::now() can no longer
+// abort the run — there is nothing left for a per-test annotation guard to
+// enforce. The surviving regression guard is
+// `test_ci_safety_runs_miri_with_isolation_disabled`, which pins the flag.
 
 // ============================================================================
 // Bash Code Block Validation Tests

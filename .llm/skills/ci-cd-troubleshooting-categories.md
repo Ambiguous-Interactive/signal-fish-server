@@ -200,8 +200,13 @@ Before committing workflow changes, verify:
 
 ### Category 9: Miri Isolation Failures for Wall-Clock Time
 
-**Example:** `chrono::Utc::now()` blocks Miri's isolation, aborting all tests in binary
-**Prevention:** `#[cfg_attr(miri, ignore)]` on any test calling wall-clock APIs
+**Example:** `chrono::Utc::now()` / `getrandom` / `getcwd` abort the test binary when
+Miri runs with isolation enabled (the default)
+**Prevention:** The Miri job runs with `MIRIFLAGS=-Zmiri-disable-isolation`, so the
+interpreter services those syscalls instead of aborting. This kills the whole class
+structurally — no per-test annotation or scanner needed. Miri still detects undefined
+behavior, data races, and memory errors; only logic determinism (which is not its job)
+is traded away. `test_ci_safety_runs_miri_with_isolation_disabled` pins the flag.
 
 ### Category 10: POSIX Shell Portability
 
