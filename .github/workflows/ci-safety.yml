@@ -112,6 +112,8 @@ jobs:
     timeout-minutes: 45
     # Staged: non-blocking until promoted to a required check
     continue-on-error: true
+    env:
+      CARGO_TARGET_DIR: target/miri
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
@@ -124,7 +126,10 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          prefix-key: "ci-safety-nightly"
+          # v2 invalidates stale target caches that included trybuild's
+          # target/tests workspaces, which produced noisy rust-cache ENOENTs.
+          prefix-key: "ci-safety-nightly-v2"
+          workspaces: ". -> target/miri"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Setup Miri
@@ -146,6 +151,7 @@ jobs:
           echo "Running Miri on library unit tests (isolation disabled)..."
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
@@ -159,6 +165,7 @@ jobs:
           echo "ref: ${{ github.ref }}"
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           if [ ! -f miri-output.txt ]; then
             echo "miri-output.txt is missing"
             exit 0
@@ -203,6 +210,9 @@ jobs:
     timeout-minutes: 30
     # Staged: non-blocking until promoted to a required check
     continue-on-error: true
+    env:
+      ASAN_OPTIONS: "detect_odr_violation=0"
+      CARGO_TARGET_DIR: target/asan
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
@@ -214,7 +224,10 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          prefix-key: "ci-safety-nightly"
+          # v2 invalidates stale target caches that included trybuild's
+          # target/tests workspaces, which produced noisy rust-cache ENOENTs.
+          prefix-key: "ci-safety-nightly-v2"
+          workspaces: ". -> target/asan"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Run tests with AddressSanitizer
@@ -223,13 +236,11 @@ jobs:
           echo "Running tests with AddressSanitizer enabled..."
           echo "AddressSanitizer detects memory errors: use-after-free, buffer overflow,"
           echo "stack buffer overflow, and memory leaks."
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           RUSTFLAGS="-Z sanitizer=address" \
             cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu \
             --all-features --no-fail-fast 2>&1 | tee asan-output.txt
           echo "AddressSanitizer analysis complete."
-        env:
-          # AddressSanitizer needs these environment variables
-          ASAN_OPTIONS: "detect_odr_violation=0"
 
       - name: Diagnose AddressSanitizer failures
         if: failure()
@@ -242,6 +253,7 @@ jobs:
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
           echo "ASAN_OPTIONS: ${ASAN_OPTIONS:-<unset>}"
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           if [ ! -f asan-output.txt ]; then
             echo "asan-output.txt is missing"
             exit 0
@@ -251,9 +263,6 @@ jobs:
             asan-output.txt || true
           echo "=== asan-output.txt tail -n 200 ==="
           tail -n 200 asan-output.txt
-        env:
-          ASAN_OPTIONS: "detect_odr_violation=0"
-
       - name: Upload AddressSanitizer output
         if: always()
         uses: actions/upload-artifact@v7.0.1

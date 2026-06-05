@@ -12,6 +12,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Environment variables from instrumented parent Cargo processes that should
+/// not leak into shell-script tests unless a test explicitly re-adds them.
+const NESTED_CARGO_ENV_VARS: &[&str] = &[
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_TARGET_DIR",
+    "ASAN_OPTIONS",
+    "LSAN_OPTIONS",
+    "UBSAN_OPTIONS",
+    "TSAN_OPTIONS",
+    "MIRIFLAGS",
+];
+
 /// Return the repository root (Cargo manifest directory).
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -39,6 +53,14 @@ pub fn write_file(path: &Path, content: &str) {
     fs::write(path, content).unwrap_or_else(|e| panic!("Failed to write {}: {e}", path.display()));
 }
 
+/// Remove inherited Cargo instrumentation from commands that may run nested
+/// Cargo through repository shell scripts.
+pub fn scrub_nested_cargo_env(command: &mut Command) {
+    for var in NESTED_CARGO_ENV_VARS {
+        command.env_remove(var);
+    }
+}
+
 /// Build a [`Command`] that invokes `bash`.
 ///
 /// On Windows, looks up Git Bash at well-known install paths since the
@@ -52,7 +74,9 @@ pub fn bash_command() -> Command {
         ];
         for path in &candidates {
             if path.exists() {
-                return Command::new(path);
+                let mut command = Command::new(path);
+                scrub_nested_cargo_env(&mut command);
+                return command;
             }
         }
         panic!(
@@ -62,6 +86,8 @@ pub fn bash_command() -> Command {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("bash")
+        let mut command = Command::new("bash");
+        scrub_nested_cargo_env(&mut command);
+        command
     }
 }

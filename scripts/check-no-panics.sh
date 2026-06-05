@@ -21,6 +21,42 @@ warn() { echo "[no-panics] WARNING: $*" >&2; }
 
 FAILED=0
 
+NESTED_CARGO_TARGET_DIR="${NESTED_CARGO_TARGET_DIR:-$REPO_ROOT/target/no-panic-policy-scan}"
+NESTED_CARGO_ENV_VARS=(
+    RUSTFLAGS
+    CARGO_ENCODED_RUSTFLAGS
+    RUSTDOCFLAGS
+    CARGO_TARGET_DIR
+    ASAN_OPTIONS
+    LSAN_OPTIONS
+    UBSAN_OPTIONS
+    TSAN_OPTIONS
+    MIRIFLAGS
+)
+
+run_nested_cargo() {
+    local inherited=()
+    local var
+    for var in "${NESTED_CARGO_ENV_VARS[@]}"; do
+        if [ -n "${!var+x}" ]; then
+            inherited+=("$var")
+        fi
+    done
+
+    if [ "${#inherited[@]}" -gt 0 ]; then
+        log "Scrubbing inherited Cargo instrumentation env for nested Cargo: ${inherited[*]}"
+    fi
+    log "Nested Cargo target dir: $NESTED_CARGO_TARGET_DIR"
+
+    (
+        for var in "${NESTED_CARGO_ENV_VARS[@]}"; do
+            unset "$var"
+        done
+        export CARGO_TARGET_DIR="$NESTED_CARGO_TARGET_DIR"
+        cargo "$@"
+    )
+}
+
 # ============================================================================
 # CLIPPY CHECKS - Deny panic-related lints
 # ============================================================================
@@ -43,7 +79,7 @@ check_clippy() {
     # - clippy::unimplemented: unimplemented!() macros
     # - clippy::unreachable: unreachable!() macros
     # - clippy::indexing_slicing: unchecked array/slice indexing
-    if cargo clippy --lib --bins --all-features -- \
+    if run_nested_cargo clippy --lib --bins --all-features -- \
         -D clippy::panic \
         -D clippy::unwrap_used \
         -D clippy::expect_used \
@@ -72,7 +108,7 @@ check_patterns() {
         return 0
     fi
 
-    if ! cargo test --test no_panic_policy_scan --quiet; then
+    if ! run_nested_cargo test --test no_panic_policy_scan --quiet; then
         error "Syn-based panic-prone macro scan failed"
         return 1
     fi

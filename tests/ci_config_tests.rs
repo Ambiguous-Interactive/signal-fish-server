@@ -7729,6 +7729,38 @@ fn test_bash_command_imports_match_platform_gating() {
 }
 
 #[test]
+fn test_bash_command_helper_scrubs_nested_cargo_instrumentation_env() {
+    let root = repo_root();
+    let helper_path = root.join("tests/common/mod.rs");
+    let content = read_file(&helper_path);
+
+    for required in [
+        "scrub_nested_cargo_env",
+        "command.env_remove(var)",
+        "\"RUSTFLAGS\"",
+        "\"CARGO_ENCODED_RUSTFLAGS\"",
+        "\"RUSTDOCFLAGS\"",
+        "\"CARGO_TARGET_DIR\"",
+        "\"ASAN_OPTIONS\"",
+        "\"LSAN_OPTIONS\"",
+        "\"UBSAN_OPTIONS\"",
+        "\"TSAN_OPTIONS\"",
+        "\"MIRIFLAGS\"",
+    ] {
+        assert!(
+            content.contains(required),
+            "tests/common::bash_command must scrub inherited Cargo \
+             instrumentation env vars by default.\n\
+             Without this, script tests that spawn nested Cargo can fail under \
+             ASan/Miri parents for reasons unrelated to the script under test.\n\
+             Missing required marker: `{required}`\n\
+             File: {}",
+            helper_path.display()
+        );
+    }
+}
+
+#[test]
 fn test_bash_command_import_platform_detector_data_driven_cases() {
     let cases = [
         (
@@ -13626,6 +13658,74 @@ fn test_ci_safety_runs_miri_with_isolation_disabled() {
 }
 
 #[test]
+fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for required in [
+        "CARGO_TARGET_DIR: target/miri",
+        "CARGO_TARGET_DIR: target/asan",
+        "prefix-key: \"ci-safety-nightly-v2\"",
+        "workspaces: \". -> target/miri\"",
+        "workspaces: \". -> target/asan\"",
+        "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}",
+    ] {
+        assert!(
+            content.contains(required),
+            "ci-safety.yml must isolate advanced-safety target directories and \
+             use a fresh cache epoch so stale trybuild target caches cannot \
+             cause rust-cache ENOENT noise.\n\
+             Missing required marker: `{required}`\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for required in [
+        "Run Miri on library tests",
+        "cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast",
+        "Run tests with AddressSanitizer",
+        "cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu",
+        "--all-features --no-fail-fast 2>&1 | tee asan-output.txt",
+    ] {
+        assert!(
+            content.contains(required),
+            "ci-safety.yml must keep broad Miri/ASan coverage; the nested Cargo \
+             failure class is handled by env scrubbing, not by dropping test \
+             targets from the safety jobs.\n\
+             Missing required marker: `{required}`\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
+
+    for forbidden in [
+        "MIRI_TEST_FILTERS=(",
+        "ASAN_TEST_TARGETS=(",
+        "--test ci_config_tests",
+        "--test public_api_privacy_tests",
+    ] {
+        assert!(
+            !content.contains(forbidden),
+            "ci-safety.yml must not use hand-maintained safety target filters. \
+             Such filters silently miss new runtime tests and can narrow coverage \
+             for unrelated failure classes.\n\
+             Found forbidden marker: `{forbidden}`\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
 fn test_ci_safety_workflow_uploads_artifacts() {
     // Validates that both safety jobs upload their output as artifacts.
     // Artifacts are critical for diagnosing safety findings even when
@@ -15670,11 +15770,31 @@ fn test_check_no_panics_script_structure() {
     let scanner_content = read_file(&scanner_path);
 
     assert!(
-        content.contains("cargo test --test no_panic_policy_scan"),
+        content.contains("run_nested_cargo test --test no_panic_policy_scan"),
         "check-no-panics.sh patterns mode must delegate Rust source analysis \
          to the syn-backed no_panic_policy_scan integration test instead of \
          parsing Rust with shell text filters."
     );
+
+    for required in [
+        "NESTED_CARGO_TARGET_DIR",
+        "run_nested_cargo",
+        "Scrubbing inherited Cargo instrumentation env",
+        "unset \"$var\"",
+        "export CARGO_TARGET_DIR=\"$NESTED_CARGO_TARGET_DIR\"",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "ASAN_OPTIONS",
+        "MIRIFLAGS",
+    ] {
+        assert!(
+            content.contains(required),
+            "check-no-panics.sh must scrub inherited sanitizer/Miri/Cargo \
+             instrumentation before running nested Cargo so ASan/Miri parents \
+             cannot poison the policy scan.\n\
+             Missing required marker: `{required}`"
+        );
+    }
 
     assert!(
         !content.contains("filter_test_code")
@@ -15713,15 +15833,36 @@ fn test_check_no_panics_script_patterns_pass() {
         .arg(&script)
         .arg("patterns")
         .current_dir(&root)
+        .env("RUSTFLAGS", "--cfg")
+        .env("CARGO_ENCODED_RUSTFLAGS", "--cfg")
+        .env("RUSTDOCFLAGS", "--cfg")
+        .env(
+            "CARGO_TARGET_DIR",
+            root.join("target").join("poisoned-parent-target"),
+        )
+        .env("ASAN_OPTIONS", "detect_odr_violation=0")
+        .env("MIRIFLAGS", "-Zmiri-poisoned-parent")
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "check-no-panics.sh patterns should pass on the current codebase.\n\
-         stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+         This regression runs with poisoned inherited Cargo instrumentation \
+         variables so the script must scrub them before invoking nested Cargo.\n\
+         stdout: {stdout}\nstderr: {stderr}",
+    );
+    assert!(
+        stdout.contains("Scrubbing inherited Cargo instrumentation env"),
+        "check-no-panics.sh should report when it scrubs inherited Cargo \
+         instrumentation variables.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Nested Cargo target dir:"),
+        "check-no-panics.sh should print the isolated nested Cargo target dir \
+         for diagnostics.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 
