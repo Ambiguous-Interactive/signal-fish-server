@@ -108,7 +108,7 @@ check_patterns() {
         return 0
     fi
 
-    if ! run_nested_cargo test --test --locked no_panic_policy_scan --quiet; then
+    if ! run_nested_cargo test --locked --test  no_panic_policy_scan --quiet; then
         error "Syn-based panic-prone macro scan failed"
         return 1
     fi
