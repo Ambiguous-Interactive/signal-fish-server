@@ -123,7 +123,7 @@ catch formatting, clippy, tests, docs, and policy failures through the mandatory
 and `./scripts/run-local-ci.sh`, not by relying on hooks to run slow semantic checks.
 When debugging hooks, run the PowerShell runner directly. Native helper functions must
 return exactly one object; discard async task completion values with `[void]` so callers
-can always read `.ExitCode`.
+can always read `.ExitCode`. Rust-source policy automation should parse Rust, not strip literals by hand.
 
 ---
 

@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hardened Rust CI policy detectors by replacing hand-rolled comment/string/char stripping with
+  `syn`-based source analysis. The `bash_command` import/call-site check now handles ASCII,
+  escaped, byte, and delimiter char literals, lifetimes, raw strings, comments, aliases, and both
+  import/call cfg mismatch directions; the direct `Command::new("bash")` guard now ignores text in
+  strings and comments while retaining line diagnostics. The no-panics pattern scan now also
+  delegates Rust syntax classification to a parser-backed integration test instead of shell brace
+  scanning.
 - Fixed the protocol v3 session-plan selection ladder so a `desired` topology acts as a _ceiling_
   rather than an exact match: a `mesh`-preferring room that cannot run mesh now correctly falls back
   to `host+webrtc`, then `host+direct`, before the relay floor — instead of collapsing straight to
