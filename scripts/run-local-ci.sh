@@ -7,7 +7,7 @@
 #
 # Usage:
 #   ./scripts/run-local-ci.sh           # Run all checks
-#   ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests)
+#   ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests, clippy, nested policy scans)
 #   ./scripts/run-local-ci.sh --fix     # Auto-fix issues where possible
 #
 # Exit codes:
@@ -52,7 +52,7 @@ for arg in "$@"; do
             echo "Usage: $0 [--fast] [--fix]"
             echo ""
             echo "Options:"
-            echo "  --fast    Skip slow checks (tests, full clippy)"
+            echo "  --fast    Skip slow checks (tests, clippy, nested policy scans)"
             echo "  --fix     Auto-fix issues where possible (fmt, clippy suggestions)"
             echo "  --help    Show this help message"
             exit 0
@@ -72,7 +72,7 @@ cd "$REPO_ROOT"
 echo -e "${BOLD}${BLUE}Local CI Runner${NC}"
 echo -e "${BLUE}Repository: $REPO_ROOT${NC}"
 if [ "$FAST_MODE" = true ]; then
-    echo -e "${YELLOW}Mode: Fast (skipping tests and full linting)${NC}"
+    echo -e "${YELLOW}Mode: Fast (skipping tests, clippy, and nested policy scans)${NC}"
 fi
 if [ "$FIX_MODE" = true ]; then
     echo -e "${YELLOW}Mode: Auto-fix enabled${NC}"
@@ -153,8 +153,10 @@ if [ "$FIX_MODE" = true ]; then
     run_check "clippy-all" "Running clippy with auto-fix (all features)" \
         cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings || true
 else
-    run_check "clippy-all" "Running clippy (all features)" \
-        cargo clippy --locked --all-targets --all-features -- -D warnings
+    if [ "$FAST_MODE" = false ]; then
+        run_check "clippy-all" "Running clippy (all features)" \
+            cargo clippy --locked --all-targets --all-features -- -D warnings
+    fi
 fi
 
 # Check 4: Tests (default features)
@@ -188,7 +190,7 @@ if [ -f scripts/validate-workflow-awk.sh ]; then
 fi
 
 # Check 9: No Panic Patterns
-if [ -f scripts/check-no-panics.sh ]; then
+if [ "$FAST_MODE" = false ] && [ -f scripts/check-no-panics.sh ]; then
     run_check_quiet "no-panics" "Checking for panic-prone patterns" \
         scripts/check-no-panics.sh patterns
 fi

@@ -15755,6 +15755,237 @@ fn test_run_local_ci_includes_readme_badge_style_check() {
     );
 }
 
+const LOCAL_CI_FAST_SKIPPED_CHECKS: &[(&str, &str, &str)] = &[
+    (
+        "default-feature clippy",
+        "run_check \"clippy-default\" \"Running clippy (default features)\"",
+        "default-feature clippy is intentionally skipped in fast mode",
+    ),
+    (
+        "all-feature clippy",
+        "run_check \"clippy-all\" \"Running clippy (all features)\"",
+        "all-feature clippy is intentionally skipped in fast mode",
+    ),
+    (
+        "default feature tests",
+        "run_check \"test-default\"",
+        "default test execution is intentionally skipped in fast mode",
+    ),
+    (
+        "all-feature tests",
+        "run_check \"test-all\"",
+        "all-feature test execution is intentionally skipped in fast mode",
+    ),
+    (
+        "no-panic nested scan",
+        "run_check_quiet \"no-panics\"",
+        "the panic-policy job runs the nested syn-backed scan once",
+    ),
+    (
+        "documentation policy tests",
+        "run_check \"doc-policy-tests\"",
+        "doc policy tests are part of the full local CI path",
+    ),
+];
+
+fn line_has_fast_mode_false_guard_before_marker(content: &str, marker: &str) -> bool {
+    let lines = content.lines().collect::<Vec<_>>();
+
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(marker))
+        .any(|(index, _)| {
+            let start = index.saturating_sub(4);
+            lines[start..=index]
+                .iter()
+                .any(|line| line.contains("FAST_MODE") && line.contains("false"))
+        })
+}
+
+#[test]
+fn test_run_local_ci_fast_mode_skips_slow_checks() {
+    let root = repo_root();
+    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+
+    let missing_guards = LOCAL_CI_FAST_SKIPPED_CHECKS
+        .iter()
+        .filter(|(_, marker, _)| !line_has_fast_mode_false_guard_before_marker(&script, marker))
+        .map(|(name, marker, reason)| format!("  - {name}: `{marker}` ({reason})"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing_guards.is_empty(),
+        "scripts/run-local-ci.sh --fast must skip slow checks so the local \
+         fast path remains lightweight and does not duplicate expensive CI \
+         phases.\n\
+         Missing FAST_MODE=false guards:\n{}",
+        missing_guards.join("\n")
+    );
+
+    assert!(
+        script.contains("tests, clippy, nested policy scans"),
+        "scripts/run-local-ci.sh --fast help text should state that nested \
+         policy scans and clippy are skipped, matching the implementation."
+    );
+}
+
+fn shell_logical_lines(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for raw_line in content.lines() {
+        let trimmed_end = raw_line.trim_end();
+        let continued = trimmed_end.ends_with('\\');
+        let segment = if continued {
+            trimmed_end.trim_end_matches('\\').trim_end()
+        } else {
+            raw_line
+        };
+
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(segment.trim());
+
+        if !continued {
+            if !current.trim().is_empty() {
+                lines.push(current.trim().to_string());
+            }
+            current.clear();
+        }
+    }
+
+    if !current.trim().is_empty() {
+        lines.push(current.trim().to_string());
+    }
+
+    lines
+}
+
+fn shellish_tokens(command: &str) -> Vec<String> {
+    let command = strip_unquoted_shell_comment(command);
+    let mut token_text = command.replace("&&", " ").replace("||", " ");
+    for separator in [';', '(', ')'] {
+        token_text = token_text.replace(separator, " ");
+    }
+
+    token_text
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c| matches!(c, '!' | '\\' | '"' | '\'')))
+        .filter(|token| !token.is_empty() && *token != "if" && *token != "then")
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn run_nested_cargo_commands(content: &str, cargo_subcommand: &str) -> Vec<Vec<String>> {
+    shell_logical_lines(content)
+        .into_iter()
+        .filter_map(|line| {
+            let tokens = shellish_tokens(&line);
+            tokens
+                .windows(2)
+                .position(|window| window == ["run_nested_cargo", cargo_subcommand])
+                .map(|start| tokens[start..].to_vec())
+        })
+        .collect()
+}
+
+fn command_has_flag_value(command: &[String], flag: &str, value: &str) -> bool {
+    command.windows(2).any(|window| window == [flag, value])
+}
+
+fn command_has_flag(command: &[String], flag: &str) -> bool {
+    command.iter().any(|token| token == flag)
+}
+
+fn format_commands_for_diagnostics(commands: &[Vec<String>]) -> String {
+    if commands.is_empty() {
+        return "  <none>".to_string();
+    }
+
+    commands
+        .iter()
+        .map(|command| format!("  - {}", command.join(" ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const NO_PANIC_SCRIPT_REQUIRED_MARKERS: &[(&str, &str)] = &[
+    (
+        "NESTED_CARGO_TARGET_DIR",
+        "isolates nested Cargo artifacts from parent CI jobs",
+    ),
+    (
+        "run_nested_cargo",
+        "centralizes nested Cargo environment scrubbing",
+    ),
+    (
+        "Scrubbing inherited Cargo instrumentation env",
+        "makes sanitizer/Miri contamination visible in logs",
+    ),
+    (
+        "Nested Cargo command:",
+        "prints the delegated Cargo command for failure diagnostics",
+    ),
+    (
+        "Nested Cargo target dir:",
+        "prints the isolated target directory for failure diagnostics",
+    ),
+    (
+        "unset \"$var\"",
+        "removes inherited instrumentation before nested Cargo",
+    ),
+    (
+        "export CARGO_TARGET_DIR=\"$NESTED_CARGO_TARGET_DIR\"",
+        "forces the nested build into the isolated target directory",
+    ),
+    (
+        "RUSTFLAGS",
+        "scrubs sanitizer and cfg flags from parent jobs",
+    ),
+    (
+        "CARGO_ENCODED_RUSTFLAGS",
+        "scrubs encoded sanitizer and cfg flags from parent jobs",
+    ),
+    (
+        "RUSTDOCFLAGS",
+        "scrubs doc instrumentation from parent jobs",
+    ),
+    ("ASAN_OPTIONS", "scrubs AddressSanitizer runtime options"),
+    ("LSAN_OPTIONS", "scrubs LeakSanitizer runtime options"),
+    (
+        "UBSAN_OPTIONS",
+        "scrubs UndefinedBehaviorSanitizer runtime options",
+    ),
+    ("TSAN_OPTIONS", "scrubs ThreadSanitizer runtime options"),
+    ("MIRIFLAGS", "scrubs Miri runtime options"),
+];
+
+const NO_PANIC_SCRIPT_FORBIDDEN_MARKERS: &[(&str, &str)] = &[
+    (
+        "filter_test_code",
+        "shell range classification is not Rust syntax-aware",
+    ),
+    ("awk -v target", "AWK cannot safely parse Rust source"),
+    (
+        "grep -rn 'panic!'",
+        "grep cannot distinguish code from strings, comments, and raw literals",
+    ),
+];
+
+const NO_PANIC_SCANNER_REQUIRED_MARKERS: &[(&str, &str)] = &[
+    ("syn::parse_file", "scanner must parse Rust syntax"),
+    (
+        "_tests.rs",
+        "scanner must skip Rust test modules by filename",
+    ),
+    (
+        "ends_with(\"_test.rs\")",
+        "scanner must skip singular Rust test module filenames",
+    ),
+];
+
 #[test]
 fn test_check_no_panics_script_structure() {
     let root = repo_root();
@@ -15769,70 +16000,142 @@ fn test_check_no_panics_script_structure() {
     let scanner_path = root.join("tests/no_panic_policy_scan.rs");
     let scanner_content = read_file(&scanner_path);
 
+    let pattern_commands = run_nested_cargo_commands(&content, "test");
     assert!(
-        content.contains("run_nested_cargo test --test no_panic_policy_scan"),
+        pattern_commands
+            .iter()
+            .any(|command| command_has_flag(command, "--locked")
+                && command_has_flag_value(command, "--test", "no_panic_policy_scan")
+                && command_has_flag(command, "--quiet")),
         "check-no-panics.sh patterns mode must delegate Rust source analysis \
          to the syn-backed no_panic_policy_scan integration test instead of \
-         parsing Rust with shell text filters."
+         parsing Rust with shell text filters.\n\
+         Expected command markers: run_nested_cargo test --locked --test \
+         no_panic_policy_scan --quiet\n\
+         Found nested Cargo test commands:\n{}",
+        format_commands_for_diagnostics(&pattern_commands)
     );
 
-    for required in [
-        "NESTED_CARGO_TARGET_DIR",
-        "run_nested_cargo",
-        "Scrubbing inherited Cargo instrumentation env",
-        "unset \"$var\"",
-        "export CARGO_TARGET_DIR=\"$NESTED_CARGO_TARGET_DIR\"",
-        "RUSTFLAGS",
-        "CARGO_ENCODED_RUSTFLAGS",
-        "ASAN_OPTIONS",
-        "MIRIFLAGS",
-    ] {
-        assert!(
-            content.contains(required),
-            "check-no-panics.sh must scrub inherited sanitizer/Miri/Cargo \
-             instrumentation before running nested Cargo so ASan/Miri parents \
-             cannot poison the policy scan.\n\
-             Missing required marker: `{required}`"
-        );
-    }
+    let missing_required_markers = NO_PANIC_SCRIPT_REQUIRED_MARKERS
+        .iter()
+        .filter(|(marker, _)| !content.contains(marker))
+        .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
+        .collect::<Vec<_>>();
 
     assert!(
-        !content.contains("filter_test_code")
-            && !content.contains("awk -v target")
-            && !content.contains("grep -rn 'panic!'"),
+        missing_required_markers.is_empty(),
+        "check-no-panics.sh must scrub inherited sanitizer/Miri/Cargo \
+         instrumentation before running nested Cargo so ASan/Miri parents \
+         cannot poison the policy scan.\n\
+         Missing required markers:\n{}",
+        missing_required_markers.join("\n")
+    );
+
+    let forbidden_markers = NO_PANIC_SCRIPT_FORBIDDEN_MARKERS
+        .iter()
+        .filter(|(marker, _)| content.contains(marker))
+        .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        forbidden_markers.is_empty(),
         "check-no-panics.sh must not classify Rust test ranges with grep/AWK. \
          Rust strings, comments, raw strings, and char literals make shell \
-         source scanning too fragile."
+         source scanning too fragile.\n\
+         Forbidden markers found:\n{}",
+        forbidden_markers.join("\n")
     );
 
+    let clippy_commands = run_nested_cargo_commands(&content, "clippy");
     assert!(
-        content.contains("clippy --lib --bins") || content.contains("clippy\" --lib --bins"),
+        clippy_commands
+            .iter()
+            .any(|command| command_has_flag(command, "--locked")
+                && command_has_flag(command, "--lib")
+                && command_has_flag(command, "--bins")
+                && command_has_flag(command, "--all-features")
+                && !command_has_flag(command, "--all-targets")),
         "check-no-panics.sh clippy must use --lib --bins to check library and \
-         binary targets without flagging test code.\n\
-         Using --all-targets would report false positives for .unwrap() in tests."
+         binary targets across all features without flagging test code.\n\
+         Using --all-targets would report false positives for .unwrap() in tests.\n\
+         Found nested Cargo clippy commands:\n{}",
+        format_commands_for_diagnostics(&clippy_commands)
     );
 
+    let missing_scanner_markers = NO_PANIC_SCANNER_REQUIRED_MARKERS
+        .iter()
+        .filter(|(marker, _)| !scanner_content.contains(marker))
+        .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
+        .collect::<Vec<_>>();
+
     assert!(
-        scanner_content.contains("syn::parse_file")
-            && scanner_content.contains("_tests.rs")
-            && scanner_content.contains("ends_with(\"_test.rs\")"),
+        missing_scanner_markers.is_empty(),
         "tests/no_panic_policy_scan.rs must parse Rust with syn and exclude \
          test-only source paths.\n\
          Files like src/server/ready_state_tests.rs are #[cfg(test)] modules \
-         that don't contain #[cfg(test)] internally."
+         that don't contain #[cfg(test)] internally.\n\
+         Missing scanner markers:\n{}",
+        missing_scanner_markers.join("\n")
     );
 }
 
 #[test]
 #[cfg(unix)]
-fn test_check_no_panics_script_patterns_pass() {
+fn test_check_no_panics_script_patterns_scrubs_nested_cargo_env() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
     let root = repo_root();
     let script = root.join("scripts/check-no-panics.sh");
+    let temp = common::unique_temp_dir("fake-cargo-no-panics");
+    let fake_bin = temp.path().join("bin");
+    let fake_cargo = fake_bin.join("cargo");
+    let fake_cargo_log = temp.path().join("fake-cargo-env.txt");
+    let nested_target = temp.path().join("nested-target");
+
+    fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|e| panic!("Failed to create {}: {e}", fake_bin.display()));
+    common::write_file(
+        &fake_cargo,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+{
+    printf 'args=%s\n' "$*"
+    for var in \
+        RUSTFLAGS \
+        CARGO_ENCODED_RUSTFLAGS \
+        RUSTDOCFLAGS \
+        ASAN_OPTIONS \
+        LSAN_OPTIONS \
+        UBSAN_OPTIONS \
+        TSAN_OPTIONS \
+        MIRIFLAGS
+    do
+        if [ -n "${!var+x}" ]; then
+            printf '%s=%s\n' "$var" "${!var}"
+        else
+            printf '%s=<unset>\n' "$var"
+        fi
+    done
+    printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
+} > "$FAKE_CARGO_LOG"
+"#,
+    );
+    fs::set_permissions(&fake_cargo, Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("Failed to chmod {}: {e}", fake_cargo.display()));
+
+    let original_path = std::env::var_os("PATH").expect("PATH must be set for script tests");
+    let mut path = std::ffi::OsString::from(fake_bin.as_os_str());
+    path.push(":");
+    path.push(original_path);
 
     let output = bash_command()
         .arg(&script)
         .arg("patterns")
         .current_dir(&root)
+        .env("PATH", path)
+        .env("FAKE_CARGO_LOG", &fake_cargo_log)
+        .env("NESTED_CARGO_TARGET_DIR", &nested_target)
         .env("RUSTFLAGS", "--cfg")
         .env("CARGO_ENCODED_RUSTFLAGS", "--cfg")
         .env("RUSTDOCFLAGS", "--cfg")
@@ -15841,6 +16144,9 @@ fn test_check_no_panics_script_patterns_pass() {
             root.join("target").join("poisoned-parent-target"),
         )
         .env("ASAN_OPTIONS", "detect_odr_violation=0")
+        .env("LSAN_OPTIONS", "detect_leaks=1")
+        .env("UBSAN_OPTIONS", "print_stacktrace=1")
+        .env("TSAN_OPTIONS", "halt_on_error=1")
         .env("MIRIFLAGS", "-Zmiri-poisoned-parent")
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
@@ -15849,7 +16155,7 @@ fn test_check_no_panics_script_patterns_pass() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "check-no-panics.sh patterns should pass on the current codebase.\n\
+        "check-no-panics.sh patterns should pass with a fake cargo command.\n\
          This regression runs with poisoned inherited Cargo instrumentation \
          variables so the script must scrub them before invoking nested Cargo.\n\
          stdout: {stdout}\nstderr: {stderr}",
@@ -15863,6 +16169,48 @@ fn test_check_no_panics_script_patterns_pass() {
         stdout.contains("Nested Cargo target dir:"),
         "check-no-panics.sh should print the isolated nested Cargo target dir \
          for diagnostics.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(
+            "Nested Cargo command: cargo test --locked --test no_panic_policy_scan --quiet"
+        ),
+        "check-no-panics.sh should print the delegated nested Cargo command \
+         for diagnostics.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let fake_cargo_output = read_file(&fake_cargo_log);
+    assert!(
+        fake_cargo_output.contains("args=test --locked --test no_panic_policy_scan --quiet"),
+        "check-no-panics.sh patterns must invoke the syn-backed scanner test \
+         through nested Cargo.\nFake cargo output:\n{fake_cargo_output}"
+    );
+    assert!(
+        fake_cargo_output.contains(&format!("CARGO_TARGET_DIR={}", nested_target.display())),
+        "check-no-panics.sh must route nested Cargo artifacts into the isolated \
+         target directory.\nFake cargo output:\n{fake_cargo_output}"
+    );
+
+    let inherited_vars = [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "ASAN_OPTIONS",
+        "LSAN_OPTIONS",
+        "UBSAN_OPTIONS",
+        "TSAN_OPTIONS",
+        "MIRIFLAGS",
+    ];
+    let leaked_vars = inherited_vars
+        .iter()
+        .filter(|var| !fake_cargo_output.contains(&format!("{var}=<unset>")))
+        .copied()
+        .collect::<Vec<_>>();
+
+    assert!(
+        leaked_vars.is_empty(),
+        "check-no-panics.sh must scrub inherited Cargo/sanitizer/Miri \
+         instrumentation before invoking nested Cargo.\n\
+         Leaked variables: {leaked_vars:?}\nFake cargo output:\n{fake_cargo_output}"
     );
 }
 
