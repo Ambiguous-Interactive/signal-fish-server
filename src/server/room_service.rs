@@ -7,6 +7,9 @@ use crate::protocol::{
 use std::sync::Arc;
 use std::time::Duration;
 
+const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
+const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
+
 impl EnhancedGameServer {
     /// Enhanced room joining with distributed coordination
     #[allow(clippy::too_many_arguments)]
@@ -382,7 +385,7 @@ impl EnhancedGameServer {
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let lock_handle = self
             .distributed_lock
-            .acquire(&lock_key, Duration::from_secs(10))
+            .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
             .await?;
         let mut game_cap_lock: Option<LockHandle> = None;
 
@@ -434,7 +437,7 @@ impl EnhancedGameServer {
                 let cap_lock_key = format!("game_room_cap:{game_name}");
                 match self
                     .distributed_lock
-                    .acquire(&cap_lock_key, Duration::from_secs(10))
+                    .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
                     .await
                 {
                     Ok(lock) => {

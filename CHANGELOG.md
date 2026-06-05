@@ -74,6 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed in-memory room-operation lock cleanup so lobby transitions, authority changes,
+  distributed room operations, and `PlayerReady` finalization release distributed locks
+  immediately instead of relying on TTL expiry; protocol v3 session-plan e2e tests now
+  document their receive timeout as a CI scheduling budget, not lock TTL compensation.
+- Corrected `heartbeat_throttle_secs` documentation to describe throttled `last_seen`
+  heartbeat writes rather than heartbeat logs.
 - Hardened Rust CI policy detectors by replacing hand-rolled comment/string/char stripping with
   `syn`-based source analysis. The `bash_command` import/call-site check now handles ASCII,
   escaped, byte, and delimiter char literals, lifetimes, raw strings, comments, aliases, and both

@@ -121,11 +121,8 @@ async fn send(ws: &mut WsStream, msg: &ClientMessage) {
 }
 
 async fn next_server_message(ws: &mut WsStream) -> ServerMessage {
-    // Generous timeout: at finalization the second `PlayerReady` blocks on the
-    // in-memory room lock (held under a ~10s TTL by the first ready, which the
-    // current InMemoryDistributedLock only releases on expiry), so the
-    // GameStarting/SessionPlan burst can lag several seconds. This mirrors the
-    // ~15s runtime of `lobby_integration_tests.rs`.
+    // Keep reads bounded while allowing for CI scheduling delays around the
+    // finalization burst (`LobbyStateChanged`, `GameStarting`, `SessionPlan`).
     next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "next server message").await
 }
 

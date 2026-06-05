@@ -232,7 +232,7 @@ deliverable WebRTC relays, while `max_signal_errors` counts rejected `Signal`
 attempts. Do not move target/transport validation in a way that lets invalid
 traffic avoid `max_signal_errors` or consume the valid ICE budget.
 
-Room finalization: borrow one player snapshot for peers, then move it into `FinalizedRoom`; no deep clone.
+Room finalization: borrow one player snapshot for peers, then move it into `FinalizedRoom`; no deep clone. In-memory room-operation locks are operation guards, not timing budgets; release them on success/error paths.
 Reconnection claims are intentionally two-phase: `claim_reconnection` reserves
 the pending record to prevent duplicate winners, but only successful reconnects
 remove it. Every post-claim failure path must release the claim and roll back
