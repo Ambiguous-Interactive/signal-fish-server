@@ -5,8 +5,9 @@
 //! default.
 
 mod test_helpers;
+mod websocket_test_helpers;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use signal_fish_server::config::AppAuthEntry;
 use signal_fish_server::protocol::{ClientMessage, ServerMessage, Topology, Transport};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
@@ -15,8 +16,10 @@ use std::sync::Arc;
 use test_helpers::{test_protocol_config, test_server_config};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{next_server_message_within, WsStream};
 
 const APP_ID: &str = "v3-test-app";
+const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 
 fn app_entry() -> AppAuthEntry {
     AppAuthEntry {
@@ -109,9 +112,6 @@ async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketA
     addr
 }
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 async fn connect(addr: std::net::SocketAddr, path: &str) -> WsStream {
     let url = format!("ws://{addr}{path}");
     let (ws, _) = tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
@@ -122,16 +122,7 @@ async fn connect(addr: std::net::SocketAddr, path: &str) -> WsStream {
 }
 
 async fn next_server_message(ws: &mut WsStream) -> ServerMessage {
-    loop {
-        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
-            .await
-            .expect("recv timeout")
-            .expect("stream closed")
-            .expect("ws error");
-        if let Message::Text(text) = frame {
-            return serde_json::from_str(&text).expect("valid ServerMessage");
-        }
-    }
+    next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "next server message").await
 }
 
 /// Authenticate and return the `ProtocolInfo` payload (skips the preceding

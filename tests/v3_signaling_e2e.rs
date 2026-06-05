@@ -12,8 +12,9 @@
 //! not depend on `NewPeer`.
 
 mod test_helpers;
+mod websocket_test_helpers;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use serde_json::json;
 use signal_fish_server::config::AppAuthEntry;
 use signal_fish_server::protocol::{
@@ -25,8 +26,12 @@ use std::sync::Arc;
 use test_helpers::{test_protocol_config, test_server_config};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{
+    next_matching_server_message_within, next_server_message_within, WsStream,
+};
 
 const APP_ID: &str = "v3-signaling-app";
+const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 
 fn app_entry() -> AppAuthEntry {
     AppAuthEntry {
@@ -95,9 +100,6 @@ async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketA
     addr
 }
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
     let url = format!("ws://{addr}/v3/ws");
     let (ws, _) = tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
@@ -113,30 +115,17 @@ async fn send(ws: &mut WsStream, msg: &ClientMessage) {
 }
 
 async fn next_server_message(ws: &mut WsStream) -> ServerMessage {
-    loop {
-        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
-            .await
-            .expect("recv timeout")
-            .expect("stream closed")
-            .expect("ws error");
-        if let Message::Text(text) = frame {
-            return serde_json::from_str(&text).expect("valid ServerMessage");
-        }
-    }
+    next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "next server message").await
 }
 
 /// Read messages until one matches `pick`, returning the mapped value. Skips
 /// interleaved housekeeping messages (e.g. `PlayerJoined`).
 async fn next_matching<T>(
     ws: &mut WsStream,
-    mut pick: impl FnMut(&ServerMessage) -> Option<T>,
+    context: &str,
+    pick: impl FnMut(ServerMessage) -> Option<T>,
 ) -> T {
-    loop {
-        let msg = next_server_message(ws).await;
-        if let Some(value) = pick(&msg) {
-            return value;
-        }
-    }
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, context, pick).await
 }
 
 /// Authenticate as a v3 + WebRTC client and drain the `Authenticated` +
@@ -190,8 +179,8 @@ async fn join_room(
     )
     .await;
 
-    next_matching(ws, |msg| match msg {
-        ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code.clone(), p.player_id)),
+    next_matching(ws, "room join response", |msg| match msg {
+        ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code, p.player_id)),
         ServerMessage::RoomJoinFailed { reason, error_code } => {
             panic!("room join failed: {reason} ({error_code:?})")
         }
@@ -201,8 +190,8 @@ async fn join_room(
 }
 
 async fn next_signal(ws: &mut WsStream) -> (PlayerId, serde_json::Value) {
-    next_matching(ws, |msg| match msg {
-        ServerMessage::Signal { from, signal } => Some((*from, signal.clone())),
+    next_matching(ws, "relayed signal", |msg| match msg {
+        ServerMessage::Signal { from, signal } => Some((from, signal)),
         _ => None,
     })
     .await
@@ -314,7 +303,7 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
     )
     .await;
 
-    next_matching(&mut replacement, |msg| match msg {
+    next_matching(&mut replacement, "reconnect response", |msg| match msg {
         ServerMessage::Reconnected(payload) => {
             assert_eq!(payload.player_id, peer2_id);
             Some(())

@@ -1,4 +1,5 @@
 mod test_helpers;
+mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -11,6 +12,16 @@ use test_helpers::{
 };
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{
+    maybe_next_matching_server_message_within, next_matching_server_message_within,
+};
+
+const AUTHORITY_RELEASE_RESPONSE_TIMEOUT: tokio::time::Duration =
+    tokio::time::Duration::from_secs(11);
+const AUTHORITY_NOTIFICATION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(6);
+const AUTHORITY_SUCCESS_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+const TWO_PLAYER_AUTHORITY_RELEASE_TIMEOUT: tokio::time::Duration =
+    tokio::time::Duration::from_secs(15);
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -895,129 +906,53 @@ async fn test_e2e_authority_protocol_enforcement() {
     // Give server time to process the request
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Player 1 should receive AuthorityResponse and/or AuthorityChanged
-    // We'll look for either message, but preferably AuthorityResponse
-    let mut received_authority_response = false;
-
-    // Try up to 3 times with a 2-second timeout each
-    for attempt in 1..=3 {
-        println!("Looking for response - attempt {attempt}");
-
-        match tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver1.next()).await {
-            Ok(Some(msg)) => {
-                let text = msg.unwrap().into_text().unwrap();
-                println!("Received message: {text}");
-                let response: ServerMessage = serde_json::from_str(&text).unwrap();
-                println!("Parsed message: {response:?}");
-
-                match response {
-                    ServerMessage::AuthorityResponse {
-                        granted, reason, ..
-                    } => {
-                        assert!(granted, "Authority release should be granted");
-                        assert!(reason.is_none(), "No error reason expected");
-                        received_authority_response = true;
-                        println!("Successfully received AuthorityResponse");
-                        break;
-                    }
-                    ServerMessage::AuthorityChanged {
-                        authority_player, ..
-                    } => {
-                        // This is also an acceptable response
-                        assert_eq!(
-                            authority_player, None,
-                            "Authority should be released (None)"
-                        );
-                        println!("Received AuthorityChanged notification");
-                        // Continue looking for AuthorityResponse
-                    }
-                    _ => {
-                        println!("Received unexpected message type: {response:?}");
-                        // Continue looking
-                    }
-                }
+    let (granted, reason) = next_matching_server_message_within(
+        &mut receiver1,
+        AUTHORITY_RELEASE_RESPONSE_TIMEOUT,
+        "player 1 authority release response",
+        |message| match message {
+            ServerMessage::AuthorityResponse {
+                granted, reason, ..
+            } => Some((granted, reason)),
+            ServerMessage::AuthorityChanged {
+                authority_player, ..
+            } => {
+                assert_eq!(
+                    authority_player, None,
+                    "Authority should be released (None)"
+                );
+                None
             }
-            Ok(None) => {
-                println!("WebSocket connection closed");
-                break;
-            }
-            Err(_) => {
-                println!("Timeout waiting for response on attempt {attempt}");
-                if attempt == 3 {
-                    break;
-                }
-            }
-        }
-    }
-
-    // We must have received at least one of the messages
-    if !received_authority_response {
-        // Try one more time with a longer timeout as a last resort
-        println!("Final attempt with longer timeout");
-        if let Ok(Some(msg)) =
-            tokio::time::timeout(tokio::time::Duration::from_secs(5), receiver1.next()).await
-        {
-            let text = msg.unwrap().into_text().unwrap();
-            let response: ServerMessage = serde_json::from_str(&text).unwrap();
-            println!("Final attempt received: {response:?}");
-
-            if let ServerMessage::AuthorityResponse { granted, .. } = response {
-                assert!(granted);
-                received_authority_response = true;
-            }
-        }
-    }
-
-    assert!(
-        received_authority_response,
-        "Never received AuthorityResponse"
-    );
+            _ => None,
+        },
+    )
+    .await;
+    assert!(granted, "Authority release should be granted");
+    assert!(reason.is_none(), "No error reason expected");
 
     // Player 2 might receive authority change notification or other notifications
     // Since we had delays, player 2 might have received different messages
     // Let's give it a few chances to receive messages
 
-    let mut found_authority_update = false;
-
-    // Try up to 3 messages with 2-second timeout each
-    for attempt in 1..=3 {
-        println!("Looking for player 2 messages - attempt {attempt}");
-
-        match tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver2.next()).await {
-            Ok(Some(msg)) => {
-                let text = msg.unwrap().into_text().unwrap();
-                println!("Player 2 received message: {text}");
-                let notification: ServerMessage = serde_json::from_str(&text).unwrap();
-                println!("Player 2 parsed message: {notification:?}");
-
-                // Accept other message types, but keep looking for AuthorityChanged
-                if let ServerMessage::AuthorityChanged {
-                    authority_player, ..
-                } = notification
-                {
-                    // This is the ideal message
-                    assert_eq!(
-                        authority_player, None,
-                        "Authority should be released (None)"
-                    );
-                    found_authority_update = true;
-                    println!("Player 2 received AuthorityChanged");
-                    break;
-                } else {
-                    println!("Player 2 received other message: {notification:?}");
-                    continue;
-                }
+    let found_authority_update = maybe_next_matching_server_message_within(
+        &mut receiver2,
+        AUTHORITY_NOTIFICATION_TIMEOUT,
+        "player 2 authority release notification",
+        |message| match message {
+            ServerMessage::AuthorityChanged {
+                authority_player, ..
+            } => {
+                assert_eq!(
+                    authority_player, None,
+                    "Authority should be released (None)"
+                );
+                Some(())
             }
-            Ok(None) => {
-                println!("Player 2 WebSocket connection closed");
-                break;
-            }
-            Err(_) => {
-                println!("Timeout waiting for player 2 message on attempt {attempt}");
-                break; // No more messages expected
-            }
-        }
-    }
+            _ => None,
+        },
+    )
+    .await
+    .is_some();
 
     // It's ok if we don't find AuthorityChanged specifically as long as we're receiving messages
     println!(
@@ -1040,73 +975,32 @@ async fn test_e2e_authority_protocol_enforcement() {
     // Give server time to process the request
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Player 2 should receive AuthorityResponse and/or AuthorityChanged
-    let mut received_authority_response = false;
-    let mut received_authority_changed = false;
-
-    // Try up to 5 times with a 2-second timeout each to allow for more messages
-    for attempt in 1..=5 {
-        println!("Looking for player 2 authority response - attempt {attempt}");
-
-        match tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver2.next()).await {
-            Ok(Some(msg)) => {
-                let text = msg.unwrap().into_text().unwrap();
-                println!("Player 2 received message: {text}");
-                let response: ServerMessage = serde_json::from_str(&text).unwrap();
-                println!("Player 2 parsed message: {response:?}");
-
-                match response {
-                    ServerMessage::AuthorityResponse {
-                        granted, reason, ..
-                    } => {
-                        println!("Got AuthorityResponse: granted={granted}, reason={reason:?}");
-                        assert!(granted, "Authority request should be granted");
-                        assert!(reason.is_none(), "No error reason expected");
-                        received_authority_response = true;
-                        if received_authority_changed {
-                            break; // We got both messages, we can stop
-                        }
-                    }
-                    ServerMessage::AuthorityChanged {
-                        authority_player, ..
-                    } => {
-                        println!("Got AuthorityChanged: authority_player={authority_player:?}");
-                        assert!(authority_player.is_some(), "Authority player should be set");
-                        // We don't need to check the exact ID, just that it's set
-                        received_authority_changed = true;
-                        if received_authority_response {
-                            break; // We got both messages, we can stop
-                        }
-                    }
-                    _ => {
-                        println!("Received unexpected message type: {response:?}");
-                        // Continue looking
-                    }
+    let (received_authority_response, received_authority_changed) =
+        next_matching_server_message_within(
+            &mut receiver2,
+            AUTHORITY_SUCCESS_TIMEOUT,
+            "player 2 successful authority response",
+            |message| match message {
+                ServerMessage::AuthorityResponse {
+                    granted, reason, ..
+                } => {
+                    assert!(granted, "Authority request should be granted");
+                    assert!(reason.is_none(), "No error reason expected");
+                    Some((true, false))
                 }
-            }
-            Ok(None) => {
-                println!("WebSocket connection closed");
-                break;
-            }
-            Err(_) => {
-                println!("Timeout waiting for response on attempt {attempt}");
-                if attempt == 5 {
-                    break;
+                ServerMessage::AuthorityChanged {
+                    authority_player, ..
+                } => {
+                    assert!(authority_player.is_some(), "Authority player should be set");
+                    Some((false, true))
                 }
-            }
-        }
-    }
+                _ => None,
+            },
+        )
+        .await;
 
-    // We must have received at least AuthorityResponse or AuthorityChanged
-    // (Both would be ideal, but either one is acceptable)
     println!(
         "Authority verification: response={received_authority_response}, changed={received_authority_changed}"
-    );
-
-    // For test passing, we require at least one of these to be true
-    assert!(
-        received_authority_response || received_authority_changed,
-        "Never received successful AuthorityResponse or AuthorityChanged"
     );
 }
 
@@ -1144,42 +1038,26 @@ async fn test_simple_authority_release() {
     let json = serde_json::to_string(&release_request).unwrap();
     sender.send(Message::Text(json.into())).await.unwrap();
 
-    // Authority release sends two messages: AuthorityResponse and AuthorityChanged
-    // We need to collect both and check for AuthorityResponse
-    let mut received_authority_response = false;
-    for _ in 0..2 {
-        match tokio::time::timeout(tokio::time::Duration::from_secs(5), receiver.next()).await {
-            Ok(Some(msg)) => {
-                let text = msg.unwrap().into_text().unwrap();
-                let response: ServerMessage = serde_json::from_str(&text).unwrap();
-                match response {
-                    ServerMessage::AuthorityResponse {
-                        granted, reason, ..
-                    } => {
-                        assert!(granted, "Authority release should be granted");
-                        assert!(reason.is_none(), "No error reason expected");
-                        received_authority_response = true;
-                        break;
-                    }
-                    ServerMessage::AuthorityChanged {
-                        authority_player, ..
-                    } => {
-                        // This is expected - authority was released (None)
-                        assert_eq!(authority_player, None);
-                        // Continue looking for AuthorityResponse
-                    }
-                    _ => panic!("Unexpected message: {response:?}"),
-                }
+    let (granted, reason) = next_matching_server_message_within(
+        &mut receiver,
+        AUTHORITY_SUCCESS_TIMEOUT,
+        "single-player authority release response",
+        |message| match message {
+            ServerMessage::AuthorityResponse {
+                granted, reason, ..
+            } => Some((granted, reason)),
+            ServerMessage::AuthorityChanged {
+                authority_player, ..
+            } => {
+                assert_eq!(authority_player, None);
+                None
             }
-            Ok(None) => panic!("Connection closed"),
-            Err(_) => break, // Timeout
-        }
-    }
-
-    assert!(
-        received_authority_response,
-        "Never received AuthorityResponse"
-    );
+            other => panic!("Unexpected message: {other:?}"),
+        },
+    )
+    .await;
+    assert!(granted, "Authority release should be granted");
+    assert!(reason.is_none(), "No error reason expected");
 
     println!("Authority release test completed successfully");
 }
@@ -1244,50 +1122,26 @@ async fn test_two_player_authority_release() {
     let json = serde_json::to_string(&release_request).unwrap();
     sender1.send(Message::Text(json.into())).await.unwrap();
 
-    // Player 1 should receive AuthorityResponse (and possibly AuthorityChanged from broadcast)
-    // We need to collect more messages since broadcasts send to all players
-    let mut received_authority_response = false;
-
-    // Increase timeout and message collection to handle all possible messages
-    for _ in 0..5 {
-        // Allow more messages since broadcasts can send multiple
-        match tokio::time::timeout(tokio::time::Duration::from_secs(3), receiver1.next()).await {
-            Ok(Some(msg)) => {
-                let text = msg.unwrap().into_text().unwrap();
-                let response: ServerMessage = serde_json::from_str(&text).unwrap();
-                match response {
-                    ServerMessage::AuthorityResponse {
-                        granted, reason, ..
-                    } => {
-                        assert!(granted, "Authority release should be granted");
-                        assert!(reason.is_none(), "No error reason expected");
-                        received_authority_response = true;
-                        break; // Found what we're looking for
-                    }
-                    ServerMessage::AuthorityChanged {
-                        authority_player, ..
-                    } => {
-                        assert_eq!(authority_player, None); // Authority released
-                                                            // Continue looking for AuthorityResponse
-                    }
-                    _ => {
-                        // Skip any other messages (like PlayerLeft, etc.)
-                        continue;
-                    }
-                }
+    let (granted, reason) = next_matching_server_message_within(
+        &mut receiver1,
+        TWO_PLAYER_AUTHORITY_RELEASE_TIMEOUT,
+        "two-player authority release response",
+        |message| match message {
+            ServerMessage::AuthorityResponse {
+                granted, reason, ..
+            } => Some((granted, reason)),
+            ServerMessage::AuthorityChanged {
+                authority_player, ..
+            } => {
+                assert_eq!(authority_player, None);
+                None
             }
-            Ok(None) => panic!("Connection closed"),
-            Err(_) => {
-                // Timeout - continue to next iteration or break if no more messages
-                break;
-            }
-        }
-    }
-
-    assert!(
-        received_authority_response,
-        "Never received AuthorityResponse"
-    );
+            _ => None,
+        },
+    )
+    .await;
+    assert!(granted, "Authority release should be granted");
+    assert!(reason.is_none(), "No error reason expected");
     println!("Two-player authority release test completed successfully");
 }
 

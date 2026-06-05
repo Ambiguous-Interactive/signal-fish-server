@@ -128,6 +128,10 @@ async fn test_websocket_message_handling() {
     assert_eq!(response, Message::text(r#"{"type":"pong"}"#));
 }
 
+// When filtering/skipping messages, use one absolute deadline for the whole
+// wait, e.g. `timeout_at(deadline, client.next())` inside the loop. Do not
+// restart a relative timeout after each unrelated frame.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_joins() {
     let server = TestServer::start().await;

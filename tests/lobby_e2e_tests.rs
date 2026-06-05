@@ -247,10 +247,10 @@ async fn test_lobby_e2e_ready_toggle() {
 
     // Clear initial messages
     for _ in 0..2 {
-        let _ = read1.next().await;
+        let _ = timeout(Duration::from_secs(5), read1.next()).await;
     }
     for _ in 0..2 {
-        let _ = read2.next().await;
+        let _ = timeout(Duration::from_secs(5), read2.next()).await;
     }
 
     // Player 1 signals ready
@@ -261,8 +261,8 @@ async fn test_lobby_e2e_ready_toggle() {
         .unwrap();
 
     // Clear LobbyStateChanged messages
-    let _ = read1.next().await;
-    let _ = read2.next().await;
+    let _ = timeout(Duration::from_secs(5), read1.next()).await;
+    let _ = timeout(Duration::from_secs(5), read2.next()).await;
 
     // Player 1 signals ready again (should toggle to not ready)
     write1

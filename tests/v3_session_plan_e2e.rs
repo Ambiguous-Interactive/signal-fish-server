@@ -9,8 +9,9 @@
 //! `SessionConfig` so finalization can pick a non-relay plan.
 
 mod test_helpers;
+mod websocket_test_helpers;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use signal_fish_server::config::{AppAuthEntry, SessionConfig};
 use signal_fish_server::protocol::{
     ClientMessage, IceServer, PlayerId, RoomId, ServerMessage, Topology, Transport,
@@ -21,8 +22,15 @@ use std::sync::Arc;
 use test_helpers::{test_protocol_config, test_server_config};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{
+    deadline_after, maybe_next_matching_server_message_with_skipped_until,
+    next_matching_server_message_within, next_server_message_within, WsStream,
+};
 
 const APP_ID: &str = "v3-session-plan-app";
+const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+const POST_GAME_STARTING_SESSION_PLAN_WINDOW: tokio::time::Duration =
+    tokio::time::Duration::from_secs(5);
 
 fn app_entry() -> AppAuthEntry {
     AppAuthEntry {
@@ -98,9 +106,6 @@ async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketA
     addr
 }
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
     let url = format!("ws://{addr}/v3/ws");
     let (ws, _) = tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
@@ -116,21 +121,12 @@ async fn send(ws: &mut WsStream, msg: &ClientMessage) {
 }
 
 async fn next_server_message(ws: &mut WsStream) -> ServerMessage {
-    loop {
-        // Generous timeout: at finalization the second `PlayerReady` blocks on the
-        // in-memory room lock (held under a ~10s TTL by the first ready, which the
-        // current InMemoryDistributedLock only releases on expiry), so the
-        // GameStarting/SessionPlan burst can lag several seconds. This mirrors the
-        // ~15s runtime of `lobby_integration_tests.rs`.
-        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(20), ws.next())
-            .await
-            .expect("recv timeout")
-            .expect("stream closed")
-            .expect("ws error");
-        if let Message::Text(text) = frame {
-            return serde_json::from_str(&text).expect("valid ServerMessage");
-        }
-    }
+    // Generous timeout: at finalization the second `PlayerReady` blocks on the
+    // in-memory room lock (held under a ~10s TTL by the first ready, which the
+    // current InMemoryDistributedLock only releases on expiry), so the
+    // GameStarting/SessionPlan burst can lag several seconds. This mirrors the
+    // ~15s runtime of `lobby_integration_tests.rs`.
+    next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "next server message").await
 }
 
 /// Authenticate, advertising the given protocol version + capabilities.
@@ -203,15 +199,19 @@ async fn join_room(
     )
     .await;
 
-    loop {
-        match next_server_message(ws).await {
-            ServerMessage::RoomJoined(p) => return (p.room_id, p.room_code.clone(), p.player_id),
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "room join response",
+        |message| match message {
+            ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code, p.player_id)),
             ServerMessage::RoomJoinFailed { reason, error_code } => {
                 panic!("room join failed: {reason} ({error_code:?})")
             }
-            _ => {}
-        }
-    }
+            _ => None,
+        },
+    )
+    .await
 }
 
 async fn ready(ws: &mut WsStream) {
@@ -223,49 +223,77 @@ async fn ready(ws: &mut WsStream) {
 /// (and reflected in `ready_players`) before the next is sent — mirrors
 /// `lobby_e2e_tests.rs` and removes the back-to-back-ready race.
 async fn await_ready_count(ws: &mut WsStream, count: usize) {
-    loop {
-        if let ServerMessage::LobbyStateChanged { ready_players, .. } =
-            next_server_message(ws).await
-        {
-            if ready_players.len() == count {
-                return;
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "lobby ready count update",
+        |message| match message {
+            ServerMessage::LobbyStateChanged { ready_players, .. }
+                if ready_players.len() == count =>
+            {
+                Some(())
             }
-        }
-    }
+            _ => None,
+        },
+    )
+    .await;
 }
 
 /// The `SessionPlan` (if any) a client receives after `GameStarting`. Reaching
 /// this point at all means `GameStarting` was observed, in order.
-type Finalization = Option<Box<signal_fish_server::protocol::SessionPlanPayload>>;
+type SessionPlan = Box<signal_fish_server::protocol::SessionPlanPayload>;
+
+#[derive(Debug)]
+struct Finalization {
+    session_plan: Option<SessionPlan>,
+    skipped_after_game_starting: String,
+}
+
+impl Finalization {
+    fn expect_session_plan(self, context: &str) -> SessionPlan {
+        self.session_plan.unwrap_or_else(|| {
+            panic!(
+                "{context} must receive a SessionPlan after GameStarting; skipped after GameStarting: {}",
+                self.skipped_after_game_starting
+            )
+        })
+    }
+}
 
 /// Read until `GameStarting` is observed (asserting no `SessionPlan` precedes
 /// it), then collect a `SessionPlan` if one arrives within a short window.
 async fn read_finalization(ws: &mut WsStream) -> Finalization {
-    // Read until GameStarting (skipping LobbyStateChanged et al.).
-    loop {
-        match next_server_message(ws).await {
-            ServerMessage::GameStarting { .. } => break,
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "finalization GameStarting",
+        |message| match message {
+            ServerMessage::GameStarting { .. } => Some(()),
             ServerMessage::SessionPlan(_) => {
                 panic!("SessionPlan must not arrive before GameStarting")
             }
-            _ => {}
-        }
-    }
+            _ => None,
+        },
+    )
+    .await;
 
-    // After GameStarting, a SessionPlan may or may not follow. Poll briefly.
-    loop {
-        let frame = tokio::time::timeout(tokio::time::Duration::from_millis(800), ws.next()).await;
-        match frame {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                match serde_json::from_str::<ServerMessage>(&text).expect("valid ServerMessage") {
-                    ServerMessage::SessionPlan(plan) => break Some(plan),
-                    _ => continue,
-                }
-            }
-            Ok(Some(Ok(_))) => continue,
-            // Timed out or stream ended: no SessionPlan.
-            _ => break None,
-        }
+    // After GameStarting, a SessionPlan may or may not follow. Use one absolute
+    // deadline so unrelated frames cannot extend this optional window.
+    let (session_plan, skipped_after_game_starting) =
+        maybe_next_matching_server_message_with_skipped_until(
+            ws,
+            deadline_after(POST_GAME_STARTING_SESSION_PLAN_WINDOW),
+            "post-GameStarting SessionPlan",
+            |message| match message {
+                ServerMessage::SessionPlan(plan) => Some(plan),
+                _ => None,
+            },
+        )
+        .await;
+
+    Finalization {
+        session_plan,
+        skipped_after_game_starting,
     }
 }
 
@@ -290,12 +318,9 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
     ready(&mut peer2).await;
 
     // Reaching past read_finalization means each saw GameStarting first, in order.
-    let plan1 = read_finalization(&mut peer1)
-        .await
-        .expect("peer1 must receive a SessionPlan after GameStarting");
-    let plan2 = read_finalization(&mut peer2)
-        .await
-        .expect("peer2 must receive a SessionPlan after GameStarting");
+    let (plan1, plan2) = tokio::join!(read_finalization(&mut peer1), read_finalization(&mut peer2));
+    let plan1 = plan1.expect_session_plan("peer1");
+    let plan2 = plan2.expect_session_plan("peer2");
 
     for plan in [&plan1, &plan2] {
         assert_eq!(plan.topology, Topology::Mesh);
@@ -343,11 +368,15 @@ async fn mixed_v2_v3_room_finalization_sends_no_session_plan() {
     // Both receive GameStarting (reaching past read_finalization proves it,
     // in order), exactly like v2. The room resolved to the relay floor, so
     // NEITHER receives a SessionPlan.
-    let plan1 = read_finalization(&mut peer1).await;
-    let plan2 = read_finalization(&mut peer2).await;
+    let (plan1, plan2) = tokio::join!(read_finalization(&mut peer1), read_finalization(&mut peer2));
     assert!(
-        plan1.is_none(),
-        "v3 peer must not receive a SessionPlan in a relay-resolved room"
+        plan1.session_plan.is_none(),
+        "v3 peer must not receive a SessionPlan in a relay-resolved room; skipped after GameStarting: {}",
+        plan1.skipped_after_game_starting
     );
-    assert!(plan2.is_none(), "v2 peer must never receive a SessionPlan");
+    assert!(
+        plan2.session_plan.is_none(),
+        "v2 peer must never receive a SessionPlan; skipped after GameStarting: {}",
+        plan2.skipped_after_game_starting
+    );
 }
