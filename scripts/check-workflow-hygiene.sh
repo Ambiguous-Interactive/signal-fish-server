@@ -592,9 +592,67 @@ normalize_run_block_commands() {
     '
 }
 
+split_shell_statements() {
+    local logical_cmd="$1"
+
+    printf '%s\n' "$logical_cmd" | awk '
+        function flush_statement() {
+            if (statement != "") {
+                print statement
+                statement = ""
+            }
+        }
+
+        {
+            statement = ""
+            for (i = 1; i <= length($0); i++) {
+                current = substr($0, i, 1)
+                next_char = substr($0, i + 1, 1)
+                prev_char = substr($0, i - 1, 1)
+
+                if (current == ";") {
+                    flush_statement()
+                    continue
+                }
+
+                if (current == "|") {
+                    flush_statement()
+                    if (next_char == "|" || next_char == "&") {
+                        i++
+                    }
+                    continue
+                }
+
+                if (current == "&") {
+                    if (next_char == "&") {
+                        flush_statement()
+                        i++
+                        continue
+                    }
+
+                    # Preserve stderr/stdout redirections such as 2>&1 and &>.
+                    if (prev_char == ">" || next_char == ">") {
+                        statement = statement current
+                        continue
+                    }
+
+                    flush_statement()
+                    continue
+                }
+
+                statement = statement current
+            }
+
+            flush_statement()
+        }
+    '
+}
+
 # Commands that are exempt from the --locked requirement:
 #   - cargo audit: Reads Cargo.lock directly and does not support --locked
 #   - cargo fmt: Formatter only, does not resolve dependencies
+#   - cargo -V/--version/version and cargo <subcommand> -V/--version: Version
+#     probes only; these do not build or resolve project dependencies
 #   - cargo publish: Intentionally resolves from registry for crates.io compatibility
 #   - cargo install: Installing tools, not building the project
 #   - cargo machete: Static analysis of Cargo.toml, does not compile
@@ -618,7 +676,9 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
         RUN_BLOCK=${run_record#*$'\t'}
 
         while IFS= read -r logical_cmd; do
-            # Split chained commands (&&, ||, ;) into individual statements.
+            # Split chained and piped commands into individual statements so a
+            # version probe later in a pipeline cannot exempt an earlier Cargo
+            # build/test/check invocation.
             while IFS= read -r statement; do
                 # Trim leading/trailing whitespace.
                 statement=$(echo "$statement" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
@@ -654,13 +714,18 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                         continue
                     fi
 
+                    if [[ "$statement" =~ (^|[[:space:]])cargo[[:space:]](\+[^[:space:]]+[[:space:]]+)?(-V|--version|version)([[:space:]]|$) ]] ||
+                       [[ "$statement" =~ (^|[[:space:]])cargo[[:space:]](\+[^[:space:]]+[[:space:]]+)?[a-z-]+[[:space:]]+(-V|--version)([[:space:]]|$) ]]; then
+                        continue
+                    fi
+
                     if ! echo "$statement" | grep -q -- "--locked"; then
                         warn "$WORKFLOW_NAME:$RUN_START_LINE: 'cargo $CARGO_SUBCMD' missing --locked flag"
                         warn "  Command: $statement"
                         MISSING_LOCKED=$((MISSING_LOCKED + 1))
                     fi
                 fi
-            done < <(printf '%s\n' "$logical_cmd" | sed -E 's/(&&|\|\||;)/\n/g')
+            done < <(split_shell_statements "$logical_cmd")
         done < <(normalize_run_block_commands "$RUN_BLOCK")
     done < <(extract_run_blocks_for_workflow "$workflow")
 done

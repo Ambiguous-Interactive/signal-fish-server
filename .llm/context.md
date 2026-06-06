@@ -105,6 +105,11 @@ Also see:
 - [Detailed Context File Reference](context-file-reference.md)
 - [Config and Wire-Format Drift](config-wire-format-drift.md)
 
+Canonical protocol samples:
+
+- [v2 client messages](code-samples/protocol/v2-client-messages.jsonl)
+- [v2 server messages](code-samples/protocol/v2-server-messages.jsonl)
+
 ---
 
 ## Skills Library

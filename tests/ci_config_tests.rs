@@ -15805,6 +15805,24 @@ fn test_run_local_ci_includes_readme_badge_style_check() {
     );
 }
 
+#[test]
+fn test_run_local_ci_runs_actionlint_when_available() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("command -v actionlint") && content.contains("run_check_quiet \"actionlint\""),
+        "run-local-ci.sh should run actionlint when it is installed so local workflow validation catches GitHub Actions lint failures."
+    );
+    assert!(
+        content.contains(".github/workflows/*.yml")
+            && content.contains(".github/workflows/*.yaml")
+            && content.contains("actionlint \"${ACTIONLINT_WORKFLOWS[@]}\""),
+        "run-local-ci.sh should validate every .yml and .yaml workflow file with actionlint."
+    );
+}
+
 const LOCAL_CI_FAST_SKIPPED_CHECKS: &[(&str, &str, &str)] = &[
     (
         "default-feature clippy",

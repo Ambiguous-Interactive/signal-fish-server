@@ -384,7 +384,9 @@ jobs:
 
       - name: Cleanup smoke test
         if: always()
-        run: docker stop test-server && docker rm test-server || true
+        run: |
+          docker stop test-server || true
+          docker rm test-server || true
 
   coverage:
     name: Coverage (llvm-cov)

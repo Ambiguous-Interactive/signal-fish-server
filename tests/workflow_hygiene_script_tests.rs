@@ -133,6 +133,90 @@ jobs:
 }
 
 #[test]
+fn test_workflow_hygiene_ignores_cargo_version_probe_commands() {
+    let workflow = r#"name: Tool Versions
+on: [push]
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Show versions
+        run: |
+          cargo -V
+          cargo --version
+          cargo version
+          cargo clippy -V
+          cargo fmt --version
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("cargo-version-probes.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed for version-only cargo commands.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("missing --locked flag"),
+        "Cargo version probe commands should not require --locked.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_does_not_let_pipeline_version_probe_exempt_build_command() {
+    let workflow = r#"name: Pipeline Cargo Commands
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Test with diagnostic probe
+        run: cargo test | cargo --version
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("pipeline-cargo.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should exit success for warning-only cases.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("'cargo test' missing --locked flag"),
+        "A later cargo version probe in a pipeline must not exempt an earlier cargo test command.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_does_not_let_background_version_probe_exempt_build_command() {
+    let workflow = r#"name: Background Cargo Commands
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Test with backgrounded diagnostic probe
+        run: |
+          cargo test & cargo --version
+          cargo clippy --version & cargo test
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("background-cargo.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should exit success for warning-only cases.\nOutput:\n{output}"
+    );
+
+    let cargo_test_warning_count = output.matches("'cargo test' missing --locked flag").count();
+    assert_eq!(
+        cargo_test_warning_count, 2,
+        "Standalone background operators must split cargo statements without letting version probes exempt cargo test commands.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_workflow_hygiene_exempts_cargo_audit_from_locked_warning() {
     let workflow = r#"name: Audit Workflow
 on: [push]

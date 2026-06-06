@@ -201,7 +201,21 @@ if [ -f scripts/validate-ci.sh ]; then
         scripts/validate-ci.sh --quiet
 fi
 
-# Check 11: Markdown Linting
+# Check 11: GitHub Actions syntax validation
+if command -v actionlint > /dev/null 2>&1; then
+    ACTIONLINT_WORKFLOWS=()
+    for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+        [ -f "$workflow" ] && ACTIONLINT_WORKFLOWS+=("$workflow")
+    done
+
+    run_check_quiet "actionlint" "Validating GitHub Actions workflow syntax" \
+        actionlint "${ACTIONLINT_WORKFLOWS[@]}"
+else
+    echo -e "${YELLOW}⚠ SKIP${NC}: actionlint (actionlint not installed)"
+    echo ""
+fi
+
+# Check 12: Markdown Linting
 if [ -f scripts/check-markdown.sh ]; then
     if [ "$FIX_MODE" = true ]; then
         echo -e "${BOLD}${BLUE}[markdown]${NC} Fixing markdown files"
@@ -235,19 +249,19 @@ else
     FAILED_CHECKS+=("markdown")
 fi
 
-# Check 12: README Badge Style Consistency
+# Check 13: README Badge Style Consistency
 if [ -f scripts/check-readme-badges.sh ]; then
     run_check_quiet "readme-badges" "Checking Shields badge style consistency in README" \
         scripts/check-readme-badges.sh README.md
 fi
 
-# Check 13: Dockerfile shell portability
+# Check 14: Dockerfile shell portability
 if [ -f scripts/check-dockerfile-portability.sh ]; then
     run_check_quiet "dockerfile-portability" "Checking Dockerfile shell portability" \
         scripts/check-dockerfile-portability.sh --quiet
 fi
 
-# Check 14: Dependency Advisory Check
+# Check 15: Dependency Advisory Check
 if [ -f scripts/check-advisories.sh ]; then
     run_check_quiet "advisories" "Checking for RUSTSEC dependency advisories" \
         scripts/check-advisories.sh
@@ -256,7 +270,7 @@ else
     echo ""
 fi
 
-# Check 15: Documentation + changelog consistency
+# Check 16: Documentation + changelog consistency
 if [ -f scripts/check-doc-consistency.sh ]; then
     run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
         scripts/check-doc-consistency.sh
@@ -266,7 +280,7 @@ else
     FAILED_CHECKS+=("doc-consistency")
 fi
 
-# Check 16: Documentation consistency policy tests
+# Check 17: Documentation consistency policy tests
 if [ "$FAST_MODE" = false ]; then
     run_check "doc-policy-tests" "Running docs/changelog policy tests" \
         cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests

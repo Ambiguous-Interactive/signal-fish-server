@@ -360,23 +360,30 @@ validate_protocol_sample_reference() {
     fi
 
     if ! grep -Fq "$sample_reference" "$markdown_file"; then
-        action_error "$markdown_file must reference canonical protocol sample: $sample_reference"
+        action_error "$markdown_file must reference canonical protocol sample: $sample_reference (derived from PROTOCOL_SAMPLE_FILES in scripts/check-doc-consistency.sh)"
     fi
 }
 
 PROTOCOL_SAMPLE_CLIENT=".llm/code-samples/protocol/v2-client-messages.jsonl"
 PROTOCOL_SAMPLE_SERVER=".llm/code-samples/protocol/v2-server-messages.jsonl"
+PROTOCOL_SAMPLE_FILES=(
+    "$PROTOCOL_SAMPLE_CLIENT"
+    "$PROTOCOL_SAMPLE_SERVER"
+)
 
 validate_protocol_stale_tokens "README.md"
 validate_protocol_stale_tokens ".llm/context.md"
-validate_protocol_stale_tokens "$PROTOCOL_SAMPLE_CLIENT"
-validate_protocol_stale_tokens "$PROTOCOL_SAMPLE_SERVER"
+
+for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
+    validate_protocol_stale_tokens "$sample_file"
+done
+
 validate_protocol_authenticated_payload_shape "$PROTOCOL_SAMPLE_SERVER"
 
-validate_protocol_sample_reference "README.md" "$PROTOCOL_SAMPLE_CLIENT"
-validate_protocol_sample_reference "README.md" "$PROTOCOL_SAMPLE_SERVER"
-validate_protocol_sample_reference ".llm/context.md" "code-samples/protocol/v2-client-messages.jsonl"
-validate_protocol_sample_reference ".llm/context.md" "code-samples/protocol/v2-server-messages.jsonl"
+for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
+    validate_protocol_sample_reference "README.md" "$sample_file"
+    validate_protocol_sample_reference ".llm/context.md" "${sample_file#.llm/}"
+done
 
 # ---------------------------------------------------------------------------
 # 4) Changelog-required gate for non-internal changed files

@@ -3,8 +3,10 @@
 mod common;
 
 use common::{bash_command, repo_root, unique_temp_dir, write_file};
-use regex::RegexBuilder;
 use std::fs;
+use std::thread;
+
+use regex::RegexBuilder;
 
 fn base_fixture_files() -> Vec<(&'static str, String)> {
     vec![
@@ -160,6 +162,97 @@ struct ScriptCase {
     must_not_contain: Vec<&'static str>,
 }
 
+fn evaluate_script_case(case: ScriptCase) -> Option<String> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_checker_with_fixture(&case.overrides, &[], &case.args)
+    }));
+
+    let (exit_code, output) = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = if let Some(message) = payload.downcast_ref::<&str>() {
+                *message
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.as_str()
+            } else {
+                "unknown panic"
+            };
+            return Some(format!("Case '{}' panicked: {message}", case.name));
+        }
+    };
+
+    let mut failures = Vec::new();
+    if exit_code != case.expected_exit {
+        failures.push(format!(
+            "exit code mismatch. Expected: {}. Actual: {}.",
+            case.expected_exit, exit_code
+        ));
+    }
+
+    for needle in &case.must_contain {
+        if !output.contains(needle) {
+            failures.push(format!("missing expected output fragment: '{needle}'"));
+        }
+    }
+
+    for needle in &case.must_not_contain {
+        if output.contains(needle) {
+            failures.push(format!(
+                "unexpectedly contains forbidden fragment: '{needle}'"
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Case '{}' failed:\n{}\nFull output:\n{}",
+            case.name,
+            failures.join("\n"),
+            output
+        ))
+    }
+}
+
+fn evaluate_script_cases_in_batches(cases: Vec<ScriptCase>) -> Vec<String> {
+    let parallelism = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .clamp(1, 6);
+    let mut failures = Vec::new();
+    let mut remaining = cases.into_iter();
+
+    loop {
+        let batch = remaining.by_ref().take(parallelism).collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+
+        let batch_failures = thread::scope(|scope| {
+            let handles = batch
+                .into_iter()
+                .map(|case| scope.spawn(move || evaluate_script_case(case)))
+                .collect::<Vec<_>>();
+            let mut failures = Vec::new();
+
+            for handle in handles {
+                match handle.join() {
+                    Ok(Some(failure)) => failures.push(failure),
+                    Ok(None) => {}
+                    Err(_) => failures.push("script case worker panicked unexpectedly".to_string()),
+                }
+            }
+
+            failures
+        });
+
+        failures.extend(batch_failures);
+    }
+
+    failures
+}
+
 #[test]
 fn test_doc_consistency_script_data_driven_cases() {
     let cases = vec![
@@ -293,6 +386,17 @@ fn test_doc_consistency_script_data_driven_cases() {
             args: vec![],
             expected_exit: 1,
             must_contain: vec!["stale protocol token 'server_version'"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_context_omits_canonical_sample_references",
+            overrides: vec![(".llm/context.md", "# Context\n\n- **Version:** 0.1.1\n")],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec![
+                ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v2-client-messages.jsonl",
+                ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v2-server-messages.jsonl",
+            ],
             must_not_contain: vec![],
         },
         // ---------------------------------------------------------------
@@ -589,35 +693,12 @@ fn test_doc_consistency_script_data_driven_cases() {
         },
     ];
 
-    for case in cases {
-        let (exit_code, output) = run_checker_with_fixture(&case.overrides, &[], &case.args);
-
-        assert_eq!(
-            exit_code, case.expected_exit,
-            "Case '{}' exit code mismatch.\nExpected: {}\nActual: {}\nOutput:\n{}",
-            case.name, case.expected_exit, exit_code, output
-        );
-
-        for needle in &case.must_contain {
-            assert!(
-                output.contains(needle),
-                "Case '{}' missing expected output fragment: '{}'\nFull output:\n{}",
-                case.name,
-                needle,
-                output
-            );
-        }
-
-        for needle in &case.must_not_contain {
-            assert!(
-                !output.contains(needle),
-                "Case '{}' unexpectedly contains forbidden fragment: '{}'\nFull output:\n{}",
-                case.name,
-                needle,
-                output
-            );
-        }
-    }
+    let failures = evaluate_script_cases_in_batches(cases);
+    assert!(
+        failures.is_empty(),
+        "Doc consistency script cases failed:\n\n{}",
+        failures.join("\n\n")
+    );
 }
 
 /// The CI workflow's dep-detect step uses a grep ERE pattern to identify
