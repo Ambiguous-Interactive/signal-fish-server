@@ -2791,6 +2791,56 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
 }
 
 #[test]
+fn test_check_markdown_script_common_issue_guidance_is_data_driven() {
+    struct GuidanceCase {
+        rule_id: &'static str,
+        symptom: &'static str,
+        fix_hint: &'static str,
+    }
+
+    let root = repo_root();
+    let script = root.join("scripts/check-markdown.sh");
+    let content = read_file(&script);
+
+    let cases = [
+        GuidanceCase {
+            rule_id: "MD013",
+            symptom: "Line length exceeds configured limit",
+            fix_hint: "Reflow paragraphs or split long list items/links across lines",
+        },
+        GuidanceCase {
+            rule_id: "MD040",
+            symptom: "Missing language identifier on code blocks",
+            fix_hint: "Add language identifier after opening backticks",
+        },
+        GuidanceCase {
+            rule_id: "MD046",
+            symptom: "Inconsistent code block style",
+            fix_hint: "Use fenced code blocks",
+        },
+    ];
+
+    for case in cases {
+        let rule_line = format!("  - {}: {}", case.rule_id, case.symptom);
+        assert!(
+            content.contains(&rule_line),
+            "check-markdown.sh missing common issue guidance for {}.\nExpected line: {}\nFile: {}",
+            case.rule_id,
+            rule_line,
+            script.display()
+        );
+
+        assert!(
+            content.contains(case.fix_hint),
+            "check-markdown.sh missing fix hint for {}.\nExpected hint fragment: {}\nFile: {}",
+            case.rule_id,
+            case.fix_hint,
+            script.display()
+        );
+    }
+}
+
+#[test]
 fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
