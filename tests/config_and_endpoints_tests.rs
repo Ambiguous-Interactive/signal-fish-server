@@ -406,6 +406,76 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("{}"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY",
+        path: "session.default_topology",
+        default: Some("relay"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS",
+        path: "session.game_topology_mappings",
+        default: Some("{}"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__ENABLE_WEBRTC",
+        path: "session.enable_webrtc",
+        default: Some("true"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__ENABLE_DIRECT",
+        path: "session.enable_direct",
+        default: Some("true"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__ICE_SERVERS",
+        path: "session.ice_servers",
+        default: Some("[]"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__TURN__ENABLED",
+        path: "turn.enabled",
+        default: Some("false"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__TURN__MODE",
+        path: "turn.mode",
+        default: Some("static_secret"),
+    },
+    ConfigReferenceRow {
+        // Empty string by default; not asserted against Config::default() here
+        // (an empty default cell is awkward in the table), but its presence and
+        // path are still validated.
+        env: "SIGNAL_FISH__TURN__STATIC_AUTH_SECRET",
+        path: "turn.static_auth_secret",
+        default: None,
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__TURN__URLS",
+        path: "turn.urls",
+        default: Some("[]"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__TURN__STUN_URLS",
+        path: "turn.stun_urls",
+        default: Some("[\"stun:stun.l.google.com:19302\"]"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS",
+        path: "turn.credential_ttl_secs",
+        default: Some("3600"),
+    },
+    ConfigReferenceRow {
+        // `Option`, skipped from serialization when None, so no default is
+        // asserted against Config::default(); documented as `null` (unset).
+        env: "SIGNAL_FISH__TURN__MANAGED_PROVIDER",
+        path: "turn.managed_provider",
+        default: None,
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__TURN__MANAGED_API_TOKEN",
+        path: "turn.managed_api_token",
+        default: None,
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING",
         path: "websocket.enable_batching",
         default: Some("true"),
@@ -888,6 +958,40 @@ fn test_config_example_includes_all_rate_limit_fields() {
         .session
         .validate()
         .expect("config.example.json session block must validate");
+
+    // Protocol v3 TURN block (P4): the example must document every field.
+    let turn = value
+        .get("turn")
+        .and_then(serde_json::Value::as_object)
+        .expect("config.example.json must include a turn object");
+    for key in [
+        "enabled",
+        "mode",
+        "static_auth_secret",
+        "urls",
+        "stun_urls",
+        "credential_ttl_secs",
+    ] {
+        assert!(
+            turn.contains_key(key),
+            "config.example.json turn must document `{key}`"
+        );
+    }
+    assert_eq!(
+        value.pointer("/turn/mode"),
+        Some(&serde_json::json!("static_secret")),
+        "config.example.json must use the canonical snake_case TURN mode token"
+    );
+    assert_eq!(
+        value.pointer("/turn/enabled"),
+        Some(&serde_json::json!(false)),
+        "config.example.json must ship with TURN disabled (relay-floor posture)"
+    );
+    // The example config must pass TURN validation.
+    config
+        .turn
+        .validate()
+        .expect("config.example.json turn block must validate");
 }
 
 #[test]

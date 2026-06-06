@@ -32,6 +32,7 @@ or when reviewing own work for correctness.
 ## TL;DR
 
 - Run cargo check → clippy → test → fmt after every change
+- Run worktree hook preflight before handoff; do not rely on staged-hook dry runs
 - Use Deep Review checklist for significant changes
 - Walk the "Am I Done?" decision tree before committing
 - Never modify test expectations to make tests pass
@@ -89,6 +90,8 @@ For non-trivial changes, dispatch as a subagent or work through manually:
 ### Rust Code Quality
 
 - [ ] No new `unwrap()` on user input or external data
+- [ ] Production `.expect()` / `.unwrap()` additions are either removed or explicitly documented
+      with a nearby `SAFETY:` rationale plus matching `#[allow(clippy::*_used)]`
 - [ ] No new `clone()` where a reference would work
 - [ ] Error messages are actionable (include context about what failed)
 - [ ] Public API changes have doc comments
@@ -188,8 +191,11 @@ Formatted? ─── NO ──► Run cargo fmt / npm run format
 New tests for new behavior? ─── NO ──► Add tests
     │ YES
     ▼
-Policy scripts pass? ─── NO ──► Fix doc-consistency / workflow-hygiene issues
+Policy scripts pass? ─── NO ──► Fix doc-consistency / workflow-hygiene / LLM issues
     │ YES
+    ▼
+Worktree hook preflight pass? ─── NO ──► Run: pwsh -NoLogo -NoProfile -NonInteractive
+    │ YES                                  -File scripts/hooks/pre-commit.ps1 -Worktree
     ▼
 Hook test suites pass? ─── NO ──► Run: cargo test --locked --test doc_consistency_*
     │ YES                          --test ci_config_tests
@@ -259,28 +265,6 @@ After the checklist passes, provide these instructions to the user:
 4. **Push**: `git push origin branch-name` when ready
 
 ⛔ **YOU NEVER**: Stage, commit, configure git, or push. See [Git Safety Forbidden Operations](./git-safety-forbidden-operations.md).
-
-### Template Instructions to Provide User
-
-```text
-Changes are ready. To commit:
-
-```
-
-git add src/file.rs tests/test_file.rs
-git commit -m "feat: add new validation
-
-- Add input validation for room codes
-- Add comprehensive tests
-
-"
-
-```text
-
-
-```
-
----
 
 ## Related Skills
 

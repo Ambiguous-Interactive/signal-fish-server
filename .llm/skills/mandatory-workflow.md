@@ -139,8 +139,10 @@ cargo test --locked --all-features
 # 2. Script-level policy checks
 scripts/check-doc-consistency.sh --staged   # or --changed-files <files>
 scripts/check-workflow-hygiene.sh
+scripts/check-llm-file-sizes.sh
+scripts/check-llm-example-files.sh
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
-pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 
 # 3. Hook/local-policy test suites (run before handoff; hooks stay fast)
 cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
@@ -151,9 +153,10 @@ cargo test --locked --test ci_config_tests
 that validate script output, internal path classifications, and CI config
 consistency. A change that passes broad Rust tests alone may still fail hook or
 policy guards if script output or policy configuration changed. Always verify
-the full chain. Git hooks themselves stay sub-second and do not run
-clippy/tests/docs; agents and local CI are responsible for catching those
-failures before the hook is ever reached.
+the full chain. Git hooks themselves stay sub-second and inspect the staged Git
+index; the `-Worktree` preflight lets agents run the same cheap checks on
+unstaged work before handoff. Agents and local CI are responsible for catching
+semantic failures before the hook is ever reached.
 
 ---
 
@@ -179,7 +182,8 @@ failures before the hook is ever reached.
 ## Security Checklist (Pre-Merge)
 
 - [ ] No `.unwrap()` on user input (see [Defensive Programming](./defensive-programming.md))
-- [ ] All `.expect()` have `// SAFETY:` comments
+- [ ] Production `.expect()` / `.unwrap()` additions have both a nearby `// SAFETY:` rationale
+      and a matching `#[allow(clippy::expect_used)]` / `#[allow(clippy::unwrap_used)]`
 - [ ] Rate limiting in place for public endpoints
 - [ ] Auth tokens validated before privileged operations
 - [ ] No secrets logged (check tracing fields)

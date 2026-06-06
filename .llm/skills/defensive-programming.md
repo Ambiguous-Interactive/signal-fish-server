@@ -185,6 +185,7 @@ let guard = state.lock().unwrap_or_else(|poisoned| {
 
 // ✅ Fail-closed when data integrity is critical
 // SAFETY: Intentional — if credentials are corrupted, we must not proceed
+#[allow(clippy::expect_used)]
 let guard = credentials.lock().expect("credentials lock poisoned");
 ```
 

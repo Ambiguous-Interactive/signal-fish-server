@@ -88,6 +88,14 @@ pub enum ClientMessage {
     },
     /// Leave spectator mode
     LeaveSpectator,
+    /// Report this client's current data-path transport state to the server (v3 only).
+    /// Lets the server distinguish P2P-connected peers from relay-fallback peers
+    /// (drives metrics and, in future, targeted relay for stuck peers). Purely
+    /// informational — the relay floor never closes regardless of what is reported.
+    TransportStatus {
+        transport: Transport,
+        connected: bool,
+    },
 }
 
 /// Payload for the RoomJoined server message.

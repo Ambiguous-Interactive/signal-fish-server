@@ -435,6 +435,73 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         snapshot.relay_health.client_id_exhaustion_events,
     );
 
+    counter(
+        &mut buf,
+        "signal_fish_transport_session_plans_emitted_total",
+        "Non-relay v3 SessionPlans emitted (one per finalized non-relay room)",
+        snapshot.transport.session_plans_emitted,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_topology_mesh_selected_total",
+        "Finalized rooms whose chosen session topology was mesh",
+        snapshot.transport.topology_mesh_selected,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_topology_host_selected_total",
+        "Finalized rooms whose chosen session topology was host",
+        snapshot.transport.topology_host_selected,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_topology_relay_selected_total",
+        "Finalized rooms that resolved to the relay floor topology",
+        snapshot.transport.topology_relay_selected,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_webrtc_selected_total",
+        "Finalized rooms whose chosen data-path transport was webrtc",
+        snapshot.transport.transport_webrtc_selected,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_direct_selected_total",
+        "Finalized rooms whose chosen data-path transport was direct",
+        snapshot.transport.transport_direct_selected,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_relay_selected_total",
+        "Finalized rooms that resolved to the relay floor transport",
+        snapshot.transport.transport_relay_selected,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_p2p_established_total",
+        "P2P data paths clients reported as established via TransportStatus",
+        snapshot.transport.p2p_established,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_relay_fallback_total",
+        "Clients that reported falling back to the relay floor via TransportStatus",
+        snapshot.transport.relay_fallback,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_signals_relayed_total",
+        "Opaque WebRTC Signal messages successfully relayed between peers",
+        snapshot.transport.signals_relayed,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_turn_credentials_issued_total",
+        "Ephemeral TURN credentials minted into SessionPlans",
+        snapshot.transport.turn_credentials_issued,
+    );
+
     let cache_age_seconds = {
         let last_refresh = snapshot.dashboard_cache.last_refresh_timestamp;
         if last_refresh == 0 {
@@ -569,5 +636,77 @@ mod tests {
             rendered.contains("signal_fish_query_latency_samples_total 0"),
             "expected query latency sample counter"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_render_prometheus_metrics_includes_transport_counters() {
+        use crate::protocol::{Topology, Transport};
+
+        let metrics = ServerMetrics::new();
+        // Drive every P5 transport counter to a distinct, non-default value so the
+        // rendered lines are unambiguous.
+        metrics.record_topology_selected(Topology::Mesh);
+        metrics.record_transport_selected(Transport::WebRtc);
+        metrics.increment_session_plans_emitted();
+        metrics.record_topology_selected(Topology::Host);
+        metrics.record_transport_selected(Transport::Direct);
+        metrics.record_topology_selected(Topology::Relay);
+        metrics.record_transport_selected(Transport::Relay);
+        metrics.record_p2p_established();
+        metrics.record_relay_fallback();
+        metrics.increment_signals_relayed();
+        metrics.add_turn_credentials_issued(3);
+
+        let snapshot = metrics.snapshot().await;
+        let rendered = render_prometheus_metrics(&snapshot);
+
+        // Each new metric name must be present with a HELP, a TYPE counter line, and
+        // its value.
+        let expectations = [
+            ("signal_fish_transport_session_plans_emitted_total", 1u64),
+            ("signal_fish_transport_topology_mesh_selected_total", 1),
+            ("signal_fish_transport_topology_host_selected_total", 1),
+            ("signal_fish_transport_topology_relay_selected_total", 1),
+            ("signal_fish_transport_webrtc_selected_total", 1),
+            ("signal_fish_transport_direct_selected_total", 1),
+            ("signal_fish_transport_relay_selected_total", 1),
+            ("signal_fish_transport_p2p_established_total", 1),
+            ("signal_fish_transport_relay_fallback_total", 1),
+            ("signal_fish_transport_signals_relayed_total", 1),
+            ("signal_fish_transport_turn_credentials_issued_total", 3),
+        ];
+
+        for (name, value) in expectations {
+            assert!(
+                rendered.contains(&format!("# HELP {name} ")),
+                "missing HELP line for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {name} counter")),
+                "missing TYPE counter line for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("{name} {value}")),
+                "missing value line `{name} {value}`"
+            );
+        }
+
+        // Sanity: the body lines (non-comment) are well-formed `name value` pairs.
+        for line in rendered.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split(' ').collect();
+            assert_eq!(
+                parts.len(),
+                2,
+                "exposition body line must be `name value`: {line:?}"
+            );
+            assert!(
+                parts[1].parse::<f64>().is_ok(),
+                "metric value must be numeric: {line:?}"
+            );
+        }
     }
 }

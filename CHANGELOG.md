@@ -52,6 +52,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `enable_direct`, `ice_servers`) with validation; the new `IceServer`, `SessionPeer`, and
   `SessionPlanPayload` types are additive over the frozen v2 wire format (`host`/`ice_servers`/
   credentials omitted when absent).
+- Added ICE servers + ephemeral TURN credentials in the session plan (protocol v3 phase P4).
+  A WebRTC `SessionPlan` now carries per-recipient `ice_servers`: the operator's static
+  `session.ice_servers` (preserved verbatim) followed by the configured public STUN and, when
+  `[turn].enabled` with `mode = "static_secret"`, a TURN entry whose `username` / `credential`
+  are freshly minted **per recipient** via the coturn REST scheme — `username =
+  "{expiry}:{player_id}"`, `credential = base64(HMAC-SHA1(static_auth_secret, username))` — so the
+  static secret never reaches clients and each player receives distinct, time-limited credentials
+  (all members of one finalize share a single `now + credential_ttl_secs` expiry). The HMAC is
+  pinned to the RFC 2202 HMAC-SHA1 test vector. Non-WebRTC plans (`host+direct`, and the
+  never-emitted relay floor) carry an empty `ice_servers` list, and a disabled `[turn]` block
+  advertises only public STUN with no credentials. Added a `[turn]` config block (`enabled`,
+  `mode` = `static_secret` | `managed`, `static_auth_secret`, `urls`, `stun_urls`,
+  `credential_ttl_secs`, `managed_provider`, `managed_api_token`) with validation; `mode =
+  "managed"` is a STUN-only stub in P4 (no outbound-HTTP dependency is added — provider minting
+  is deferred). Added the `sha1` dependency. `Config.turn` is `#[serde(default)]`, so existing
+  config files without a `[turn]` block still load and the v2 wire format is unchanged.
+- Added the relay-fallback contract, transport status reporting, and transport metrics (protocol
+  v3 phase P5). New optional, v3-only `ClientMessage::TransportStatus { transport, connected }`
+  lets a client report its current data-path state
+  (`{"type":"TransportStatus","data":{"transport":"webrtc","connected":true}}`); the server
+  records it per connection and updates metrics, ignoring it from any non-v3 connection. A
+  `connected:true` P2P transport (`direct`/`webrtc`) counts as a P2P establishment; `connected:false`
+  counts as a relay fallback; `connected:true` with `relay` is "still on the floor" and moves no
+  counter. The message is purely informational — the server relays `GameData` unconditionally, so
+  the relay floor never closes regardless of what is reported. Added Prometheus counters for the v3
+  transport surface: `signal_fish_transport_session_plans_emitted_total`, per-finalized-room
+  topology (`signal_fish_transport_topology_{mesh,host,relay}_selected_total`) and transport
+  (`signal_fish_transport_{webrtc,direct,relay}_selected_total`) selection,
+  `signal_fish_transport_p2p_established_total`, `signal_fish_transport_relay_fallback_total`,
+  `signal_fish_transport_signals_relayed_total`, and
+  `signal_fish_transport_turn_credentials_issued_total`. Selection counters are recorded once per
+  finalize in `emit_session_plan` (relay-resolved rooms included; the late-join path never counts,
+  avoiding double-counting); `signals_relayed` counts a `Signal` at successful dispatch only;
+  `turn_credentials_issued` counts each minted TURN credential. Documented the client
+  transport/fallback state machine, the unconditional relay guarantee, the two-data-channel
+  recommendation, and the metrics in `docs/architecture/transport-fallback.md`. The v2 wire format
+  is unchanged — adding a `ClientMessage` variant leaves every existing variant byte-identical.
 - Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
   relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
   `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.
@@ -66,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SIGNAL_TARGET_NOT_FOUND`, and `SIGNAL_RATE_LIMITED` error codes. All signaling is gated to v3 +
   WebRTC peers, so v2 clients never receive `Signal` or `NewPeer` and v2 wire behavior is
   byte-identical.
+- Documented the protocol v3 wire contract and topology handoff (protocol v3 phase P6). Added a
+  "Protocol v3 additions" section to `docs/protocol.md` (capability-negotiation handshake, the
+  `Signal` / `NewPeer` / `SessionPlan` / `TransportStatus` messages, the `mesh+webrtc` →
+  `host+webrtc` → `host+direct` → `relay` selection ladder, the late-join decision table, the
+  glare/offerer rule, ICE/TURN credentials, and mesh + host sequence diagrams) and a new
+  `docs/architecture/handoff-and-topologies.md` covering the finalization handoff seam and the three
+  topologies. Added canonical v3 wire samples
+  (`.llm/code-samples/protocol/v3-client-messages.jsonl`,
+  `.llm/code-samples/protocol/v3-server-messages.jsonl`) referenced from `README.md`,
+  `.llm/context.md`, and `.llm/context-protocol-and-scenarios.md`, plus a `tests/v3_protocol_samples.rs`
+  test that deserializes every sample line into the real `ClientMessage` / `ServerMessage` types and
+  asserts the `type` tag round-trips — the enforceable proof that the samples match the wire.
 
 ### Security
 

@@ -109,6 +109,8 @@ Canonical protocol samples:
 
 - [v2 client messages](code-samples/protocol/v2-client-messages.jsonl)
 - [v2 server messages](code-samples/protocol/v2-server-messages.jsonl)
+- [v3 client messages](code-samples/protocol/v3-client-messages.jsonl)
+- [v3 server messages](code-samples/protocol/v3-server-messages.jsonl)
 
 ---
 

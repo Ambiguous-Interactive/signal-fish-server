@@ -262,6 +262,7 @@ is also supported for game data when `enable_message_pack_game_data` is enabled.
 ### Client Messages
 
 Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/code-samples/protocol/v2-client-messages.jsonl)
+(v3 additions: [.llm/code-samples/protocol/v3-client-messages.jsonl](.llm/code-samples/protocol/v3-client-messages.jsonl))
 
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
@@ -303,6 +304,7 @@ existing room, current members also receive `PlayerJoined`.
 ### Server Messages
 
 Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/code-samples/protocol/v2-server-messages.jsonl)
+(v3 additions: [.llm/code-samples/protocol/v3-server-messages.jsonl](.llm/code-samples/protocol/v3-server-messages.jsonl))
 
 | Message              | Description                                              |
 | -------------------- | -------------------------------------------------------- |

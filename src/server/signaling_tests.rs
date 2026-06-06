@@ -8,12 +8,12 @@
 
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    SessionConfig, TransportSecurityConfig,
+    SessionConfig, TransportSecurityConfig, TurnConfig,
 };
 use crate::database::DatabaseConfig;
 use crate::protocol::{
-    ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo, Room, ServerMessage, Topology,
-    Transport,
+    ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo, Room, ServerMessage,
+    Topology, Transport,
 };
 use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
@@ -60,6 +60,7 @@ async fn create_test_server_with_signal_limits(
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
         SessionConfig::default(),
+        TurnConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),
@@ -79,6 +80,7 @@ async fn create_test_server_with_session(session: SessionConfig) -> Arc<Enhanced
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
         session,
+        TurnConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),
@@ -1704,4 +1706,340 @@ async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner(
         1,
         "same-token concurrent reconnects must not duplicate room membership"
     );
+}
+
+// ---------------------------------------------------------------------------
+// signals_relayed metric (P5).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn handle_signal_increments_signals_relayed_on_successful_relay() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    assert_eq!(
+        server.metrics.signals_relayed.load(Ordering::Relaxed),
+        0,
+        "no signals relayed before any handle_signal call"
+    );
+
+    server
+        .handle_signal(&alice, bob, json!({ "Offer": "x" }))
+        .await;
+
+    // Sanity: the relay actually delivered (so the metric reflects a real event).
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::Signal { from, .. } => assert_eq!(*from, alice),
+        other => panic!("expected Signal, got {other:?}"),
+    }
+    assert_eq!(
+        server.metrics.signals_relayed.load(Ordering::Relaxed),
+        1,
+        "a successful relay must increment signals_relayed exactly once"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn handle_signal_does_not_count_rejected_cross_room_signal() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    // Alice and Bob are in DIFFERENT rooms => cross-room signal is rejected.
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, uuid::Uuid::new_v4())
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, uuid::Uuid::new_v4())
+        .await;
+
+    server
+        .handle_signal(&alice, bob, json!({ "Offer": "x" }))
+        .await;
+
+    // Alice gets a rejection error; Bob never receives the signal.
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::CrossRoomSignal));
+    assert_silent(&mut bob_rx).await;
+
+    assert_eq!(
+        server.metrics.signals_relayed.load(Ordering::Relaxed),
+        0,
+        "a rejected cross-room signal must NOT count as relayed"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn handle_signal_does_not_count_rate_limited_signal() {
+    // A 0-budget signal limiter rejects every relay attempt; none may count.
+    let server = create_test_server_with_signals(0).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    server
+        .handle_signal(&alice, bob, json!({ "Offer": "x" }))
+        .await;
+
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server.metrics.signals_relayed.load(Ordering::Relaxed),
+        0,
+        "a rate-limited signal must NOT count as relayed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TransportStatus handler (P5): per-connection state + p2p/relay metrics, v3 gating.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_webrtc_connected_records_p2p_and_state() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, true)),
+        "the per-connection transport status must be recorded"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        1,
+        "webrtc + connected must record one p2p_established"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        0,
+        "a connected p2p report must not count as relay_fallback"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_direct_connected_records_p2p() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc_direct_host());
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::Direct,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::Direct, true))
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        1,
+        "direct + connected is a P2P establishment"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_disconnected_records_relay_fallback() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: false,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, false))
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        1,
+        "connected=false must record one relay_fallback"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        0,
+        "a fallback report must not count as p2p_established"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_relay_connected_moves_no_counter_but_records_state() {
+    // `connected: true` with `transport: relay` means "still on the floor": it is
+    // neither a P2P establishment nor a fallback, so it moves no metric — only the
+    // per-connection state is updated.
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::Relay,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::Relay, true)),
+        "the report is still recorded as per-connection state"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        0,
+        "relay + connected is not a P2P establishment"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        0,
+        "relay + connected is not a fallback event"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_from_non_v3_client_is_ignored() {
+    // A v2 client can never legitimately send TransportStatus; the report must be
+    // dropped — no per-connection state, no metric movement (defense-in-depth).
+    let server = create_test_server().await;
+    let (legacy, mut legacy_rx) = register_client(&server).await;
+    server.set_client_protocol(&legacy, v2_with_webrtc_transport());
+
+    server
+        .handle_client_message(
+            &legacy,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    // The ignored report must also leak no message back to the v2 client.
+    assert_silent(&mut legacy_rx).await;
+
+    assert_eq!(
+        server.client_transport_status(&legacy),
+        None,
+        "a non-v3 client's TransportStatus must NOT update per-connection state"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        0,
+        "a non-v3 client's TransportStatus must not move p2p_established"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        0,
+        "a non-v3 client's TransportStatus must not move relay_fallback"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Relay floor never closes (P5): GameData still relays after a P2P-failure report.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn game_data_still_relays_after_transport_status_disconnected() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    // Alice reports her P2P path failed and she fell back to the relay floor.
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: false,
+            },
+        )
+        .await;
+
+    // The server keeps relaying GameData unconditionally — the floor never closes.
+    let payload = json!({ "tick": 42 });
+    server.handle_game_data(&alice, payload.clone()).await;
+
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::GameData { from_player, data } => {
+            assert_eq!(*from_player, alice);
+            assert_eq!(*data, payload);
+        }
+        other => panic!("expected relayed GameData after fallback, got {other:?}"),
+    }
 }

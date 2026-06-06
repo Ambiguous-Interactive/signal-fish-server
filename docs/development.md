@@ -527,9 +527,16 @@ typos
 # MSRV consistency
 ./scripts/check-msrv-consistency.sh
 
+# Fast hook-equivalent policy checks over unstaged work
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+
+# Canonical local preflight, including hook readiness, LLM policy checks, markdown,
+# workflow hygiene, docs/changelog consistency, and policy test suites.
+./scripts/run-local-ci.sh
+
 ```
 
-Or use the pre-commit hook to run checks automatically:
+Enable git hooks as a final last-resort guard:
 
 ```bash
 

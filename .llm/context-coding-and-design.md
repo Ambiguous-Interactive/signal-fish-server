@@ -23,6 +23,9 @@ Linting: [Clippy and Linting](skills/clippy-and-linting.md)
 Key rules:
 
 - Always use `Result<T, E>` with `?` -- never `.unwrap()` in production code
+  unless a compile-time invariant is documented with `SAFETY:` and an explicit
+  `#[allow(clippy::unwrap_used)]`; apply the same documented exception rule to
+  production `.expect()`
 - Validate all input at system boundaries
 - Use `checked_`/`saturating_` arithmetic -- never raw `as` casts that truncate
 - Use `Bytes` for network data, `SmallVec` for small collections, `DashMap` for concurrent access

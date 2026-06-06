@@ -795,6 +795,287 @@ and `room_id` (from the original `RoomJoined` response) to reconnect:
 On successful reconnection, the server sends a `Reconnected` message with the current room state and any
 missed events that occurred during the disconnection.
 
+## Protocol v3 additions
+
+Protocol v3 is a **purely additive** layer on top of the v2 wire contract documented above. Everything in the
+preceding sections still applies unchanged; v3 only adds optional `Authenticate` fields, four new message types,
+and a capability-negotiation handshake. A v2 client never sends or receives a v3 message — the relay floor is the
+universal default and a v2 client observes byte-identical v2 behavior.
+
+Canonical wire samples for this section:
+
+- [v3 client messages](../.llm/code-samples/protocol/v3-client-messages.jsonl)
+- [v3 server messages](../.llm/code-samples/protocol/v3-server-messages.jsonl)
+
+See also the [Transport Fallback Contract](architecture/transport-fallback.md) (client-side state machine and the
+relay-floor guarantee) and [Handoff and Topologies](architecture/handoff-and-topologies.md) (mesh / host / relay
+topologies and the finalization handoff seam).
+
+### Capability negotiation handshake
+
+A v3-capable client advertises its capabilities by adding three optional fields to the first `Authenticate`
+message:
+
+```json
+{
+  "type": "Authenticate",
+  "data": {
+    "app_id": "mb_app_abc123",
+    "protocol_version": 3,
+    "supported_transports": ["relay", "direct", "webrtc"],
+    "supported_topologies": ["relay", "host", "mesh"]
+  }
+}
+```
+
+- `protocol_version` — the highest protocol version the client speaks. When absent, the endpoint default is used
+  (`/v2/ws` ⇒ 2, `/v3/ws` ⇒ 3).
+- `supported_transports` — data-path transports the client supports. Absent ⇒ relay-only (v2). Tokens: `relay`,
+  `direct`, `webrtc`.
+- `supported_topologies` — session topologies the client supports. Absent ⇒ relay-only (v2). Tokens: `relay`,
+  `host`, `mesh`.
+
+The server clamps the negotiated version into its configured range:
+`negotiated = clamp(client_max, min_protocol_version, max_protocol_version)`, i.e.
+`min(client_max, max_protocol_version)` raised to at least `min_protocol_version`. A client that advertises a higher
+version than the deployment speaks is clamped **down** to `max_protocol_version`; one that omits the field is
+treated as a pure v2 client. If the negotiated version is below 3, the connection is **relay-only** regardless of
+the advertised transports/topologies. Defaults: `min_protocol_version = 2`, `max_protocol_version = 3`.
+
+The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 fields plus three new ones):
+
+```json
+{
+  "type": "ProtocolInfo",
+  "data": {
+    "capabilities": ["reconnection", "spectators", "authority"],
+    "game_data_formats": ["json", "message_pack"],
+    "protocol_version": 3,
+    "min_protocol_version": 2,
+    "max_protocol_version": 3
+  }
+}
+```
+
+The three new fields are omitted from the wire for a negotiated v2 connection, so the v2 `ProtocolInfo` shape stays
+byte-identical.
+
+**Endpoints.** `/v2/ws` and `/v3/ws` share the same handler. `/v3/ws` only changes the _default_ protocol version
+to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then
+clamped). `/v2/ws` behavior is unchanged.
+
+**Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
+chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor, where
+no v3 messages are emitted at all. This is the relay-floor guarantee: v2 and v3 clients interoperate, always.
+
+### New v3 messages
+
+These four messages exist only on a negotiated v3 connection.
+
+| Message | Direction | Purpose |
+|---|---|---|
+| `Signal` | client ⇄ server | Relay an opaque, matchbox-shaped WebRTC signal to/from a specific peer in the same room |
+| `NewPeer` | server → client | A new peer is available for a direct connection (late join); designates the offerer |
+| `SessionPlan` | server → client | Per-recipient session directive emitted at finalization (alongside `GameStarting`) |
+| `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
+
+#### Signal
+
+`Signal` carries an **opaque** payload that the server never parses — it is forwarded verbatim to the target peer.
+By convention the payload is matchbox-compatible: one of `{"Offer": "..."}`, `{"Answer": "..."}`, or
+`{"IceCandidate": "..."}`. The server validates only the envelope (same room, negotiated WebRTC, rate limit,
+v3 target); it never inspects the SDP or ICE strings.
+
+Client → server (`to` names the target peer):
+
+```json
+{
+  "type": "Signal",
+  "data": { "to": "<player-uuid>", "signal": { "Offer": "<sdp>" } }
+}
+```
+
+Server → client (`from` names the originating peer):
+
+```json
+{
+  "type": "Signal",
+  "data": { "from": "<player-uuid>", "signal": { "Answer": "<sdp>" } }
+}
+```
+
+#### NewPeer
+
+`NewPeer` is the **late-join** pairing message: it tells an already-running v3 session that a peer is now available
+for a direct (WebRTC) connection. `you_initiate` designates exactly one side of each pair as the offerer, avoiding
+glare (see the glare rule below).
+
+```json
+{
+  "type": "NewPeer",
+  "data": { "peer_id": "<player-uuid>", "you_initiate": true }
+}
+```
+
+Initial pairing at finalization is owned by `SessionPlan` (below); `NewPeer` covers a peer joining or reconnecting
+_after_ finalization. See the [late-join decision table](#late-join-decision-table).
+
+#### SessionPlan
+
+`SessionPlan` is the **per-recipient** session directive emitted at lobby finalization. It is sent alongside the
+unchanged `GameStarting` (and only to v3-capable members) when a room negotiates a non-relay plan. A relay-only
+room emits **no** `SessionPlan`, so v2 clients never observe it. Each recipient gets its own tailored `peers` list,
+`initiate` flags, and freshly minted ICE credentials.
+
+```json
+{
+  "type": "SessionPlan",
+  "data": {
+    "topology": "mesh",
+    "transport": "webrtc",
+    "peers": [
+      { "player_id": "<player-uuid>", "player_name": "Bob", "is_authority": false, "initiate": true }
+    ],
+    "ice_servers": [
+      { "urls": ["stun:stun.l.google.com:19302"] },
+      {
+        "urls": ["turn:turn.example.com:3478"],
+        "username": "<expiry-unix>:<player-uuid>",
+        "credential": "<base64-hmac>"
+      }
+    ],
+    "fallback": "relay"
+  }
+}
+```
+
+Fields:
+
+- `topology` — `relay`, `host`, or `mesh`.
+- `transport` — `relay`, `direct`, or `webrtc`.
+- `host` — the elected host's player id; present only for `host` topology, omitted otherwise.
+- `peers` — the peers _this recipient_ should connect to (always excludes the recipient itself). Each entry carries
+  `player_id`, `player_name`, `is_authority`, and a per-recipient `initiate` flag.
+- `ice_servers` — STUN/TURN servers for WebRTC; omitted (empty) for non-WebRTC plans.
+- `fallback` — the universal fallback transport, always `relay` (the floor).
+
+#### TransportStatus
+
+`TransportStatus` lets a client report its current data-path transport state, so the server can distinguish
+P2P-connected peers from relay-fallback peers (this drives metrics). It is **purely informational**: the relay
+floor never closes regardless of what is reported.
+
+```json
+{
+  "type": "TransportStatus",
+  "data": { "transport": "webrtc", "connected": true }
+}
+```
+
+### Topology / transport selection ladder
+
+At finalization the server picks a single room-wide plan by walking a richest-first ladder and settling on the
+first rung that (a) is no richer than the per-game _desired_ ceiling, (b) has its transport enabled in config, and
+(c) is supported by **every** member. Otherwise it falls to the universal relay floor:
+
+```text
+mesh + webrtc      ← richest
+host + webrtc
+host + direct
+relay (floor)      ← always available
+```
+
+Rules:
+
+- **All-members-v3 required.** Any non-relay rung requires every room member to be v3-capable _and_ to support that
+  rung's topology and transport. A single non-supporting member skips the rung.
+- **Relay floor always wins** when no rung fits. A relay-floor room emits no `SessionPlan` and relays exactly like
+  v2.
+- **`desired` is a ceiling, not an exact match.** A mesh-preferring room that cannot run mesh falls back to a host
+  topology before collapsing to relay.
+
+This ladder is the single source of truth in `src/server/session_policy.rs` (`UPGRADE_LADDER` + `RELAY_FLOOR`).
+
+### Late-join decision table
+
+`NewPeer` pairing for a peer joining or reconnecting _after_ finalization is gated on both the room's
+`lobby_state` and the resolved topology:
+
+| `room.lobby_state` | Resolved topology | `NewPeer` behavior |
+|---|---|---|
+| not `Finalized` | any | no `NewPeer` (initial pairing is owned by the finalize-time `SessionPlan`) |
+| `Finalized` | `Relay` | no `NewPeer` (the active session is relay) |
+| `Finalized` | `Mesh` **(webrtc)** | pair the joiner with every other WebRTC member; one offerer per pair |
+| `Finalized` | `Host` **(webrtc)** | star: client ⇄ host only; host joiner ⇄ all clients; never client ⇄ client |
+
+`NewPeer` is emitted only when the resolved **transport** is `webrtc`; a `host + direct` (LAN) finalized room emits
+no `NewPeer` (clients use the `SessionPlan`'s direct connection info).
+
+### Glare / offerer rule
+
+For any WebRTC pair, exactly one side must send the offer. Which side is encoded in the `initiate` flag on a
+`SessionPlan` peer and in `you_initiate` on `NewPeer`:
+
+- **Mesh:** the peer whose `player_id` is the **lesser** of the two UUIDs sends the offer (a deterministic,
+  stateless, antisymmetric rule).
+- **Host:** the direction is fixed regardless of UUID order — each **client initiates to the host**, and the host
+  answers every client. Clients never signal each other in a star topology.
+
+### ICE / TURN credentials
+
+Every WebRTC `SessionPlan` carries an `ice_servers` list:
+
+- **STUN is always present** in a WebRTC plan (the configured `turn.stun_urls`, advertised credential-less since
+  public STUN needs no auth).
+- **Ephemeral per-player TURN credentials** are added when the `[turn]` block is enabled (`mode = static_secret`
+  with non-empty `urls`). Each recipient receives its **own** short-lived credential: `username` is
+  `"<expiry-unix>:<player-uuid>"` and `credential` is the base64 of `HMAC-SHA1(static_auth_secret, username)`
+  (the coturn REST scheme). The static auth secret is **never** sent to clients. The `username` / `credential`
+  values in the [v3 server-message samples](../.llm/code-samples/protocol/v3-server-messages.jsonl) are
+  **illustrative placeholders, not a real credential** (the sample `credential` is not the actual HMAC of the
+  shown `username`).
+
+See the [TURN / STUN configuration](configuration.md#turn--stun-ice-credentials-protocol-v3) section and the
+[Transport Fallback Contract](architecture/transport-fallback.md) for the full ICE/fallback behavior.
+
+### Sequence diagrams
+
+**Mesh + WebRTC finalization → connect → fallback.** Two v3 peers A and B (with `A < B` by UUID, so A offers):
+
+```text
+A                         server                          B
+|  Authenticate (v3, mesh+webrtc)  |                       |
+|--------------------------------->|<----------------------|  Authenticate (v3, mesh+webrtc)
+|  (both ready → finalize)         |                       |
+|<--- GameStarting ----------------|---- GameStarting ---->|
+|<--- SessionPlan(mesh,webrtc) ----|---- SessionPlan ----->|   per-recipient: A.peers=[B initiate=true],
+|                                  |                       |                  B.peers=[A initiate=false]
+|  Signal{to:B, Offer} ----------->|---- Signal{from:A} -->|
+|<-- Signal{from:B} ---------------|<--- Signal{to:A,Answer}|
+|  Signal{to:B, IceCandidate} ---->|---- Signal{from:A} -->|   (ICE trickle, both directions)
+|  == WebRTC data channel open ==  |                       |
+|  TransportStatus{webrtc, true} ->|<-- TransportStatus{webrtc, true}
+|                                  |                       |
+|  (if P2P fails or times out)     |                       |
+|  TransportStatus{webrtc, false}->|   server keeps relaying GameData (floor never closes)
+|  GameData over relay ----------->|---- GameData -------->|
+```
+
+**Host + WebRTC finalization.** Clients C1, C2 and elected host H:
+
+```text
+C1                        server                          H (host)            C2
+|  SessionPlan(host,webrtc,host=H) |                       |                   |
+|<--- (C1.peers=[H initiate=true]) |-- SessionPlan ------->|-- SessionPlan --->|  (C2.peers=[H initiate=true];
+|                                  |   H.peers=[C1,C2 initiate=false]          |   each client offers to H)
+|  Signal{to:H, Offer} ----------->|---- Signal{from:C1} ->|                   |
+|<-- Signal{from:H, Answer} -------|<--- Signal{to:C1} ----|                   |
+|                                  |<--- Signal{from:C2} --|<-- Signal{to:H,Offer} (C2 offers to H)
+|  == C1⇄H channel open ==         |    == C2⇄H channel open ==                |
+|  (C1 and C2 never signal each other in a star topology)                     |
+|  (on failure: each client falls back to GameData over the relay floor)      |
+```
+
 ## Next Steps
 
 - [Getting Started](getting-started.md) - Basic usage examples

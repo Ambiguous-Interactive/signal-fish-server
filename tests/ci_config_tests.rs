@@ -14958,6 +14958,13 @@ fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_availab
                 function Assert($condition, $message) {
                     if (-not $condition) { throw $message }
                 }
+                function Find-Line([string]$content, [string]$needle) {
+                    $lines = [string[]]($content -split "`r?`n")
+                    for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index].Contains($needle)) { return $index + 1 }
+                    }
+                    throw "Missing line containing: $needle"
+                }
                 function Find-Line([string[]]$lines, [string]$needle) {
                     for ($index = 0; $index -lt $lines.Count; $index++) {
                         if ($lines[$index].Contains($needle)) { return $index + 1 }
@@ -15066,10 +15073,51 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
                     $script:Failed = 0
                     $script:Skipped = 0
                     $script:IndexTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+                    $script:WorktreeTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
                     $script:PreloadError = $null
+                    $script:InspectWorktree = $false
+                    $script:FixtureHeadTextByPath = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+                    $script:FixtureContextMarkersChanged = $false
+                    $script:FixturePanicMacroDiffChanged = $true
                 }
                 function Assert($condition, $message) {
                     if (-not $condition) { throw $message }
+                }
+                function Find-Line([string]$content, [string]$needle) {
+                    $lines = [string[]]($content -split "`r?`n")
+                    for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index].Contains($needle)) { return $index + 1 }
+                    }
+                    throw "Missing line containing: $needle"
+                }
+                function Candidate([string]$file, [int]$line, [string]$text) {
+                    [pscustomobject]@{
+                        File = $file
+                        Line = $line
+                        Text = $text.TrimStart()
+                    }
+                }
+                function Set-Candidates([object[]]$staged, [object[]]$head = @()) {
+                    $script:FixtureStagedCandidates = [object[]]$staged
+                    $script:FixtureHeadCandidates = [object[]]$head
+                }
+                function Get-StagedRustPanicMacroCandidates {
+                    return [object[]]$script:FixtureStagedCandidates
+                }
+                function Get-HeadRustPanicMacroCandidates {
+                    return [object[]]$script:FixtureHeadCandidates
+                }
+                function Get-HeadText([string]$Path) {
+                    if ($script:FixtureHeadTextByPath.ContainsKey($Path)) {
+                        return $script:FixtureHeadTextByPath[$Path]
+                    }
+                    return $null
+                }
+                function Test-RustTestContextMarkersChanged {
+                    return $script:FixtureContextMarkersChanged
+                }
+                function Test-RustPanicMacroDiffChanged {
+                    return $script:FixturePanicMacroDiffChanged
                 }
 
                 $productionContent = @'
@@ -15080,7 +15128,7 @@ pub fn production() {
                 $testContent = @'
 #[cfg(test)]
 fn helper() {
-    let _ = result.expect("test helper");
+    panic!("test helper");
 }
 '@
                 $testFileContent = @'
@@ -15097,7 +15145,7 @@ pub fn production() {
                 $lifetimeContent = @'
 #[cfg(test)]
 fn lifetime_helper<'a>(input: &'a str) -> &'a str {
-    let _ = result.expect("test lifetime");
+    panic!("test lifetime");
     input
 }
 
@@ -15116,10 +15164,44 @@ pub fn not_any_test_or_feature() {
     panic!("not any test or feature prod");
 }
 '@
+                $headTestContextContent = @'
+#[cfg(test)]
+pub fn helper() {
+    panic!("same text and line");
+}
+'@
+                $currentProductionContextContent = @'
+#[cfg(not(test))]
+pub fn helper() {
+    panic!("same text and line");
+}
+'@
+                $copiedPanicContent = @'
+pub fn production() {
+    panic!("copied from test");
+}
+
+#[cfg(test)]
+mod tests {
+    pub fn helper() {
+        panic!("copied from test");
+    }
+}
+'@
+                $headCopiedPanicContent = @'
+#[cfg(test)]
+mod tests {
+    pub fn helper() {
+        panic!("copied from test");
+    }
+}
+'@
                 $bypassSyntaxContent = @'
 pub fn production(result: Result<(), String>) {
     panic ! ("spaced macro");
     panic /*comment*/ ! ("commented macro");
+    todo! ["bracket macro"];
+    unimplemented! {"brace macro"};
     let _ = result.unwrap /*comment*/ ();
 }
 '@
@@ -15127,17 +15209,7 @@ pub fn production(result: Result<(), String>) {
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $productionContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,3 @@
-+pub fn production() {
-+    panic!("boom");
-+}
-'@
-                }
+                Set-Candidates -staged @((Candidate "src/lib.rs" 2 'panic!("boom");'))
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "production panic addition should fail"
 
@@ -15145,109 +15217,129 @@ diff --git a/src/lib.rs b/src/lib.rs
                 $script:StagedFiles = @("src/lib.rs", "src/foo/tests.rs")
                 $script:IndexTextCache["src/lib.rs"] = $testContent
                 $script:IndexTextCache["src/foo/tests.rs"] = $testFileContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,4 @@
-+#[cfg(test)]
-+fn helper() {
-+    let _ = result.expect("test helper");
-+}
-'@
-                }
+                Set-Candidates -staged @((Candidate "src/lib.rs" 3 'panic!("test helper");'))
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 0) "cfg(test) panic addition should not fail"
                 Assert ($script:Passed -eq 1) "cfg(test) panic addition should pass the check"
 
                 Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $productionContent
+                $existing = Candidate "src/lib.rs" 2 'panic!("boom");'
+                Set-Candidates -staged @($existing) -head @($existing)
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 0) "unchanged staged panic macros already present in HEAD should not fail"
+                Assert ($script:Passed -eq 1) "unchanged staged panic macros should pass without context scanning"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = @'
+pub fn production(result: Result<(), String>) {
+    let _ = result.expect("local CI enforces expect policy");
+}
+'@
+                Set-Candidates -staged @()
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 0) "pre-commit should not scan .expect(); local CI owns that policy"
+                Assert ($script:Passed -eq 1) "no explicit panic macros should pass"
+
+                Reset-State
                 $script:StagedFiles = @("src/foo/tests.rs")
+                Set-Candidates -staged @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Skipped -eq 1) "test-only files should skip production panic scan"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $commentedAttributeContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,4 @@
-+// #[cfg(test)] appears in documentation, not as an attribute.
-+pub fn production() {
-+    panic!("commented attr prod");
-+}
-'@
-                }
+                Set-Candidates -staged @((Candidate "src/lib.rs" 3 'panic!("commented attr prod");'))
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "commented cfg(test) text must not hide production panic additions"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $lifetimeContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,8 @@
-+#[cfg(test)]
-+fn lifetime_helper<'a>(input: &'a str) -> &'a str {
-+    let _ = result.expect("test lifetime");
-+    input
-+}
-+
-+pub fn after_lifetime_helper() {
-+    panic!("after lifetime prod");
-+}
-'@
-                }
-                Test-RustAddedPanicPatterns
-                Assert ($script:Failed -eq 1) "lifetimes in cfg(test) items must not hide following production panic additions"
+                $lifetimeCandidates = @(
+                    (Candidate "src/lib.rs" (Find-Line $lifetimeContent 'panic!("test lifetime")') 'panic!("test lifetime");'),
+                    (Candidate "src/lib.rs" (Find-Line $lifetimeContent 'panic!("after lifetime prod")') 'panic!("after lifetime prod");')
+                )
+                $lifetimeTestLines = Get-RustCandidateTestLineSet -Content $lifetimeContent -CandidateLines ([int[]]@($lifetimeCandidates | ForEach-Object { $_.Line }))
+                Assert ($lifetimeTestLines.Contains($lifetimeCandidates[0].Line)) "lifetimes in cfg(test) items should be classified as test code"
+                Assert (-not $lifetimeTestLines.Contains($lifetimeCandidates[1].Line)) "lifetimes in cfg(test) items must not hide following production code"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $mixedCfgContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,9 @@
-+#[cfg(any(test, feature = "x"))]
-+pub fn any_test_or_feature() {
-+    panic!("any test or feature prod");
-+}
-+
-+#[cfg(not(any(test, feature = "x")))]
-+pub fn not_any_test_or_feature() {
-+    panic!("not any test or feature prod");
-+}
-'@
-                }
+                $mixedCfgCandidates = @(
+                    (Candidate "src/lib.rs" 3 'panic!("any test or feature prod");'),
+                    (Candidate "src/lib.rs" 8 'panic!("not any test or feature prod");')
+                )
+                Set-Candidates -staged $mixedCfgCandidates -head @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "mixed cfg(test, production) expressions must not hide production panic additions"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $currentProductionContextContent
+                $script:FixtureHeadTextByPath["src/lib.rs"] = $headTestContextContent
+                $script:FixtureContextMarkersChanged = $true
+                $sameTextCandidate = Candidate "src/lib.rs" 3 'panic!("same text and line");'
+                Set-Candidates -staged @($sameTextCandidate) -head @($sameTextCandidate)
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "removing cfg(test) around an existing panic macro should fail even when line text is unchanged"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $copiedPanicContent
+                $script:FixtureHeadTextByPath["src/lib.rs"] = $headCopiedPanicContent
+                $copiedCandidates = @(
+                    (Candidate "src/lib.rs" 2 'panic!("copied from test");'),
+                    (Candidate "src/lib.rs" 8 'panic!("copied from test");')
+                )
+                $copiedHeadCandidates = @((Candidate "src/lib.rs" 4 'panic!("copied from test");'))
+                Set-Candidates -staged $copiedCandidates -head $copiedHeadCandidates
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "copying same-text panic from unchanged test code into production should fail"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $bypassSyntaxContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,5 @@
-+pub fn production(result: Result<(), String>) {
-+    panic ! ("spaced macro");
-+    panic /*comment*/ ! ("commented macro");
-+    let _ = result.unwrap /*comment*/ ();
-+}
-'@
-                }
+                $syntaxCandidates = @(
+                    (Candidate "src/lib.rs" 2 'panic ! ("spaced macro");'),
+                    (Candidate "src/lib.rs" 3 'panic /*comment*/ ! ("commented macro");'),
+                    (Candidate "src/lib.rs" 4 'todo! ["bracket macro"];'),
+                    (Candidate "src/lib.rs" 5 'unimplemented! {"brace macro"};')
+                )
+                Set-Candidates -staged $syntaxCandidates -head @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "Rust whitespace/comment syntax must not bypass production panic detection"
+                Assert (Test-RustPanicMacroLine -Line 'panic ! ("spaced macro");') "spaced macro syntax should be detected"
+                Assert (Test-RustPanicMacroLine -Line 'panic /*comment*/ ! ("commented macro");') "commented macro syntax should be detected"
+                Assert (Test-RustPanicMacroLine -Line 'todo! ["bracket macro"];') "bracket macro syntax should be detected"
+                Assert (Test-RustPanicMacroLine -Line 'unimplemented! {"brace macro"};') "brace macro syntax should be detected"
+                Assert (-not (Test-RustPanicMacroLine -Line 'let _ = result.unwrap /*comment*/ ();')) ".unwrap() should stay out of the fast hook"
+                Assert (-not (Test-RustPanicMacroLine -Line '// panic!("commented");')) "line comments should not be candidates"
+                Assert (-not (Test-RustPanicMacroLine -Line '/* panic!("doc") */')) "block comments should not be candidates"
+                Assert (-not (Test-RustPanicMacroLine -Line 'let text = "panic!(not code)";')) "string literals should not be candidates"
+                Assert (-not (Test-RustPanicMacroLine -Line ('let text = r#' + '"panic!(not code)"' + '#;'))) "raw string literals should not be candidates"
+                $multiLineComment = @'
+pub fn docs() {
+    /*
+    panic!("not code");
+    */
+}
+'@
+                $commentLines = Get-RustExecutablePanicMacroLineSet -Content $multiLineComment -CandidateLines ([int[]]@(3))
+                Assert (-not $commentLines.Contains(3)) "multi-line block comments should not be executable candidates"
+                $quote = [char]34
+                $hash = [char]35
+                $multiLineRawString = "pub fn docs() {`n" +
+                    "    let text = r$hash$quote`n" +
+                    '    panic!("not code");' + "`n" +
+                    "    $quote$hash;`n" +
+                    "}`n"
+                $rawLines = Get-RustExecutablePanicMacroLineSet -Content $multiLineRawString -CandidateLines ([int[]]@(3))
+                Assert (-not $rawLines.Contains(3)) "multi-line raw strings should not be executable candidates"
             "#,
         ])
         .current_dir(&root)
@@ -15337,25 +15429,53 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
             && content.contains("Split-RustCfgArguments")
             && content.contains("Get-RustItemEndLine")
             && content.contains("Get-RustTestLineSet")
-            && content.contains("maxCandidateLineByFile")
-            && content.contains("testLinesByFile")
-            && content.contains("-MaxLine $maxCandidateLineByFile[$candidate.File]")
+            && content.contains("Test-RustPanicMacroLine")
+            && content.contains("Get-StagedRustPanicMacroCandidates")
+            && content.contains("Get-HeadRustPanicMacroCandidates")
+            && content.contains("Get-NewRustPanicMacroCandidates")
+            && content.contains("Get-WorktreeRustPanicMacroCandidates")
+            && content.contains("Get-RustExecutablePanicMacroLineSet")
+            && content.contains("Test-RustTestContextMarkersChanged")
+            && content.contains("Test-RustPanicMacroDiffChanged")
+            && content.contains("Get-RustCandidateTestLineSet")
+            && content.contains("Select-ProductionRustPanicMacroCandidates")
             && content.contains("Sort-Object -Property File, Line")
-            && content.contains(
-                "$pickaxePattern = \"unwrap|expect|panic|todo|unimplemented|unreachable\""
-            )
-            && content.contains("-PickaxePattern $pickaxePattern")
-            && content.contains("\\.(?:unwrap|expect)\\b")
-            && content.contains("$rustWhitespace!")
-            && content.contains("\"--no-ext-diff\", \"--no-textconv\"")
+            && content.contains("Get-PolicyText")
+            && content.contains("\"grep\", \"--cached\", \"-n\", \"-E\"")
+            && content.contains("\"grep\", \"-n\", \"-E\", $grepPattern, \"HEAD\"")
+            && content.contains("panic|todo|unimplemented|unreachable")
+            && content.contains("Full .expect/.unwrap policy runs in local CI and CI")
+            && content.contains("$($candidate.File):$($candidate.Line):")
             && content.contains("Add-IndexTextCache -Pathspecs $candidateFiles")
             && content.contains("$candidateFiles.Count -gt 2")
-            && content.contains("^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@")
+            && content.contains("Get-RustPanicCandidateKey -Candidate $candidate -IncludeLine")
+            && content.contains("Test-RustTestContextMarkersChanged")
             && content.contains("Contains($candidate.Line)"),
-        "pre-commit panic-pattern scans must be line-number aware and scoped to \
-         production Rust additions only. Test-only files and #[cfg(test)]/#[test] \
-         blocks must not fail the last-resort hook; small candidate sets may use \
-         direct index reads while larger sets must be batched to avoid git show fanout."
+        "pre-commit panic-pattern scans must stay line-number aware, production \
+         scoped, and candidate-first. The hook may block explicit panic macros, \
+         but .expect/.unwrap policy belongs in local CI/CI so the commit path \
+         remains sub-second."
+    );
+}
+
+#[test]
+fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+
+    assert!(
+        content.contains("[switch]$Worktree")
+            && content.contains("Get-WorktreeChangedFiles")
+            && content.contains("\"ls-files\", \"--others\", \"--exclude-standard\", \"-z\"")
+            && content.contains("Get-WorktreeRustPanicMacroCandidates")
+            && content.contains("HookPolicyChangedFiles")
+            && content.contains("Hook speed policy")
+            && content.contains("New-WorktreeSkillsIndexContent")
+            && content.contains("WriteAllText($indexPath, $expected")
+            && content.contains("Running fast worktree preflight checks"),
+        "pre-commit runner must expose a worktree preflight mode so agents can run \
+         the same cheap policies before handoff without staging files. The actual \
+         git hook remains staged-index based."
     );
 }
 
@@ -15802,6 +15922,39 @@ fn test_run_local_ci_includes_readme_badge_style_check() {
     assert!(
         content.contains("scripts/check-readme-badges.sh"),
         "run-local-ci.sh should invoke scripts/check-readme-badges.sh."
+    );
+}
+
+#[test]
+fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("check-hook-readiness.ps1")
+            && content.contains("scripts/hooks/pre-commit.ps1 -Worktree")
+            && content.contains("hook-readiness")
+            && content.contains("pre-commit-preflight"),
+        "run-local-ci.sh must run hook readiness and a worktree-scoped pre-commit \
+         preflight so agents catch cheap hook failures before staging or committing."
+    );
+
+    assert!(
+        content.contains("scripts/check-llm-file-sizes.sh")
+            && content.contains("scripts/check-llm-example-files.sh")
+            && content.contains("llm-file-sizes")
+            && content.contains("llm-example-files"),
+        "run-local-ci.sh must include the LLM policies that CI already runs; \
+         they stay out of git hooks but must not first fail in GitHub CI."
+    );
+
+    assert!(
+        content.contains("scripts/check-no-panics.sh")
+            && !content.contains("scripts/check-no-panics.sh patterns"),
+        "run-local-ci.sh must run the full panic policy, including clippy \
+         .expect/.unwrap enforcement. The git hook only keeps the sub-second \
+         explicit panic-macro guard."
     );
 }
 

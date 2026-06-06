@@ -1,16 +1,30 @@
 #requires -Version 7.0
-param([switch]$SourceOnly)
+param(
+    [switch]$SourceOnly,
+    [switch]$Worktree
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$script:PreCommitTimer = [System.Diagnostics.Stopwatch]::StartNew()
 $script:Passed = 0
 $script:Failed = 0
 $script:Skipped = 0
 $script:IndexTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+$script:WorktreeTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 $script:MaxBatchedBlobBytes = 2 * 1024 * 1024
 $script:PreloadBatchThreshold = 3
 $script:PreloadError = $null
+$script:InspectWorktree = $false
+$script:HookPolicyFiles = @(
+    ".githooks/pre-commit",
+    ".githooks/pre-push",
+    "scripts/hooks/native-process.ps1",
+    "scripts/hooks/pre-commit.ps1",
+    "scripts/hooks/pre-push.ps1"
+)
+$script:HookPolicyChangedFiles = @()
 
 . (Join-Path $PSScriptRoot "native-process.ps1")
 
@@ -85,6 +99,42 @@ function Get-StagedFiles {
     $result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
 }
 
+function Add-UniqueGitPaths {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$NulDelimitedPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$OrderedPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$SeenPaths
+    )
+
+    if ([string]::IsNullOrEmpty($NulDelimitedPaths)) {
+        return
+    }
+
+    foreach ($path in $NulDelimitedPaths.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        if ($SeenPaths.Add($path)) {
+            [void]$OrderedPaths.Add($path)
+        }
+    }
+}
+
+function Get-WorktreeChangedFiles {
+    param([string[]]$Pathspecs = @())
+
+    $orderedPaths = [System.Collections.Generic.List[string]]::new()
+    $seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+    $cachedArgs = @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $Pathspecs
+    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $cachedArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
+
+    $worktreeArgs = @("diff", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $Pathspecs
+    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $worktreeArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
+
+    $untrackedArgs = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
+    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $untrackedArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
+
+    Write-Output -NoEnumerate ([string[]]$orderedPaths)
+}
+
 function Test-StagedAny {
     param([string[]]$Pathspecs)
     @(Get-StagedFiles -Pathspecs $Pathspecs).Count -gt 0
@@ -119,6 +169,33 @@ function Get-StagedOrWorkingTreeText {
     }
 
     $null
+}
+
+function Get-WorktreeText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($script:WorktreeTextCache.ContainsKey($Path)) {
+        return $script:WorktreeTextCache[$Path]
+    }
+
+    $absolutePath = Join-Path $script:RepoRoot $Path
+    if (-not (Test-Path -LiteralPath $absolutePath)) {
+        return $null
+    }
+
+    $text = [System.IO.File]::ReadAllText($absolutePath)
+    $script:WorktreeTextCache[$Path] = $text
+    $text
+}
+
+function Get-PolicyText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($script:InspectWorktree) {
+        return Get-WorktreeText -Path $Path
+    }
+
+    Get-IndexText -Path $Path
 }
 
 function Get-IndexFiles {
@@ -396,34 +473,17 @@ function Set-IndexText {
     }
 }
 
-function Get-StagedAddedLines {
-    param(
-        [string[]]$Pathspecs,
-        [string]$PickaxePattern = ""
-    )
-
-    $arguments = @("diff", "--cached", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--diff-filter=ACMR")
-    if (-not [string]::IsNullOrEmpty($PickaxePattern)) {
-        $arguments += @("-G", $PickaxePattern)
-    }
-    $arguments += @("--") + $Pathspecs
-    (Invoke-Git -Arguments $arguments).Stdout
-}
-
 function Test-FastHookSource {
     if ($null -ne $script:PreloadError) {
         Skip "Hook speed policy" "staged content preload failed"
         return
     }
 
-    $files = @(
-        ".githooks/pre-commit",
-        ".githooks/pre-push",
-        "scripts/hooks/native-process.ps1",
-        "scripts/hooks/pre-commit.ps1",
-        "scripts/hooks/pre-push.ps1"
-    )
-    $stagedHookFiles = @($script:StagedFiles | Where-Object { $files -contains $_ })
+    $stagedHookFiles = [string[]]@(if ($script:HookPolicyChangedFiles.Count -gt 0) {
+        $script:HookPolicyChangedFiles
+    } else {
+        $script:StagedFiles | Where-Object { $script:HookPolicyFiles -contains $_ }
+    })
     if ($stagedHookFiles.Count -eq 0) {
         Skip "Hook speed policy" "no hook files staged"
         return
@@ -433,7 +493,7 @@ function Test-FastHookSource {
     $violations = [System.Collections.Generic.List[string]]::new()
 
     foreach ($file in $stagedHookFiles) {
-        $content = Get-IndexText -Path $file
+        $content = Get-PolicyText -Path $file
         if ($null -eq $content) {
             continue
         }
@@ -458,29 +518,13 @@ function Test-FastHookSource {
     }
 }
 
-function Test-Whitespace {
-    $result = Invoke-Native -FileName "git" -Arguments @("diff", "--cached", "--check", "--no-ext-diff", "--no-textconv")
-    if ($result.ExitCode -eq 0) {
-        Pass "Staged diff whitespace"
-    } else {
-        Fail "Staged diff whitespace" "Fix whitespace errors in the staged diff.`n$($result.Output.Trim())"
-    }
-}
-
 function Add-StagedContentPreload {
     $skillsIndexTriggered = @($script:StagedFiles | Where-Object {
             $_ -eq "scripts/generate-skills-index.sh" -or
             ($_.StartsWith(".llm/skills/") -and $_.EndsWith(".md"))
         }).Count -gt 0
-    $hookSourceFiles = @(
-        ".githooks/pre-commit",
-        ".githooks/pre-push",
-        "scripts/hooks/native-process.ps1",
-        "scripts/hooks/pre-commit.ps1",
-        "scripts/hooks/pre-push.ps1"
-    )
     $preloadPaths = @($script:StagedFiles | Where-Object {
-            ($hookSourceFiles -contains $_) -or
+            ($script:HookPolicyFiles -contains $_) -or
             ($_.StartsWith(".llm/") -and $_.EndsWith(".md") -and
                 -not ($skillsIndexTriggered -and $_.StartsWith(".llm/skills/"))) -or
             $_ -eq "README.md"
@@ -861,64 +905,846 @@ function Get-RustTestLineSet {
     Write-Output -NoEnumerate $testLines
 }
 
+function Test-RustPanicMacroLine {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
+
+    $macroNames = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@("panic", "todo", "unimplemented", "unreachable"),
+        [System.StringComparer]::Ordinal
+    )
+
+    $charIndex = 0
+    $inString = $false
+    $inChar = $false
+    $escape = $false
+    $rawTerminator = ""
+    while ($charIndex -lt $Line.Length) {
+        if (-not [string]::IsNullOrEmpty($rawTerminator)) {
+            if ($Line.Substring($charIndex).StartsWith($rawTerminator, [System.StringComparison]::Ordinal)) {
+                $charIndex += $rawTerminator.Length
+                $rawTerminator = ""
+                continue
+            }
+            $charIndex++
+            continue
+        }
+
+        if ($inString) {
+            if ($escape) {
+                $escape = $false
+            } elseif ($Line[$charIndex] -eq [char]"\") {
+                $escape = $true
+            } elseif ($Line[$charIndex] -eq [char]"""") {
+                $inString = $false
+            }
+            $charIndex++
+            continue
+        }
+
+        if ($inChar) {
+            if ($escape) {
+                $escape = $false
+            } elseif ($Line[$charIndex] -eq [char]"\") {
+                $escape = $true
+            } elseif ($Line[$charIndex] -eq [char]"'") {
+                $inChar = $false
+            }
+            $charIndex++
+            continue
+        }
+
+        if ($charIndex + 1 -lt $Line.Length -and $Line[$charIndex] -eq [char]"/" -and $Line[$charIndex + 1] -eq [char]"/") {
+            return $false
+        }
+        if ($charIndex + 1 -lt $Line.Length -and $Line[$charIndex] -eq [char]"/" -and $Line[$charIndex + 1] -eq [char]"*") {
+            $end = $Line.IndexOf("*/", $charIndex + 2, [System.StringComparison]::Ordinal)
+            if ($end -lt 0) {
+                return $false
+            }
+            $charIndex = $end + 2
+            continue
+        }
+
+        $rawStart = -1
+        if ($Line[$charIndex] -eq [char]"r") {
+            $rawStart = $charIndex
+        } elseif ($charIndex + 1 -lt $Line.Length -and $Line[$charIndex] -eq [char]"b" -and $Line[$charIndex + 1] -eq [char]"r") {
+            $rawStart = $charIndex + 1
+        }
+        if ($rawStart -ge 0) {
+            $probe = $rawStart + 1
+            while ($probe -lt $Line.Length -and $Line[$probe] -eq [char]"#") {
+                $probe++
+            }
+            if ($probe -lt $Line.Length -and $Line[$probe] -eq [char]"""") {
+                $hashes = $Line.Substring($rawStart + 1, $probe - $rawStart - 1)
+                $rawTerminator = """" + $hashes
+                $charIndex = $probe + 1
+                continue
+            }
+        }
+
+        if (
+            $Line[$charIndex] -eq [char]"""" -or
+            ($charIndex + 1 -lt $Line.Length -and $Line[$charIndex] -eq [char]"b" -and $Line[$charIndex + 1] -eq [char]"""")
+        ) {
+            $inString = $true
+            $escape = $false
+            $charIndex += if ($Line[$charIndex] -eq [char]"b") { 2 } else { 1 }
+            continue
+        }
+
+        if ($Line[$charIndex] -eq [char]"'") {
+            $nextIndex = $charIndex + 1
+            if ($nextIndex -lt $Line.Length -and (Test-RustIdentifierStartChar -Char $Line[$nextIndex])) {
+                $afterIdentifier = $nextIndex + 1
+                while ($afterIdentifier -lt $Line.Length -and (Test-RustIdentifierChar -Char $Line[$afterIdentifier])) {
+                    $afterIdentifier++
+                }
+                if ($afterIdentifier -lt $Line.Length -and $Line[$afterIdentifier] -ne [char]"'") {
+                    $charIndex = $afterIdentifier
+                    continue
+                }
+            }
+
+            $inChar = $true
+            $escape = $false
+            $charIndex++
+            continue
+        }
+
+        if (Test-RustIdentifierStartChar -Char $Line[$charIndex]) {
+            $start = $charIndex
+            $charIndex++
+            while ($charIndex -lt $Line.Length -and (Test-RustIdentifierChar -Char $Line[$charIndex])) {
+                $charIndex++
+            }
+
+            $identifier = $Line.Substring($start, $charIndex - $start)
+            if ($macroNames.Contains($identifier)) {
+                $probe = $charIndex
+                $canProbe = $true
+                foreach ($expected in @("!", "delimiter")) {
+                    while ($probe -lt $Line.Length) {
+                        if ([char]::IsWhiteSpace($Line[$probe])) {
+                            $probe++
+                            continue
+                        }
+                        if ($probe + 1 -lt $Line.Length -and $Line[$probe] -eq [char]"/" -and $Line[$probe + 1] -eq [char]"*") {
+                            $end = $Line.IndexOf("*/", $probe + 2, [System.StringComparison]::Ordinal)
+                            if ($end -lt 0) {
+                                $canProbe = $false
+                                break
+                            }
+                            $probe = $end + 2
+                            continue
+                        }
+                        break
+                    }
+                    if (-not $canProbe -or $probe -ge $Line.Length) {
+                        $canProbe = $false
+                        break
+                    }
+                    if ($expected -eq "delimiter") {
+                        if ($Line[$probe] -notin @([char]"(", [char]"[", [char]"{")) {
+                            $canProbe = $false
+                            break
+                        }
+                    } elseif ($Line[$probe] -ne [char]$expected) {
+                        $canProbe = $false
+                        break
+                    }
+                    $probe++
+                }
+                if ($canProbe) {
+                    return $true
+                }
+            }
+            continue
+        }
+
+        $charIndex++
+    }
+
+    $false
+}
+
+function Test-RustIdentifierStartChar {
+    param([Parameter(Mandatory = $true)][char]$Char)
+
+    $code = [int]$Char
+    ($code -ge 65 -and $code -le 90) -or
+    ($code -ge 97 -and $code -le 122) -or
+    $Char -eq [char]"_"
+}
+
+function Test-RustIdentifierChar {
+    param([Parameter(Mandatory = $true)][char]$Char)
+
+    $code = [int]$Char
+    ($code -ge 65 -and $code -le 90) -or
+    ($code -ge 97 -and $code -le 122) -or
+    ($code -ge 48 -and $code -le 57) -or
+    $Char -eq [char]"_"
+}
+
+function Get-RustExecutablePanicMacroLineSet {
+    param(
+        [AllowNull()][string]$Content,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][int[]]$CandidateLines
+    )
+
+    $macroLines = [System.Collections.Generic.HashSet[int]]::new()
+    if ([string]::IsNullOrEmpty($Content) -or $CandidateLines.Count -eq 0) {
+        Write-Output -NoEnumerate $macroLines
+        return
+    }
+
+    $candidateLineSet = [System.Collections.Generic.HashSet[int]]::new()
+    $maxCandidateLine = 0
+    foreach ($lineNumber in $CandidateLines) {
+        [void]$candidateLineSet.Add($lineNumber)
+        if ($lineNumber -gt $maxCandidateLine) {
+            $maxCandidateLine = $lineNumber
+        }
+    }
+
+    $lines = [string[]](($Content -replace "`r`n", "`n" -replace "`r", "`n") -split "`n")
+    $lineLimit = [System.Math]::Min($maxCandidateLine, $lines.Count)
+    $blockCommentDepth = 0
+    $rawTerminator = ""
+    $inString = $false
+    $inChar = $false
+    $escape = $false
+
+    for ($index = 0; $index -lt $lineLimit; $index++) {
+        $lineNumber = $index + 1
+        $line = $lines[$index]
+        $lineStartsInsideSuppressedContext =
+            $blockCommentDepth -gt 0 -or
+            -not [string]::IsNullOrEmpty($rawTerminator) -or
+            $inString -or
+            $inChar
+
+        if (
+            $candidateLineSet.Contains($lineNumber) -and
+            -not $lineStartsInsideSuppressedContext -and
+            (Test-RustPanicMacroLine -Line $line)
+        ) {
+            [void]$macroLines.Add($lineNumber)
+        }
+
+        $charIndex = 0
+        while ($charIndex -lt $line.Length) {
+            if ($blockCommentDepth -gt 0) {
+                if ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"/" -and $line[$charIndex + 1] -eq [char]"*") {
+                    $blockCommentDepth++
+                    $charIndex += 2
+                    continue
+                }
+                if ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"*" -and $line[$charIndex + 1] -eq [char]"/") {
+                    $blockCommentDepth--
+                    $charIndex += 2
+                    continue
+                }
+                $charIndex++
+                continue
+            }
+
+            if (-not [string]::IsNullOrEmpty($rawTerminator)) {
+                if ($line.Substring($charIndex).StartsWith($rawTerminator, [System.StringComparison]::Ordinal)) {
+                    $charIndex += $rawTerminator.Length
+                    $rawTerminator = ""
+                    continue
+                }
+                $charIndex++
+                continue
+            }
+
+            if ($inString) {
+                if ($escape) {
+                    $escape = $false
+                } elseif ($line[$charIndex] -eq [char]"\") {
+                    $escape = $true
+                } elseif ($line[$charIndex] -eq [char]"""") {
+                    $inString = $false
+                }
+                $charIndex++
+                continue
+            }
+
+            if ($inChar) {
+                if ($escape) {
+                    $escape = $false
+                } elseif ($line[$charIndex] -eq [char]"\") {
+                    $escape = $true
+                } elseif ($line[$charIndex] -eq [char]"'") {
+                    $inChar = $false
+                }
+                $charIndex++
+                continue
+            }
+
+            if ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"/" -and $line[$charIndex + 1] -eq [char]"/") {
+                break
+            }
+            if ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"/" -and $line[$charIndex + 1] -eq [char]"*") {
+                $blockCommentDepth = 1
+                $charIndex += 2
+                continue
+            }
+
+            $rawStart = -1
+            if ($line[$charIndex] -eq [char]"r") {
+                $rawStart = $charIndex
+            } elseif ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"b" -and $line[$charIndex + 1] -eq [char]"r") {
+                $rawStart = $charIndex + 1
+            }
+            if ($rawStart -ge 0) {
+                $probe = $rawStart + 1
+                while ($probe -lt $line.Length -and $line[$probe] -eq [char]"#") {
+                    $probe++
+                }
+                if ($probe -lt $line.Length -and $line[$probe] -eq [char]"""") {
+                    $hashes = $line.Substring($rawStart + 1, $probe - $rawStart - 1)
+                    $rawTerminator = """" + $hashes
+                    $charIndex = $probe + 1
+                    continue
+                }
+            }
+
+            if (
+                $line[$charIndex] -eq [char]"""" -or
+                ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"b" -and $line[$charIndex + 1] -eq [char]"""")
+            ) {
+                $inString = $true
+                $escape = $false
+                $charIndex += if ($line[$charIndex] -eq [char]"b") { 2 } else { 1 }
+                continue
+            }
+
+            if ($line[$charIndex] -eq [char]"'") {
+                $inChar = $true
+                $escape = $false
+                $charIndex++
+                continue
+            }
+
+            $charIndex++
+        }
+    }
+
+    Write-Output -NoEnumerate $macroLines
+}
+
+function Get-RustLineBraceDelta {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
+
+    $withoutLineComment = $Line.Split([string[]]@("//"), 2, [System.StringSplitOptions]::None)[0]
+    $delta = 0
+    foreach ($char in $withoutLineComment.ToCharArray()) {
+        if ($char -eq [char]"{") {
+            $delta++
+        } elseif ($char -eq [char]"}") {
+            $delta--
+        }
+    }
+
+    $delta
+}
+
+function Get-RustCandidateTestLineSet {
+    param(
+        [AllowNull()][string]$Content,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][int[]]$CandidateLines
+    )
+
+    $testCandidateLines = [System.Collections.Generic.HashSet[int]]::new()
+    if ([string]::IsNullOrEmpty($Content) -or $CandidateLines.Count -eq 0) {
+        Write-Output -NoEnumerate $testCandidateLines
+        return
+    }
+
+    $candidateLineSet = [System.Collections.Generic.HashSet[int]]::new()
+    $maxCandidateLine = 0
+    foreach ($lineNumber in $CandidateLines) {
+        [void]$candidateLineSet.Add($lineNumber)
+        if ($lineNumber -gt $maxCandidateLine) {
+            $maxCandidateLine = $lineNumber
+        }
+    }
+    $lines = [string[]](($Content -replace "`r`n", "`n" -replace "`r", "`n") -split "`n")
+    $lineLimit = [System.Math]::Min($maxCandidateLine, $lines.Count)
+    $depth = 0
+    $pendingTestAttribute = $false
+    $pendingTestItemDepth = $null
+    $testRegionDepths = [System.Collections.Generic.List[int]]::new()
+
+    for ($index = 0; $index -lt $lineLimit; $index++) {
+        $line = $lines[$index]
+        $trimmed = $line.Trim()
+
+        for ($regionIndex = $testRegionDepths.Count - 1; $regionIndex -ge 0; $regionIndex--) {
+            if ($depth -lt $testRegionDepths[$regionIndex]) {
+                $testRegionDepths.RemoveAt($regionIndex)
+            }
+        }
+
+        $lineNumber = $index + 1
+        if ($candidateLineSet.Contains($lineNumber)) {
+            foreach ($regionDepth in $testRegionDepths) {
+                if ($depth -ge $regionDepth) {
+                    [void]$testCandidateLines.Add($lineNumber)
+                    break
+                }
+            }
+        }
+
+        if ($trimmed.StartsWith("#[")) {
+            if ((Test-RustCfgTestAttributeLine -Line $trimmed) -or (Test-RustDirectTestAttributeLine -Line $trimmed)) {
+                $pendingTestAttribute = $true
+            }
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+
+        if ($pendingTestAttribute) {
+            $pendingTestItemDepth = $depth
+            $pendingTestAttribute = $false
+        }
+
+        $newDepth = $depth + (Get-RustLineBraceDelta -Line $line)
+        if ($null -ne $pendingTestItemDepth) {
+            if ($newDepth -gt $pendingTestItemDepth) {
+                [void]$testRegionDepths.Add($pendingTestItemDepth + 1)
+                $pendingTestItemDepth = $null
+            } elseif ($trimmed.Contains(";")) {
+                $pendingTestItemDepth = $null
+            }
+        }
+
+        $depth = [System.Math]::Max(0, $newDepth)
+        for ($regionIndex = $testRegionDepths.Count - 1; $regionIndex -ge 0; $regionIndex--) {
+            if ($depth -lt $testRegionDepths[$regionIndex]) {
+                $testRegionDepths.RemoveAt($regionIndex)
+            }
+        }
+    }
+
+    Write-Output -NoEnumerate $testCandidateLines
+}
+
+function Get-WorktreeRustPanicMacroCandidates {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    if ($Pathspecs.Count -eq 0) {
+        return @()
+    }
+
+    $trackedFiles = [string[]]@(Get-IndexFiles -Pathspecs $Pathspecs)
+    $tracked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($file in $trackedFiles) {
+        [void]$tracked.Add($file)
+    }
+
+    if ($trackedFiles.Count -gt 0) {
+        $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
+        $result = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", $grepPattern, "--") + $trackedFiles)
+        if ($result.ExitCode -ne 0 -and $result.ExitCode -ne 1) {
+            throw "git grep failed:`n$($result.Output)"
+        }
+        if ($result.ExitCode -eq 0) {
+            foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+                $line = $rawLine.TrimEnd("`r")
+                if ($line -notmatch "^(?<file>[^:]+):(?<line>\d+):(?<text>.*)$") {
+                    throw "Unable to parse git grep output line: $line"
+                }
+
+                $text = $Matches["text"]
+                if (Test-RustPanicMacroLine -Line $text) {
+                    [void]$candidates.Add([pscustomobject]@{
+                            File = $Matches["file"]
+                            Line = [int]$Matches["line"]
+                            Text = $text.TrimStart()
+                        })
+                }
+            }
+        }
+    }
+
+    foreach ($file in $Pathspecs) {
+        if ($tracked.Contains($file)) {
+            continue
+        }
+
+        $content = Get-PolicyText -Path $file
+        if ($null -eq $content) {
+            continue
+        }
+
+        $lineNumber = 0
+        foreach ($line in $content -split "`r?`n") {
+            $lineNumber++
+            if (Test-RustPanicMacroLine -Line $line) {
+                [void]$candidates.Add([pscustomobject]@{
+                        File = $file
+                        Line = $lineNumber
+                        Text = $line.TrimStart()
+                    })
+            }
+        }
+    }
+
+    return [object[]]$candidates.ToArray()
+}
+
+function Get-StagedRustPanicMacroCandidates {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs)
+
+    if ($Pathspecs.Count -eq 0) {
+        return @()
+    }
+
+    $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
+    $result = Invoke-Native -FileName "git" -Arguments (@("grep", "--cached", "-n", "-E", $grepPattern, "--") + $Pathspecs)
+    if ($result.ExitCode -eq 1) {
+        return @()
+    }
+    if ($result.ExitCode -ne 0) {
+        throw "git grep --cached failed:`n$($result.Output)"
+    }
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $line = $rawLine.TrimEnd("`r")
+        if ($line -notmatch "^(?<file>[^:]+):(?<line>\d+):(?<text>.*)$") {
+            throw "Unable to parse git grep output line: $line"
+        }
+
+        $text = $Matches["text"]
+        if (Test-RustPanicMacroLine -Line $text) {
+            [void]$candidates.Add([pscustomobject]@{
+                    File = $Matches["file"]
+                    Line = [int]$Matches["line"]
+                    Text = $text.TrimStart()
+                })
+        }
+    }
+
+    return [object[]]$candidates.ToArray()
+}
+
+function Get-HeadRustPanicMacroCandidates {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs)
+
+    if ($Pathspecs.Count -eq 0) {
+        return @()
+    }
+
+    $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
+    $result = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", $grepPattern, "HEAD", "--") + $Pathspecs)
+    if ($result.ExitCode -eq 1) {
+        return @()
+    }
+    if ($result.ExitCode -ne 0) {
+        if ($result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+            return @()
+        }
+        throw "git grep HEAD failed:`n$($result.Output)"
+    }
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $line = $rawLine.TrimEnd("`r")
+        if ($line -notmatch "^HEAD:(?<file>[^:]+):(?<line>\d+):(?<text>.*)$") {
+            throw "Unable to parse git grep HEAD output line: $line"
+        }
+
+        $text = $Matches["text"]
+        if (Test-RustPanicMacroLine -Line $text) {
+            [void]$candidates.Add([pscustomobject]@{
+                    File = $Matches["file"]
+                    Line = [int]$Matches["line"]
+                    Text = $text.TrimStart()
+                })
+        }
+    }
+
+    return [object[]]$candidates.ToArray()
+}
+
+function Get-HeadText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $result = Invoke-Native -FileName "git" -Arguments @("show", "HEAD:$Path")
+    if ($result.ExitCode -ne 0) {
+        return $null
+    }
+
+    $result.Stdout
+}
+
+function Get-RustTestContextMarkerSignature {
+    param([AllowNull()][string]$Content)
+
+    if ([string]::IsNullOrEmpty($Content)) {
+        return ""
+    }
+
+    $markers = [System.Collections.Generic.List[string]]::new()
+    $lineNumber = 0
+    foreach ($line in $Content -split "`r?`n") {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        if ((Test-RustCfgTestAttributeLine -Line $trimmed) -or (Test-RustDirectTestAttributeLine -Line $trimmed)) {
+            [void]$markers.Add("${lineNumber}:$trimmed")
+        }
+    }
+
+    $markers -join "`n"
+}
+
+function Get-RustTestContextMarkerSignatureFromGit {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles,
+        [switch]$Head
+    )
+
+    if ($CandidateFiles.Count -eq 0) {
+        return ""
+    }
+
+    $grepPattern = "#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest)"
+    $arguments = @("grep")
+    if ($Head) {
+        $arguments += @("-n", "-E", $grepPattern, "HEAD")
+    } elseif (-not $script:InspectWorktree) {
+        $arguments += @("--cached", "-n", "-E", $grepPattern)
+    } else {
+        $arguments += @("-n", "-E", $grepPattern)
+    }
+    $arguments += @("--") + $CandidateFiles
+
+    $result = Invoke-Native -FileName "git" -Arguments $arguments
+    if ($result.ExitCode -eq 1) {
+        return ""
+    }
+    if ($result.ExitCode -ne 0) {
+        if ($Head -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+            return ""
+        }
+        throw "git grep test context markers failed:`n$($result.Output)"
+    }
+
+    $markers = [System.Collections.Generic.List[string]]::new()
+    foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $line = $rawLine.TrimEnd("`r")
+        if ($Head -and $line.StartsWith("HEAD:", [System.StringComparison]::Ordinal)) {
+            $line = $line.Substring("HEAD:".Length)
+        }
+        [void]$markers.Add($line)
+    }
+
+    $markerArray = [string[]]$markers
+    [array]::Sort($markerArray, [System.StringComparer]::Ordinal)
+    $markerArray -join "`n"
+}
+
+function Test-RustTestContextMarkersChanged {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles)
+
+    (Get-RustTestContextMarkerSignatureFromGit -CandidateFiles $CandidateFiles) -ne
+    (Get-RustTestContextMarkerSignatureFromGit -CandidateFiles $CandidateFiles -Head)
+}
+
+function Test-RustPanicMacroDiffChanged {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles)
+
+    if ($CandidateFiles.Count -eq 0) {
+        return $false
+    }
+
+    if ($script:InspectWorktree) {
+        $tracked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($file in (Get-IndexFiles -Pathspecs $CandidateFiles)) {
+            [void]$tracked.Add($file)
+        }
+        foreach ($file in $CandidateFiles) {
+            if (-not $tracked.Contains($file)) {
+                return $true
+            }
+        }
+    }
+
+    $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
+    $arguments = @("diff")
+    if ($script:InspectWorktree) {
+        $arguments += "HEAD"
+    } else {
+        $arguments += "--cached"
+    }
+    $arguments += @("--quiet", "-G", $grepPattern, "--") + $CandidateFiles
+    $result = Invoke-Native -FileName "git" -Arguments $arguments
+    if ($result.ExitCode -eq 0) {
+        return $false
+    }
+    if ($result.ExitCode -eq 1) {
+        return $true
+    }
+    if ($script:InspectWorktree -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+        return $true
+    }
+
+    throw "git diff panic macro check failed:`n$($result.Output)"
+}
+
+function Select-ProductionRustPanicMacroCandidates {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
+        [switch]$Head
+    )
+
+    $productionCandidates = [System.Collections.Generic.List[object]]::new()
+    if ($Candidates.Count -eq 0) {
+        return @()
+    }
+
+    $candidateFiles = [string[]]@($Candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
+    foreach ($file in $candidateFiles) {
+        $content = if ($Head) { Get-HeadText -Path $file } else { Get-PolicyText -Path $file }
+        if ($null -eq $content) {
+            continue
+        }
+
+        $fileCandidates = @($Candidates | Where-Object { $_.File -eq $file } | Sort-Object -Property Line)
+        if ($fileCandidates.Count -eq 0) {
+            continue
+        }
+
+        $lineNumbers = [int[]]@($fileCandidates | ForEach-Object { [int]$_.Line })
+        $executableMacroLines = Get-RustExecutablePanicMacroLineSet -Content $content -CandidateLines $lineNumbers
+        $testCandidateLines = Get-RustCandidateTestLineSet -Content $content -CandidateLines $lineNumbers
+        foreach ($candidate in $fileCandidates) {
+            if (-not $executableMacroLines.Contains($candidate.Line)) {
+                continue
+            }
+            if ($testCandidateLines.Contains($candidate.Line)) {
+                continue
+            }
+
+            [void]$productionCandidates.Add($candidate)
+        }
+    }
+
+    return [object[]]$productionCandidates.ToArray()
+}
+
+function Get-RustPanicCandidateKey {
+    param(
+        [Parameter(Mandatory = $true)]$Candidate,
+        [switch]$IncludeLine
+    )
+
+    if ($IncludeLine) {
+        return "$($Candidate.File)`0$($Candidate.Line)`0$($Candidate.Text)"
+    }
+
+    "$($Candidate.File)`0$($Candidate.Text)"
+}
+
+function Get-NewRustPanicMacroCandidates {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles
+    )
+
+    if ($Candidates.Count -eq 0) {
+        return @()
+    }
+
+    if (Test-RustTestContextMarkersChanged -CandidateFiles $CandidateFiles) {
+        $productionCandidates = Select-ProductionRustPanicMacroCandidates -Candidates $Candidates
+        if ($productionCandidates.Count -eq 0) {
+            return @()
+        }
+
+        $headCandidates = Get-HeadRustPanicMacroCandidates -Pathspecs $CandidateFiles
+        $productionHeadCandidates = Select-ProductionRustPanicMacroCandidates -Candidates $headCandidates -Head
+        $headProductionCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
+        foreach ($candidate in $productionHeadCandidates) {
+            $key = Get-RustPanicCandidateKey -Candidate $candidate
+            if ($headProductionCounts.ContainsKey($key)) {
+                $headProductionCounts[$key]++
+            } else {
+                $headProductionCounts[$key] = 1
+            }
+        }
+
+        $newProductionCandidates = [System.Collections.Generic.List[object]]::new()
+        foreach ($candidate in @($productionCandidates | Sort-Object -Property File, Line)) {
+            $key = Get-RustPanicCandidateKey -Candidate $candidate
+            if ($headProductionCounts.ContainsKey($key) -and $headProductionCounts[$key] -gt 0) {
+                $headProductionCounts[$key]--
+                continue
+            }
+
+            [void]$newProductionCandidates.Add($candidate)
+        }
+
+        return [object[]]$newProductionCandidates.ToArray()
+    }
+
+    $headCandidates = Get-HeadRustPanicMacroCandidates -Pathspecs $CandidateFiles
+    $headCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
+    foreach ($candidate in $headCandidates) {
+        $key = Get-RustPanicCandidateKey -Candidate $candidate -IncludeLine
+        if ($headCounts.ContainsKey($key)) {
+            $headCounts[$key]++
+        } else {
+            $headCounts[$key] = 1
+        }
+    }
+
+    $newCandidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in @($Candidates | Sort-Object -Property File, Line)) {
+        $key = Get-RustPanicCandidateKey -Candidate $candidate -IncludeLine
+        if ($headCounts.ContainsKey($key) -and $headCounts[$key] -gt 0) {
+            $headCounts[$key]--
+            continue
+        }
+
+        [void]$newCandidates.Add($candidate)
+    }
+
+    return [object[]]$newCandidates.ToArray()
+}
+
 function Test-RustAddedPanicPatterns {
-    $productionRustFiles = [string[]]@($script:StagedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
-    if ($productionRustFiles.Count -eq 0) {
+    $changedProductionRustFiles = [string[]]@($script:StagedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
+    if ($changedProductionRustFiles.Count -eq 0) {
         Skip "Rust panic patterns" "no production Rust files staged"
         return
     }
 
-    $rustWhitespace = "(?:\s|/\*.*?\*/)*"
-    $panicPattern = "\.(?:unwrap|expect)\b|\b(?:panic|todo|unimplemented|unreachable)$rustWhitespace!$rustWhitespace\("
-    $pickaxePattern = "unwrap|expect|panic|todo|unimplemented|unreachable"
-    try {
-        $diff = Get-StagedAddedLines -Pathspecs $productionRustFiles -PickaxePattern $pickaxePattern
-    } catch {
-        Fail "Rust panic patterns" $_.Exception.Message
-        return
-    }
-    $currentFile = ""
-    $nextNewLine = 0
-    $candidates = [System.Collections.Generic.List[object]]::new()
     $violations = [System.Collections.Generic.List[string]]::new()
+    $candidates = @()
 
-    foreach ($rawLine in $diff -split "`n") {
-        $line = $rawLine.TrimEnd("`r")
-        if ($line.StartsWith("+++ b/")) {
-            $currentFile = $line.Substring(6)
-            continue
-        }
-        if ($line -match "^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@") {
-            $nextNewLine = [int]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture)
-            continue
-        }
-        if (-not $line.StartsWith("+") -or $line.StartsWith("+++")) {
-            if ($line.StartsWith(" ") -and $nextNewLine -gt 0) {
-                $nextNewLine++
-            }
-            continue
-        }
-        if (-not (Test-ProductionRustSourcePath -Path $currentFile)) {
-            continue
-        }
-
-        $addedLineNumber = $nextNewLine
-        if ($nextNewLine -gt 0) {
-            $nextNewLine++
-        }
-
-        $added = $line.Substring(1)
-        $trimmed = $added.TrimStart()
-        if ($trimmed.StartsWith("//")) {
-            continue
-        }
-
-        if ($added -match $panicPattern) {
-            [void]$candidates.Add([pscustomobject]@{
-                    File = $currentFile
-                    Line = $addedLineNumber
-                    Text = $trimmed
-                })
+    if ($script:InspectWorktree) {
+        $scannableFiles = [string[]]@($changedProductionRustFiles | Where-Object {
+                Test-Path -LiteralPath (Join-Path $script:RepoRoot $_)
+            })
+        $candidates = @(Get-WorktreeRustPanicMacroCandidates -Pathspecs $scannableFiles)
+    } else {
+        try {
+            $candidates = @(Get-StagedRustPanicMacroCandidates -Pathspecs $changedProductionRustFiles)
+        } catch {
+            Fail "Rust panic patterns" $_.Exception.Message
+            return
         }
     }
 
@@ -928,7 +1754,26 @@ function Test-RustAddedPanicPatterns {
     }
 
     $candidateFiles = [string[]]@($candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
-    if ($candidateFiles.Count -gt 2) {
+    try {
+        $panicMacroDiffChanged = Test-RustPanicMacroDiffChanged -CandidateFiles $candidateFiles
+        $testContextMarkersChanged = Test-RustTestContextMarkersChanged -CandidateFiles $candidateFiles
+        if (-not $panicMacroDiffChanged -and -not $testContextMarkersChanged) {
+            Pass "Rust panic patterns"
+            return
+        }
+
+        $candidates = @(Get-NewRustPanicMacroCandidates -Candidates $candidates -CandidateFiles $candidateFiles)
+    } catch {
+        Fail "Rust panic patterns" $_.Exception.Message
+        return
+    }
+    if ($candidates.Count -eq 0) {
+        Pass "Rust panic patterns"
+        return
+    }
+    $candidateFiles = [string[]]@($candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
+
+    if (-not $script:InspectWorktree -and $candidateFiles.Count -gt 2) {
         try {
             Add-IndexTextCache -Pathspecs $candidateFiles
         } catch {
@@ -937,33 +1782,40 @@ function Test-RustAddedPanicPatterns {
         }
     }
 
-    $orderedCandidates = @($candidates | Sort-Object -Property File, Line)
-    $maxCandidateLineByFile = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
-    foreach ($candidate in $orderedCandidates) {
-        if ((-not $maxCandidateLineByFile.ContainsKey($candidate.File)) -or
-            $candidate.Line -gt $maxCandidateLineByFile[$candidate.File]) {
-            $maxCandidateLineByFile[$candidate.File] = [int]$candidate.Line
-        }
-    }
-
-    $testLinesByFile = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
-    foreach ($candidate in $orderedCandidates) {
-        if (-not $testLinesByFile.ContainsKey($candidate.File)) {
-            $content = Get-IndexText -Path $candidate.File
-            $testLinesByFile[$candidate.File] = Get-RustTestLineSet -Content $content -MaxLine $maxCandidateLineByFile[$candidate.File]
-        }
-
-        $testLines = $testLinesByFile[$candidate.File]
-        if ($testLines.Contains($candidate.Line)) {
+    foreach ($file in @($candidateFiles | Sort-Object)) {
+        $content = Get-PolicyText -Path $file
+        if ($null -eq $content) {
             continue
         }
 
-        [void]$violations.Add("$($candidate.File): $($candidate.Text)")
-        break
+        $fileCandidates = @($candidates | Where-Object { $_.File -eq $file } | Sort-Object -Property Line)
+        if ($fileCandidates.Count -eq 0) {
+            continue
+        }
+
+        $lineNumbers = [int[]]@($fileCandidates | ForEach-Object { [int]$_.Line })
+        $executableMacroLines = Get-RustExecutablePanicMacroLineSet -Content $content -CandidateLines $lineNumbers
+        $testCandidateLines = Get-RustCandidateTestLineSet -Content $content -CandidateLines $lineNumbers
+        foreach ($candidate in $fileCandidates) {
+            if (-not $executableMacroLines.Contains($candidate.Line)) {
+                continue
+            }
+            if ($testCandidateLines.Contains($candidate.Line)) {
+                continue
+            }
+
+            [void]$violations.Add("$($candidate.File):$($candidate.Line): $($candidate.Text)")
+            if ($violations.Count -ge 5) {
+                break
+            }
+        }
+        if ($violations.Count -ge 5) {
+            break
+        }
     }
 
     if ($violations.Count -gt 0) {
-        Fail "Rust panic patterns" "Production Rust additions include panic-prone patterns.`n$($violations -join "`n")"
+        Fail "Rust panic patterns" "Changed production Rust files contain explicit panic macros. Replace panic!/todo!/unimplemented!/unreachable! with typed errors or move test-only macros behind #[cfg(test)]. Full .expect/.unwrap policy runs in local CI and CI.`n$($violations -join "`n")"
     } else {
         Pass "Rust panic patterns"
     }
@@ -1009,6 +1861,58 @@ function New-SkillsIndexContent {
     ($lines -join "`n") + "`n"
 }
 
+function ConvertTo-GitRelativePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $relative = [System.IO.Path]::GetRelativePath($script:RepoRoot, $Path)
+    $relative.Replace([System.IO.Path]::DirectorySeparatorChar, "/").Replace([System.IO.Path]::AltDirectorySeparatorChar, "/")
+}
+
+function New-WorktreeSkillsIndexContent {
+    $warning = "> WARNING: Auto-generated by ``scripts/generate-skills-index.sh``. Do not edit manually."
+    $lines = [System.Collections.Generic.List[string]]::new()
+    [void]$lines.Add("# Skills Index")
+    [void]$lines.Add("")
+    [void]$lines.Add($warning)
+    [void]$lines.Add("")
+    [void]$lines.Add("## Files")
+    [void]$lines.Add("")
+
+    $skillsRoot = Join-Path $script:RepoRoot ".llm/skills"
+    if (-not (Test-Path -LiteralPath $skillsRoot)) {
+        return ($lines -join "`n") + "`n"
+    }
+
+    $paths = [string[]]@(
+        Get-ChildItem -LiteralPath $skillsRoot -Filter "*.md" -File |
+            Where-Object { $_.Name -ne "index.md" } |
+            ForEach-Object { ConvertTo-GitRelativePath -Path $_.FullName }
+    )
+    [array]::Sort($paths, [System.StringComparer]::Ordinal)
+
+    foreach ($path in $paths) {
+        $fileName = Get-GitPathFileName -Path $path
+        $title = ""
+        $content = Get-WorktreeText -Path $path
+        if ($null -eq $content) {
+            continue
+        }
+        foreach ($line in $content -split "`r?`n") {
+            if ($line.StartsWith("# Skill:")) {
+                $title = $line.Substring("# Skill:".Length).Trim()
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($title)) {
+            [void]$lines.Add("- [$fileName](./$fileName)")
+        } else {
+            [void]$lines.Add("- [$title](./$fileName)")
+        }
+    }
+
+    ($lines -join "`n") + "`n"
+}
+
 function Repair-SkillsIndexIfNeeded {
     $triggered = @($script:StagedFiles | Where-Object {
             $_ -eq "scripts/generate-skills-index.sh" -or
@@ -1016,6 +1920,28 @@ function Repair-SkillsIndexIfNeeded {
         }).Count -gt 0
     if (-not $triggered) {
         Skip "Skills index freshness" "no skills index inputs staged"
+        return
+    }
+
+    if ($script:InspectWorktree) {
+        try {
+            $expected = New-WorktreeSkillsIndexContent
+        } catch {
+            Fail "Skills index freshness" $_.Exception.Message
+            return
+        }
+        $actual = Get-WorktreeText -Path ".llm/skills/index.md"
+        if ($null -eq $actual) { $actual = "" }
+
+        if ($actual -eq $expected) {
+            Pass "Skills index freshness"
+            return
+        }
+
+        $indexPath = Join-Path $script:RepoRoot ".llm/skills/index.md"
+        [System.IO.File]::WriteAllText($indexPath, $expected, [System.Text.UTF8Encoding]::new($false))
+        $script:WorktreeTextCache[".llm/skills/index.md"] = $expected
+        Pass "Skills index freshness (auto-repaired)"
         return
     }
 
@@ -1057,7 +1983,7 @@ function Test-LlmFileSizes {
 
     $violations = [System.Collections.Generic.List[string]]::new()
     foreach ($file in $llmFiles) {
-        $content = Get-IndexText -Path $file
+        $content = Get-PolicyText -Path $file
         if ($null -eq $content) {
             continue
         }
@@ -1085,7 +2011,7 @@ function Test-ReadmeBadges {
         return
     }
 
-    $readme = Get-IndexText -Path "README.md"
+    $readme = Get-PolicyText -Path "README.md"
     if ($null -eq $readme) {
         Skip "README badge styles" "README.md not present in index"
         return
@@ -1132,23 +2058,38 @@ function Complete-PreCommit {
     exit 0
 }
 
-$timer = [System.Diagnostics.Stopwatch]::StartNew()
-$script:PreCommitTimer = $timer
 $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
 Set-Location $script:RepoRoot
-$script:StagedFiles = @(Get-StagedFiles)
-
-Write-Step "Running fast last-resort checks..."
-$hasProductionRust = @($script:StagedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ }).Count -gt 0
-if (-not $hasProductionRust) {
-    if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
+$script:InspectWorktree = [bool]$Worktree
+$productionRustPathspecs = @("src/**/*.rs", "src/*.rs")
+$script:HookPolicyChangedFiles = [string[]]@(if ($script:InspectWorktree) {
+    Get-WorktreeChangedFiles -Pathspecs $script:HookPolicyFiles
+} else {
+    Get-StagedFiles -Pathspecs $script:HookPolicyFiles
+})
+$script:StagedFiles = if ($script:InspectWorktree) {
+    @(Get-WorktreeChangedFiles -Pathspecs $productionRustPathspecs)
+} else {
+    @(Get-StagedFiles -Pathspecs $productionRustPathspecs)
 }
-if (-not (Invoke-Check "Rust panic patterns" { Test-RustAddedPanicPatterns })) { Complete-PreCommit }
-if (-not (Invoke-Check "Staged diff whitespace" { Test-Whitespace })) { Complete-PreCommit }
 
+if ($script:InspectWorktree) {
+    Write-Step "Running fast worktree preflight checks..."
+} else {
+    Write-Step "Running fast last-resort checks..."
+}
+$hasProductionRust = @($script:StagedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ }).Count -gt 0
 if ($hasProductionRust) {
+    if ($script:HookPolicyChangedFiles.Count -gt 0) {
+        if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
+    }
+    if (-not (Invoke-Check "Rust panic patterns" { Test-RustAddedPanicPatterns })) { Complete-PreCommit }
     Complete-PreCommit
 }
+
+$script:StagedFiles = if ($script:InspectWorktree) { @(Get-WorktreeChangedFiles) } else { @(Get-StagedFiles) }
+if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
+if (-not (Invoke-Check "Rust panic patterns" { Test-RustAddedPanicPatterns })) { Complete-PreCommit }
 
 Add-StagedContentPreload
 if ($null -ne $script:PreloadError) {

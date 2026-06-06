@@ -14,18 +14,29 @@ of decoded text round trips.
 
 ## Why This Changed
 
-The failure in `pre-commit.txt` showed that pre-commit was running full clippy.
-On Windows, `cargo clippy --fix` took 20.99 seconds and still could not repair a
-cfg-specific unused variable. That is too slow for a git hook and too late in
-the workflow.
+The current failure in `pre-commit.txt` was a fast 484 ms Rust panic-pattern
+failure on a production `.expect(...)` addition. The code had the documented
+`SAFETY:` rationale and clippy allowance, so the root issue was policy drift
+between the hook and the agent workflow guidance. The hook no longer adjudicates
+`.expect()`/`.unwrap()` policy; local CI now runs the full panic policy so
+agents catch those semantic failures before staging.
+
+An earlier Windows hook incident ran full `cargo clippy --fix`, took 20.99
+seconds, and still could not repair a cfg-specific unused variable. That remains
+too slow for a git hook and too late in the workflow.
 
 Clippy, tests, rustdoc, markdownlint, and broader policy checks now run in
 agent workflows, `scripts/run-local-ci.sh`, and CI.
 
 ## Pre-Commit Checks
 
-- staged whitespace errors
-- panic-prone additions in production Rust source
+Production Rust commit path:
+
+- explicit `panic!`/`todo!`/`unimplemented!`/`unreachable!` macro additions in
+  production Rust source, excluding test-only files and `#[cfg(test)]` ranges
+
+Non-production-Rust metadata path:
+
 - `.llm/skills/index.md` freshness with auto-repair
 - staged `.llm/*.md` line-count limit
 - README badge style
@@ -43,6 +54,7 @@ agent workflows, `scripts/run-local-ci.sh`, and CI.
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
 

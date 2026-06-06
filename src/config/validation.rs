@@ -140,6 +140,9 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // Session topology/transport policy validation
     config.session.validate()?;
 
+    // TURN / STUN ICE-server policy validation
+    config.turn.validate()?;
+
     Ok(())
 }
 

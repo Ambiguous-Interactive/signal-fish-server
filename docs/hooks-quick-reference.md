@@ -17,7 +17,7 @@ multiple file contents.
 
 | Hook | Fast Checks |
 |------|-------------|
-| pre-commit | production Rust commits: staged whitespace and panic-pattern additions; non-production-Rust commits: metadata guards such as skills index auto-repair, `.llm` file size, README badge style, and hook speed policy |
+| pre-commit | production Rust commits: explicit panic-macro additions only (`panic!`, `todo!`, `unimplemented!`, `unreachable!`) with test-code ranges excluded; non-production-Rust commits: metadata guards such as skills index auto-repair, `.llm` file size, README badge style, and hook speed policy |
 | pre-push | pushed-file discovery, workflow direct-script invocation policy, hook speed policy |
 
 ## Required Agent Checks
@@ -28,6 +28,7 @@ Run these before handoff or push:
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
 

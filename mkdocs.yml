@@ -134,3 +134,5 @@ nav:
       - Error Codes: reference/error-codes.md
       - Features: features.md
       - Architecture: architecture.md
+      - Transport Fallback (v3): architecture/transport-fallback.md
+      - Handoff & Topologies (v3): architecture/handoff-and-topologies.md

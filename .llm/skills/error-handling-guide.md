@@ -157,10 +157,13 @@ let result = maybe_value.map(|v| v.to_string());
 let result = maybe_value.and_then(|v| v.parse().ok());
 ```
 
-**`expect()` only for compile-time-provable cases** with a `// SAFETY:` comment — it still panics:
+**`expect()` only for compile-time-provable cases** with a nearby `// SAFETY:`
+comment and matching clippy allowance — it still panics, so prefer propagation
+or fallbacks when practical:
 
 ```rust
 // SAFETY: Regex literal is known valid at compile time
+#[allow(clippy::expect_used)]
 let re = Regex::new(r"^\d+$").expect("valid regex literal");
 
 // ❌ NEVER in production code for runtime-dependent values
@@ -252,7 +255,8 @@ See [Defensive Programming](./defensive-programming.md) for comprehensive safe a
 - [ ] Error variants match what callers need to handle (not internal impl)
 - [ ] `.context()` or `.map_err()` at every module/crate boundary
 - [ ] Zero `.unwrap()` in production code
-- [ ] `.expect()` only for compile-time-provable cases with `// SAFETY:` comment
+- [ ] Production `.expect()` only for compile-time-provable cases with `// SAFETY:` and
+      `#[allow(clippy::expect_used)]`
 - [ ] `#[must_use]` on all Result-returning public functions
 - [ ] Errors logged with structured tracing fields
 - [ ] Error test covers every variant

@@ -75,6 +75,60 @@ impl EnhancedGameServer {
             ClientMessage::LeaveSpectator => {
                 self.handle_leave_spectator(player_id).await;
             }
+            ClientMessage::TransportStatus {
+                transport,
+                connected,
+            } => {
+                self.handle_transport_status(player_id, transport, connected)
+                    .await;
+            }
+        }
+    }
+
+    /// Record a client's reported data-path transport state (Protocol v3, PLAN §P5).
+    ///
+    /// Purely informational and v3-only: a v2 client can never legitimately send
+    /// this, so a non-v3 connection's report is ignored (debug-logged) as
+    /// defense-in-depth (Appendix K). The relay floor never closes regardless of
+    /// what is reported — this only drives observability and, in future, targeted
+    /// relay for stuck peers.
+    ///
+    /// Metric interpretation:
+    /// - `connected == true` AND a P2P transport (`Direct` / `WebRtc`) ⇒
+    ///   `record_p2p_established` (a peer-to-peer path came up).
+    /// - `connected == false` ⇒ `record_relay_fallback` (the client dropped back to
+    ///   the relay floor), regardless of which transport it names.
+    /// - `connected == true` with `transport: relay` is just "I am on the floor":
+    ///   it is not a P2P establishment and not a fallback event, so it moves no
+    ///   counter — only the per-connection state is updated. (Documented here and in
+    ///   `docs/architecture/transport-fallback.md`.)
+    async fn handle_transport_status(
+        &self,
+        player_id: &PlayerId,
+        transport: crate::protocol::Transport,
+        connected: bool,
+    ) {
+        use crate::protocol::Transport;
+
+        if !self.client_supports_v3(player_id) {
+            tracing::debug!(
+                %player_id,
+                ?transport,
+                connected,
+                "Ignoring TransportStatus from a non-v3 connection (v3-only message)"
+            );
+            return;
+        }
+
+        self.set_client_transport_status(player_id, transport, connected);
+
+        if !connected {
+            // The client fell back to the relay floor (for any transport it names).
+            self.metrics.record_relay_fallback();
+        } else if matches!(transport, Transport::Direct | Transport::WebRtc) {
+            // A peer-to-peer data path came up. `connected: true` with `relay`
+            // means "still on the floor" and is intentionally not counted.
+            self.metrics.record_p2p_established();
         }
     }
 }

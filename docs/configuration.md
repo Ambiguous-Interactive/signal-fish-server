@@ -179,6 +179,19 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_FIELDS` | `metrics.dashboard_cache_history_fields` | `["active_rooms","rooms_by_game","player_percentiles","game_percentiles"]` | Dashboard history fields |
 | `SIGNAL_FISH__RELAY_TYPES__DEFAULT_RELAY_TYPE` | `relay_types.default_relay_type` | `matchbox` | Default relay integration label |
 | `SIGNAL_FISH__RELAY_TYPES__GAME_RELAY_MAPPINGS` | `relay_types.game_relay_mappings` | `{}` | JSON object mapping game names to relay labels |
+| `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY` | `session.default_topology` | `relay` | Preferred topology for unmapped games (`relay`, `host`, `mesh`) |
+| `SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS` | `session.game_topology_mappings` | `{}` | JSON object mapping game names to topologies |
+| `SIGNAL_FISH__SESSION__ENABLE_WEBRTC` | `session.enable_webrtc` | `true` | Permit the WebRTC transport for `mesh`/`host` upgrades |
+| `SIGNAL_FISH__SESSION__ENABLE_DIRECT` | `session.enable_direct` | `true` | Permit the Direct (LAN/routable) transport for `host` upgrades |
+| `SIGNAL_FISH__SESSION__ICE_SERVERS` | `session.ice_servers` | `[]` | JSON array of static ICE servers advertised in a WebRTC plan |
+| `SIGNAL_FISH__TURN__ENABLED` | `turn.enabled` | `false` | Mint and advertise TURN credentials |
+| `SIGNAL_FISH__TURN__MODE` | `turn.mode` | `static_secret` | TURN credential source (`static_secret`, `managed`) |
+| `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET` | `turn.static_auth_secret` | `""` | coturn `--static-auth-secret` (server-only; never sent to clients) |
+| `SIGNAL_FISH__TURN__URLS` | `turn.urls` | `[]` | JSON array of TURN server URLs (e.g. `turn:turn.example.com:3478`) |
+| `SIGNAL_FISH__TURN__STUN_URLS` | `turn.stun_urls` | `["stun:stun.l.google.com:19302"]` | JSON array of STUN URLs advertised on WebRTC plans |
+| `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential |
+| `SIGNAL_FISH__TURN__MANAGED_PROVIDER` | `turn.managed_provider` | `null` | Managed-mode provider name (required when `mode = managed`) |
+| `SIGNAL_FISH__TURN__MANAGED_API_TOKEN` | `turn.managed_api_token` | `null` | Managed-mode API token (required when `mode = managed`) |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `true` | Enable outbound message batching |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds |
@@ -295,6 +308,79 @@ Complete reference of all configuration options with environment variable overri
 - `batch_size` - Max messages per batch
 - `batch_interval_ms` - Batch flush interval
 - `auth_timeout_secs` - Seconds to wait for auth after connect
+
+## Session Topology (Protocol v3)
+
+```json
+
+{
+  "session": {
+    "default_topology": "relay",
+    "game_topology_mappings": {},
+    "enable_webrtc": true,
+    "enable_direct": true,
+    "ice_servers": []
+  }
+}
+
+```
+
+- `default_topology` - Preferred topology for games not in `game_topology_mappings` (`relay`, `host`, `mesh`; default: `relay`)
+- `game_topology_mappings` - Per-game topology overrides, e.g. `{"FastFPS": "mesh", "BoardGame": "host"}`
+- `enable_webrtc` - Permit the WebRTC transport for `mesh`/`host` upgrades (default: true)
+- `enable_direct` - Permit the Direct (LAN/routable) transport for `host` upgrades (default: true)
+- `ice_servers` - Static ICE (STUN/TURN) servers advertised in a WebRTC `SessionPlan`; appended before any TURN-derived entries
+
+Every upgrade gracefully degrades to the `relay` floor, so a fully-disabled
+deployment keeps working exactly like v2. ICE servers are advertised only when a
+WebRTC topology (`mesh`, or `host` with the WebRTC transport) is actually
+selected; under the default `relay` topology no `SessionPlan` is emitted at all.
+
+## TURN / STUN (ICE Credentials) (Protocol v3)
+
+```json
+
+{
+  "turn": {
+    "enabled": false,
+    "mode": "static_secret",
+    "static_auth_secret": "",
+    "urls": [],
+    "stun_urls": ["stun:stun.l.google.com:19302"],
+    "credential_ttl_secs": 3600
+  }
+}
+
+```
+
+- `enabled` - Mint and advertise TURN credentials (default: false). When false,
+  the block is inert and only `stun_urls` is advertised
+- `mode` - How credentials are obtained: `static_secret` (server self-mints
+  short-lived coturn REST credentials) or `managed` (defers to a managed
+  provider; STUN-only stub today; default: `static_secret`)
+- `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled` with `mode = static_secret`
+- `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled` with `mode = static_secret`
+- `stun_urls` - Public STUN URLs advertised on WebRTC plans regardless of `enabled` (default: `["stun:stun.l.google.com:19302"]`)
+- `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` when enabled (default: 3600)
+- `managed_provider` - Managed-mode provider name (e.g. `"cloudflare"`). Required when `mode = managed`
+- `managed_api_token` - Managed-mode API token. Required when `mode = managed`
+
+### Security: `static_auth_secret` is server-only
+
+`turn.static_auth_secret` is a **server-only secret** and is **never sent to
+clients** — only the short-lived ephemeral username/credential pair derived from
+it ever reaches a client. It must match the value passed to coturn via
+`--static-auth-secret` (coturn `--use-auth-secret`). Prefer setting it via the
+environment variable `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET` rather than checking
+it into the config file.
+
+### STUN phone-home note
+
+`turn.stun_urls` defaults to a public Google STUN server
+(`stun:stun.l.google.com:19302`). It is only advertised to clients once a WebRTC
+topology (`mesh`, or `host` with the WebRTC transport) is actually selected — it
+is **never** sent under the default `relay` topology. Operators who want no
+third-party STUN dependency should set `stun_urls: []`.
 
 ## Validation
 

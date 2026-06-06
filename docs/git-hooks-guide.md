@@ -23,9 +23,13 @@ local CI, or GitHub CI.
   stages `.llm/skills/index.md` when skill inputs changed, then verifies the
   repaired index entry by Git object id.
 
-The failure captured in `pre-commit.txt` is the reference incident: a Windows
-pre-commit run spent 20.99 seconds in `cargo clippy --fix` and still could not
-repair a cfg-specific unused variable. Clippy is therefore enforced by agent
+The current failure captured in `pre-commit.txt` is a 484 ms last-resort Rust
+panic-pattern failure on a production `.expect(...)` addition. That exposed a
+policy mismatch: the hook was doing semantic `.expect()`/`.unwrap()` work that
+belongs in local CI and CI. The hook now stays to explicit panic macros, while
+agents run worktree preflight and the full panic policy before handoff. An
+earlier Windows incident spent 20.99 seconds in
+`cargo clippy --fix`; that remains the reason clippy is enforced by agent
 workflow and CI, not by git hooks.
 
 ## Installation
@@ -57,9 +61,13 @@ The pre-commit hook runs `scripts/hooks/pre-commit.ps1`. When production Rust
 files are staged, it runs only the code-path guards needed for last-resort
 safety and budget:
 
-- staged diff whitespace via `git diff --cached --check`
-- new panic-prone production Rust additions in `src/**/*.rs`, excluding test
-  files and staged `#[cfg(test)]`/test-function ranges
+- new explicit `panic!`, `todo!`, `unimplemented!`, and `unreachable!` macro
+  additions in `src/**/*.rs`, excluding test-only files and staged
+  `#[cfg(test)]`/test-function ranges.
+
+Production `.expect()` and `.unwrap()` policy is enforced by
+`scripts/check-no-panics.sh` in agent workflow, local CI, and CI, not by the git
+hook.
 
 When no production Rust files are staged, it also checks lightweight repository
 metadata guards:
@@ -85,12 +93,14 @@ Agents and developers must run semantic checks outside hooks:
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
 
-`scripts/run-local-ci.sh` owns slower policy checks including markdownlint,
-workflow hygiene, doc/changelog consistency, doc policy tests, Dockerfile
-portability, advisory checks, and README badge checks.
+`scripts/run-local-ci.sh` owns slower policy checks including hook readiness,
+worktree hook preflight, LLM file-size/example policies, markdownlint, workflow
+hygiene, doc/changelog consistency, doc policy tests, Dockerfile portability,
+advisory checks, and README badge checks.
 
 ## Markdownlint
 

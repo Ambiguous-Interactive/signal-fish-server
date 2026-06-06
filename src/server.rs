@@ -73,6 +73,8 @@ pub struct EnhancedGameServer {
     relay_type_config: crate::config::RelayTypeConfig,
     /// Session topology/transport selection policy (protocol v3)
     session_config: crate::config::SessionConfig,
+    /// TURN / STUN ICE-server policy (protocol v3); drives `SessionPlan.ice_servers`
+    turn_config: crate::config::TurnConfig,
     /// Rate limiter for room operations
     rate_limiter: Arc<RoomRateLimiter>,
     /// Server metrics
@@ -174,6 +176,7 @@ impl EnhancedGameServer {
         protocol_config: crate::config::ProtocolConfig,
         relay_type_config: crate::config::RelayTypeConfig,
         session_config: crate::config::SessionConfig,
+        turn_config: crate::config::TurnConfig,
         database_config: DatabaseConfig,
         metrics_config: crate::config::MetricsConfig,
         _auth_config: crate::config::AuthMaintenanceConfig,
@@ -269,6 +272,7 @@ impl EnhancedGameServer {
             protocol_config,
             relay_type_config,
             session_config,
+            turn_config,
             rate_limiter,
             metrics,
             message_coordinator,
@@ -341,6 +345,31 @@ impl EnhancedGameServer {
     /// (`session_policy::EnhancedGameServer::emit_session_plan`).
     pub(crate) fn client_protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.connection_manager.protocol(player_id)
+    }
+
+    /// Persist the client's last-reported data-path transport state (mirrors
+    /// [`set_client_protocol`](Self::set_client_protocol)). Driven by the v3-only
+    /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus).
+    pub(crate) fn set_client_transport_status(
+        &self,
+        player_id: &PlayerId,
+        transport: Transport,
+        connected: bool,
+    ) {
+        self.connection_manager
+            .set_transport_status(player_id, transport, connected);
+    }
+
+    /// Fetch the client's last-reported data-path transport state, or `None` if it
+    /// has not reported one (the relay floor is the implicit default). Mirrors
+    /// [`client_protocol`](Self::client_protocol). Consumed by tests and the future
+    /// targeted-relay path (PLAN §P5 notes); not yet read in production.
+    #[allow(dead_code)]
+    pub(crate) fn client_transport_status(
+        &self,
+        player_id: &PlayerId,
+    ) -> Option<(Transport, bool)> {
+        self.connection_manager.transport_status(player_id)
     }
 
     /// Whether the client negotiated protocol v3 or higher (gates all v3 emission).
