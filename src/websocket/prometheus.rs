@@ -480,13 +480,13 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_transport_p2p_established_total",
-        "P2P data paths clients reported as established via TransportStatus",
+        "First TransportStatus reports or state transitions clients reported as established P2P",
         snapshot.transport.p2p_established,
     );
     counter(
         &mut buf,
         "signal_fish_transport_relay_fallback_total",
-        "Clients that reported falling back to the relay floor via TransportStatus",
+        "First TransportStatus reports or state transitions clients reported as relay fallback",
         snapshot.transport.relay_fallback,
     );
     counter(

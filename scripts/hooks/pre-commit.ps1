@@ -132,7 +132,9 @@ function Get-WorktreeChangedFiles {
     $untrackedArgs = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
     Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $untrackedArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
 
-    Write-Output -NoEnumerate ([string[]]$orderedPaths)
+    foreach ($path in $orderedPaths) {
+        $path
+    }
 }
 
 function Test-StagedAny {

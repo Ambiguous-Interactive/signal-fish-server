@@ -3,9 +3,10 @@ use crate::config::{
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
 use crate::database::DatabaseConfig;
-use crate::protocol::{ClientMessage, ServerMessage};
-use crate::server::{EnhancedGameServer, ServerConfig};
+use crate::protocol::{ClientMessage, PlayerId, ServerMessage, Topology, Transport};
+use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig, TransportStatusUpdate};
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
@@ -69,9 +70,6 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn client_protocol_round_trips_through_server() {
-    use crate::protocol::{Topology, Transport};
-    use crate::server::NegotiatedProtocol;
-
     let server = create_test_server().await;
     let (sender, _receiver) = mpsc::channel(4);
     let addr: SocketAddr = "127.0.0.1:50050".parse().unwrap();
@@ -102,6 +100,89 @@ async fn client_protocol_round_trips_through_server() {
     let proto = server.client_protocol(&player_id);
     assert_eq!(proto.version, 3);
     assert_eq!(proto.topologies, vec![Topology::Relay, Topology::Mesh]);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn duplicate_transport_status_reports_do_not_inflate_metrics() {
+    let server = create_test_server().await;
+    let (sender, _receiver) = mpsc::channel(4);
+    let addr: SocketAddr = "127.0.0.1:50060".parse().unwrap();
+    let player_id = server
+        .connection_manager
+        .register_client(sender, addr, server.instance_id)
+        .await
+        .expect("client registration succeeds");
+
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::WebRtc],
+            topologies: vec![Topology::Relay, Topology::Mesh],
+        },
+    );
+
+    for connected in [true, true, false, false, true] {
+        server
+            .handle_client_message(
+                &player_id,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected,
+                },
+            )
+            .await;
+    }
+
+    assert_eq!(
+        server.client_transport_status(&player_id),
+        Some((Transport::WebRtc, true)),
+        "the last reported transport state should remain available"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        2,
+        "only first connected report and the reconnect transition count as P2P events"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        1,
+        "duplicate fallback reports must not inflate relay fallback events"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_update_results_are_distinct() {
+    let server = create_test_server().await;
+    let missing_player_id = PlayerId::new_v4();
+
+    assert_eq!(
+        server.set_client_transport_status(&missing_player_id, Transport::WebRtc, true),
+        TransportStatusUpdate::MissingConnection
+    );
+
+    let (sender, _receiver) = mpsc::channel(4);
+    let addr: SocketAddr = "127.0.0.1:50061".parse().unwrap();
+    let player_id = server
+        .connection_manager
+        .register_client(sender, addr, server.instance_id)
+        .await
+        .expect("client registration succeeds");
+
+    assert_eq!(
+        server.set_client_transport_status(&player_id, Transport::WebRtc, true),
+        TransportStatusUpdate::Changed
+    );
+    assert_eq!(
+        server.set_client_transport_status(&player_id, Transport::WebRtc, true),
+        TransportStatusUpdate::Duplicate
+    );
+    assert_eq!(
+        server.set_client_transport_status(&player_id, Transport::WebRtc, false),
+        TransportStatusUpdate::Changed
+    );
 }
 
 #[tokio::test]

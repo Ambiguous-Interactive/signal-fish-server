@@ -100,7 +100,7 @@ run_check() {
         echo -e "${RED}✗ FAIL${NC}: $name"
         FAILED_CHECKS+=("$name")
         echo ""
-        return 1
+        return 0
     fi
 }
 
@@ -124,7 +124,30 @@ run_check_quiet() {
         echo "$output"
         FAILED_CHECKS+=("$name")
         echo ""
-        return 1
+        return 0
+    fi
+}
+
+record_failed_check() {
+    local name="$1"
+    local reason="$2"
+
+    echo -e "${RED}✗ FAIL${NC}: $name ($reason)"
+    FAILED_CHECKS+=("$name")
+    echo ""
+    return 0
+}
+
+run_powershell_check() {
+    local name="$1"
+    local description="$2"
+    shift 2
+
+    if command -v pwsh > /dev/null 2>&1; then
+        run_check_quiet "$name" "$description" \
+            pwsh -NoLogo -NoProfile -NonInteractive "$@"
+    else
+        record_failed_check "$name" "PowerShell 7+ 'pwsh' not found"
     fi
 }
 
@@ -175,43 +198,49 @@ fi
 if [ -f scripts/check-msrv-consistency.sh ]; then
     run_check_quiet "msrv" "Checking MSRV consistency" \
         scripts/check-msrv-consistency.sh
+else
+    record_failed_check "msrv" "scripts/check-msrv-consistency.sh not found"
 fi
 
 # Check 7: Workflow Hygiene
 if [ -f scripts/check-workflow-hygiene.sh ]; then
     run_check_quiet "workflow-hygiene" "Checking workflow hygiene" \
         scripts/check-workflow-hygiene.sh
+else
+    record_failed_check "workflow-hygiene" "scripts/check-workflow-hygiene.sh not found"
 fi
 
 # Check 8: AWK Script Validation
 if [ -f scripts/validate-workflow-awk.sh ]; then
     run_check_quiet "awk-validation" "Validating AWK scripts in workflows" \
         scripts/validate-workflow-awk.sh
+else
+    record_failed_check "awk-validation" "scripts/validate-workflow-awk.sh not found"
 fi
 
 # Check 9: No Panic Patterns
-if [ "$FAST_MODE" = false ] && [ -f scripts/check-no-panics.sh ]; then
-    run_check_quiet "no-panics" "Checking for panic-prone patterns" \
-        scripts/check-no-panics.sh
+if [ "$FAST_MODE" = false ]; then
+    if [ -f scripts/check-no-panics.sh ]; then
+        run_check_quiet "no-panics" "Checking for panic-prone patterns" \
+            scripts/check-no-panics.sh
+    else
+        record_failed_check "no-panics" "scripts/check-no-panics.sh not found"
+    fi
 fi
 
 # Check 10: Hook readiness and worktree preflight
-if command -v pwsh > /dev/null 2>&1; then
-    run_check_quiet "hook-readiness" "Checking git hook readiness" \
-        pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
+run_powershell_check "hook-readiness" "Checking git hook readiness" \
+    -File scripts/check-hook-readiness.ps1
 
-    run_check_quiet "pre-commit-preflight" "Running fast worktree-scoped pre-commit policies" \
-        pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
-else
-    echo -e "${RED}✗ FAIL${NC}: hook-readiness (PowerShell 7+ 'pwsh' not found)"
-    echo ""
-    FAILED_CHECKS+=("hook-readiness")
-fi
+run_powershell_check "pre-commit-preflight" "Running fast worktree-scoped pre-commit policies" \
+    -File scripts/hooks/pre-commit.ps1 -Worktree
 
 # Check 11: CI Configuration Validation (AWK, shell, markdown links)
 if [ -f scripts/validate-ci.sh ]; then
     run_check_quiet "ci-validation" "Validating CI configuration (AWK, shell, links)" \
         scripts/validate-ci.sh --quiet
+else
+    record_failed_check "ci-validation" "scripts/validate-ci.sh not found"
 fi
 
 # Check 12: GitHub Actions syntax validation
@@ -267,30 +296,30 @@ if [ -f scripts/check-llm-file-sizes.sh ]; then
     run_check_quiet "llm-file-sizes" "Checking LLM context file sizes" \
         scripts/check-llm-file-sizes.sh
 else
-    echo -e "${RED}✗ FAIL${NC}: llm-file-sizes (scripts/check-llm-file-sizes.sh not found)"
-    echo ""
-    FAILED_CHECKS+=("llm-file-sizes")
+    record_failed_check "llm-file-sizes" "scripts/check-llm-file-sizes.sh not found"
 fi
 
 if [ -f scripts/check-llm-example-files.sh ]; then
     run_check_quiet "llm-example-files" "Checking extracted LLM skill examples" \
         scripts/check-llm-example-files.sh
 else
-    echo -e "${RED}✗ FAIL${NC}: llm-example-files (scripts/check-llm-example-files.sh not found)"
-    echo ""
-    FAILED_CHECKS+=("llm-example-files")
+    record_failed_check "llm-example-files" "scripts/check-llm-example-files.sh not found"
 fi
 
 # Check 15: README Badge Style Consistency
 if [ -f scripts/check-readme-badges.sh ]; then
     run_check_quiet "readme-badges" "Checking Shields badge style consistency in README" \
         scripts/check-readme-badges.sh README.md
+else
+    record_failed_check "readme-badges" "scripts/check-readme-badges.sh not found"
 fi
 
 # Check 16: Dockerfile shell portability
 if [ -f scripts/check-dockerfile-portability.sh ]; then
     run_check_quiet "dockerfile-portability" "Checking Dockerfile shell portability" \
         scripts/check-dockerfile-portability.sh --quiet
+else
+    record_failed_check "dockerfile-portability" "scripts/check-dockerfile-portability.sh not found"
 fi
 
 # Check 17: Dependency Advisory Check
@@ -298,8 +327,7 @@ if [ -f scripts/check-advisories.sh ]; then
     run_check_quiet "advisories" "Checking for RUSTSEC dependency advisories" \
         scripts/check-advisories.sh
 else
-    echo -e "${YELLOW}⚠ SKIP${NC}: advisories (scripts/check-advisories.sh not found)"
-    echo ""
+    record_failed_check "advisories" "scripts/check-advisories.sh not found"
 fi
 
 # Check 18: Documentation + changelog consistency
@@ -307,9 +335,7 @@ if [ -f scripts/check-doc-consistency.sh ]; then
     run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
         scripts/check-doc-consistency.sh
 else
-    echo -e "${RED}✗ FAIL${NC}: doc-consistency (scripts/check-doc-consistency.sh not found)"
-    echo ""
-    FAILED_CHECKS+=("doc-consistency")
+    record_failed_check "doc-consistency" "scripts/check-doc-consistency.sh not found"
 fi
 
 # Check 19: Documentation consistency policy tests

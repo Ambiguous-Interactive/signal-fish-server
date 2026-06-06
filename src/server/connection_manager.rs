@@ -58,6 +58,13 @@ pub(crate) struct ClientConnection {
     pub transport_status: Option<(Transport, bool)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportStatusUpdate {
+    Changed,
+    Duplicate,
+    MissingConnection,
+}
+
 pub(crate) struct ConnectionManager {
     clients: DashMap<PlayerId, ClientConnection>,
     connections_per_ip: DashMap<IpAddr, usize>,
@@ -215,15 +222,25 @@ impl ConnectionManager {
     /// Record the last-reported data-path transport state for a connection
     /// (mirrors [`Self::set_protocol`]). Driven by
     /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus).
+    /// Returns whether the persisted state changed. Duplicate reports leave
+    /// state untouched so event counters are not inflated.
     pub fn set_transport_status(
         &self,
         player_id: &PlayerId,
         transport: Transport,
         connected: bool,
-    ) {
+    ) -> TransportStatusUpdate {
         if let Some(mut connection) = self.clients.get_mut(player_id) {
-            connection.transport_status = Some((transport, connected));
+            let new_status = Some((transport, connected));
+            if connection.transport_status == new_status {
+                return TransportStatusUpdate::Duplicate;
+            }
+
+            connection.transport_status = new_status;
+            return TransportStatusUpdate::Changed;
         }
+
+        TransportStatusUpdate::MissingConnection
     }
 
     /// Read the last-reported data-path transport state for a connection.

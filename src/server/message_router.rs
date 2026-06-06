@@ -1,6 +1,6 @@
 use crate::protocol::{ClientMessage, PlayerId};
 
-use super::EnhancedGameServer;
+use super::{EnhancedGameServer, TransportStatusUpdate};
 
 impl EnhancedGameServer {
     /// Handle incoming client message with enhanced coordination.
@@ -93,6 +93,10 @@ impl EnhancedGameServer {
     /// what is reported — this only drives observability and, in future, targeted
     /// relay for stuck peers.
     ///
+    /// Duplicate reports of the same `(transport, connected)` pair update no
+    /// counters; the metrics below are emitted only for the first report or a
+    /// real per-connection state transition.
+    ///
     /// Metric interpretation:
     /// - `connected == true` AND a P2P transport (`Direct` / `WebRtc`) ⇒
     ///   `record_p2p_established` (a peer-to-peer path came up).
@@ -120,7 +124,27 @@ impl EnhancedGameServer {
             return;
         }
 
-        self.set_client_transport_status(player_id, transport, connected);
+        match self.set_client_transport_status(player_id, transport, connected) {
+            TransportStatusUpdate::Changed => {}
+            TransportStatusUpdate::Duplicate => {
+                tracing::debug!(
+                    %player_id,
+                    ?transport,
+                    connected,
+                    "Ignoring duplicate TransportStatus report"
+                );
+                return;
+            }
+            TransportStatusUpdate::MissingConnection => {
+                tracing::debug!(
+                    %player_id,
+                    ?transport,
+                    connected,
+                    "Ignoring TransportStatus for connection that no longer exists"
+                );
+                return;
+            }
+        }
 
         if !connected {
             // The client fell back to the relay floor (for any transport it names).

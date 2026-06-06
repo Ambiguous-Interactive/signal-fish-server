@@ -23,6 +23,14 @@ Config and binary wire-format drift rules:
 - **Lychee self-scans `.toml` files** -- use `--exclude-path .lychee.toml` or add exclusions.
 - **TOML/JSON/YAML "before/after" examples need separate blocks** -- duplicate table headers
   (e.g., two `[dependencies]`) in one block is invalid and will fail CI validation.
+- **PowerShell fixtures/scripts cannot overload functions** -- PowerShell silently
+  replaces earlier functions with later functions of the same name in a command
+  block or script file. Use one helper per name and distinct names for distinct
+  behaviors.
+- **Local CI aggregate helpers must survive failures under `set -e`** -- helper
+  failure branches should record the check in `FAILED_CHECKS` and return success;
+  the final summary owns the nonzero exit. Required local-CI script gates should
+  fail closed when their script file is missing, not silently skip.
 - **Avoid accidental setext headings in skills** -- keep a blank line between
   `**Trigger**: ...` and a following `---` separator, or markdownlint will treat
   the trigger line as a heading (MD003/MD026).

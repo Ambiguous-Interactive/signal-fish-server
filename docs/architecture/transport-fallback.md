@@ -97,12 +97,17 @@ message is **v3 only** — the server ignores it from any connection that did no
 negotiate v3 (a v2 client can never legitimately send it). It is purely
 informational and never causes the relay floor to close.
 
-Server-side interpretation (drives the metrics below):
+Server-side interpretation (drives the metrics below): duplicate reports of the
+same `(transport, connected)` state update only the stored per-connection state;
+they do not move counters. Counters move on the first report for a connection and
+on later real per-connection state transitions.
 
 - `connected: true` with a P2P transport (`direct` or `webrtc`) — a peer-to-peer
-  data path came up; counts as **P2P established**.
+  data path came up; counts as **P2P established** when it is a first report or a
+  transition from a different state.
 - `connected: false` (for any named transport) — the client dropped back to the
-  relay floor; counts as **relay fallback**.
+  relay floor; counts as **relay fallback** when it is a first report or a
+  transition from a different state.
 - `connected: true` with `transport: relay` — "I am still on the floor"; this is
   neither a P2P establishment nor a fallback, so it moves **no** counter (only the
   per-connection state is updated).
@@ -122,10 +127,10 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
   `signal_fish_transport_direct_selected_total`,
   `signal_fish_transport_relay_selected_total` — chosen data-path transport per
   finalized room.
-- `signal_fish_transport_p2p_established_total` — P2P paths clients reported as
-  established via `TransportStatus`.
-- `signal_fish_transport_relay_fallback_total` — clients that reported falling back
-  to the relay floor via `TransportStatus`.
+- `signal_fish_transport_p2p_established_total` — first reports or state
+  transitions where clients reported P2P paths as established via `TransportStatus`.
+- `signal_fish_transport_relay_fallback_total` — first reports or state transitions
+  where clients reported falling back to the relay floor via `TransportStatus`.
 - `signal_fish_transport_signals_relayed_total` — opaque WebRTC `Signal` messages
   successfully relayed between peers.
 - `signal_fish_transport_turn_credentials_issued_total` — ephemeral TURN

@@ -127,11 +127,11 @@ pub struct ServerMetrics {
     pub transport_direct_selected: AtomicU64,
     /// Finalized rooms whose chosen data-path transport was `relay` (the floor).
     pub transport_relay_selected: AtomicU64,
-    /// P2P data paths a client reported as established (`TransportStatus` with a
-    /// P2P transport and `connected: true`).
+    /// First reports or P2P data-path state transitions a client reported as
+    /// established (`TransportStatus` with a P2P transport and `connected: true`).
     pub p2p_established: AtomicU64,
-    /// Clients that reported falling back to the relay floor (`TransportStatus`
-    /// with `connected: false`).
+    /// First reports or relay-fallback state transitions a client reported
+    /// (`TransportStatus` with `connected: false`).
     pub relay_fallback: AtomicU64,
     /// Opaque WebRTC `Signal` messages successfully relayed peer-to-peer.
     pub signals_relayed: AtomicU64,
@@ -312,10 +312,10 @@ pub struct RelayHealthMetrics {
 /// Protocol v3 transport / session-plan observability (PLAN §P5).
 ///
 /// Exposes the per-finalized-room topology/transport selection ratios, the
-/// P2P-established-vs-relay-fallback split (reported by clients via
-/// `TransportStatus`), the count of opaque WebRTC signals relayed, and the number
-/// of TURN credentials minted — so dashboards can see how often the relay floor is
-/// actually upgraded to a peer-to-peer path.
+/// P2P-established-vs-relay-fallback first-report/transition split (reported by
+/// clients via `TransportStatus`), the count of opaque WebRTC signals relayed,
+/// and the number of TURN credentials minted — so dashboards can see how often
+/// the relay floor is actually upgraded to a peer-to-peer path.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransportMetrics {
     pub session_plans_emitted: u64,
@@ -889,14 +889,15 @@ impl ServerMetrics {
         self.session_plans_emitted.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record that a client reported an established P2P data path (`TransportStatus`
-    /// with a P2P transport and `connected: true`).
+    /// Record that a client reported an established P2P data path for the first
+    /// time or as a state transition (`TransportStatus` with a P2P transport and
+    /// `connected: true`).
     pub fn record_p2p_established(&self) {
         self.p2p_established.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record that a client reported falling back to the relay floor
-    /// (`TransportStatus` with `connected: false`).
+    /// Record that a client reported the relay floor for the first time or as a
+    /// state transition (`TransportStatus` with `connected: false`).
     pub fn record_relay_fallback(&self) {
         self.relay_fallback.fetch_add(1, Ordering::Relaxed);
     }

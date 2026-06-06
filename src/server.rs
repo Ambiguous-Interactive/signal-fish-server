@@ -53,7 +53,7 @@ mod spectator_handlers;
 mod spectator_service;
 
 use connection_manager::ConnectionManager;
-pub(crate) use connection_manager::NegotiatedProtocol;
+pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 use spectator_service::SpectatorService;
 
@@ -355,9 +355,9 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         transport: Transport,
         connected: bool,
-    ) {
+    ) -> TransportStatusUpdate {
         self.connection_manager
-            .set_transport_status(player_id, transport, connected);
+            .set_transport_status(player_id, transport, connected)
     }
 
     /// Fetch the client's last-reported data-path transport state, or `None` if it

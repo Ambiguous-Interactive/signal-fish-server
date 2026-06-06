@@ -963,7 +963,8 @@ Fields:
 
 `TransportStatus` lets a client report its current data-path transport state, so the server can distinguish
 P2P-connected peers from relay-fallback peers (this drives metrics). It is **purely informational**: the relay
-floor never closes regardless of what is reported.
+floor never closes regardless of what is reported. Metrics count the first report for a connection and real
+per-connection state transitions; duplicate `(transport, connected)` reports do not move counters.
 
 ```json
 {

@@ -123,6 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed protocol v3 `TransportStatus` metrics so duplicate reports of the same
+  `(transport, connected)` state no longer inflate P2P-established or
+  relay-fallback counters; counters now move only on a first report or a real
+  per-connection state transition.
+- Fixed local CI summary accounting so PowerShell-backed checks all report a
+  failure when `pwsh` is unavailable, required local policy scripts fail closed
+  when missing, and aggregate check helpers continue to the final summary after
+  recording failures under `set -e`.
 - Fixed in-memory room-operation lock cleanup so lobby transitions, authority changes,
   distributed room operations, and `PlayerReady` finalization release distributed locks
   immediately instead of relying on TTL expiry; protocol v3 session-plan e2e tests now
