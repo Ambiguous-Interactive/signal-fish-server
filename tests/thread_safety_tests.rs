@@ -8,7 +8,7 @@ use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::distributed::{
     CircuitBreaker, CircuitState, DistributedLock, InMemoryDistributedLock,
 };
-use signal_fish_server::protocol::PlayerInfo;
+use signal_fish_server::protocol::{PlayerInfo, ServerMessage};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Barrier;
@@ -896,7 +896,7 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
     // Drain any buffered messages, then send a fresh broadcast and verify
     // that exactly 5 receivers get the new message.
     for rx in &mut initial_receivers {
-        while rx.try_recv().is_ok() {}
+        drain_pending_messages(rx, "pre-verification broadcast drain");
     }
 
     let verification_msg = Arc::new(ServerMessage::Pong);
@@ -907,8 +907,15 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
 
     let mut received_count = 0usize;
     for rx in &mut initial_receivers {
-        if rx.try_recv().is_ok() {
-            received_count += 1;
+        match rx.try_recv() {
+            Ok(message) => match message.as_ref() {
+                ServerMessage::Pong => received_count += 1,
+                other => panic!("expected verification Pong broadcast, got {other:?}"),
+            },
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("verification receiver disconnected")
+            }
         }
     }
 
@@ -916,4 +923,20 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
         received_count, 5,
         "All 5 initial clients should still be registered and receive the verification broadcast, but only {received_count} received it"
     );
+}
+
+fn drain_pending_messages(
+    receiver: &mut tokio::sync::mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+) -> usize {
+    let mut drained = 0;
+    loop {
+        match receiver.try_recv() {
+            Ok(_) => drained += 1,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return drained,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("{context}: receiver disconnected while draining pending messages")
+            }
+        }
+    }
 }

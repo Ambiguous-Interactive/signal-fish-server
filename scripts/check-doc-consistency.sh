@@ -403,6 +403,9 @@ is_internal_path() {
         scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
             return 0
             ;;
+        src/*_tests.rs|src/*_test.rs|src/*/tests.rs)
+            return 0
+            ;;
         docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md)
             return 0
             ;;

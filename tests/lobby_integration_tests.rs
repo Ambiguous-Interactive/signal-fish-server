@@ -1,6 +1,7 @@
 mod test_helpers;
 
 use signal_fish_server::protocol::*;
+use std::sync::Arc;
 use test_helpers::create_test_server;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -35,27 +36,27 @@ async fn test_lobby_integration_full_flow() {
             .await;
     }
 
-    // Clear initial messages
+    // Assert initial messages
     for (i, rx) in channels.iter_mut().enumerate() {
-        let _ = rx.try_recv().unwrap(); // RoomJoined
+        expect_room_joined(rx, &format!("player {} initial join", i + 1));
 
         // Only the last player (when room becomes full) gets LobbyStateChanged
         if i == 2 {
-            let _ = rx.try_recv().unwrap(); // LobbyStateChanged
+            expect_lobby_state_changed(rx, "player 3 full-lobby update");
         }
     }
 
-    // Clear PlayerJoined notifications that existing players received
+    // Assert PlayerJoined notifications that existing players received
     for (i, rx) in channels.iter_mut().enumerate() {
         if i == 0 {
             // Player 1 should have received PlayerJoined for Player 2 and Player 3
-            let _ = rx.try_recv().unwrap(); // PlayerJoined for Player 2
-            let _ = rx.try_recv().unwrap(); // PlayerJoined for Player 3
-            let _ = rx.try_recv().unwrap(); // LobbyStateChanged when room became full
+            expect_player_joined(rx, player_ids[1], "player 1 sees player 2 join");
+            expect_player_joined(rx, player_ids[2], "player 1 sees player 3 join");
+            expect_lobby_state_changed(rx, "player 1 full-lobby update");
         } else if i == 1 {
             // Player 2 should have received PlayerJoined for Player 3
-            let _ = rx.try_recv().unwrap(); // PlayerJoined for Player 3
-            let _ = rx.try_recv().unwrap(); // LobbyStateChanged when room became full
+            expect_player_joined(rx, player_ids[2], "player 2 sees player 3 join");
+            expect_lobby_state_changed(rx, "player 2 full-lobby update");
         }
         // Player 3 doesn't receive any PlayerJoined messages (already covered above)
     }
@@ -63,9 +64,7 @@ async fn test_lobby_integration_full_flow() {
     // All LobbyStateChanged messages should have been cleared above
     // Verify no unexpected messages remain
     for (i, rx) in channels.iter_mut().enumerate() {
-        if let Ok(msg) = rx.try_recv() {
-            panic!("Player {} has unexpected message: {:?}", i + 1, msg);
-        }
+        assert_no_pending_message(rx, &format!("player {} post-join drain", i + 1));
     }
 
     // Players signal ready one by one
@@ -135,19 +134,21 @@ async fn test_lobby_player_leaves_during_ready_phase() {
             .await;
     }
 
-    // Clear initial messages
-    let _ = rx1.try_recv(); // RoomJoined
-    let _ = rx2.try_recv(); // RoomJoined
-    let _ = rx1.try_recv(); // PlayerJoined
-    let _ = rx1.try_recv(); // LobbyStateChanged
-    let _ = rx2.try_recv(); // LobbyStateChanged
+    expect_room_joined(&mut rx1, "player 1 leave-test room join");
+    expect_room_joined(&mut rx2, "player 2 leave-test room join");
+    expect_player_joined(
+        &mut rx1,
+        player2_id,
+        "player 1 leave-test join notification",
+    );
+    expect_lobby_state_changed(&mut rx1, "player 1 leave-test lobby update");
+    expect_lobby_state_changed(&mut rx2, "player 2 leave-test lobby update");
 
     // Player 1 signals ready
     server.handle_player_ready(&player1_id).await;
 
-    // Clear LobbyStateChanged messages
-    let _ = rx1.try_recv();
-    let _ = rx2.try_recv();
+    expect_lobby_state_changed(&mut rx1, "player 1 ready update before leave");
+    expect_lobby_state_changed(&mut rx2, "player 2 ready update before leave");
 
     // Player 2 leaves the room
     server.leave_room(&player2_id).await;
@@ -180,6 +181,52 @@ async fn test_lobby_player_leaves_during_ready_phase() {
         }
         _ => panic!("Expected error message, but received: {msg:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_lobby_ready_toggle_resets_ready_state() {
+    let server = create_test_server().await;
+
+    let player1_id = Uuid::new_v4();
+    let player2_id = Uuid::new_v4();
+
+    let (tx1, mut rx1) = mpsc::channel(64);
+    let (tx2, mut rx2) = mpsc::channel(64);
+
+    server.connect_client(player1_id, tx1).await;
+    server.connect_client(player2_id, tx2).await;
+
+    for (id, name) in [(player1_id, "ToggleP1"), (player2_id, "ToggleP2")] {
+        server
+            .handle_join_room(
+                &id,
+                "toggle_test".to_string(),
+                Some("TOGGLE".to_string()),
+                name.to_string(),
+                Some(2),
+                Some(true),
+                None,
+            )
+            .await;
+    }
+
+    expect_room_joined(&mut rx1, "toggle player 1 room join");
+    expect_room_joined(&mut rx2, "toggle player 2 room join");
+    expect_player_joined(&mut rx1, player2_id, "toggle player 1 sees player 2 join");
+    expect_lobby_state_changed_with_ready(&mut rx1, "toggle player 1 full-lobby update", 0, false);
+    expect_lobby_state_changed_with_ready(&mut rx2, "toggle player 2 full-lobby update", 0, false);
+
+    server.handle_player_ready(&player1_id).await;
+
+    expect_lobby_state_changed_with_ready(&mut rx1, "toggle player 1 first ready update", 1, false);
+    expect_lobby_state_changed_with_ready(&mut rx2, "toggle player 2 first ready update", 1, false);
+
+    server.handle_player_ready(&player1_id).await;
+
+    expect_lobby_state_changed_with_ready(&mut rx1, "toggle player 1 ready reset update", 0, false);
+    expect_lobby_state_changed_with_ready(&mut rx2, "toggle player 2 ready reset update", 0, false);
+    assert_no_pending_message(&mut rx1, "toggle player 1 final drain");
+    assert_no_pending_message(&mut rx2, "toggle player 2 final drain");
 }
 
 #[tokio::test]
@@ -220,9 +267,8 @@ async fn test_lobby_room_authority_preservation() {
         )
         .await;
 
-    // Clear initial messages
-    let room_joined_msg1 = rx1.try_recv().unwrap();
-    let room_joined_msg2 = rx2.try_recv().unwrap();
+    let room_joined_msg1 = expect_room_joined(&mut rx1, "authority player room join");
+    let room_joined_msg2 = expect_room_joined(&mut rx2, "regular player room join");
 
     // Verify initial authority assignment
     match room_joined_msg1.as_ref() {
@@ -239,19 +285,18 @@ async fn test_lobby_room_authority_preservation() {
         _ => panic!("Expected RoomJoined message"),
     }
 
-    // Clear remaining messages
-    let _ = rx1.try_recv(); // PlayerJoined
-    let _ = rx1.try_recv(); // LobbyStateChanged
-    let _ = rx2.try_recv(); // LobbyStateChanged
+    expect_player_joined(&mut rx1, player2_id, "authority player sees regular join");
+    expect_lobby_state_changed(&mut rx1, "authority player full-lobby update");
+    expect_lobby_state_changed(&mut rx2, "regular player full-lobby update");
 
     // Both players signal ready
     server.handle_player_ready(&player1_id).await;
-    let _ = rx1.try_recv(); // LobbyStateChanged
-    let _ = rx2.try_recv(); // LobbyStateChanged
+    expect_lobby_state_changed(&mut rx1, "authority player first ready update");
+    expect_lobby_state_changed(&mut rx2, "regular player first ready update");
 
     server.handle_player_ready(&player2_id).await;
-    let _ = rx1.try_recv(); // LobbyStateChanged
-    let _ = rx2.try_recv(); // LobbyStateChanged
+    expect_lobby_state_changed(&mut rx1, "authority player all-ready update");
+    expect_lobby_state_changed(&mut rx2, "regular player all-ready update");
 
     // Check GameStarting message preserves authority
     let game_start_msg1 = rx1.try_recv().unwrap();
@@ -403,8 +448,12 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             "ViewerOne".to_string(),
         )
         .await;
-    let _ = spectator_rx.try_recv();
-    let _ = player_rx.try_recv();
+    expect_spectator_joined(
+        &mut spectator_rx,
+        spectator_id,
+        "spectator rejoin after voluntary leave",
+    );
+    expect_new_spectator_joined(&mut player_rx, spectator_id, "host sees spectator rejoin");
 
     server.disconnect_client(&spectator_id).await;
 
@@ -422,5 +471,119 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             assert_eq!(*reason, Some(SpectatorStateChangeReason::Disconnected));
         }
         other => panic!("unexpected message after spectator disconnect: {other:?}"),
+    }
+}
+
+fn recv_now(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+) -> Arc<ServerMessage> {
+    receiver
+        .try_recv()
+        .unwrap_or_else(|error| panic!("{context}: expected message, got {error:?}"))
+}
+
+fn expect_room_joined(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+) -> Arc<ServerMessage> {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::RoomJoined(_) => message,
+        other => panic!("{context}: expected RoomJoined, got {other:?}"),
+    }
+}
+
+fn expect_player_joined(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_player_id: PlayerId,
+    context: &str,
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::PlayerJoined { player } => {
+            assert_eq!(player.id, expected_player_id, "{context}: joined player id");
+        }
+        other => panic!("{context}: expected PlayerJoined, got {other:?}"),
+    }
+}
+
+fn expect_lobby_state_changed(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, context: &str) {
+    expect_lobby_state_changed_with(receiver, context, |_, _| {});
+}
+
+fn expect_lobby_state_changed_with_ready(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+    expected_ready_players: usize,
+    expected_all_ready: bool,
+) {
+    expect_lobby_state_changed_with(receiver, context, |ready_players, all_ready| {
+        assert_eq!(
+            ready_players.len(),
+            expected_ready_players,
+            "{context}: ready player count"
+        );
+        assert_eq!(*all_ready, expected_all_ready, "{context}: all_ready flag");
+    });
+}
+
+fn expect_lobby_state_changed_with(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+    assert_payload: impl FnOnce(&[PlayerId], &bool),
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::LobbyStateChanged {
+            ready_players,
+            all_ready,
+            ..
+        } => assert_payload(ready_players, all_ready),
+        other => panic!("{context}: expected LobbyStateChanged, got {other:?}"),
+    }
+}
+
+fn expect_spectator_joined(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_spectator_id: PlayerId,
+    context: &str,
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::SpectatorJoined(payload) => {
+            assert_eq!(
+                payload.spectator_id, expected_spectator_id,
+                "{context}: spectator id"
+            );
+        }
+        other => panic!("{context}: expected SpectatorJoined, got {other:?}"),
+    }
+}
+
+fn expect_new_spectator_joined(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_spectator_id: PlayerId,
+    context: &str,
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::NewSpectatorJoined { spectator, .. } => {
+            assert_eq!(
+                spectator.id, expected_spectator_id,
+                "{context}: spectator id"
+            );
+        }
+        other => panic!("{context}: expected NewSpectatorJoined, got {other:?}"),
+    }
+}
+
+fn assert_no_pending_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, context: &str) {
+    match receiver.try_recv() {
+        Ok(message) => panic!("{context}: unexpected pending message: {message:?}"),
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        Err(mpsc::error::TryRecvError::Disconnected) => {
+            panic!("{context}: channel disconnected while checking for silence")
+        }
     }
 }

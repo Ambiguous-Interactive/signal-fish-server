@@ -18749,6 +18749,9 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
     ".llm/*",
     "target/*",
     "progress/*",
+    "src/*_tests.rs",
+    "src/*_test.rs",
+    "src/*/tests.rs",
     "docs/ci-cd-*",
     "docs/test-*",
     "docs/git-hooks-*",
@@ -18834,6 +18837,21 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
         "scripts are internal tooling",
     ),
     ("tests/ci_config_tests.rs", true, "test files are internal"),
+    (
+        "src/server/message_router_tests.rs",
+        true,
+        "Rust test modules under src are internal",
+    ),
+    (
+        "src/server/ready_state_test.rs",
+        true,
+        "singular Rust test modules under src are internal",
+    ),
+    (
+        "src/server/tests.rs",
+        true,
+        "nested Rust tests.rs modules under src are internal",
+    ),
     (
         "docs/ci-cd-testing.md",
         true,

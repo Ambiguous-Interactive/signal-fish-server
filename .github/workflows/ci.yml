@@ -213,6 +213,7 @@ jobs:
                 Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
+                src/*_tests.rs|src/*_test.rs|src/*/tests.rs) ;;
                 docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md) ;;
                 .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
                 .gitignore|.dockerignore) ;;

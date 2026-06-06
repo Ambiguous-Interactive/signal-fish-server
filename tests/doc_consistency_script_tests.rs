@@ -424,7 +424,12 @@ fn test_doc_consistency_script_data_driven_cases() {
         ScriptCase {
             name: "passes_changed_files_gate_for_internal_only_changes",
             overrides: vec![],
-            args: vec!["--changed-files", "scripts/run-local-ci.sh", "tests/integration_tests.rs"],
+            args: vec![
+                "--changed-files",
+                "scripts/run-local-ci.sh",
+                "tests/integration_tests.rs",
+                "src/server/message_router_tests.rs",
+            ],
             expected_exit: 0,
             must_contain: vec!["No non-internal changed files detected"],
             must_not_contain: vec!["[ERROR]"],

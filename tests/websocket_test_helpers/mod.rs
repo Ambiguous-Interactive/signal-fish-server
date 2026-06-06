@@ -72,6 +72,28 @@ where
     }
 }
 
+pub async fn expect_no_server_message_within<S>(ws: &mut S, timeout: Duration, context: &str)
+where
+    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
+{
+    let deadline = deadline_after(timeout);
+    let mut skipped = VecDeque::new();
+
+    loop {
+        match next_server_read_event_before(ws, deadline, context).await {
+            Some(ServerReadEvent::ServerMessage(message)) => {
+                let name = server_message_name(&message);
+                panic!(
+                    "{context}: expected no ServerMessage, got {name}; skipped: {}",
+                    skipped_message_summary(&skipped)
+                );
+            }
+            Some(ServerReadEvent::SkippedFrame(name)) => remember_skipped(&mut skipped, name),
+            None => return,
+        }
+    }
+}
+
 async fn next_server_read_event_before<S>(
     ws: &mut S,
     deadline: Instant,

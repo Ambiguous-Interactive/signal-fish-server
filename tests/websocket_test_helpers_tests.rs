@@ -8,8 +8,8 @@ use futures_util::{Stream, StreamExt};
 use signal_fish_server::protocol::ServerMessage;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use websocket_test_helpers::{
-    deadline_after, maybe_next_matching_server_message_with_skipped_until,
-    next_matching_server_message_within,
+    deadline_after, expect_no_server_message_within,
+    maybe_next_matching_server_message_with_skipped_until, next_matching_server_message_within,
 };
 
 struct RepeatingTextFrames {
@@ -128,6 +128,38 @@ async fn optional_matching_server_message_reports_skipped_non_text_frames() {
         skipped.contains("PingFrame") && skipped.contains("BinaryFrame"),
         "skipped diagnostics should include non-text frames, got {skipped:?}"
     );
+}
+
+#[tokio::test]
+async fn no_server_message_skips_non_text_frames_until_timeout() {
+    let frames = vec![
+        Ok(Message::Ping(Vec::new().into())),
+        Ok(Message::Binary(Vec::new().into())),
+    ];
+    let mut stream = futures_util::stream::iter(frames).chain(futures_util::stream::pending::<
+        Result<Message, WebSocketError>,
+    >());
+
+    expect_no_server_message_within(
+        &mut stream,
+        Duration::from_millis(10),
+        "test no server message",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "expected no ServerMessage, got Pong")]
+async fn no_server_message_panics_on_text_server_message() {
+    let frames = vec![Ok(text_frame(ServerMessage::Pong))];
+    let mut stream = futures_util::stream::iter(frames);
+
+    expect_no_server_message_within(
+        &mut stream,
+        Duration::from_secs(1),
+        "test unexpected message",
+    )
+    .await;
 }
 
 fn text_frame(message: ServerMessage) -> Message {

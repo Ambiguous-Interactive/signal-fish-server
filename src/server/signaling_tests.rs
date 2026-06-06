@@ -259,13 +259,11 @@ async fn recv(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Arc<ServerMe
 
 /// Assert that no message is pending within a short window.
 async fn assert_silent(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
-    assert!(
-        timeout(Duration::from_millis(100), receiver.recv())
-            .await
-            .unwrap_or(None)
-            .is_none(),
-        "expected no message to be delivered"
-    );
+    match timeout(Duration::from_millis(100), receiver.recv()).await {
+        Err(_) => {}
+        Ok(Some(message)) => panic!("expected no message to be delivered, got {message:?}"),
+        Ok(None) => panic!("channel closed while checking for silence"),
+    }
 }
 
 fn error_code(message: &ServerMessage) -> Option<ErrorCode> {
