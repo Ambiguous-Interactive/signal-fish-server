@@ -227,17 +227,24 @@ fn test_protocol_docs_reference_canonical_samples_data_driven() {
         },
     ];
 
+    let mut missing_references = Vec::new();
     for case in cases {
         let content = read_file(&root.join(case.file));
         for required_reference in case.required_references {
-            assert!(
-                content.contains(required_reference),
-                "{} must reference canonical protocol sample {}",
-                case.file,
-                required_reference
-            );
+            if !content.contains(required_reference) {
+                missing_references.push(format!(
+                    "{} must reference canonical protocol sample {}",
+                    case.file, required_reference
+                ));
+            }
         }
     }
+
+    assert!(
+        missing_references.is_empty(),
+        "Protocol docs are missing canonical sample references:\n{}",
+        missing_references.join("\n")
+    );
 }
 
 #[test]

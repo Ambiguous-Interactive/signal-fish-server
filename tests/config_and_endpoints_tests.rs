@@ -853,6 +853,41 @@ fn test_config_example_includes_all_rate_limit_fields() {
         Some(&serde_json::json!("json")),
         "config.example.json must use the canonical lowercase logging format token"
     );
+
+    // Protocol v3 session block (P3): the example must document every field.
+    let session = value
+        .get("session")
+        .and_then(serde_json::Value::as_object)
+        .expect("config.example.json must include a session object");
+    for key in [
+        "default_topology",
+        "game_topology_mappings",
+        "enable_webrtc",
+        "enable_direct",
+        "ice_servers",
+    ] {
+        assert!(
+            session.contains_key(key),
+            "config.example.json session must document `{key}`"
+        );
+    }
+    assert_eq!(
+        config.session.default_topology,
+        signal_fish_server::protocol::Topology::Relay,
+        "session.default_topology must default to the relay floor"
+    );
+    assert!(config.session.enable_webrtc);
+    assert!(config.session.enable_direct);
+    assert_eq!(
+        value.pointer("/session/default_topology"),
+        Some(&serde_json::json!("relay")),
+        "config.example.json must use the canonical lowercase topology token"
+    );
+    // The example config must pass session validation.
+    config
+        .session
+        .validate()
+        .expect("config.example.json session block must validate");
 }
 
 #[test]

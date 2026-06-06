@@ -57,6 +57,7 @@
 - [Markdown Linting and CI/CD Integration](./markdown-best-practices-linting.md)
 - [MSRV Management](./msrv-management.md)
 - [Observability and Logging](./observability-and-logging.md)
+- [Protocol v3 Session-Plan Selection](./protocol-v3-session-plan.md)
 - [Review Changelog Entries](./review-changelog-entries.md)
 - [Rust Idioms and Patterns](./rust-idioms-and-patterns.md)
 - [Rust Performance Optimization](./rust-performance-optimization.md)

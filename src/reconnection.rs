@@ -563,7 +563,6 @@ mod tests {
     use tokio::sync::Barrier;
 
     #[test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     fn test_reconnection_token_creation() {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
@@ -576,7 +575,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     fn test_reconnection_token_validation() {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
@@ -596,7 +594,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     fn test_event_buffer_push() {
         let room_id = Uuid::new_v4();
         let mut buffer = EventBuffer::new(room_id, 3);
@@ -615,7 +612,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     fn test_event_buffer_get_events_after() {
         let room_id = Uuid::new_v4();
         let mut buffer = EventBuffer::new(room_id, 10);
@@ -632,7 +628,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_reconnection_manager_flow() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(300, 100, metrics);
@@ -658,7 +653,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_reconnection_claim_is_single_use_under_concurrency() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = Arc::new(ReconnectionManager::new(300, 100, metrics));
@@ -713,7 +707,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_reconnection_claim_release_allows_retry() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(300, 100, metrics);
@@ -742,7 +735,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_reconnection_cleanup_updates_active_session_gauge() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(1, 100, Arc::clone(&metrics));
@@ -771,7 +763,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore)] // chrono::Utc::now() calls clock_gettime — blocked by Miri isolation
     async fn test_event_buffering() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(300, 100, metrics);

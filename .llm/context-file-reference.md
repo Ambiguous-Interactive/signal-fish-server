@@ -1,7 +1,7 @@
 # Signal Fish — File Reference
 
 > **Complete file tables for the Signal Fish Server codebase.**
-> See [context.md](context.md) for architecture overview and coding standards.
+> See [Central Context and Quick Reference](context.md) for architecture overview and coding standards.
 
 ## Core Server Files
 

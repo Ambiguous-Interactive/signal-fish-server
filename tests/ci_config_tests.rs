@@ -12,12 +12,24 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use common::bash_command;
 use common::{read_file, repo_root};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
+use syn::visit::Visit;
+use syn::{
+    Attribute, Block, Expr, ExprCall, ExprLit, ExprPath, File, Item, Lit, Meta, Pat, Stmt, Token,
+    UseTree,
+};
 
 /// Check whether `cargo-deny` is installed by running `cargo deny --version`.
 /// Returns `true` when the subcommand is available, `false` otherwise.
@@ -1365,6 +1377,139 @@ fn test_ci_workflow_has_required_jobs() {
 }
 
 #[test]
+fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        workflow.contains("Show Rust tool versions")
+            && workflow.contains("rustc -Vv")
+            && workflow.contains("cargo clippy -V")
+            && workflow.contains("cargo fmt --version"),
+        "ci.yml lint job must print Rust tool versions before linting so \
+         platform-only clippy failures include enough environment context."
+    );
+
+    let clippy_start = workflow
+        .find("      - name: Run clippy")
+        .expect("ci.yml must contain a Run clippy step");
+    let after_start = &workflow[clippy_start..];
+    let clippy_end = after_start
+        .find("\n      - name: Check optional feature matrix")
+        .expect("Run clippy step must be followed by optional feature matrix step");
+    let clippy_step = &after_start[..clippy_end];
+
+    for required in [
+        "shell: bash",
+        "set -o pipefail",
+        "set +e",
+        "cargo clippy --locked --all-targets --all-features -- -D warnings",
+        "tee clippy-output.txt",
+        "pipeline_status=(\"${PIPESTATUS[@]}\")",
+        "clippy_status=\"${pipeline_status[0]}\"",
+        "tee_status=\"${pipeline_status[1]}\"",
+        "status=\"$clippy_status\"",
+        "status=\"$tee_status\"",
+        "set -e",
+        "GITHUB_STEP_SUMMARY",
+        "Clippy failure diagnostics",
+        "Runner OS: $RUNNER_OS",
+        "ansi_escape=\"$(printf '\\033')\"",
+        "sed -E",
+        "head -n 120",
+        "|| true",
+        "exit \"$status\"",
+    ] {
+        assert!(
+            clippy_step.contains(required),
+            "ci.yml Run clippy step must contain `{required}` for robust failure diagnostics.\n\
+             Step block:\n{clippy_step}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_ci_clippy_shell_status_handling_preserves_pipeline_failures() {
+    let cases = [
+        (
+            "clippy_failure_preserved",
+            5,
+            "tee clippy-output.txt",
+            5,
+            "summary=yes",
+        ),
+        (
+            "tee_failure_preserved",
+            0,
+            "bash -c 'cat >/dev/null; exit 7'",
+            7,
+            "summary=no",
+        ),
+        (
+            "success_remains_success",
+            0,
+            "tee clippy-output.txt",
+            0,
+            "summary=no",
+        ),
+    ];
+
+    for (name, clippy_exit, tee_command, expected_exit, expected_summary) in cases {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("signal-fish-clippy-status-")
+            .tempdir()
+            .unwrap_or_else(|e| panic!("failed to create temp dir: {e}"));
+        let script = format!(
+            r#"
+set -o pipefail
+set +e
+bash -c 'printf "error: fixture\n"; exit {clippy_exit}' 2>&1 | {tee_command}
+pipeline_status=("${{PIPESTATUS[@]}}")
+clippy_status="${{pipeline_status[0]}}"
+tee_status="${{pipeline_status[1]}}"
+status="$clippy_status"
+if [ "$status" -eq 0 ] && [ "$tee_status" -ne 0 ]; then
+  status="$tee_status"
+fi
+set -e
+if [ "$clippy_status" -ne 0 ]; then
+  echo "summary=yes"
+else
+  echo "summary=no"
+fi
+echo "clippy=$clippy_status tee=$tee_status status=$status"
+exit "$status"
+"#
+        );
+
+        let output = bash_command()
+            .arg("-c")
+            .arg(script)
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap_or_else(|e| panic!("{name}: failed to run status contract script: {e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(expected_exit),
+            "{name}: shell status contract produced wrong exit code.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains(expected_summary),
+            "{name}: shell status contract produced wrong summary state.\n\
+             Expected marker: {expected_summary}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("status={expected_exit}")),
+            "{name}: shell status contract did not report final status.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn test_ci_workflow_matrix_os_values_match_constant() {
     // Validates that the MATRIX_OS_VALUES constant matches the actual
     // strategy.matrix.os lists in ci.yml. If these drift apart, the
@@ -2262,8 +2407,6 @@ fn test_readme_shields_badges_use_for_the_badge_style() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_passes_on_repository() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2271,7 +2414,7 @@ fn test_check_readme_badges_script_passes_on_repository() {
         "scripts/check-readme-badges.sh must exist to validate README badge styles"
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("README.md")
         .current_dir(&root)
@@ -2351,8 +2494,6 @@ fn test_shields_style_matcher_uses_query_parameter_boundaries() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_passes_when_no_shields_urls() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2366,7 +2507,7 @@ fn test_check_readme_badges_script_passes_when_no_shields_urls() {
         "# README\n\nNo shields badges in this file.\n",
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg(temp_markdown.path())
         .current_dir(&root)
@@ -2392,8 +2533,6 @@ fn test_check_readme_badges_script_passes_when_no_shields_urls() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_fails_when_style_param_missing() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2407,7 +2546,7 @@ fn test_check_readme_badges_script_fails_when_style_param_missing() {
         r#"<img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue">"#,
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg(temp_markdown.path())
         .current_dir(&root)
@@ -2433,8 +2572,6 @@ fn test_check_readme_badges_script_fails_when_style_param_missing() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2449,7 +2586,7 @@ fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
         "<img src=\"https://img.shields.io/badge/docs-GitHub%20Pages-blue\t?style=for-the-badge\">",
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg(temp_markdown.path())
         .current_dir(&root)
@@ -2478,8 +2615,6 @@ fn test_check_readme_badges_script_treats_tab_as_url_terminator() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2493,7 +2628,7 @@ fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
         "# README\n\nThis file intentionally has no badges.\n",
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("--require-at-least-one")
         .arg(temp_markdown.path())
@@ -2520,8 +2655,6 @@ fn test_check_readme_badges_script_strict_mode_requires_at_least_one_badge() {
 #[test]
 #[cfg(unix)]
 fn test_check_readme_badges_script_rejects_multiple_positional_args() {
-    use std::process::Command;
-
     let root = repo_root();
     let script = root.join("scripts/check-readme-badges.sh");
     assert!(
@@ -2529,7 +2662,7 @@ fn test_check_readme_badges_script_rejects_multiple_positional_args() {
         "scripts/check-readme-badges.sh must exist to validate README badge styles"
     );
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .arg(&script)
         .arg("README.md")
         .arg("Cargo.toml")
@@ -2655,6 +2788,56 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
          Missing tracked-file discovery in {}",
         script.display()
     );
+}
+
+#[test]
+fn test_check_markdown_script_common_issue_guidance_is_data_driven() {
+    struct GuidanceCase {
+        rule_id: &'static str,
+        symptom: &'static str,
+        fix_hint: &'static str,
+    }
+
+    let root = repo_root();
+    let script = root.join("scripts/check-markdown.sh");
+    let content = read_file(&script);
+
+    let cases = [
+        GuidanceCase {
+            rule_id: "MD013",
+            symptom: "Line length exceeds configured limit",
+            fix_hint: "Reflow paragraphs or split long list items/links across lines",
+        },
+        GuidanceCase {
+            rule_id: "MD040",
+            symptom: "Missing language identifier on code blocks",
+            fix_hint: "Add language identifier after opening backticks",
+        },
+        GuidanceCase {
+            rule_id: "MD046",
+            symptom: "Inconsistent code block style",
+            fix_hint: "Use fenced code blocks",
+        },
+    ];
+
+    for case in cases {
+        let rule_line = format!("  - {}: {}", case.rule_id, case.symptom);
+        assert!(
+            content.contains(&rule_line),
+            "check-markdown.sh missing common issue guidance for {}.\nExpected line: {}\nFile: {}",
+            case.rule_id,
+            rule_line,
+            script.display()
+        );
+
+        assert!(
+            content.contains(case.fix_hint),
+            "check-markdown.sh missing fix hint for {}.\nExpected hint fragment: {}\nFile: {}",
+            case.rule_id,
+            case.fix_hint,
+            script.display()
+        );
+    }
 }
 
 #[test]
@@ -6266,7 +6449,7 @@ fn test_docs_relative_links_resolve_to_existing_files() {
         return;
     }
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args(["scripts/check-internal-links.sh", "--docs-only", "--quiet"])
         .current_dir(&root)
         .output()
@@ -6294,34 +6477,23 @@ fn test_docs_relative_links_resolve_to_existing_files() {
 #[test]
 fn test_direct_bash_command_tests_are_unix_gated() {
     let root = repo_root();
-    let checked_files = ["tests/ci_config_tests.rs"];
-    let function_re = Regex::new(r"^\s*fn\s+[A-Za-z0-9_]+\s*\(").unwrap();
+    let checked_files = top_level_rust_test_files(&root);
     let mut violations = Vec::new();
 
-    for file in checked_files {
-        let content = read_file(&root.join(file));
-        let mut current_test_attrs: Vec<String> = Vec::new();
-        let mut current_fn_attrs: Vec<String> = Vec::new();
+    for path in checked_files {
+        let content = read_file(&path);
+        let file = relative_path_for_display(&root, &path);
+        let policy_info = analyze_rust_policy_source(&content);
 
-        for (line_idx, line) in content.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("#[") {
-                current_fn_attrs.push(trimmed.to_string());
-                continue;
-            }
-            if function_re.is_match(line) {
-                current_test_attrs = current_fn_attrs.clone();
-                current_fn_attrs.clear();
-            } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
-                current_fn_attrs.clear();
-            }
+        if policy_info.crate_excludes_windows {
+            continue;
+        }
 
-            if line.contains("Command::new(\"bash\")")
-                && !current_test_attrs.iter().any(|attr| attr == "#[cfg(unix)]")
-            {
+        for call_site in policy_info.direct_bash_command_calls {
+            if !call_site.is_unix_gated {
                 violations.push(format!(
                     "{file}:{}: direct bash command test must be #[cfg(unix)]-gated or use tests/common::bash_command()",
-                    line_idx + 1
+                    call_site.line
                 ));
             }
         }
@@ -6332,6 +6504,5101 @@ fn test_direct_bash_command_tests_are_unix_gated() {
         "Direct Bash invocations in Rust tests are not portable to Windows:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn test_direct_bash_command_detector_uses_rust_syntax() {
+    let cases = [
+        (
+            "rejects ungated direct bash command",
+            r#"
+use std::process::Command;
+
+#[test]
+fn direct_bash() {
+    Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "accepts unix-gated direct bash command",
+            r#"
+use std::process::Command;
+
+#[test]
+#[cfg(unix)]
+fn direct_bash() {
+    Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "ignores strings and comments",
+            r#"
+#[test]
+fn text_only() {
+    let text = "Command::new(\"bash\")";
+    // Command::new("bash")
+    /*
+       Command::new("bash")
+    */
+    assert!(!text.is_empty());
+}
+"#,
+            false,
+        ),
+        (
+            "detects fully qualified process command",
+            r#"
+#[test]
+fn direct_bash() {
+    std::process::Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "ignores relative std path shadowed by local module",
+            r#"
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+#[test]
+fn local_std_module() {
+    std::process::Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "detects nested relative std path despite ancestor module",
+            r#"
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+mod nested {
+    #[test]
+    fn local_std_module() {
+        std::process::Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects absolute std path despite local module",
+            r#"
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+#[test]
+fn absolute_std_path() {
+    ::std::process::Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects extern crate std alias inside nested module",
+            r#"
+extern crate std as real_std;
+
+mod nested {
+    #[test]
+    fn std_alias() {
+        real_std::process::Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects crate-qualified extern crate std alias",
+            r#"
+extern crate std as real_std;
+
+mod nested {
+    #[test]
+    fn std_alias() {
+        crate::real_std::process::Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects super-qualified extern crate std alias",
+            r#"
+extern crate std as real_std;
+
+mod nested {
+    #[test]
+    fn std_alias() {
+        super::real_std::process::Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects multi-super-qualified extern crate std alias",
+            r#"
+extern crate std as real_std;
+
+mod outer {
+    mod nested {
+        #[test]
+        fn std_alias() {
+            super::super::real_std::process::Command::new("bash");
+        }
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "ignores non-root extern crate std alias inside nested module",
+            r#"
+mod outer {
+    extern crate std as real_std;
+
+    mod nested {
+        pub struct real_std;
+
+        impl real_std {
+            pub fn process() {}
+        }
+
+        #[test]
+        fn std_alias() {
+            real_std::process::Command::new("bash");
+        }
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "ignores process command import from shadowed local std module",
+            r#"
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+use std::process::Command;
+
+#[test]
+fn local_std_import() {
+    Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "ignores process command import before later shadowing std module",
+            r#"
+use std::process::Command;
+
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+#[test]
+fn local_std_import() {
+    Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "ignores process command import shadowed by outer std module",
+            r#"
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+#[test]
+fn local_std_import() {
+    use std::process::Command;
+    Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "detects absolute process command import despite local std module",
+            r#"
+mod std {
+    pub mod process {
+        pub struct Command;
+
+        impl Command {
+            pub fn new(_program: &str) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+use ::std::process::Command;
+
+#[test]
+fn absolute_std_import() {
+    Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects std crate alias import",
+            r#"
+use std as real_std;
+
+#[test]
+fn std_alias() {
+    real_std::process::Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects process command import through std alias",
+            r#"
+use std as real_std;
+use real_std::process::Command;
+
+#[test]
+fn std_alias_import() {
+    Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects extern crate std alias",
+            r#"
+extern crate std as real_std;
+
+#[test]
+fn std_alias() {
+    real_std::process::Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects process command import through extern crate std alias",
+            r#"
+extern crate std as real_std;
+use real_std::process::Command;
+
+#[test]
+fn std_alias_import() {
+    Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects absolute process command import through extern crate std alias",
+            r#"
+extern crate std as real_std;
+use ::real_std::process::Command;
+
+#[test]
+fn std_alias_import() {
+    Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects process command import through crate-qualified extern std alias",
+            r#"
+extern crate std as real_std;
+
+mod nested {
+    use crate::real_std::process::Command;
+
+    #[test]
+    fn std_alias_import() {
+        Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects process command import through crate-qualified std use alias",
+            r#"
+use std as real_std;
+
+mod nested {
+    use crate::real_std::process::Command;
+
+    #[test]
+    fn std_alias_import() {
+        Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects crate-qualified std use alias despite local block type",
+            r#"
+use std as real_std;
+
+mod nested {
+    #[test]
+    fn std_alias() {
+        struct real_std;
+        crate::real_std::process::Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects process command import through super-qualified extern std alias",
+            r#"
+extern crate std as real_std;
+
+mod nested {
+    use super::real_std::process::Command;
+
+    #[test]
+    fn std_alias_import() {
+        Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects super-qualified std alias despite child module shadow",
+            r#"
+mod outer {
+    use std as real_std;
+
+    mod nested {
+        mod real_std {}
+
+        #[test]
+        fn std_alias() {
+            super::real_std::process::Command::new("bash");
+        }
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "ignores super-qualified path shadowed in target module",
+            r#"
+extern crate std as real_std;
+
+mod outer {
+    struct real_std;
+
+    mod nested {
+        #[test]
+        fn std_alias() {
+            super::real_std::process::Command::new("bash");
+        }
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "detects super-qualified extern std alias from inline module in function",
+            r#"
+extern crate std as real_std;
+
+fn outer() {
+    mod nested {
+        #[test]
+        fn direct_bash() {
+            super::real_std::process::Command::new("bash");
+        }
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects process module import through crate-qualified extern std alias",
+            r#"
+extern crate std as real_std;
+
+mod nested {
+    use crate::real_std::process as process_mod;
+
+    #[test]
+    fn std_alias_import() {
+        process_mod::Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "detects qself std command constructor",
+            r#"
+#[test]
+fn direct_bash() {
+    <std::process::Command>::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects qself std command constructor in macro fallback",
+            r#"
+macro_rules! run_bash {
+    ($extra:expr) => {
+        $extra;
+        <std::process::Command>::new("bash");
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-unix fallback direct bash command in if-let else",
+            r#"
+macro_rules! run_bash {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        if let Some(_) = $extra {
+        } else {
+            std::process::Command::new("bash");
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts cfg-unix fallback direct bash command in general if else",
+            r#"
+macro_rules! run_bash {
+    ($cond:expr) => {
+        #[cfg(unix)]
+        if $cond {
+        } else {
+            std::process::Command::new("bash");
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects process module import through std self alias",
+            r#"
+use std::{self as real_std};
+use real_std::process as process_mod;
+
+#[test]
+fn std_alias_import() {
+    process_mod::Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects parenthesized bash literal",
+            r#"
+use std::process::Command;
+
+#[test]
+fn direct_bash() {
+    Command::new(("bash"));
+}
+"#,
+            true,
+        ),
+        (
+            "detects renamed process command import",
+            r#"
+use std::process::Command as ProcessCommand;
+
+#[test]
+fn direct_bash() {
+    ProcessCommand::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "detects renamed process module import",
+            r#"
+use std::process as process_mod;
+
+#[test]
+fn direct_bash() {
+    process_mod::Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "ignores non-process command type",
+            r#"
+struct Command;
+
+impl Command {
+    fn new(_program: &str) -> Self {
+        Self
+    }
+}
+
+#[test]
+fn local_command_type() {
+    Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "ignores block local command type that shadows process import",
+            r#"
+use std::process::Command;
+
+#[test]
+fn local_command_type() {
+    struct Command;
+
+    impl Command {
+        fn new(_program: &str) -> Self {
+            Self
+        }
+    }
+
+    Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "does not leak process command import into nested modules",
+            r#"
+use std::process::Command;
+
+mod nested {
+    struct Command;
+
+    impl Command {
+        fn new(_program: &str) -> Self {
+            Self
+        }
+    }
+
+    #[test]
+    fn local_command_type() {
+        Command::new("bash");
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "accepts cfg-gated local direct bash command",
+            r#"
+use std::process::Command;
+
+#[test]
+fn direct_bash() {
+    #[cfg(unix)]
+    let _child = Command::new("bash");
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command inside macro definition",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    () => {
+        Command::new("bash");
+    };
+}
+
+#[test]
+fn macro_defined_direct_bash() {
+    run_bash!();
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated direct bash command inside macro definition",
+            r#"
+use std::process::Command;
+
+#[cfg(unix)]
+macro_rules! run_bash {
+    () => {
+        Command::new("bash");
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "ignores inert macro input",
+            r#"
+use std::process::Command;
+
+#[test]
+fn text_only() {
+    let text = stringify!(Command::new("bash"));
+    assert!(!text.is_empty());
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command inside runtime macro input",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    () => {
+        assert!(Command::new("bash").status().is_ok());
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated direct bash command inside runtime macro input",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    () => {
+        #[cfg(unix)]
+        assert!(Command::new("bash").status().is_ok());
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "ignores inert macro input in paren transcriber",
+            r#"
+macro_rules! generated_only {
+    () => (quote! {
+        std::process::Command::new("bash");
+    });
+}
+"#,
+            false,
+        ),
+        (
+            "ignores inert quote_spanned macro input",
+            r#"
+use proc_macro2::Span;
+
+macro_rules! generated_only {
+    () => {
+        quote_spanned! { Span::call_site()=>
+            std::process::Command::new("bash");
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command inside local quote macro input",
+            r#"
+use std::process::Command;
+
+macro_rules! quote {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+#[test]
+fn direct_bash() {
+    quote!(Command::new("bash"));
+}
+"#,
+            true,
+        ),
+        (
+            "detects direct bash command inside parent quote macro from nested module",
+            r#"
+macro_rules! quote {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+mod nested {
+    use std::process::Command;
+
+    #[test]
+    fn direct_bash() {
+        quote!(Command::new("bash"));
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "ignores renamed quote macro input",
+            r#"
+use quote::quote as q;
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        q! {
+            std::process::Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "ignores quote macro input through module alias chain",
+            r#"
+use quote as quote_crate;
+use quote_crate::quote as q;
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        q! {
+            std::process::Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "ignores absolute quote macro input through extern crate alias",
+            r#"
+extern crate quote as real_quote;
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        ::real_quote::quote! {
+            std::process::Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "ignores absolute quote macro input",
+            r#"
+macro_rules! generated_only {
+    ($extra:expr) => {
+        ::quote::quote! {
+            std::process::Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "ignores absolute quote macro input despite local quote module",
+            r#"
+mod quote {}
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        ::quote::quote! {
+            std::process::Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command when local module shadows quote path",
+            r#"
+mod quote {}
+use std::process::Command;
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        quote::quote! {
+            Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "detects direct bash command when local module shadows quote import",
+            r#"
+mod quote {}
+use quote::quote as q;
+use std::process::Command;
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        q! {
+            Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "detects direct bash command when later local module shadows quote import",
+            r#"
+use quote::quote as q;
+mod quote {}
+use std::process::Command;
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        q! {
+            Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "detects direct bash command when outer module shadows block quote import",
+            r#"
+mod quote {}
+use std::process::Command;
+
+#[test]
+fn local_quote_import() {
+    use quote::quote as q;
+    q! {
+        Command::new("bash");
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "accepts unix-only local quote macro shadowing windows quote import",
+            r#"
+use quote::quote;
+
+#[cfg(unix)]
+macro_rules! quote {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+macro_rules! generated_only {
+    ($extra:expr) => {
+        quote! {
+            std::process::Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects windows runtime macro alias despite unix-only quote alias",
+            r#"
+#[cfg(unix)]
+use quote::quote as q;
+#[cfg(windows)]
+use runtime_macros::q;
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        q! {
+            Command::new("bash");
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "ignores macro matcher tokens",
+            r#"
+use std::process::Command;
+
+macro_rules! only_matches {
+    (Command::new("bash")) => {
+        ()
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command inside macro body with local import",
+            r#"
+macro_rules! run_bash {
+    () => {
+        use std::process::Command;
+        Command::new("bash");
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated direct bash command inside macro body",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    () => {
+        #[cfg(unix)]
+        Command::new("bash");
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command inside parenthesized macro block",
+            r#"
+macro_rules! run_bash {
+    () => ({
+        use std::process::Command;
+        Command::new("bash");
+    });
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated direct bash command inside parenthesized macro block",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    () => ({
+        #[cfg(unix)]
+        Command::new("bash");
+    });
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command inside macro body with metavariable",
+            r#"
+macro_rules! run_bash {
+    ($extra:expr) => {
+        use std::process::Command;
+        $extra;
+        Command::new("bash");
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated direct bash command inside macro body with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        Command::new("bash");
+        $extra
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts cfg-gated direct bash command in macro let statement with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        let _child = Command::new("bash");
+        $extra
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts cfg-gated direct bash command in macro block with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        {
+            Command::new("bash");
+        }
+        $extra
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts cfg-gated direct bash command in macro call argument with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        drop((Command::new("bash"), $extra));
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "detects direct bash command in macro call argument with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        drop((Command::new("bash"), $extra));
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "detects direct bash command from fallback import through outer std alias",
+            r#"
+use std as real_std;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        use real_std::process::Command;
+        $extra;
+        Command::new("bash");
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "detects nested parenthesized bash literal in macro call argument with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        drop((Command::new((("bash"))), $extra));
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "detects direct bash command inside runtime macro input with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        assert!(Command::new("bash").arg($extra).status().is_ok());
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated direct bash command inside runtime macro input with metavariable",
+            r#"
+use std::process::Command;
+
+macro_rules! run_bash {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        assert!(Command::new("bash").arg($extra).status().is_ok());
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "does not let value binding shadow process command import",
+            r#"
+use std::process::Command;
+
+#[test]
+fn direct_bash() {
+    let Command = || {};
+    Command::new("bash");
+    Command();
+}
+"#,
+            true,
+        ),
+        (
+            "does not let unix-only local type shadow windows direct bash command",
+            r#"
+use std::process::Command;
+
+#[test]
+fn direct_bash() {
+    #[cfg(unix)]
+    struct Command;
+
+    Command::new("bash");
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated trait item direct bash command",
+            r#"
+use std::process::Command;
+
+#[cfg(unix)]
+trait Fixture {
+    fn direct_bash() {
+        Command::new("bash");
+    }
+}
+"#,
+            false,
+        ),
+    ];
+
+    for (name, content, should_reject) in cases {
+        let policy_info = analyze_rust_policy_source(content);
+        let rejects = policy_info
+            .direct_bash_command_calls
+            .iter()
+            .any(|call_site| !call_site.is_unix_gated);
+        assert_eq!(rejects, should_reject, "{name}: unexpected detector result");
+    }
+}
+
+#[test]
+fn test_bash_command_imports_match_platform_gating() {
+    let root = repo_root();
+    let mut violations = Vec::new();
+
+    for path in top_level_rust_test_files(&root) {
+        let content = read_file(&path);
+        let file = relative_path_for_display(&root, &path);
+        violations.extend(bash_command_import_platform_violations(&file, &content));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Rust test imports must use the same platform cfg as their shell-helper call sites.\n\
+         This prevents Windows clippy from failing with unused platform-specific imports.\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_bash_command_helper_scrubs_nested_cargo_instrumentation_env() {
+    let root = repo_root();
+    let helper_path = root.join("tests/common/mod.rs");
+    let content = read_file(&helper_path);
+
+    for required in [
+        "scrub_nested_cargo_env",
+        "command.env_remove(var)",
+        "\"RUSTFLAGS\"",
+        "\"CARGO_ENCODED_RUSTFLAGS\"",
+        "\"RUSTDOCFLAGS\"",
+        "\"CARGO_TARGET_DIR\"",
+        "\"ASAN_OPTIONS\"",
+        "\"LSAN_OPTIONS\"",
+        "\"UBSAN_OPTIONS\"",
+        "\"TSAN_OPTIONS\"",
+        "\"MIRIFLAGS\"",
+    ] {
+        assert!(
+            content.contains(required),
+            "tests/common::bash_command must scrub inherited Cargo \
+             instrumentation env vars by default.\n\
+             Without this, script tests that spawn nested Cargo can fail under \
+             ASan/Miri parents for reasons unrelated to the script under test.\n\
+             Missing required marker: `{required}`\n\
+             File: {}",
+            helper_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_bash_command_import_platform_detector_data_driven_cases() {
+    let cases = [
+        (
+            "rejects import compiled on windows with only unix-gated call",
+            r#"
+mod common;
+use common::{bash_command, read_file};
+
+#[test]
+#[cfg(unix)]
+fn script_test() {
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "accepts matching unix-gated import",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+use common::read_file;
+
+#[test]
+#[cfg(unix)]
+fn script_test() {
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper used by windows-compiled test",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "rejects unix-gated import used by windows-compiled test",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "rejects common glob imports",
+            r#"
+mod common;
+use common::*;
+
+#[test]
+fn portable_script_test() {
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "ignores string and comment mentions",
+            r##"
+mod common;
+use common::{bash_command, repo_root};
+
+#[test]
+fn non_script_test() {
+    let text = "tests/common::bash_command()";
+    let raw = r#"bash_command()"#;
+    // bash_command()
+    /*
+       bash_command()
+    */
+    assert!(!text.is_empty() && !raw.is_empty());
+}
+"##,
+            true,
+        ),
+        (
+            "accepts ascii char literals before windows-compiled call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    let letter = 'a';
+    let digit = '1';
+    let underscore = '_';
+    bash_command();
+    assert_eq!((letter, digit, underscore), ('a', '1', '_'));
+}
+"#,
+            false,
+        ),
+        (
+            "accepts escaped and byte char literals before windows-compiled call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    let newline = '\n';
+    let quote = '\'';
+    let byte = b'x';
+    bash_command();
+    assert_eq!((newline, quote, byte), ('\n', '\'', b'x'));
+}
+"#,
+            false,
+        ),
+        (
+            "accepts comment delimiter char literals before windows-compiled call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    let slash = '/';
+    let star = '*';
+    bash_command();
+    assert_eq!((slash, star), ('/', '*'));
+}
+"#,
+            false,
+        ),
+        (
+            "rejects windows import when cfg-gated local call is unix-only",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn script_test() {
+    #[cfg(unix)]
+    let _command = bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated import and impl method call",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+
+struct Fixture;
+
+impl Fixture {
+    #[cfg(unix)]
+    fn script_test() {
+        bash_command();
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "rejects cfg-gated import used by windows-compiled impl method",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+
+struct Fixture;
+
+impl Fixture {
+    fn script_test() {
+        bash_command();
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "accepts lifetimes before windows-compiled call",
+            r#"
+mod common;
+use common::bash_command;
+
+fn lifetime_helper<'a>(input: &'a str) -> &'a str {
+    input
+}
+
+#[test]
+fn portable_script_test() {
+    assert_eq!(lifetime_helper("ok"), "ok");
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "accepts renamed helper used by windows-compiled test",
+            r#"
+mod common;
+use common::bash_command as run_bash;
+
+#[test]
+fn portable_script_test() {
+    run_bash();
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when block-local function shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    fn bash_command() {}
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when block-local binding shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    let bash_command = || {};
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when nested module call cannot use outer helper",
+            r#"
+mod common;
+use common::bash_command;
+
+mod nested {
+    fn bash_command() {}
+
+    #[test]
+    fn portable_script_test() {
+        bash_command();
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when function parameter shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+fn helper(bash_command: impl FnOnce()) {
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when closure parameter shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    let helper = |bash_command: fn()| bash_command();
+    let _ = helper;
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when for-loop pattern shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    for bash_command in [|| {}] {
+        bash_command();
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when match-arm pattern shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    match Some(|| {}) {
+        Some(bash_command) => bash_command(),
+        None => {}
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when if-let pattern shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    if let Some(bash_command) = Some(|| {}) {
+        bash_command();
+    }
+}
+"#,
+            true,
+        ),
+        (
+            "accepts import when unix-only local function cannot shadow windows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    #[cfg(unix)]
+    fn bash_command() {}
+
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "accepts import when module with same name does not shadow helper call",
+            r#"
+mod common;
+use common::bash_command;
+mod bash_command {}
+
+#[test]
+fn portable_script_test() {
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "accepts import when type alias with same name does not shadow helper call",
+            r#"
+mod common;
+use common::bash_command;
+type bash_command = ();
+
+#[test]
+fn portable_script_test() {
+    bash_command();
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when unit struct constructor shadows helper call",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    struct bash_command;
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "accepts helper call inside macro body with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        $extra;
+        bash_command();
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts nested helper import through multi-super path",
+            r#"
+mod common;
+
+mod outer {
+    mod nested {
+        use super::super::common::bash_command;
+
+        #[test]
+        fn script_test() {
+            bash_command();
+        }
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper call inside macro call argument with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        drop((bash_command(), $extra));
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper call inside runtime macro input",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    () => {
+        assert!(bash_command().status().is_ok());
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper call inside runtime macro input with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        assert!(bash_command().status().is_ok(), "{:?}", $extra);
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "rejects windows import when runtime macro helper call with metavariable is unix-only",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        assert!(bash_command().status().is_ok(), "{:?}", $extra);
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated import for runtime macro helper call with metavariable",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        assert!(bash_command().status().is_ok(), "{:?}", $extra);
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "rejects windows import when fallback if-let else helper call is unix-only",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        if let Some(_) = $extra {
+        } else {
+            bash_command();
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects windows import when fallback general if else helper call is unix-only",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($cond:expr) => {
+        #[cfg(unix)]
+        if $cond {
+        } else {
+            bash_command();
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when helper only appears in inert macro input",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    () => {
+        stringify!(bash_command());
+        quote! {
+            bash_command();
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts helper call inside local quote macro input",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! quote {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+#[test]
+fn script_test() {
+    quote!(bash_command());
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper call inside parent quote macro from nested module",
+            r#"
+mod common;
+
+macro_rules! quote {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+mod nested {
+    use crate::common::bash_command;
+
+    #[test]
+    fn script_test() {
+        quote!(bash_command());
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when helper only appears in renamed quote macro input",
+            r#"
+mod common;
+use common::bash_command;
+use quote::quote as q;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        q! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when helper only appears in quote module alias chain",
+            r#"
+mod common;
+use common::bash_command;
+use quote as quote_crate;
+use quote_crate::quote as q;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        q! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts helper when later local module shadows renamed quote import",
+            r#"
+mod common;
+use common::bash_command;
+use quote::quote as q;
+mod quote {}
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        q! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper when outer module shadows block quote import",
+            r#"
+mod common;
+mod quote {}
+use common::bash_command;
+
+#[test]
+fn script_test() {
+    use quote::quote as q;
+    q! {
+        bash_command();
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when helper only appears in absolute quote macro input",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        ::quote::quote! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when helper only appears in absolute quote macro input despite local quote module",
+            r#"
+mod common;
+mod quote {}
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        ::quote::quote! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro let shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        let bash_command = $extra;
+        bash_command();
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro let mut shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        let mut bash_command = $extra;
+        bash_command();
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro destructuring let shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        let (bash_command, _) = ($extra, ());
+        bash_command();
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro if-let shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        if let Some(bash_command) = $extra {
+            bash_command();
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts fallback helper call before later if-let shadow with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        bash_command();
+        if let Some(bash_command) = $extra {
+            bash_command();
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts fallback helper call in else body after if-let shadow",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        if let Some(bash_command) = $extra {
+            bash_command();
+        } else {
+            bash_command();
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts fallback helper call in if-let scrutinee block before shadow",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        if let Some(bash_command) = { bash_command(); $extra } {
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts fallback helper call in async if-let scrutinee block before shadow",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        if let Some(bash_command) = async { bash_command(); $extra } {
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when fallback macro while-let shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        while let Some(bash_command) = $extra {
+            bash_command();
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro for pattern shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        for bash_command in $extra {
+            bash_command();
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro match arm shadows helper with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        match $extra {
+            Some(bash_command) => bash_command(),
+            None => {}
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro match arm shadow wraps if expression",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        match $extra {
+            Some(bash_command) => if true { bash_command(); },
+            None => {}
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro match arm body contains turbofish comma",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        match $extra {
+            Some(bash_command) => foo::<A, B>(bash_command()),
+            None => {}
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro match arm body contains qself generic comma",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        match $extra {
+            Some(bash_command) => <Foo<A, B>>::bar(bash_command()),
+            None => {}
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects import when fallback macro match arm qself generic comma follows return",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        match $extra {
+            Some(bash_command) => return <Foo<A, B>>::bar(bash_command()),
+            None => {}
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts fallback helper call inside qself call arguments",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        $extra;
+        <Foo as Trait>::bar(bash_command());
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when helper only appears in fallback quote alias chain",
+            r#"
+mod common;
+use common::bash_command;
+use quote as quote_crate;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        use quote_crate::quote as q;
+        q! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts helper in quote input when unix-only local quote macro shadows import",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+use quote::quote;
+
+#[cfg(unix)]
+macro_rules! quote {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        quote! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts fallback helper call before later let shadow with metavariable",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        bash_command();
+        let bash_command = $extra;
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper call in fallback let initializer before shadow",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        let bash_command = (bash_command(), $extra);
+        let _ = bash_command;
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper call after unix-only fallback let shadow",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        let bash_command = $extra;
+        bash_command();
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "accepts helper in windows runtime macro alias despite unix-only quote alias",
+            r#"
+mod common;
+#[cfg(unix)]
+use quote::quote as q;
+#[cfg(windows)]
+use runtime_macros::q;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        q! {
+            bash_command();
+            $extra
+        }
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "rejects windows import when macro helper call with metavariable is unix-only",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        drop((bash_command(), $extra));
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "accepts cfg-gated import for macro helper call with metavariable",
+            r#"
+mod common;
+#[cfg(unix)]
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        #[cfg(unix)]
+        drop((bash_command(), $extra));
+    };
+}
+"#,
+            false,
+        ),
+        (
+            "rejects import when macro helper call with metavariable is value-shadowed",
+            r#"
+mod common;
+use common::bash_command;
+
+macro_rules! script_test {
+    ($extra:expr) => {
+        let bash_command = || {};
+        $extra;
+        bash_command();
+    };
+}
+"#,
+            true,
+        ),
+        (
+            "rejects root helper import masked by block-local common helper",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    mod common {
+        pub fn bash_command() {}
+    }
+
+    use common::bash_command;
+    bash_command();
+}
+"#,
+            true,
+        ),
+        (
+            "rejects root helper import masked by block-local common glob helper",
+            r#"
+mod common;
+use common::bash_command;
+
+#[test]
+fn portable_script_test() {
+    mod common {
+        pub fn bash_command() {}
+    }
+
+    use common::*;
+    bash_command();
+}
+"#,
+            true,
+        ),
+    ];
+
+    for (name, content, should_reject) in cases {
+        let violations = bash_command_import_platform_violations("fixture.rs", content);
+        assert_eq!(
+            !violations.is_empty(),
+            should_reject,
+            "{name}: unexpected detector result: {violations:?}"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct CommonBashCommandImport {
+    line: usize,
+    is_unix_gated: bool,
+    local_name: String,
+    is_glob: bool,
+}
+
+#[derive(Debug)]
+struct RustCallSite {
+    line: usize,
+    is_unix_gated: bool,
+    local_name: String,
+}
+
+#[derive(Debug)]
+struct DirectBashCommandCallSite {
+    line: usize,
+    is_unix_gated: bool,
+}
+
+#[derive(Default)]
+struct RustPolicyInfo {
+    crate_excludes_windows: bool,
+    bash_command_imports: Vec<CommonBashCommandImport>,
+    single_segment_calls: Vec<RustCallSite>,
+    direct_bash_command_calls: Vec<DirectBashCommandCallSite>,
+}
+
+fn bash_command_import_platform_violations(file: &str, content: &str) -> Vec<String> {
+    let policy_info = analyze_rust_policy_source(content);
+
+    if policy_info.crate_excludes_windows {
+        return Vec::new();
+    }
+
+    let mut violations = Vec::new();
+
+    for import in &policy_info.bash_command_imports {
+        if import.is_glob {
+            violations.push(format!(
+                "{file}:{}: avoid `use common::*`; import tests/common helpers explicitly so platform cfg checks stay precise.",
+                import.line
+            ));
+            continue;
+        }
+
+        let has_windows_compiled_import =
+            policy_info.bash_command_imports.iter().any(|candidate| {
+                !candidate.is_glob
+                    && candidate.local_name == import.local_name
+                    && !candidate.is_unix_gated
+            });
+        let has_windows_compiled_call = policy_info
+            .single_segment_calls
+            .iter()
+            .any(|call| call.local_name == import.local_name && !call.is_unix_gated);
+
+        if import.is_unix_gated {
+            if has_windows_compiled_call && !has_windows_compiled_import {
+                violations.push(format!(
+                    "{file}:{}: `bash_command` is imported only on Unix as `{}`, but Windows has {}. \
+                     Make the import available on Windows or gate the helper call with #[cfg(unix)].",
+                    import.line,
+                    import.local_name,
+                    bash_command_call_summary(&import.local_name, &policy_info.single_segment_calls)
+                ));
+            }
+            continue;
+        }
+
+        if !has_windows_compiled_call {
+            violations.push(format!(
+                "{file}:{}: `bash_command` is imported on Windows as `{}`, but Windows has {}. \
+                 Gate the import with #[cfg(unix)] when all helper calls are Unix-only.",
+                import.line,
+                import.local_name,
+                bash_command_call_summary(&import.local_name, &policy_info.single_segment_calls)
+            ));
+        }
+    }
+
+    violations
+}
+
+fn bash_command_call_summary(local_name: &str, call_sites: &[RustCallSite]) -> String {
+    let call_lines = call_sites
+        .iter()
+        .filter(|call| call.local_name == local_name)
+        .map(|call| call.line.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if call_lines.is_empty() {
+        format!("no `{local_name}` helper call sites found")
+    } else {
+        format!("helper call line(s): {call_lines}")
+    }
+}
+
+fn top_level_rust_test_files(root: &Path) -> Vec<PathBuf> {
+    let tests_dir = root.join("tests");
+    let mut files = fs::read_dir(&tests_dir)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", tests_dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("Failed to read tests/ entry: {e}"))
+                .path()
+        })
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn relative_path_for_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn analyze_rust_policy_source(content: &str) -> RustPolicyInfo {
+    let file = syn::parse_file(content)
+        .unwrap_or_else(|error| panic!("failed to parse Rust test source: {error}"));
+    let mut policy_info = RustPolicyInfo {
+        crate_excludes_windows: attrs_include_unix_cfg(&file.attrs),
+        ..RustPolicyInfo::default()
+    };
+
+    if !policy_info.crate_excludes_windows {
+        let mut visitor = RustPolicyVisitor::new(&mut policy_info);
+        visitor.visit_file(&file);
+    }
+
+    policy_info
+}
+
+struct RustPolicyVisitor<'info> {
+    policy_info: &'info mut RustPolicyInfo,
+    scopes: Vec<RustNameScope>,
+    unix_only_context_depth: usize,
+}
+
+#[derive(Default)]
+struct RustNameScope {
+    command_aliases: BTreeSet<String>,
+    common_bash_command_aliases: BTreeSet<String>,
+    inert_macro_aliases: RustInertMacroAliases,
+    is_module_scope: bool,
+    macro_names: BTreeSet<String>,
+    process_module_aliases: BTreeSet<String>,
+    qualified_std_module_aliases: BTreeSet<String>,
+    qualified_type_or_module_names: BTreeSet<String>,
+    std_extern_crate_aliases: BTreeSet<String>,
+    std_module_aliases: BTreeSet<String>,
+    type_or_module_names: BTreeSet<String>,
+    value_names: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct RustInertMacroAliases {
+    aliases: BTreeSet<String>,
+    extern_module_aliases: BTreeSet<String>,
+    module_aliases: BTreeSet<String>,
+    qualified_module_aliases: BTreeSet<String>,
+}
+
+struct RustPathSegments {
+    is_absolute: bool,
+    segments: Vec<String>,
+}
+
+impl RustPathSegments {
+    fn from_syn_path(path: &syn::Path) -> Self {
+        Self {
+            is_absolute: path.leading_colon.is_some(),
+            segments: path_segments(path),
+        }
+    }
+}
+
+impl<'info> RustPolicyVisitor<'info> {
+    fn new(policy_info: &'info mut RustPolicyInfo) -> Self {
+        Self {
+            policy_info,
+            scopes: Vec::new(),
+            unix_only_context_depth: 0,
+        }
+    }
+
+    fn is_unix_only(&self) -> bool {
+        self.unix_only_context_depth > 0
+    }
+
+    fn with_attrs(&mut self, attrs: &[Attribute], visit: impl FnOnce(&mut Self)) {
+        let attrs_exclude_windows = attrs_include_unix_cfg(attrs);
+        if attrs_exclude_windows {
+            self.unix_only_context_depth += 1;
+        }
+
+        visit(self);
+
+        if attrs_exclude_windows {
+            self.unix_only_context_depth -= 1;
+        }
+    }
+
+    fn with_unix_only_context(&mut self, is_unix_only: bool, visit: impl FnOnce(&mut Self)) {
+        if is_unix_only {
+            self.unix_only_context_depth += 1;
+        }
+
+        visit(self);
+
+        if is_unix_only {
+            self.unix_only_context_depth -= 1;
+        }
+    }
+
+    fn with_child_scope(&mut self, scope: RustNameScope, visit: impl FnOnce(&mut Self)) {
+        self.scopes.push(scope);
+        visit(self);
+        self.scopes.pop();
+    }
+
+    fn with_optional_child_scope(
+        &mut self,
+        scope: Option<RustNameScope>,
+        visit: impl FnOnce(&mut Self),
+    ) {
+        if let Some(scope) = scope {
+            self.with_child_scope(scope, visit);
+        } else {
+            visit(self);
+        }
+    }
+
+    fn with_independent_scope(&mut self, scope: RustNameScope, visit: impl FnOnce(&mut Self)) {
+        let previous_scopes = std::mem::replace(&mut self.scopes, vec![scope]);
+        visit(self);
+        self.scopes = previous_scopes;
+    }
+
+    fn with_independent_scope_with_inherited(
+        &mut self,
+        mut inherited_scopes: Vec<RustNameScope>,
+        scope: RustNameScope,
+        visit: impl FnOnce(&mut Self),
+    ) {
+        inherited_scopes.push(scope);
+        let previous_scopes = std::mem::replace(&mut self.scopes, inherited_scopes);
+        visit(self);
+        self.scopes = previous_scopes;
+    }
+
+    fn record_call(&mut self, call: &ExprCall) {
+        let Some(expr_path) = called_path(call) else {
+            return;
+        };
+        let path = &expr_path.path;
+
+        let path_segments = RustPathSegments::from_syn_path(path);
+        if let [local_name] = path_segments.segments.as_slice() {
+            if path_alias_resolves_to_common_bash_command(local_name, &self.scopes) {
+                self.policy_info.single_segment_calls.push(RustCallSite {
+                    line: line_for_span(path.span()),
+                    is_unix_gated: self.is_unix_only(),
+                    local_name: local_name.clone(),
+                });
+            }
+        }
+
+        if (is_std_process_command_constructor(path, &self.scopes)
+            || is_qself_std_process_command_constructor(expr_path, &self.scopes))
+            && first_arg_is_string_literal(call, "bash")
+        {
+            self.policy_info
+                .direct_bash_command_calls
+                .push(DirectBashCommandCallSite {
+                    line: line_for_span(path.span()),
+                    is_unix_gated: self.is_unix_only(),
+                });
+        }
+    }
+
+    fn record_macro(&mut self, macro_node: &syn::Macro) {
+        if macro_path_is_macro_rules(&macro_node.path) {
+            for transcriber in macro_rules_transcriber_groups(&macro_node.tokens) {
+                self.record_macro_transcriber(&transcriber);
+            }
+            return;
+        }
+
+        if !macro_invocation_tokens_are_inert(
+            &MacroInvocationPath::from_syn_path(&macro_node.path),
+            &self.scopes,
+        ) {
+            self.record_macro_token_fallback(&macro_node.tokens);
+        }
+    }
+
+    fn record_macro_transcriber(&mut self, transcriber: &proc_macro2::Group) {
+        if let Some(block) = parse_token_group_as_block(transcriber) {
+            self.visit_block(&block);
+            return;
+        }
+
+        if let Some(expr) = parse_token_group_as_expr(transcriber) {
+            self.visit_expr(&expr);
+            return;
+        }
+
+        if let Some(block) = parse_token_stream_as_wrapped_block(transcriber.stream()) {
+            self.visit_block(&block);
+            return;
+        }
+
+        self.record_macro_token_fallback(&transcriber.stream());
+    }
+
+    fn record_macro_token_fallback(&mut self, tokens: &TokenStream) {
+        let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+        let mut fallback_scope = RustNameScope::default();
+        collect_macro_fallback_scope_names(&token_trees, &mut fallback_scope, &self.scopes);
+        self.scopes.push(fallback_scope);
+
+        let mut pending_unix_cfg = false;
+        let mut pending_value_shadow = None;
+        let mut start = 0;
+        while start < token_trees.len() {
+            if let Some((shadow_scope, arm_end)) = macro_fallback_match_arm_at(&token_trees, start)
+            {
+                let arm_stream = token_trees[start..arm_end]
+                    .iter()
+                    .cloned()
+                    .collect::<TokenStream>();
+                self.with_unix_only_context(pending_unix_cfg, |visitor| {
+                    visitor.with_child_scope(shadow_scope, |visitor| {
+                        visitor.record_macro_token_fallback(&arm_stream);
+                    });
+                });
+                pending_unix_cfg = false;
+                start = arm_end
+                    + usize::from(matches!(
+                        token_trees.get(arm_end),
+                        Some(TokenTree::Punct(punct)) if punct.as_char() == ','
+                    ));
+                continue;
+            }
+
+            if let Some((expr_start, body_idx, shadow_scope, next)) =
+                macro_fallback_control_body_at(&token_trees, start)
+            {
+                if expr_start < body_idx {
+                    let expr_stream = token_trees[expr_start..body_idx]
+                        .iter()
+                        .cloned()
+                        .collect::<TokenStream>();
+                    self.with_unix_only_context(pending_unix_cfg, |visitor| {
+                        visitor.record_macro_token_fallback(&expr_stream);
+                    });
+                }
+
+                if let Some(TokenTree::Group(body)) = token_trees.get(body_idx) {
+                    self.with_unix_only_context(pending_unix_cfg, |visitor| {
+                        visitor.with_optional_child_scope(Some(shadow_scope), |visitor| {
+                            visitor.record_macro_token_group(body);
+                        });
+                    });
+                }
+                let continues_with_else = matches!(token_trees.get(next), Some(TokenTree::Ident(ident)) if ident == "else");
+                if !continues_with_else {
+                    pending_unix_cfg = false;
+                }
+                start = next;
+                continue;
+            }
+
+            if pending_value_shadow.is_none() {
+                if let Some((stmt, next)) = macro_parseable_statement_at(&token_trees, start) {
+                    self.with_unix_only_context(pending_unix_cfg, |visitor| {
+                        visitor.visit_stmt(&stmt);
+                    });
+                    pending_unix_cfg = false;
+                    start = next;
+                    continue;
+                }
+            }
+
+            if let Some((attr_excludes_windows, next)) = macro_cfg_attr_at(&token_trees, start) {
+                pending_unix_cfg = pending_unix_cfg || attr_excludes_windows;
+                start = next;
+                continue;
+            }
+
+            if !pending_unix_cfg {
+                if let Some(scope) = macro_fallback_let_shadow_at(&token_trees, start) {
+                    pending_value_shadow = Some(scope);
+                    start += 1;
+                    continue;
+                }
+            }
+
+            if let Some((call, next)) = macro_qself_expr_call_at(&token_trees, start) {
+                let shadow_scope = macro_fallback_body_shadow_at(&token_trees, start);
+                self.with_unix_only_context(pending_unix_cfg, |visitor| {
+                    visitor.with_optional_child_scope(shadow_scope, |visitor| {
+                        visitor.visit_expr_call(&call);
+                    });
+                });
+                pending_unix_cfg = false;
+                start = next;
+                continue;
+            }
+
+            if let Some((path, span, args, next)) = macro_call_path_at(&token_trees, start) {
+                let shadow_scope = macro_fallback_body_shadow_at(&token_trees, start);
+                self.with_optional_child_scope(shadow_scope, |visitor| {
+                    visitor.record_macro_token_call(&path, span, args, pending_unix_cfg);
+                    visitor.with_unix_only_context(pending_unix_cfg, |visitor| {
+                        visitor.record_macro_token_fallback(&args.stream());
+                    });
+                });
+                pending_unix_cfg = false;
+                start = next;
+                continue;
+            }
+
+            if let TokenTree::Group(group) = &token_trees[start] {
+                if !token_group_is_inert_macro_input(&token_trees, start, &self.scopes) {
+                    let shadow_scope = macro_fallback_body_shadow_at(&token_trees, start);
+                    self.with_unix_only_context(pending_unix_cfg, |visitor| {
+                        visitor.with_optional_child_scope(shadow_scope, |visitor| {
+                            visitor.record_macro_token_group(group);
+                        });
+                    });
+                    pending_unix_cfg = false;
+                }
+                start += 1;
+                continue;
+            }
+
+            if matches!(&token_trees[start], TokenTree::Punct(punct) if punct.as_char() == ';') {
+                if let Some(shadow_scope) = pending_value_shadow.take() {
+                    if let Some(scope) = self.scopes.last_mut() {
+                        scope.value_names.extend(shadow_scope.value_names);
+                    }
+                }
+                pending_unix_cfg = false;
+            }
+            start += 1;
+        }
+
+        if let Some(shadow_scope) = pending_value_shadow {
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.value_names.extend(shadow_scope.value_names);
+            }
+        }
+
+        self.scopes.pop();
+    }
+
+    fn record_macro_token_group(&mut self, group: &proc_macro2::Group) {
+        if let Some(block) = parse_token_group_as_block(group) {
+            self.visit_block(&block);
+            return;
+        }
+
+        if let Some(expr) = parse_token_group_as_expr(group) {
+            self.visit_expr(&expr);
+            return;
+        }
+
+        if let Some(block) = parse_token_stream_as_wrapped_block(group.stream()) {
+            self.visit_block(&block);
+            return;
+        }
+
+        self.record_macro_token_fallback(&group.stream());
+    }
+
+    fn record_macro_token_call(
+        &mut self,
+        path: &RustPathSegments,
+        span: Span,
+        args: &proc_macro2::Group,
+        excludes_windows: bool,
+    ) {
+        if let [local_name] = path.segments.as_slice() {
+            if path_alias_resolves_to_common_bash_command(local_name, &self.scopes) {
+                self.policy_info.single_segment_calls.push(RustCallSite {
+                    line: line_for_span(span),
+                    is_unix_gated: self.is_unix_only() || excludes_windows,
+                    local_name: local_name.clone(),
+                });
+            }
+        }
+
+        if path_segments_resolve_to_std_process_command_constructor(path, &self.scopes)
+            && macro_call_first_arg_is_string_literal(args, "bash")
+        {
+            self.policy_info
+                .direct_bash_command_calls
+                .push(DirectBashCommandCallSite {
+                    line: line_for_span(span),
+                    is_unix_gated: self.is_unix_only() || excludes_windows,
+                });
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for RustPolicyVisitor<'_> {
+    fn visit_file(&mut self, node: &'ast File) {
+        let scope = scope_from_items(&node.items, &[]);
+        self.with_independent_scope(scope, |visitor| {
+            syn::visit::visit_file(visitor, node);
+        });
+    }
+
+    fn visit_item(&mut self, node: &'ast Item) {
+        self.with_attrs(item_attrs(node), |visitor| {
+            syn::visit::visit_item(visitor, node);
+        });
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        let mut prefix = Vec::new();
+        if let Some((scope, parent_scopes)) = self.scopes.split_last() {
+            let mut context = CommonImportCollector {
+                is_absolute: node.leading_colon.is_some(),
+                line: line_for_span(node.span()),
+                is_unix_gated: self.is_unix_only(),
+                imports: &mut self.policy_info.bash_command_imports,
+                scope,
+                parent_scopes,
+            };
+            collect_common_bash_command_imports(&node.tree, &mut prefix, &mut context);
+        }
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if let Some((_brace, items)) = &node.content {
+            let inherited_scopes = inherited_module_scopes(&self.scopes);
+            let scope = scope_from_items(items, &inherited_scopes);
+            self.with_independent_scope_with_inherited(inherited_scopes, scope, |visitor| {
+                for item in items {
+                    visitor.visit_item(item);
+                }
+            });
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.with_child_scope(scope_from_fn_inputs(&node.sig.inputs), |visitor| {
+            syn::visit::visit_item_fn(visitor, node);
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.with_attrs(&node.attrs, |visitor| {
+            visitor.with_child_scope(scope_from_fn_inputs(&node.sig.inputs), |visitor| {
+                syn::visit::visit_impl_item_fn(visitor, node);
+            });
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.with_attrs(&node.attrs, |visitor| {
+            visitor.with_child_scope(scope_from_fn_inputs(&node.sig.inputs), |visitor| {
+                syn::visit::visit_trait_item_fn(visitor, node);
+            });
+        });
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        self.with_attrs(&node.attrs, |visitor| {
+            syn::visit::visit_local(visitor, node);
+        });
+        if !attrs_include_unix_cfg(&node.attrs) {
+            if let Some(scope) = self.scopes.last_mut() {
+                collect_pat_local_names(&node.pat, scope);
+            }
+        }
+    }
+
+    fn visit_block(&mut self, node: &'ast Block) {
+        let scope = scope_from_stmts(&node.stmts, &self.scopes);
+        self.with_child_scope(scope, |visitor| {
+            syn::visit::visit_block(visitor, node);
+        });
+    }
+
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        self.with_attrs(expr_attrs(node), |visitor| {
+            syn::visit::visit_expr(visitor, node);
+        });
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        self.record_call(node);
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.with_child_scope(scope_from_pats(node.inputs.iter()), |visitor| {
+            syn::visit::visit_expr_closure(visitor, node);
+        });
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_expr(&node.expr);
+        let mut scope = RustNameScope::default();
+        collect_pat_local_names(&node.pat, &mut scope);
+        self.with_child_scope(scope, |visitor| {
+            visitor.visit_block(&node.body);
+        });
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.visit_expr(&node.cond);
+        let mut scope = RustNameScope::default();
+        collect_condition_pat_local_names(&node.cond, &mut scope);
+        self.with_child_scope(scope, |visitor| {
+            visitor.visit_block(&node.then_branch);
+        });
+        if let Some((_else_token, branch)) = &node.else_branch {
+            self.visit_expr(branch);
+        }
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.visit_expr(&node.cond);
+        let mut scope = RustNameScope::default();
+        collect_condition_pat_local_names(&node.cond, &mut scope);
+        self.with_child_scope(scope, |visitor| {
+            visitor.visit_block(&node.body);
+        });
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        self.with_attrs(&node.attrs, |visitor| {
+            let mut scope = RustNameScope::default();
+            collect_pat_local_names(&node.pat, &mut scope);
+            visitor.with_child_scope(scope, |visitor| {
+                if let Some((_if_token, guard)) = &node.guard {
+                    visitor.visit_expr(guard);
+                }
+                visitor.visit_expr(&node.body);
+            });
+        });
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        if macro_path_is_macro_rules(&node.mac.path) && !attrs_include_unix_cfg(&node.attrs) {
+            if let (Some(ident), Some(scope)) = (&node.ident, self.scopes.last_mut()) {
+                scope.macro_names.insert(ident.to_string());
+            }
+        }
+        self.visit_macro(&node.mac);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.with_attrs(&node.attrs, |visitor| {
+            visitor.visit_macro(&node.mac);
+        });
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.record_macro(node);
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn collect_common_bash_command_imports(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    context: &mut CommonImportCollector<'_>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_common_bash_command_imports(&path.tree, prefix, context);
+            prefix.pop();
+        }
+        UseTree::Name(name) => push_common_bash_command_import(
+            prefix,
+            &name.ident.to_string(),
+            &name.ident.to_string(),
+            false,
+            context,
+        ),
+        UseTree::Rename(rename) => push_common_bash_command_import(
+            prefix,
+            &rename.ident.to_string(),
+            &rename.rename.to_string(),
+            false,
+            context,
+        ),
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_common_bash_command_imports(item, prefix, context);
+            }
+        }
+        UseTree::Glob(_) => {
+            push_common_bash_command_import(prefix, "bash_command", "bash_command", true, context)
+        }
+    }
+}
+
+struct CommonImportCollector<'a> {
+    is_absolute: bool,
+    line: usize,
+    is_unix_gated: bool,
+    imports: &'a mut Vec<CommonBashCommandImport>,
+    scope: &'a RustNameScope,
+    parent_scopes: &'a [RustNameScope],
+}
+
+fn push_common_bash_command_import(
+    prefix: &[String],
+    imported_name: &str,
+    local_name: &str,
+    is_glob: bool,
+    context: &mut CommonImportCollector<'_>,
+) {
+    if imported_name == "bash_command"
+        && !context.is_absolute
+        && use_prefix_resolves_to_root_common_module(prefix, context.scope, context.parent_scopes)
+    {
+        context.imports.push(CommonBashCommandImport {
+            line: context.line,
+            is_unix_gated: context.is_unix_gated,
+            local_name: local_name.to_string(),
+            is_glob,
+        });
+    }
+}
+
+fn use_prefix_resolves_to_root_common_module(
+    prefix: &[String],
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    let scopes = scope_refs_with_current(scope, parent_scopes);
+    let Some(root) = root_scope(&scopes) else {
+        return false;
+    };
+    if !root.type_or_module_names.contains("common") {
+        return false;
+    }
+
+    match prefix {
+        [common] if common == "common" => nearest_type_or_module_scope("common", &scopes)
+            .is_some_and(|scope| std::ptr::eq(scope, root)),
+        [crate_root, common] if crate_root == "crate" && common == "common" => true,
+        [self_root, common] if self_root == "self" && common == "common" => {
+            current_module_scope(&scopes).is_some_and(|scope| std::ptr::eq(scope, root))
+        }
+        [first, .., common] if first == "super" && common == "common" => {
+            let super_count = prefix
+                .iter()
+                .take_while(|segment| segment.as_str() == "super")
+                .count();
+            super_count + 1 == prefix.len()
+                && ancestor_module_scope(&scopes, super_count)
+                    .is_some_and(|scope| std::ptr::eq(scope, root))
+        }
+        _ => false,
+    }
+}
+
+fn use_prefix_resolves_to_std_module(
+    prefix: &[String],
+    is_absolute: bool,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    if is_absolute {
+        if let Some(remaining) =
+            absolute_std_module_remaining_in_scope_chain(prefix, scope, parent_scopes)
+        {
+            return remaining.is_empty();
+        }
+    }
+
+    if let Some(remaining) =
+        qualified_std_module_remaining_in_scope_chain(prefix, scope, parent_scopes)
+    {
+        return !is_absolute && remaining.is_empty();
+    }
+
+    match prefix {
+        [module] if module == "std" => {
+            return is_absolute
+                || !type_or_module_name_is_shadowed_in_scope_chain("std", scope, parent_scopes);
+        }
+        [module] => {
+            return !is_absolute
+                && std_module_alias_resolves_in_scope_chain(module, scope, parent_scopes);
+        }
+        [root, module] if matches!(root.as_str(), "crate" | "self" | "super") => {
+            return !is_absolute
+                && std_module_alias_resolves_in_scope_chain(module, scope, parent_scopes);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn use_prefix_resolves_to_std_process_module(
+    prefix: &[String],
+    is_absolute: bool,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    if is_absolute {
+        if let Some(remaining) =
+            absolute_std_module_remaining_in_scope_chain(prefix, scope, parent_scopes)
+        {
+            return matches!(remaining, [process] if process == "process");
+        }
+    }
+
+    if let Some(remaining) =
+        qualified_std_module_remaining_in_scope_chain(prefix, scope, parent_scopes)
+    {
+        return matches!(remaining, [process] if process == "process") && !is_absolute;
+    }
+
+    match prefix {
+        [module, process] if process == "process" => use_prefix_resolves_to_std_module(
+            std::slice::from_ref(module),
+            is_absolute,
+            scope,
+            parent_scopes,
+        ),
+        _ => false,
+    }
+}
+
+fn use_prefix_resolves_to_quote_module(
+    prefix: &[String],
+    is_absolute: bool,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    if is_absolute {
+        if let Some(remaining) =
+            absolute_quote_module_remaining_in_scope_chain(prefix, scope, parent_scopes)
+        {
+            return remaining.is_empty();
+        }
+    }
+
+    if let Some(remaining) =
+        qualified_quote_module_remaining_in_scope_chain(prefix, scope, parent_scopes)
+    {
+        return !is_absolute && remaining.is_empty();
+    }
+
+    let [module] = prefix else {
+        return false;
+    };
+
+    if module == "quote" {
+        return quote_crate_name_is_unshadowed(is_absolute, scope, parent_scopes);
+    }
+
+    !is_absolute && quote_module_alias_resolves_in_scope_chain(module, scope, parent_scopes)
+}
+
+fn quote_crate_name_is_unshadowed(
+    is_absolute: bool,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    is_absolute || !type_or_module_name_is_shadowed_in_scope_chain("quote", scope, parent_scopes)
+}
+
+fn std_module_alias_resolves_in_scope_chain(
+    alias: &str,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    scoped_alias_resolves_with_current(
+        alias,
+        scope,
+        parent_scopes,
+        |scope, alias| scope.std_module_aliases.contains(alias),
+        |scope, alias| scope.type_or_module_names.contains(alias),
+    )
+}
+
+fn qualified_std_module_remaining_in_scope_chain<'path>(
+    prefix: &'path [String],
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> Option<&'path [String]> {
+    let scopes = scope_refs_with_current(scope, parent_scopes);
+    qualified_std_module_remaining(prefix, &scopes)
+}
+
+fn absolute_std_module_remaining_in_scope_chain<'path>(
+    prefix: &'path [String],
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> Option<&'path [String]> {
+    let scopes = scope_refs_with_current(scope, parent_scopes);
+    absolute_std_module_remaining(prefix, &scopes)
+}
+
+fn quote_module_alias_resolves_in_scope_chain(
+    alias: &str,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    scoped_alias_resolves_with_current(
+        alias,
+        scope,
+        parent_scopes,
+        |scope, alias| scope.inert_macro_aliases.module_aliases.contains(alias),
+        |scope, alias| scope.type_or_module_names.contains(alias),
+    )
+}
+
+fn qualified_quote_module_remaining_in_scope_chain<'path>(
+    prefix: &'path [String],
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> Option<&'path [String]> {
+    let scopes = scope_refs_with_current(scope, parent_scopes);
+    qualified_quote_module_remaining(prefix, &scopes)
+}
+
+fn absolute_quote_module_remaining_in_scope_chain<'path>(
+    prefix: &'path [String],
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> Option<&'path [String]> {
+    let scopes = scope_refs_with_current(scope, parent_scopes);
+    absolute_quote_module_remaining(prefix, &scopes)
+}
+
+fn absolute_std_module_remaining<'path>(
+    prefix: &'path [String],
+    scopes: &[&RustNameScope],
+) -> Option<&'path [String]> {
+    let (alias, remaining) = absolute_path_alias_with_remaining(prefix)?;
+    if alias == "std" {
+        return Some(remaining);
+    }
+    root_scope(scopes)?
+        .std_extern_crate_aliases
+        .contains(alias)
+        .then_some(remaining)
+}
+
+fn absolute_quote_module_remaining<'path>(
+    prefix: &'path [String],
+    scopes: &[&RustNameScope],
+) -> Option<&'path [String]> {
+    let (alias, remaining) = absolute_path_alias_with_remaining(prefix)?;
+    if alias == "quote" {
+        return Some(remaining);
+    }
+    root_scope(scopes)?
+        .inert_macro_aliases
+        .extern_module_aliases
+        .contains(alias)
+        .then_some(remaining)
+}
+
+fn absolute_path_alias_with_remaining(prefix: &[String]) -> Option<(&str, &[String])> {
+    let alias = prefix.first()?;
+    Some((alias, &prefix[1..]))
+}
+
+fn qualified_std_module_remaining<'path>(
+    prefix: &'path [String],
+    scopes: &[&RustNameScope],
+) -> Option<&'path [String]> {
+    let (target_scope, alias, remaining) = qualified_path_target_alias(prefix, scopes)?;
+    if target_scope.qualified_type_or_module_names.contains(alias) {
+        return None;
+    }
+    target_scope
+        .qualified_std_module_aliases
+        .contains(alias)
+        .then_some(remaining)
+}
+
+fn qualified_quote_module_remaining<'path>(
+    prefix: &'path [String],
+    scopes: &[&RustNameScope],
+) -> Option<&'path [String]> {
+    let (target_scope, alias, remaining) = qualified_path_target_alias(prefix, scopes)?;
+    if target_scope.qualified_type_or_module_names.contains(alias) {
+        return None;
+    }
+    target_scope
+        .inert_macro_aliases
+        .qualified_module_aliases
+        .contains(alias)
+        .then_some(remaining)
+}
+
+fn scope_refs_with_current<'scope>(
+    scope: &'scope RustNameScope,
+    parent_scopes: &'scope [RustNameScope],
+) -> Vec<&'scope RustNameScope> {
+    let mut scopes = parent_scopes.iter().collect::<Vec<_>>();
+    scopes.push(scope);
+    scopes
+}
+
+fn root_scope<'scope>(scopes: &[&'scope RustNameScope]) -> Option<&'scope RustNameScope> {
+    scopes.first().copied()
+}
+
+fn nearest_type_or_module_scope<'scope>(
+    name: &str,
+    scopes: &[&'scope RustNameScope],
+) -> Option<&'scope RustNameScope> {
+    scopes
+        .iter()
+        .rev()
+        .find(|scope| scope.type_or_module_names.contains(name))
+        .copied()
+}
+
+fn qualified_path_target_alias<'path, 'scope>(
+    prefix: &'path [String],
+    scopes: &[&'scope RustNameScope],
+) -> Option<(&'scope RustNameScope, &'path str, &'path [String])> {
+    let first_segment = prefix.first()?.as_str();
+    let (target_scope, alias_idx) = match first_segment {
+        "crate" => (module_scope_at(scopes, 0)?, 1),
+        "self" => (current_module_scope(scopes)?, 1),
+        "super" => {
+            let super_count = prefix
+                .iter()
+                .take_while(|segment| segment.as_str() == "super")
+                .count();
+            (ancestor_module_scope(scopes, super_count)?, super_count)
+        }
+        _ => return None,
+    };
+
+    let alias = prefix.get(alias_idx)?;
+    Some((target_scope, alias, &prefix[alias_idx + 1..]))
+}
+
+fn module_scope_at<'scope>(
+    scopes: &[&'scope RustNameScope],
+    module_position: usize,
+) -> Option<&'scope RustNameScope> {
+    scopes
+        .iter()
+        .filter(|scope| scope.is_module_scope)
+        .copied()
+        .nth(module_position)
+}
+
+fn current_module_scope<'scope>(scopes: &[&'scope RustNameScope]) -> Option<&'scope RustNameScope> {
+    scopes
+        .iter()
+        .rev()
+        .find(|scope| scope.is_module_scope)
+        .copied()
+}
+
+fn ancestor_module_scope<'scope>(
+    scopes: &[&'scope RustNameScope],
+    super_count: usize,
+) -> Option<&'scope RustNameScope> {
+    let module_scopes = scopes
+        .iter()
+        .filter(|scope| scope.is_module_scope)
+        .copied()
+        .collect::<Vec<_>>();
+    if super_count == 0 {
+        return module_scopes.last().copied();
+    }
+    let current_position = module_scopes.len().checked_sub(1)?;
+    let target_position = current_position.checked_sub(super_count)?;
+    module_scopes.get(target_position).copied()
+}
+
+fn inherited_module_scopes(scopes: &[RustNameScope]) -> Vec<RustNameScope> {
+    let root_scope = scopes.first();
+    scopes
+        .iter()
+        .map(|scope| {
+            let root_std_aliases = root_scope
+                .map(|scope| scope.std_extern_crate_aliases.clone())
+                .unwrap_or_default();
+            let root_quote_aliases = root_scope
+                .map(|scope| scope.inert_macro_aliases.extern_module_aliases.clone())
+                .unwrap_or_default();
+            RustNameScope {
+                is_module_scope: scope.is_module_scope,
+                macro_names: scope.macro_names.clone(),
+                qualified_std_module_aliases: scope.qualified_std_module_aliases.clone(),
+                qualified_type_or_module_names: scope.qualified_type_or_module_names.clone(),
+                std_extern_crate_aliases: root_std_aliases.clone(),
+                std_module_aliases: root_std_aliases,
+                inert_macro_aliases: RustInertMacroAliases {
+                    extern_module_aliases: root_quote_aliases.clone(),
+                    qualified_module_aliases: scope
+                        .inert_macro_aliases
+                        .qualified_module_aliases
+                        .clone(),
+                    module_aliases: root_quote_aliases,
+                    ..RustInertMacroAliases::default()
+                },
+                ..RustNameScope::default()
+            }
+        })
+        .collect()
+}
+
+fn scope_from_items(items: &[Item], parent_scopes: &[RustNameScope]) -> RustNameScope {
+    let mut scope = RustNameScope {
+        is_module_scope: true,
+        ..RustNameScope::default()
+    };
+
+    for item in items {
+        collect_item_non_import_scope_names(item, &mut scope);
+    }
+
+    for item in items {
+        collect_item_import_scope_names(item, &mut scope, parent_scopes);
+    }
+
+    scope
+}
+
+fn scope_from_stmts(stmts: &[Stmt], parent_scopes: &[RustNameScope]) -> RustNameScope {
+    let mut scope = RustNameScope::default();
+
+    for stmt in stmts {
+        if let Stmt::Item(item) = stmt {
+            collect_item_non_import_scope_names(item, &mut scope);
+        }
+    }
+
+    for stmt in stmts {
+        if let Stmt::Item(item) = stmt {
+            collect_item_import_scope_names(item, &mut scope, parent_scopes);
+        }
+    }
+
+    scope
+}
+
+fn scope_from_fn_inputs(inputs: &Punctuated<syn::FnArg, Token![,]>) -> RustNameScope {
+    let mut scope = RustNameScope::default();
+
+    for input in inputs {
+        if let syn::FnArg::Typed(input) = input {
+            collect_pat_local_names(&input.pat, &mut scope);
+        }
+    }
+
+    scope
+}
+
+fn scope_from_pats<'pat>(pats: impl IntoIterator<Item = &'pat Pat>) -> RustNameScope {
+    let mut scope = RustNameScope::default();
+
+    for pat in pats {
+        collect_pat_local_names(pat, &mut scope);
+    }
+
+    scope
+}
+
+fn collect_item_import_scope_names(
+    item: &Item,
+    scope: &mut RustNameScope,
+    parent_scopes: &[RustNameScope],
+) {
+    if let Item::Use(item) = item {
+        let mut prefix = Vec::new();
+        collect_scope_imports(
+            &item.tree,
+            &mut prefix,
+            item.leading_colon.is_some(),
+            attrs_include_unix_cfg(&item.attrs),
+            scope,
+            parent_scopes,
+        );
+    }
+}
+
+fn collect_item_non_import_scope_names(item: &Item, scope: &mut RustNameScope) {
+    match item {
+        Item::Use(_) => {}
+        _ if attrs_include_unix_cfg(item_attrs(item)) => {}
+        Item::Const(item) => {
+            scope.value_names.insert(item.ident.to_string());
+        }
+        Item::Enum(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+        }
+        Item::ExternCrate(item) => {
+            let local_name = item
+                .rename
+                .as_ref()
+                .map(|(_as, rename)| rename.to_string())
+                .unwrap_or_else(|| item.ident.to_string());
+            if item.ident == "std" {
+                scope.std_extern_crate_aliases.insert(local_name.clone());
+                scope
+                    .qualified_std_module_aliases
+                    .insert(local_name.clone());
+                scope.std_module_aliases.insert(local_name);
+            } else if item.ident == "quote" {
+                scope
+                    .inert_macro_aliases
+                    .extern_module_aliases
+                    .insert(local_name.clone());
+                scope
+                    .inert_macro_aliases
+                    .qualified_module_aliases
+                    .insert(local_name.clone());
+                scope.inert_macro_aliases.module_aliases.insert(local_name);
+            } else {
+                record_type_or_module_name(scope, local_name);
+            }
+        }
+        Item::Fn(item) => {
+            scope.value_names.insert(item.sig.ident.to_string());
+        }
+        Item::Mod(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+        }
+        Item::Static(item) => {
+            scope.value_names.insert(item.ident.to_string());
+        }
+        Item::Struct(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+            if !matches!(item.fields, syn::Fields::Named(_)) {
+                scope.value_names.insert(item.ident.to_string());
+            }
+        }
+        Item::Trait(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+        }
+        Item::TraitAlias(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+        }
+        Item::Type(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+        }
+        Item::Union(item) => {
+            record_type_or_module_name(scope, item.ident.to_string());
+        }
+        _ => {}
+    }
+}
+
+fn record_type_or_module_name(scope: &mut RustNameScope, local_name: String) {
+    scope
+        .qualified_type_or_module_names
+        .insert(local_name.clone());
+    scope.type_or_module_names.insert(local_name);
+}
+
+fn collect_scope_imports(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    is_absolute: bool,
+    excludes_windows: bool,
+    scope: &mut RustNameScope,
+    parent_scopes: &[RustNameScope],
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_scope_imports(
+                &path.tree,
+                prefix,
+                is_absolute,
+                excludes_windows,
+                scope,
+                parent_scopes,
+            );
+            prefix.pop();
+        }
+        UseTree::Name(name) => record_scope_import(
+            prefix,
+            &name.ident.to_string(),
+            None,
+            is_absolute,
+            excludes_windows,
+            scope,
+            parent_scopes,
+        ),
+        UseTree::Rename(rename) => record_scope_import(
+            prefix,
+            &rename.ident.to_string(),
+            Some(&rename.rename.to_string()),
+            is_absolute,
+            excludes_windows,
+            scope,
+            parent_scopes,
+        ),
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_scope_imports(
+                    item,
+                    prefix,
+                    is_absolute,
+                    excludes_windows,
+                    scope,
+                    parent_scopes,
+                );
+            }
+        }
+        UseTree::Glob(_) => {
+            if use_prefix_resolves_to_std_process_module(prefix, is_absolute, scope, parent_scopes)
+            {
+                scope.command_aliases.insert("Command".to_string());
+            }
+            if use_prefix_resolves_to_root_common_module(prefix, scope, parent_scopes) {
+                scope
+                    .common_bash_command_aliases
+                    .insert("bash_command".to_string());
+            }
+            if use_prefix_resolves_to_quote_module(prefix, is_absolute, scope, parent_scopes) {
+                for macro_name in QUOTE_TOKEN_MACROS {
+                    scope
+                        .inert_macro_aliases
+                        .aliases
+                        .insert((*macro_name).to_string());
+                }
+            }
+            if !excludes_windows
+                && matches!(prefix.last().map(String::as_str), Some("common"))
+                && !use_prefix_resolves_to_root_common_module(prefix, scope, parent_scopes)
+            {
+                scope.value_names.insert("bash_command".to_string());
+            }
+        }
+    }
+}
+
+fn record_scope_import(
+    prefix: &[String],
+    imported_name: &str,
+    explicit_local_name: Option<&str>,
+    is_absolute: bool,
+    excludes_windows: bool,
+    scope: &mut RustNameScope,
+    parent_scopes: &[RustNameScope],
+) {
+    let local_name = local_import_name(prefix, imported_name, explicit_local_name);
+
+    if quote_import_resolves_to_inert_macro(
+        prefix,
+        imported_name,
+        is_absolute,
+        scope,
+        parent_scopes,
+    ) {
+        if !excludes_windows {
+            scope.inert_macro_aliases.aliases.insert(local_name);
+        }
+        return;
+    }
+
+    if quote_import_resolves_to_module_alias(
+        prefix,
+        imported_name,
+        is_absolute,
+        scope,
+        parent_scopes,
+    ) {
+        if !excludes_windows {
+            scope
+                .inert_macro_aliases
+                .qualified_module_aliases
+                .insert(local_name.clone());
+            scope.inert_macro_aliases.module_aliases.insert(local_name);
+        }
+        return;
+    }
+
+    if imported_name == "Command"
+        && use_prefix_resolves_to_std_process_module(prefix, is_absolute, scope, parent_scopes)
+    {
+        scope.command_aliases.insert(local_name);
+        return;
+    }
+
+    if imported_name == "bash_command"
+        && use_prefix_resolves_to_root_common_module(prefix, scope, parent_scopes)
+    {
+        scope.common_bash_command_aliases.insert(local_name);
+        return;
+    }
+
+    if imported_name == "process"
+        && use_prefix_resolves_to_std_module(prefix, is_absolute, scope, parent_scopes)
+    {
+        scope.process_module_aliases.insert(local_name);
+        return;
+    }
+
+    if imported_name == "std"
+        && prefix.is_empty()
+        && (is_absolute
+            || !type_or_module_name_is_shadowed_in_scope_chain("std", scope, parent_scopes))
+    {
+        scope
+            .qualified_std_module_aliases
+            .insert(local_name.clone());
+        scope.std_module_aliases.insert(local_name);
+        return;
+    }
+
+    if imported_name == "self"
+        && use_prefix_resolves_to_std_module(prefix, is_absolute, scope, parent_scopes)
+    {
+        scope
+            .qualified_std_module_aliases
+            .insert(local_name.clone());
+        scope.std_module_aliases.insert(local_name);
+        return;
+    }
+
+    if imported_name == "self"
+        && use_prefix_resolves_to_std_process_module(prefix, is_absolute, scope, parent_scopes)
+    {
+        scope.process_module_aliases.insert(local_name);
+        return;
+    }
+
+    if !excludes_windows {
+        if name_can_shadow_inert_macro(&local_name) {
+            scope.macro_names.insert(local_name.clone());
+        }
+        record_type_or_module_name(scope, local_name.clone());
+        scope.value_names.insert(local_name);
+    }
+}
+
+fn local_import_name(
+    prefix: &[String],
+    imported_name: &str,
+    explicit_local_name: Option<&str>,
+) -> String {
+    if let Some(local_name) = explicit_local_name {
+        return local_name.to_string();
+    }
+
+    if imported_name == "self" {
+        return prefix
+            .last()
+            .cloned()
+            .unwrap_or_else(|| imported_name.to_string());
+    }
+
+    imported_name.to_string()
+}
+
+fn collect_pat_local_names(pat: &Pat, scope: &mut RustNameScope) {
+    match pat {
+        Pat::Ident(pat) => {
+            scope.value_names.insert(pat.ident.to_string());
+            if let Some((_at, subpat)) = &pat.subpat {
+                collect_pat_local_names(subpat, scope);
+            }
+        }
+        Pat::Or(pat) => {
+            for case in &pat.cases {
+                collect_pat_local_names(case, scope);
+            }
+        }
+        Pat::Paren(pat) => collect_pat_local_names(&pat.pat, scope),
+        Pat::Reference(pat) => collect_pat_local_names(&pat.pat, scope),
+        Pat::Slice(pat) => {
+            for item in &pat.elems {
+                collect_pat_local_names(item, scope);
+            }
+        }
+        Pat::Struct(pat) => {
+            for field in &pat.fields {
+                collect_pat_local_names(&field.pat, scope);
+            }
+        }
+        Pat::Tuple(pat) => {
+            for item in &pat.elems {
+                collect_pat_local_names(item, scope);
+            }
+        }
+        Pat::TupleStruct(pat) => {
+            for item in &pat.elems {
+                collect_pat_local_names(item, scope);
+            }
+        }
+        Pat::Type(pat) => collect_pat_local_names(&pat.pat, scope),
+        _ => {}
+    }
+}
+
+fn collect_condition_pat_local_names(expr: &Expr, scope: &mut RustNameScope) {
+    match expr {
+        Expr::Let(expr) => collect_pat_local_names(&expr.pat, scope),
+        Expr::Binary(expr) if matches!(expr.op, syn::BinOp::And(_)) => {
+            collect_condition_pat_local_names(&expr.left, scope);
+            collect_condition_pat_local_names(&expr.right, scope);
+        }
+        Expr::Group(expr) => collect_condition_pat_local_names(&expr.expr, scope),
+        Expr::Paren(expr) => collect_condition_pat_local_names(&expr.expr, scope),
+        _ => {}
+    }
+}
+
+fn called_path(call: &ExprCall) -> Option<&ExprPath> {
+    match call.func.as_ref() {
+        Expr::Path(path) => Some(path),
+        _ => None,
+    }
+}
+
+fn path_segments(path: &syn::Path) -> Vec<String> {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect()
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn expr_attrs(expr: &Expr) -> &[Attribute] {
+    match expr {
+        Expr::Array(expr) => &expr.attrs,
+        Expr::Assign(expr) => &expr.attrs,
+        Expr::Async(expr) => &expr.attrs,
+        Expr::Await(expr) => &expr.attrs,
+        Expr::Binary(expr) => &expr.attrs,
+        Expr::Block(expr) => &expr.attrs,
+        Expr::Break(expr) => &expr.attrs,
+        Expr::Call(expr) => &expr.attrs,
+        Expr::Cast(expr) => &expr.attrs,
+        Expr::Closure(expr) => &expr.attrs,
+        Expr::Const(expr) => &expr.attrs,
+        Expr::Continue(expr) => &expr.attrs,
+        Expr::Field(expr) => &expr.attrs,
+        Expr::ForLoop(expr) => &expr.attrs,
+        Expr::Group(expr) => &expr.attrs,
+        Expr::If(expr) => &expr.attrs,
+        Expr::Index(expr) => &expr.attrs,
+        Expr::Infer(expr) => &expr.attrs,
+        Expr::Let(expr) => &expr.attrs,
+        Expr::Lit(expr) => &expr.attrs,
+        Expr::Loop(expr) => &expr.attrs,
+        Expr::Macro(expr) => &expr.attrs,
+        Expr::Match(expr) => &expr.attrs,
+        Expr::MethodCall(expr) => &expr.attrs,
+        Expr::Paren(expr) => &expr.attrs,
+        Expr::Path(expr) => &expr.attrs,
+        Expr::Range(expr) => &expr.attrs,
+        Expr::RawAddr(expr) => &expr.attrs,
+        Expr::Reference(expr) => &expr.attrs,
+        Expr::Repeat(expr) => &expr.attrs,
+        Expr::Return(expr) => &expr.attrs,
+        Expr::Struct(expr) => &expr.attrs,
+        Expr::Try(expr) => &expr.attrs,
+        Expr::TryBlock(expr) => &expr.attrs,
+        Expr::Tuple(expr) => &expr.attrs,
+        Expr::Unary(expr) => &expr.attrs,
+        Expr::Unsafe(expr) => &expr.attrs,
+        Expr::Verbatim(_) => &[],
+        Expr::While(expr) => &expr.attrs,
+        Expr::Yield(expr) => &expr.attrs,
+        _ => &[],
+    }
+}
+
+fn is_std_process_command_constructor(path: &syn::Path, scopes: &[RustNameScope]) -> bool {
+    let path = RustPathSegments::from_syn_path(path);
+    path_segments_resolve_to_std_process_command_constructor(&path, scopes)
+}
+
+fn is_qself_std_process_command_constructor(path: &ExprPath, scopes: &[RustNameScope]) -> bool {
+    if path
+        .path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "new")
+    {
+        return false;
+    }
+
+    let Some(qself) = &path.qself else {
+        return false;
+    };
+    let syn::Type::Path(type_path) = qself.ty.as_ref() else {
+        return false;
+    };
+
+    let mut constructor_path = RustPathSegments::from_syn_path(&type_path.path);
+    constructor_path.segments.push("new".to_string());
+    path_segments_resolve_to_std_process_command_constructor(&constructor_path, scopes)
+}
+
+fn path_segments_resolve_to_std_process_command_constructor(
+    path: &RustPathSegments,
+    scopes: &[RustNameScope],
+) -> bool {
+    match path.segments.as_slice() {
+        [std, process, command, new]
+            if std == "std"
+                && process == "process"
+                && command == "Command"
+                && new == "new"
+                && (path.is_absolute || !type_or_module_name_is_shadowed(std, scopes)) =>
+        {
+            true
+        }
+        [command_alias, new] if new == "new" => scoped_alias_resolves(
+            command_alias,
+            scopes,
+            |scope, alias| scope.command_aliases.contains(alias),
+            |scope, alias| scope.type_or_module_names.contains(alias),
+        ),
+        [module_alias, command, new] if command == "Command" && new == "new" => {
+            scoped_alias_resolves(
+                module_alias,
+                scopes,
+                |scope, alias| scope.process_module_aliases.contains(alias),
+                |scope, alias| scope.type_or_module_names.contains(alias),
+            )
+        }
+        [std_alias, process, command, new]
+            if process == "process" && command == "Command" && new == "new" =>
+        {
+            if path.is_absolute {
+                let scope_refs = scopes.iter().collect::<Vec<_>>();
+                absolute_std_module_remaining(std::slice::from_ref(std_alias), &scope_refs)
+                    .is_some_and(|remaining| remaining.is_empty())
+            } else {
+                scoped_alias_resolves(
+                    std_alias,
+                    scopes,
+                    |scope, alias| scope.std_module_aliases.contains(alias),
+                    |scope, alias| scope.type_or_module_names.contains(alias),
+                )
+            }
+        }
+        [.., process, command, new]
+            if process == "process" && command == "Command" && new == "new" =>
+        {
+            let prefix = &path.segments[..path.segments.len() - 3];
+            let scope_refs = scopes.iter().collect::<Vec<_>>();
+            if path.is_absolute {
+                absolute_std_module_remaining(prefix, &scope_refs)
+                    .is_some_and(|remaining| remaining.is_empty())
+            } else {
+                qualified_std_module_remaining(prefix, &scope_refs)
+                    .is_some_and(|remaining| remaining.is_empty())
+            }
+        }
+        _ => false,
+    }
+}
+
+fn path_alias_resolves_to_common_bash_command(alias: &str, scopes: &[RustNameScope]) -> bool {
+    scoped_alias_resolves(
+        alias,
+        scopes,
+        |scope, alias| scope.common_bash_command_aliases.contains(alias),
+        |scope, alias| scope.value_names.contains(alias),
+    )
+}
+
+fn macro_path_is_macro_rules(path: &syn::Path) -> bool {
+    path.is_ident("macro_rules")
+}
+
+fn macro_rules_transcriber_groups(tokens: &TokenStream) -> Vec<proc_macro2::Group> {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut transcribers = Vec::new();
+    let mut idx = 0;
+
+    while idx + 2 < token_trees.len() {
+        if token_pair_is_fat_arrow(&token_trees, idx) {
+            if let Some(TokenTree::Group(group)) = token_trees.get(idx + 2) {
+                transcribers.push(group.clone());
+                idx += 3;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+
+    transcribers
+}
+
+fn token_pair_is_fat_arrow(tokens: &[TokenTree], start: usize) -> bool {
+    matches!(tokens.get(start), Some(TokenTree::Punct(punct)) if punct.as_char() == '=')
+        && matches!(tokens.get(start + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == '>')
+}
+
+fn parse_token_group_as_block(group: &proc_macro2::Group) -> Option<Block> {
+    if group.delimiter() != Delimiter::Brace {
+        return None;
+    }
+    let stream = group.stream();
+    if token_stream_contains_dollar(&stream) {
+        return None;
+    }
+
+    syn::parse2::<Block>(TokenStream::from(TokenTree::Group(group.clone()))).ok()
+}
+
+fn parse_token_group_as_expr(group: &proc_macro2::Group) -> Option<Expr> {
+    let stream = group.stream();
+    if token_stream_contains_dollar(&stream) {
+        return None;
+    }
+
+    syn::parse2::<Expr>(TokenStream::from(TokenTree::Group(group.clone()))).ok()
+}
+
+fn parse_token_stream_as_wrapped_block(stream: TokenStream) -> Option<Block> {
+    if token_stream_contains_dollar(&stream) {
+        return None;
+    }
+
+    syn::parse2::<Block>(TokenStream::from(TokenTree::Group(
+        proc_macro2::Group::new(Delimiter::Brace, stream),
+    )))
+    .ok()
+}
+
+fn token_stream_contains_dollar(stream: &TokenStream) -> bool {
+    stream
+        .clone()
+        .into_iter()
+        .any(|token_tree| match token_tree {
+            TokenTree::Punct(punct) => punct.as_char() == '$',
+            TokenTree::Group(group) => token_stream_contains_dollar(&group.stream()),
+            _ => false,
+        })
+}
+
+const BUILTIN_TOKEN_MACROS: &[&str] = &[
+    "cfg",
+    "column",
+    "compile_error",
+    "concat",
+    "concat_bytes",
+    "env",
+    "file",
+    "include",
+    "include_bytes",
+    "include_str",
+    "line",
+    "module_path",
+    "option_env",
+    "stringify",
+];
+
+const QUOTE_TOKEN_MACROS: &[&str] = &["format_ident", "quote", "quote_spanned"];
+
+struct MacroInvocationPath {
+    is_absolute: bool,
+    segments: Vec<String>,
+}
+
+impl MacroInvocationPath {
+    fn from_syn_path(path: &syn::Path) -> Self {
+        Self {
+            is_absolute: path.leading_colon.is_some(),
+            segments: path_segments(path),
+        }
+    }
+}
+
+fn token_group_is_inert_macro_input(
+    tokens: &[TokenTree],
+    group_idx: usize,
+    scopes: &[RustNameScope],
+) -> bool {
+    macro_invocation_path_before_bang(tokens, group_idx)
+        .is_some_and(|path| macro_invocation_tokens_are_inert(&path, scopes))
+}
+
+fn macro_invocation_path_before_bang(
+    tokens: &[TokenTree],
+    group_idx: usize,
+) -> Option<MacroInvocationPath> {
+    if group_idx < 2
+        || !matches!(tokens.get(group_idx - 1), Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
+    {
+        return None;
+    }
+
+    let mut ident_idx = group_idx - 2;
+    let mut segments = Vec::new();
+    let mut is_absolute = false;
+    loop {
+        let TokenTree::Ident(ident) = tokens.get(ident_idx)? else {
+            return None;
+        };
+        segments.push(ident.to_string());
+
+        if ident_idx >= 2 && token_pair_is_double_colon(tokens, ident_idx - 2) {
+            if ident_idx == 2 {
+                is_absolute = true;
+                break;
+            }
+            ident_idx = ident_idx.checked_sub(3)?;
+        } else {
+            break;
+        }
+    }
+    segments.reverse();
+    Some(MacroInvocationPath {
+        is_absolute,
+        segments,
+    })
+}
+
+fn macro_invocation_tokens_are_inert(path: &MacroInvocationPath, scopes: &[RustNameScope]) -> bool {
+    match path.segments.as_slice() {
+        [macro_name] if builtin_macro_tokens_are_inert(macro_name) => {
+            !macro_name_is_shadowed(macro_name, scopes)
+        }
+        [macro_name] if quote_macro_tokens_are_inert(macro_name) => {
+            !macro_name_is_shadowed(macro_name, scopes)
+                || scoped_inert_macro_alias_resolves(macro_name, scopes)
+        }
+        [macro_name] => scoped_inert_macro_alias_resolves(macro_name, scopes),
+        [module_alias, macro_name] if quote_macro_tokens_are_inert(macro_name) => {
+            module_alias_resolves_to_quote(module_alias, path.is_absolute, scopes)
+        }
+        _ => false,
+    }
+}
+
+fn builtin_macro_tokens_are_inert(name: &str) -> bool {
+    BUILTIN_TOKEN_MACROS.contains(&name)
+}
+
+fn quote_macro_tokens_are_inert(name: &str) -> bool {
+    QUOTE_TOKEN_MACROS.contains(&name)
+}
+
+fn name_can_shadow_inert_macro(name: &str) -> bool {
+    builtin_macro_tokens_are_inert(name) || quote_macro_tokens_are_inert(name)
+}
+
+fn quote_import_resolves_to_inert_macro(
+    prefix: &[String],
+    imported_name: &str,
+    is_absolute: bool,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    use_prefix_resolves_to_quote_module(prefix, is_absolute, scope, parent_scopes)
+        && quote_macro_tokens_are_inert(imported_name)
+}
+
+fn quote_import_resolves_to_module_alias(
+    prefix: &[String],
+    imported_name: &str,
+    is_absolute: bool,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    (prefix.is_empty()
+        && imported_name == "quote"
+        && quote_crate_name_is_unshadowed(is_absolute, scope, parent_scopes))
+        || (use_prefix_resolves_to_quote_module(prefix, is_absolute, scope, parent_scopes)
+            && imported_name == "self")
+}
+
+fn scoped_inert_macro_alias_resolves(alias: &str, scopes: &[RustNameScope]) -> bool {
+    scoped_alias_resolves(
+        alias,
+        scopes,
+        |scope, alias| scope.inert_macro_aliases.aliases.contains(alias),
+        |scope, alias| scope.macro_names.contains(alias),
+    )
+}
+
+fn module_alias_resolves_to_quote(
+    alias: &str,
+    is_absolute: bool,
+    scopes: &[RustNameScope],
+) -> bool {
+    if is_absolute {
+        let scope_refs = scopes.iter().collect::<Vec<_>>();
+        return alias == "quote"
+            || root_scope(&scope_refs).is_some_and(|scope| {
+                scope
+                    .inert_macro_aliases
+                    .extern_module_aliases
+                    .contains(alias)
+            });
+    }
+
+    if scoped_alias_resolves(
+        alias,
+        scopes,
+        |scope, alias| scope.inert_macro_aliases.module_aliases.contains(alias),
+        |scope, alias| scope.type_or_module_names.contains(alias),
+    ) {
+        return true;
+    }
+
+    alias == "quote" && !type_or_module_name_is_shadowed(alias, scopes)
+}
+
+fn macro_name_is_shadowed(name: &str, scopes: &[RustNameScope]) -> bool {
+    scopes
+        .iter()
+        .rev()
+        .any(|scope| scope.macro_names.contains(name))
+}
+
+fn type_or_module_name_is_shadowed(name: &str, scopes: &[RustNameScope]) -> bool {
+    scopes
+        .iter()
+        .rev()
+        .any(|scope| scope.type_or_module_names.contains(name))
+}
+
+fn type_or_module_name_is_shadowed_in_scope_chain(
+    name: &str,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+) -> bool {
+    scope.type_or_module_names.contains(name)
+        || parent_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.type_or_module_names.contains(name))
+}
+
+fn macro_cfg_attr_at(tokens: &[TokenTree], start: usize) -> Option<(bool, usize)> {
+    if !matches!(tokens.get(start), Some(TokenTree::Punct(punct)) if punct.as_char() == '#') {
+        return None;
+    }
+
+    let Some(TokenTree::Group(group)) = tokens.get(start + 1) else {
+        return None;
+    };
+    if group.delimiter() != Delimiter::Bracket {
+        return None;
+    }
+
+    let attr_excludes_windows = syn::parse2::<Meta>(group.stream())
+        .ok()
+        .is_some_and(|meta| macro_attr_meta_windows_value(&meta) == CfgValue::AlwaysFalse);
+    Some((attr_excludes_windows, start + 2))
+}
+
+fn macro_attr_meta_windows_value(meta: &Meta) -> CfgValue {
+    match meta {
+        Meta::List(list) if list.path.is_ident("cfg") => {
+            let Some(items) = cfg_list_items(list) else {
+                return CfgValue::Unknown;
+            };
+            let [item] = items.as_slice() else {
+                return CfgValue::Unknown;
+            };
+            cfg_meta_windows_value(item)
+        }
+        _ => cfg_meta_windows_value(meta),
+    }
+}
+
+fn collect_macro_fallback_scope_names(
+    tokens: &[TokenTree],
+    scope: &mut RustNameScope,
+    parent_scopes: &[RustNameScope],
+) {
+    let mut start = 0;
+    while start < tokens.len() {
+        if let Some((Stmt::Item(item), next)) = macro_parseable_statement_at(tokens, start) {
+            collect_item_non_import_scope_names(&item, scope);
+            collect_item_import_scope_names(&item, scope, parent_scopes);
+            start = next;
+            continue;
+        }
+        start += 1;
+    }
+}
+
+fn parse_macro_pattern_slice(
+    tokens: &[TokenTree],
+    start: usize,
+    end: usize,
+) -> Option<RustNameScope> {
+    if start >= end {
+        return None;
+    }
+
+    let pat_stream = tokens[start..end].iter().cloned().collect::<TokenStream>();
+    let mut scope = RustNameScope::default();
+    if let Ok(pat) = Pat::parse_multi.parse2(pat_stream) {
+        collect_pat_local_names(&pat, &mut scope);
+    } else {
+        collect_macro_pattern_fallback_local_names(&tokens[start..end], &mut scope);
+    }
+    Some(scope)
+}
+
+fn collect_macro_pattern_fallback_local_names(tokens: &[TokenTree], scope: &mut RustNameScope) {
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                if !matches!(name.as_str(), "_" | "mut" | "ref") {
+                    scope.value_names.insert(name);
+                }
+            }
+            TokenTree::Group(group) => {
+                let nested = group.stream().into_iter().collect::<Vec<_>>();
+                collect_macro_pattern_fallback_local_names(&nested, scope);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn macro_fallback_let_shadow_at(tokens: &[TokenTree], start: usize) -> Option<RustNameScope> {
+    if !matches!(tokens.get(start), Some(TokenTree::Ident(ident)) if ident == "let") {
+        return None;
+    }
+
+    let mut eq_idx = start + 1;
+    while eq_idx < tokens.len() {
+        if matches!(tokens.get(eq_idx), Some(TokenTree::Punct(punct)) if punct.as_char() == '=') {
+            break;
+        }
+        if matches!(tokens.get(eq_idx), Some(TokenTree::Punct(punct)) if punct.as_char() == ';') {
+            return None;
+        }
+        eq_idx += 1;
+    }
+
+    if eq_idx >= tokens.len() {
+        return None;
+    }
+
+    parse_macro_pattern_slice(tokens, start + 1, eq_idx)
+}
+
+fn macro_fallback_body_shadow_at(tokens: &[TokenTree], start: usize) -> Option<RustNameScope> {
+    macro_fallback_match_arm_shadow_at(tokens, start)
+}
+
+fn macro_fallback_control_body_at(
+    tokens: &[TokenTree],
+    control_start: usize,
+) -> Option<(usize, usize, RustNameScope, usize)> {
+    match tokens.get(control_start) {
+        Some(TokenTree::Ident(ident)) if ident == "if" || ident == "while" => {
+            macro_fallback_if_while_body_at(tokens, control_start)
+        }
+        Some(TokenTree::Ident(ident)) if ident == "for" => {
+            macro_fallback_for_body_at(tokens, control_start)
+        }
+        _ => None,
+    }
+}
+
+fn macro_fallback_if_while_body_at(
+    tokens: &[TokenTree],
+    control_start: usize,
+) -> Option<(usize, usize, RustNameScope, usize)> {
+    if matches!(tokens.get(control_start + 1), Some(TokenTree::Ident(ident)) if ident == "let") {
+        return macro_fallback_if_while_let_body_at(tokens, control_start);
+    }
+
+    if !matches!(tokens.get(control_start), Some(TokenTree::Ident(ident)) if ident == "if") {
+        return None;
+    }
+
+    let expr_start = control_start + 1;
+    let body_idx = macro_fallback_control_body_group_idx(tokens, expr_start)?;
+    Some((expr_start, body_idx, RustNameScope::default(), body_idx + 1))
+}
+
+fn macro_fallback_if_while_let_body_at(
+    tokens: &[TokenTree],
+    control_start: usize,
+) -> Option<(usize, usize, RustNameScope, usize)> {
+    if !matches!(tokens.get(control_start + 1), Some(TokenTree::Ident(ident)) if ident == "let") {
+        return None;
+    }
+
+    let eq_idx = (control_start + 2..tokens.len()).find(
+        |idx| matches!(tokens.get(*idx), Some(TokenTree::Punct(punct)) if punct.as_char() == '='),
+    )?;
+    let body_idx = macro_fallback_control_body_group_idx(tokens, eq_idx + 1)?;
+    let shadow_scope = parse_macro_pattern_slice(tokens, control_start + 2, eq_idx)?;
+    Some((eq_idx + 1, body_idx, shadow_scope, body_idx + 1))
+}
+
+fn macro_fallback_for_body_at(
+    tokens: &[TokenTree],
+    control_start: usize,
+) -> Option<(usize, usize, RustNameScope, usize)> {
+    let in_idx = (control_start + 1..tokens.len())
+        .find(|idx| matches!(tokens.get(*idx), Some(TokenTree::Ident(ident)) if ident == "in"))?;
+    let body_idx = macro_fallback_control_body_group_idx(tokens, in_idx + 1)?;
+    let shadow_scope = parse_macro_pattern_slice(tokens, control_start + 1, in_idx)?;
+    Some((in_idx + 1, body_idx, shadow_scope, body_idx + 1))
+}
+
+fn macro_fallback_control_body_group_idx(tokens: &[TokenTree], start: usize) -> Option<usize> {
+    let mut candidate = None;
+    for idx in start..tokens.len() {
+        match tokens.get(idx) {
+            Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => {
+                candidate = Some(idx);
+            }
+            Some(TokenTree::Ident(ident)) if ident == "else" && candidate.is_some() => {
+                break;
+            }
+            Some(TokenTree::Punct(punct))
+                if matches!(punct.as_char(), ',' | ';') && candidate.is_some() =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+    candidate
+}
+
+fn macro_fallback_match_arm_at(
+    tokens: &[TokenTree],
+    body_start: usize,
+) -> Option<(RustNameScope, usize)> {
+    let shadow_scope = macro_fallback_match_arm_shadow_at(tokens, body_start)?;
+    let arm_end = macro_fallback_match_arm_end(tokens, body_start);
+    Some((shadow_scope, arm_end))
+}
+
+fn macro_fallback_match_arm_end(tokens: &[TokenTree], body_start: usize) -> usize {
+    let mut angle_depth = 0usize;
+    for idx in body_start..tokens.len() {
+        match tokens.get(idx) {
+            Some(TokenTree::Punct(punct))
+                if punct.as_char() == '<'
+                    && (angle_depth > 0
+                        || idx == body_start
+                        || macro_qself_type_prefix_starts_at(tokens, idx)
+                        || (idx >= 2 && token_pair_is_double_colon(tokens, idx - 2))) =>
+            {
+                angle_depth += 1;
+            }
+            Some(TokenTree::Punct(punct)) if punct.as_char() == '>' && angle_depth > 0 => {
+                angle_depth -= 1;
+            }
+            Some(TokenTree::Punct(punct)) if punct.as_char() == ',' && angle_depth == 0 => {
+                return idx;
+            }
+            _ => {}
+        }
+    }
+    tokens.len()
+}
+
+fn macro_qself_type_prefix_starts_at(tokens: &[TokenTree], start: usize) -> bool {
+    if !matches!(tokens.get(start), Some(TokenTree::Punct(punct)) if punct.as_char() == '<') {
+        return false;
+    }
+
+    let mut idx = start + 1;
+    let mut angle_depth = 1usize;
+    while idx < tokens.len() {
+        match tokens.get(idx) {
+            Some(TokenTree::Punct(punct)) if punct.as_char() == '<' => {
+                angle_depth += 1;
+            }
+            Some(TokenTree::Punct(punct)) if punct.as_char() == '>' => {
+                let Some(next_depth) = angle_depth.checked_sub(1) else {
+                    return false;
+                };
+                angle_depth = next_depth;
+                if angle_depth == 0 {
+                    return token_pair_is_double_colon(tokens, idx + 1);
+                }
+            }
+            Some(TokenTree::Punct(punct)) if punct.as_char() == ',' && angle_depth == 1 => {
+                return false;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    false
+}
+
+fn macro_fallback_match_arm_shadow_at(
+    tokens: &[TokenTree],
+    body_start: usize,
+) -> Option<RustNameScope> {
+    let arrow_start = body_start.checked_sub(2)?;
+    if !token_pair_is_fat_arrow(tokens, arrow_start) {
+        return None;
+    }
+
+    let mut pattern_start = arrow_start;
+    while pattern_start > 0 {
+        if matches!(tokens.get(pattern_start - 1), Some(TokenTree::Punct(punct)) if matches!(punct.as_char(), ',' | ';'))
+        {
+            break;
+        }
+        pattern_start -= 1;
+    }
+
+    let pattern_end = (pattern_start..arrow_start)
+        .find(|idx| matches!(tokens.get(*idx), Some(TokenTree::Ident(ident)) if ident == "if"))
+        .unwrap_or(arrow_start);
+    parse_macro_pattern_slice(tokens, pattern_start, pattern_end)
+}
+
+fn macro_parseable_statement_at(tokens: &[TokenTree], start: usize) -> Option<(Stmt, usize)> {
+    let mut idx = start;
+    while idx < tokens.len() {
+        match tokens.get(idx) {
+            Some(TokenTree::Punct(punct)) if punct.as_char() == ';' => {
+                return parse_macro_statement_slice(tokens, start, idx + 1);
+            }
+            Some(TokenTree::Group(_)) => {
+                if let Some(parsed) = parse_macro_statement_slice(tokens, start, idx + 1) {
+                    return Some(parsed);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    parse_macro_statement_slice(tokens, start, tokens.len())
+}
+
+fn parse_macro_statement_slice(
+    tokens: &[TokenTree],
+    start: usize,
+    end: usize,
+) -> Option<(Stmt, usize)> {
+    if start >= end {
+        return None;
+    }
+
+    let stream = tokens[start..end].iter().cloned().collect::<TokenStream>();
+    syn::parse2::<Stmt>(stream).ok().map(|stmt| (stmt, end))
+}
+
+fn macro_qself_expr_call_at(tokens: &[TokenTree], start: usize) -> Option<(ExprCall, usize)> {
+    if !matches!(tokens.get(start), Some(TokenTree::Punct(punct)) if punct.as_char() == '<') {
+        return None;
+    }
+
+    let mut end = start + 1;
+    let mut angle_depth = 1usize;
+    while end < tokens.len() {
+        match tokens.get(end) {
+            Some(TokenTree::Punct(punct)) if punct.as_char() == '<' => {
+                angle_depth += 1;
+            }
+            Some(TokenTree::Punct(punct)) if punct.as_char() == '>' => {
+                angle_depth = angle_depth.checked_sub(1)?;
+                if angle_depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        end += 1;
+    }
+
+    if angle_depth != 0 || !token_pair_is_double_colon(tokens, end + 1) {
+        return None;
+    }
+
+    let TokenTree::Ident(_) = tokens.get(end + 3)? else {
+        return None;
+    };
+    let TokenTree::Group(args) = tokens.get(end + 4)? else {
+        return None;
+    };
+    if args.delimiter() != Delimiter::Parenthesis {
+        return None;
+    }
+
+    let stream = tokens[start..=end + 4]
+        .iter()
+        .cloned()
+        .collect::<TokenStream>();
+    match syn::parse2::<Expr>(stream).ok()? {
+        Expr::Call(call) => Some((call, end + 5)),
+        _ => None,
+    }
+}
+
+fn macro_call_path_at(
+    tokens: &[TokenTree],
+    start: usize,
+) -> Option<(RustPathSegments, Span, &proc_macro2::Group, usize)> {
+    let mut idx = start;
+    let is_absolute = token_pair_is_double_colon(tokens, idx);
+    if token_pair_is_double_colon(tokens, idx) {
+        idx += 2;
+    } else if idx >= 2 && token_pair_is_double_colon(tokens, idx - 2) {
+        return None;
+    }
+
+    let TokenTree::Ident(first_ident) = tokens.get(idx)? else {
+        return None;
+    };
+    let span = first_ident.span();
+    let mut segments = vec![first_ident.to_string()];
+    idx += 1;
+
+    while token_pair_is_double_colon(tokens, idx) {
+        idx += 2;
+        let TokenTree::Ident(ident) = tokens.get(idx)? else {
+            return None;
+        };
+        segments.push(ident.to_string());
+        idx += 1;
+    }
+
+    let TokenTree::Group(args) = tokens.get(idx)? else {
+        return None;
+    };
+    if args.delimiter() == Delimiter::Parenthesis {
+        Some((
+            RustPathSegments {
+                is_absolute,
+                segments,
+            },
+            span,
+            args,
+            idx + 1,
+        ))
+    } else {
+        None
+    }
+}
+
+fn token_pair_is_double_colon(tokens: &[TokenTree], start: usize) -> bool {
+    matches!(tokens.get(start), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        && matches!(tokens.get(start + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+}
+
+fn macro_call_first_arg_is_string_literal(args: &proc_macro2::Group, expected: &str) -> bool {
+    let mut tokens = args.stream().into_iter();
+    let Some(first_arg) = tokens.next() else {
+        return false;
+    };
+
+    token_tree_is_string_literal(&first_arg, expected)
+}
+
+fn token_tree_is_string_literal(token_tree: &TokenTree, expected: &str) -> bool {
+    match token_tree {
+        TokenTree::Literal(literal) => literal_is_string_value(literal, expected),
+        TokenTree::Group(group) if group.delimiter() == Delimiter::Parenthesis => {
+            let mut tokens = group.stream().into_iter();
+            matches!(
+                (tokens.next(), tokens.next()),
+                (Some(token_tree), None) if token_tree_is_string_literal(&token_tree, expected)
+            )
+        }
+        _ => false,
+    }
+}
+
+fn literal_is_string_value(literal: &proc_macro2::Literal, expected: &str) -> bool {
+    matches!(
+        syn::parse_str::<Lit>(&literal.to_string()),
+        Ok(Lit::Str(value)) if value.value() == expected
+    )
+}
+
+fn scoped_alias_resolves(
+    alias: &str,
+    scopes: &[RustNameScope],
+    alias_matches: impl Fn(&RustNameScope, &str) -> bool,
+    alias_is_shadowed: impl Fn(&RustNameScope, &str) -> bool,
+) -> bool {
+    for scope in scopes.iter().rev() {
+        if alias_is_shadowed(scope, alias) {
+            return false;
+        }
+        if alias_matches(scope, alias) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn scoped_alias_resolves_with_current(
+    alias: &str,
+    scope: &RustNameScope,
+    parent_scopes: &[RustNameScope],
+    alias_matches: impl Fn(&RustNameScope, &str) -> bool,
+    alias_is_shadowed: impl Fn(&RustNameScope, &str) -> bool,
+) -> bool {
+    if alias_is_shadowed(scope, alias) {
+        return false;
+    }
+    if alias_matches(scope, alias) {
+        return true;
+    }
+
+    for scope in parent_scopes.iter().rev() {
+        if alias_is_shadowed(scope, alias) {
+            return false;
+        }
+        if alias_matches(scope, alias) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn first_arg_is_string_literal(call: &ExprCall, expected: &str) -> bool {
+    let Some(first_arg) = call.args.first() else {
+        return false;
+    };
+
+    expr_is_string_literal(first_arg, expected)
+}
+
+fn expr_is_string_literal(expr: &Expr, expected: &str) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) if value.value() == expected
+    ) || matches!(
+        expr,
+        Expr::Group(expr) if expr_is_string_literal(&expr.expr, expected)
+    ) || matches!(
+        expr,
+        Expr::Paren(expr) if expr_is_string_literal(&expr.expr, expected)
+    )
+}
+
+fn line_for_span(span: Span) -> usize {
+    span.start().line
+}
+
+fn attrs_include_unix_cfg(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(attr_excludes_windows)
+}
+
+fn attr_excludes_windows(attr: &Attribute) -> bool {
+    let Some(meta) = cfg_attr_meta(attr) else {
+        return false;
+    };
+
+    cfg_meta_windows_value(&meta) == CfgValue::AlwaysFalse
+}
+
+fn cfg_attr_meta(attr: &Attribute) -> Option<Meta> {
+    if !attr.path().is_ident("cfg") {
+        return None;
+    }
+
+    attr.parse_args::<Meta>().ok()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CfgValue {
+    AlwaysTrue,
+    AlwaysFalse,
+    Unknown,
+}
+
+fn cfg_meta_windows_value(meta: &Meta) -> CfgValue {
+    match meta {
+        Meta::Path(path) => cfg_path_windows_value(path),
+        Meta::NameValue(name_value) => cfg_name_value_windows_value(name_value),
+        Meta::List(list) if list.path.is_ident("all") => cfg_all_windows_value(list),
+        Meta::List(list) if list.path.is_ident("any") => cfg_any_windows_value(list),
+        Meta::List(list) if list.path.is_ident("not") => cfg_not_windows_value(list),
+        Meta::List(_) => CfgValue::Unknown,
+    }
+}
+
+fn cfg_path_windows_value(path: &syn::Path) -> CfgValue {
+    if path.is_ident("unix") {
+        CfgValue::AlwaysFalse
+    } else if path.is_ident("windows") {
+        CfgValue::AlwaysTrue
+    } else {
+        CfgValue::Unknown
+    }
+}
+
+fn cfg_name_value_windows_value(name_value: &syn::MetaNameValue) -> CfgValue {
+    let Some(value) = expr_string_literal(&name_value.value) else {
+        return CfgValue::Unknown;
+    };
+
+    if name_value.path.is_ident("target_family") || name_value.path.is_ident("target_os") {
+        if value == "windows" {
+            CfgValue::AlwaysTrue
+        } else {
+            CfgValue::AlwaysFalse
+        }
+    } else {
+        CfgValue::Unknown
+    }
+}
+
+fn cfg_all_windows_value(list: &syn::MetaList) -> CfgValue {
+    let Some(items) = cfg_list_items(list) else {
+        return CfgValue::Unknown;
+    };
+    let mut has_unknown = false;
+
+    for item in &items {
+        match cfg_meta_windows_value(item) {
+            CfgValue::AlwaysFalse => return CfgValue::AlwaysFalse,
+            CfgValue::AlwaysTrue => {}
+            CfgValue::Unknown => has_unknown = true,
+        }
+    }
+
+    if has_unknown {
+        CfgValue::Unknown
+    } else {
+        CfgValue::AlwaysTrue
+    }
+}
+
+fn cfg_any_windows_value(list: &syn::MetaList) -> CfgValue {
+    let Some(items) = cfg_list_items(list) else {
+        return CfgValue::Unknown;
+    };
+    let mut has_unknown = false;
+
+    for item in &items {
+        match cfg_meta_windows_value(item) {
+            CfgValue::AlwaysTrue => return CfgValue::AlwaysTrue,
+            CfgValue::AlwaysFalse => {}
+            CfgValue::Unknown => has_unknown = true,
+        }
+    }
+
+    if has_unknown {
+        CfgValue::Unknown
+    } else {
+        CfgValue::AlwaysFalse
+    }
+}
+
+fn cfg_not_windows_value(list: &syn::MetaList) -> CfgValue {
+    let Some(items) = cfg_list_items(list) else {
+        return CfgValue::Unknown;
+    };
+    let [item] = items.as_slice() else {
+        return CfgValue::Unknown;
+    };
+
+    match cfg_meta_windows_value(item) {
+        CfgValue::AlwaysTrue => CfgValue::AlwaysFalse,
+        CfgValue::AlwaysFalse => CfgValue::AlwaysTrue,
+        CfgValue::Unknown => CfgValue::Unknown,
+    }
+}
+
+fn cfg_list_items(list: &syn::MetaList) -> Option<Vec<Meta>> {
+    Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .ok()
+        .map(|items| items.into_iter().collect())
+}
+
+fn expr_string_literal(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) => Some(value.value()),
+        _ => None,
+    }
 }
 
 #[test]
@@ -6532,7 +11799,7 @@ fn test_internal_link_checker_handles_common_markdown_inline_link_forms() {
         )
     });
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args([
             "scripts/check-internal-links.sh",
             "--no-git-tracked-check",
@@ -6567,7 +11834,7 @@ fn test_internal_link_checker_handles_common_markdown_inline_link_forms() {
         )
     });
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args([
             "scripts/check-internal-links.sh",
             "--no-git-tracked-check",
@@ -6635,7 +11902,7 @@ fn test_internal_link_checker_rejects_repo_escaping_relative_links() {
         )
     });
 
-    let output = Command::new("bash")
+    let output = bash_command()
         .args(["scripts/check-internal-links.sh", "--quiet"])
         .arg(&markdown_path)
         .current_dir(&root)
@@ -8417,19 +13684,95 @@ fn test_ci_safety_pr_triggers_are_code_scoped() {
 }
 
 #[test]
-fn test_ci_safety_runs_miri_compat_preflight() {
+fn test_ci_safety_runs_miri_with_isolation_disabled() {
+    // The Miri job runs with `-Zmiri-disable-isolation`. This is what
+    // structurally eliminates the entire "test reached an isolated syscall"
+    // failure class (wall-clock `clock_gettime`, entropy `getrandom`, `getcwd`):
+    // with isolation off, the interpreter services those syscalls instead of
+    // aborting the test binary, so ordinary time/UUID-using unit tests run under
+    // Miri without per-test annotations or a separate compatibility scanner.
+    // Guard the flag here so the class cannot silently regress.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
 
     assert!(
-        content.contains("bash scripts/check-miri-compat.sh"),
-        "ci-safety.yml should run scripts/check-miri-compat.sh before the slow \
-         Miri interpreter step so incompatible tests fail fast with local \
-         remediation guidance. Invoke through bash so CI does not depend on \
-         checkout executable-bit metadata.\nFile: {}",
+        content.contains("-Zmiri-disable-isolation"),
+        "ci-safety.yml must run Miri with MIRIFLAGS=-Zmiri-disable-isolation so \
+         wall-clock / entropy / getcwd syscalls do not abort the interpreter. \
+         Without it, any unit test reaching Utc::now()/SystemTime::now()/getrandom \
+         re-introduces the isolation failure class this flag was added to kill.\n\
+         File: {}",
         workflow_path.display()
     );
+}
+
+#[test]
+fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for required in [
+        "CARGO_TARGET_DIR: target/miri",
+        "CARGO_TARGET_DIR: target/asan",
+        "prefix-key: \"ci-safety-nightly-v2\"",
+        "workspaces: \". -> target/miri\"",
+        "workspaces: \". -> target/asan\"",
+        "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}",
+    ] {
+        assert!(
+            content.contains(required),
+            "ci-safety.yml must isolate advanced-safety target directories and \
+             use a fresh cache epoch so stale trybuild target caches cannot \
+             cause rust-cache ENOENT noise.\n\
+             Missing required marker: `{required}`\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+
+    for required in [
+        "Run Miri on library tests",
+        "cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast",
+        "Run tests with AddressSanitizer",
+        "cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu",
+        "--all-features --no-fail-fast 2>&1 | tee asan-output.txt",
+    ] {
+        assert!(
+            content.contains(required),
+            "ci-safety.yml must keep broad Miri/ASan coverage; the nested Cargo \
+             failure class is handled by env scrubbing, not by dropping test \
+             targets from the safety jobs.\n\
+             Missing required marker: `{required}`\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
+
+    for forbidden in [
+        "MIRI_TEST_FILTERS=(",
+        "ASAN_TEST_TARGETS=(",
+        "--test ci_config_tests",
+        "--test public_api_privacy_tests",
+    ] {
+        assert!(
+            !content.contains(forbidden),
+            "ci-safety.yml must not use hand-maintained safety target filters. \
+             Such filters silently miss new runtime tests and can narrow coverage \
+             for unrelated failure classes.\n\
+             Found forbidden marker: `{forbidden}`\n\
+             File: {}",
+            workflow_path.display()
+        );
+    }
 }
 
 #[test]
@@ -10463,6 +15806,255 @@ fn test_run_local_ci_includes_readme_badge_style_check() {
 }
 
 #[test]
+fn test_run_local_ci_runs_actionlint_when_available() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("command -v actionlint") && content.contains("run_check_quiet \"actionlint\""),
+        "run-local-ci.sh should run actionlint when it is installed so local workflow validation catches GitHub Actions lint failures."
+    );
+    assert!(
+        content.contains(".github/workflows/*.yml")
+            && content.contains(".github/workflows/*.yaml")
+            && content.contains("actionlint \"${ACTIONLINT_WORKFLOWS[@]}\""),
+        "run-local-ci.sh should validate every .yml and .yaml workflow file with actionlint."
+    );
+}
+
+const LOCAL_CI_FAST_SKIPPED_CHECKS: &[(&str, &str, &str)] = &[
+    (
+        "default-feature clippy",
+        "run_check \"clippy-default\" \"Running clippy (default features)\"",
+        "default-feature clippy is intentionally skipped in fast mode",
+    ),
+    (
+        "all-feature clippy",
+        "run_check \"clippy-all\" \"Running clippy (all features)\"",
+        "all-feature clippy is intentionally skipped in fast mode",
+    ),
+    (
+        "default feature tests",
+        "run_check \"test-default\"",
+        "default test execution is intentionally skipped in fast mode",
+    ),
+    (
+        "all-feature tests",
+        "run_check \"test-all\"",
+        "all-feature test execution is intentionally skipped in fast mode",
+    ),
+    (
+        "no-panic nested scan",
+        "run_check_quiet \"no-panics\"",
+        "the panic-policy job runs the nested syn-backed scan once",
+    ),
+    (
+        "documentation policy tests",
+        "run_check \"doc-policy-tests\"",
+        "doc policy tests are part of the full local CI path",
+    ),
+];
+
+fn line_has_fast_mode_false_guard_before_marker(content: &str, marker: &str) -> bool {
+    let lines = content.lines().collect::<Vec<_>>();
+
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(marker))
+        .any(|(index, _)| {
+            let start = index.saturating_sub(4);
+            lines[start..=index]
+                .iter()
+                .any(|line| line.contains("FAST_MODE") && line.contains("false"))
+        })
+}
+
+#[test]
+fn test_run_local_ci_fast_mode_skips_slow_checks() {
+    let root = repo_root();
+    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+
+    let missing_guards = LOCAL_CI_FAST_SKIPPED_CHECKS
+        .iter()
+        .filter(|(_, marker, _)| !line_has_fast_mode_false_guard_before_marker(&script, marker))
+        .map(|(name, marker, reason)| format!("  - {name}: `{marker}` ({reason})"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing_guards.is_empty(),
+        "scripts/run-local-ci.sh --fast must skip slow checks so the local \
+         fast path remains lightweight and does not duplicate expensive CI \
+         phases.\n\
+         Missing FAST_MODE=false guards:\n{}",
+        missing_guards.join("\n")
+    );
+
+    assert!(
+        script.contains("tests, clippy, nested policy scans"),
+        "scripts/run-local-ci.sh --fast help text should state that nested \
+         policy scans and clippy are skipped, matching the implementation."
+    );
+}
+
+fn shell_logical_lines(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for raw_line in content.lines() {
+        let trimmed_end = raw_line.trim_end();
+        let continued = trimmed_end.ends_with('\\');
+        let segment = if continued {
+            trimmed_end.trim_end_matches('\\').trim_end()
+        } else {
+            raw_line
+        };
+
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(segment.trim());
+
+        if !continued {
+            if !current.trim().is_empty() {
+                lines.push(current.trim().to_string());
+            }
+            current.clear();
+        }
+    }
+
+    if !current.trim().is_empty() {
+        lines.push(current.trim().to_string());
+    }
+
+    lines
+}
+
+fn shellish_tokens(command: &str) -> Vec<String> {
+    let command = strip_unquoted_shell_comment(command);
+    let mut token_text = command.replace("&&", " ").replace("||", " ");
+    for separator in [';', '(', ')'] {
+        token_text = token_text.replace(separator, " ");
+    }
+
+    token_text
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c| matches!(c, '!' | '\\' | '"' | '\'')))
+        .filter(|token| !token.is_empty() && *token != "if" && *token != "then")
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn run_nested_cargo_commands(content: &str, cargo_subcommand: &str) -> Vec<Vec<String>> {
+    shell_logical_lines(content)
+        .into_iter()
+        .filter_map(|line| {
+            let tokens = shellish_tokens(&line);
+            tokens
+                .windows(2)
+                .position(|window| window == ["run_nested_cargo", cargo_subcommand])
+                .map(|start| tokens[start..].to_vec())
+        })
+        .collect()
+}
+
+fn command_has_flag_value(command: &[String], flag: &str, value: &str) -> bool {
+    command.windows(2).any(|window| window == [flag, value])
+}
+
+fn command_has_flag(command: &[String], flag: &str) -> bool {
+    command.iter().any(|token| token == flag)
+}
+
+fn format_commands_for_diagnostics(commands: &[Vec<String>]) -> String {
+    if commands.is_empty() {
+        return "  <none>".to_string();
+    }
+
+    commands
+        .iter()
+        .map(|command| format!("  - {}", command.join(" ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const NO_PANIC_SCRIPT_REQUIRED_MARKERS: &[(&str, &str)] = &[
+    (
+        "NESTED_CARGO_TARGET_DIR",
+        "isolates nested Cargo artifacts from parent CI jobs",
+    ),
+    (
+        "run_nested_cargo",
+        "centralizes nested Cargo environment scrubbing",
+    ),
+    (
+        "Scrubbing inherited Cargo instrumentation env",
+        "makes sanitizer/Miri contamination visible in logs",
+    ),
+    (
+        "Nested Cargo command:",
+        "prints the delegated Cargo command for failure diagnostics",
+    ),
+    (
+        "Nested Cargo target dir:",
+        "prints the isolated target directory for failure diagnostics",
+    ),
+    (
+        "unset \"$var\"",
+        "removes inherited instrumentation before nested Cargo",
+    ),
+    (
+        "export CARGO_TARGET_DIR=\"$NESTED_CARGO_TARGET_DIR\"",
+        "forces the nested build into the isolated target directory",
+    ),
+    (
+        "RUSTFLAGS",
+        "scrubs sanitizer and cfg flags from parent jobs",
+    ),
+    (
+        "CARGO_ENCODED_RUSTFLAGS",
+        "scrubs encoded sanitizer and cfg flags from parent jobs",
+    ),
+    (
+        "RUSTDOCFLAGS",
+        "scrubs doc instrumentation from parent jobs",
+    ),
+    ("ASAN_OPTIONS", "scrubs AddressSanitizer runtime options"),
+    ("LSAN_OPTIONS", "scrubs LeakSanitizer runtime options"),
+    (
+        "UBSAN_OPTIONS",
+        "scrubs UndefinedBehaviorSanitizer runtime options",
+    ),
+    ("TSAN_OPTIONS", "scrubs ThreadSanitizer runtime options"),
+    ("MIRIFLAGS", "scrubs Miri runtime options"),
+];
+
+const NO_PANIC_SCRIPT_FORBIDDEN_MARKERS: &[(&str, &str)] = &[
+    (
+        "filter_test_code",
+        "shell range classification is not Rust syntax-aware",
+    ),
+    ("awk -v target", "AWK cannot safely parse Rust source"),
+    (
+        "grep -rn 'panic!'",
+        "grep cannot distinguish code from strings, comments, and raw literals",
+    ),
+];
+
+const NO_PANIC_SCANNER_REQUIRED_MARKERS: &[(&str, &str)] = &[
+    ("syn::parse_file", "scanner must parse Rust syntax"),
+    (
+        "_tests.rs",
+        "scanner must skip Rust test modules by filename",
+    ),
+    (
+        "ends_with(\"_test.rs\")",
+        "scanner must skip singular Rust test module filenames",
+    ),
+];
+
+#[test]
 fn test_check_no_panics_script_structure() {
     let root = repo_root();
     let script_path = root.join("scripts/check-no-panics.sh");
@@ -10473,58 +16065,220 @@ fn test_check_no_panics_script_structure() {
     );
 
     let content = read_file(&script_path);
+    let scanner_path = root.join("tests/no_panic_policy_scan.rs");
+    let scanner_content = read_file(&scanner_path);
 
+    let pattern_commands = run_nested_cargo_commands(&content, "test");
     assert!(
-        content.contains("filter_test_code"),
-        "check-no-panics.sh must contain a filter_test_code function \
-         to exclude test code from panic pattern scanning"
+        pattern_commands
+            .iter()
+            .any(|command| command_has_flag(command, "--locked")
+                && command_has_flag_value(command, "--test", "no_panic_policy_scan")
+                && command_has_flag(command, "--quiet")),
+        "check-no-panics.sh patterns mode must delegate Rust source analysis \
+         to the syn-backed no_panic_policy_scan integration test instead of \
+         parsing Rust with shell text filters.\n\
+         Expected command markers: run_nested_cargo test --locked --test \
+         no_panic_policy_scan --quiet\n\
+         Found nested Cargo test commands:\n{}",
+        format_commands_for_diagnostics(&pattern_commands)
     );
 
-    // The integer expression bug was caused by unsanitized wc -l output
+    let missing_required_markers = NO_PANIC_SCRIPT_REQUIRED_MARKERS
+        .iter()
+        .filter(|(marker, _)| !content.contains(marker))
+        .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
+        .collect::<Vec<_>>();
+
     assert!(
-        content.contains("tr -d") || content.contains("xargs"),
-        "check-no-panics.sh must sanitize count variables (e.g., via tr -d or xargs) \
-         to prevent 'integer expression expected' errors"
+        missing_required_markers.is_empty(),
+        "check-no-panics.sh must scrub inherited sanitizer/Miri/Cargo \
+         instrumentation before running nested Cargo so ASan/Miri parents \
+         cannot poison the policy scan.\n\
+         Missing required markers:\n{}",
+        missing_required_markers.join("\n")
     );
 
-    // Must use --lib --bins for clippy, not --all-targets
+    let forbidden_markers = NO_PANIC_SCRIPT_FORBIDDEN_MARKERS
+        .iter()
+        .filter(|(marker, _)| content.contains(marker))
+        .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
+        .collect::<Vec<_>>();
+
     assert!(
-        content.contains("clippy --lib --bins") || content.contains("clippy\" --lib --bins"),
+        forbidden_markers.is_empty(),
+        "check-no-panics.sh must not classify Rust test ranges with grep/AWK. \
+         Rust strings, comments, raw strings, and char literals make shell \
+         source scanning too fragile.\n\
+         Forbidden markers found:\n{}",
+        forbidden_markers.join("\n")
+    );
+
+    let clippy_commands = run_nested_cargo_commands(&content, "clippy");
+    assert!(
+        clippy_commands
+            .iter()
+            .any(|command| command_has_flag(command, "--locked")
+                && command_has_flag(command, "--lib")
+                && command_has_flag(command, "--bins")
+                && command_has_flag(command, "--all-features")
+                && !command_has_flag(command, "--all-targets")),
         "check-no-panics.sh clippy must use --lib --bins to check library and \
-         binary targets without flagging test code.\n\
-         Using --all-targets would report false positives for .unwrap() in tests."
+         binary targets across all features without flagging test code.\n\
+         Using --all-targets would report false positives for .unwrap() in tests.\n\
+         Found nested Cargo clippy commands:\n{}",
+        format_commands_for_diagnostics(&clippy_commands)
     );
 
-    // Must exclude *_tests.rs files from grep scanning
+    let missing_scanner_markers = NO_PANIC_SCANNER_REQUIRED_MARKERS
+        .iter()
+        .filter(|(marker, _)| !scanner_content.contains(marker))
+        .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
+        .collect::<Vec<_>>();
+
     assert!(
-        content.contains("_tests.rs"),
-        "check-no-panics.sh must exclude *_tests.rs files from pattern scanning.\n\
+        missing_scanner_markers.is_empty(),
+        "tests/no_panic_policy_scan.rs must parse Rust with syn and exclude \
+         test-only source paths.\n\
          Files like src/server/ready_state_tests.rs are #[cfg(test)] modules \
-         that don't contain #[cfg(test)] internally."
+         that don't contain #[cfg(test)] internally.\n\
+         Missing scanner markers:\n{}",
+        missing_scanner_markers.join("\n")
     );
 }
 
 #[test]
 #[cfg(unix)]
-fn test_check_no_panics_script_patterns_pass() {
-    use std::process::Command;
+fn test_check_no_panics_script_patterns_scrubs_nested_cargo_env() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
 
     let root = repo_root();
     let script = root.join("scripts/check-no-panics.sh");
+    let temp = common::unique_temp_dir("fake-cargo-no-panics");
+    let fake_bin = temp.path().join("bin");
+    let fake_cargo = fake_bin.join("cargo");
+    let fake_cargo_log = temp.path().join("fake-cargo-env.txt");
+    let nested_target = temp.path().join("nested-target");
 
-    let output = Command::new("bash")
+    fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|e| panic!("Failed to create {}: {e}", fake_bin.display()));
+    common::write_file(
+        &fake_cargo,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+{
+    printf 'args=%s\n' "$*"
+    for var in \
+        RUSTFLAGS \
+        CARGO_ENCODED_RUSTFLAGS \
+        RUSTDOCFLAGS \
+        ASAN_OPTIONS \
+        LSAN_OPTIONS \
+        UBSAN_OPTIONS \
+        TSAN_OPTIONS \
+        MIRIFLAGS
+    do
+        if [ -n "${!var+x}" ]; then
+            printf '%s=%s\n' "$var" "${!var}"
+        else
+            printf '%s=<unset>\n' "$var"
+        fi
+    done
+    printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
+} > "$FAKE_CARGO_LOG"
+"#,
+    );
+    fs::set_permissions(&fake_cargo, Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("Failed to chmod {}: {e}", fake_cargo.display()));
+
+    let original_path = std::env::var_os("PATH").expect("PATH must be set for script tests");
+    let mut path = std::ffi::OsString::from(fake_bin.as_os_str());
+    path.push(":");
+    path.push(original_path);
+
+    let output = bash_command()
         .arg(&script)
         .arg("patterns")
         .current_dir(&root)
+        .env("PATH", path)
+        .env("FAKE_CARGO_LOG", &fake_cargo_log)
+        .env("NESTED_CARGO_TARGET_DIR", &nested_target)
+        .env("RUSTFLAGS", "--cfg")
+        .env("CARGO_ENCODED_RUSTFLAGS", "--cfg")
+        .env("RUSTDOCFLAGS", "--cfg")
+        .env(
+            "CARGO_TARGET_DIR",
+            root.join("target").join("poisoned-parent-target"),
+        )
+        .env("ASAN_OPTIONS", "detect_odr_violation=0")
+        .env("LSAN_OPTIONS", "detect_leaks=1")
+        .env("UBSAN_OPTIONS", "print_stacktrace=1")
+        .env("TSAN_OPTIONS", "halt_on_error=1")
+        .env("MIRIFLAGS", "-Zmiri-poisoned-parent")
         .output()
         .unwrap_or_else(|e| panic!("Failed to run {}: {e}", script.display()));
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "check-no-panics.sh patterns should pass on the current codebase.\n\
-         stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "check-no-panics.sh patterns should pass with a fake cargo command.\n\
+         This regression runs with poisoned inherited Cargo instrumentation \
+         variables so the script must scrub them before invoking nested Cargo.\n\
+         stdout: {stdout}\nstderr: {stderr}",
+    );
+    assert!(
+        stdout.contains("Scrubbing inherited Cargo instrumentation env"),
+        "check-no-panics.sh should report when it scrubs inherited Cargo \
+         instrumentation variables.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Nested Cargo target dir:"),
+        "check-no-panics.sh should print the isolated nested Cargo target dir \
+         for diagnostics.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(
+            "Nested Cargo command: cargo test --locked --test no_panic_policy_scan --quiet"
+        ),
+        "check-no-panics.sh should print the delegated nested Cargo command \
+         for diagnostics.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let fake_cargo_output = read_file(&fake_cargo_log);
+    assert!(
+        fake_cargo_output.contains("args=test --locked --test no_panic_policy_scan --quiet"),
+        "check-no-panics.sh patterns must invoke the syn-backed scanner test \
+         through nested Cargo.\nFake cargo output:\n{fake_cargo_output}"
+    );
+    assert!(
+        fake_cargo_output.contains(&format!("CARGO_TARGET_DIR={}", nested_target.display())),
+        "check-no-panics.sh must route nested Cargo artifacts into the isolated \
+         target directory.\nFake cargo output:\n{fake_cargo_output}"
+    );
+
+    let inherited_vars = [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "ASAN_OPTIONS",
+        "LSAN_OPTIONS",
+        "UBSAN_OPTIONS",
+        "TSAN_OPTIONS",
+        "MIRIFLAGS",
+    ];
+    let leaked_vars = inherited_vars
+        .iter()
+        .filter(|var| !fake_cargo_output.contains(&format!("{var}=<unset>")))
+        .copied()
+        .collect::<Vec<_>>();
+
+    assert!(
+        leaked_vars.is_empty(),
+        "check-no-panics.sh must scrub inherited Cargo/sanitizer/Miri \
+         instrumentation before invoking nested Cargo.\n\
+         Leaked variables: {leaked_vars:?}\nFake cargo output:\n{fake_cargo_output}"
     );
 }
 
@@ -10591,8 +16345,6 @@ fn test_pinned_nightly_staleness_warning() {
 #[test]
 #[cfg(unix)]
 fn test_scripts_pass_basic_syntax_check() {
-    use std::process::Command;
-
     let root = repo_root();
     let scripts_dir = root.join("scripts");
 
@@ -10616,7 +16368,7 @@ fn test_scripts_pass_basic_syntax_check() {
     for entry in &entries {
         let path = entry.path();
         // Use bash -n for syntax check (always available, unlike shellcheck)
-        let output = Command::new("bash")
+        let output = bash_command()
             .arg("-n")
             .arg(&path)
             .output()
@@ -11314,13 +17066,15 @@ fn test_proptest_tests_ignored_under_miri() {
     // This test ensures that all `#[test]` functions inside `proptest!` blocks
     // have `#[cfg_attr(miri, ignore)]` annotations.
     //
-    // Background: Proptest's failure-persistence layer calls `std::env::current_dir()`
-    // to absolutize source file paths. Miri blocks `getcwd` in isolation mode,
-    // causing the entire test binary to abort. This is not a per-test failure --
-    // it kills every test in the binary.
+    // Background: a proptest case runs hundreds of generated inputs per test.
+    // Under Miri's interpreter (10-50x slower) that is far too slow for the job's
+    // time budget, and proptest's input-space exploration is orthogonal to Miri's
+    // purpose (detecting undefined behavior on one concrete execution). So each
+    // `#[test]` inside a `proptest!` block stays annotated `#[cfg_attr(miri,
+    // ignore)]` to keep the Miri job fast and focused.
     //
-    // The fix is to annotate each `#[test]` inside a `proptest!` block with
-    // `#[cfg_attr(miri, ignore)]` so Miri skips those tests entirely.
+    // (Ordinary tests need no annotation: the Miri job runs with
+    // `-Zmiri-disable-isolation`, so wall-clock / entropy / getcwd syscalls work.)
 
     let root = repo_root();
     let src_dir = root.join("src");
@@ -11446,16 +17200,13 @@ fn test_proptest_tests_ignored_under_miri() {
              - Tests with #[cfg_attr(miri, ignore)]: {}\n\
              - Tests missing annotation: {}\n\n\
              Why this is required:\n\
-             - Proptest's failure-persistence layer calls std::env::current_dir()\n\
-             - Miri blocks getcwd in isolation mode\n\
-             - This aborts the ENTIRE test binary, not just one test\n\
+             - A proptest test runs hundreds of generated cases per test\n\
+             - Under Miri's interpreter (10-50x slower) that blows the job's time budget\n\
+             - Proptest's input-space exploration is orthogonal to Miri's UB detection\n\
              - Adding #[cfg_attr(miri, ignore)] skips the test under Miri\n\n\
              Fix: Add #[cfg_attr(miri, ignore)] to each #[test] inside proptest! blocks.\n\
-             Also add an explanatory comment above the proptest! macro:\n\
-             // NOTE: All proptest tests are excluded from Miri runs via\n\
-             // `#[cfg_attr(miri, ignore)]`. Proptest's failure-persistence layer calls\n\
-             // `std::env::current_dir()` (getcwd), which is blocked by Miri isolation\n\
-             // and aborts the entire test binary.",
+             Also add an explanatory comment on each annotation, e.g.:\n\
+             // proptest runs hundreds of cases — too slow under Miri",
             violations.join("\n"),
             total_proptest_blocks,
             total_tests_in_proptest,
@@ -11465,89 +17216,13 @@ fn test_proptest_tests_ignored_under_miri() {
     }
 }
 
-#[test]
-fn test_wall_clock_tests_ignored_under_miri() {
-    // Regression guard: tests that use wall-clock APIs (Room::new, Utc::now,
-    // SystemTime::now) must opt out of Miri with #[cfg_attr(miri, ignore)].
-    // Miri blocks clock_gettime(CLOCK_REALTIME) in isolation mode.
-    let root = repo_root();
-    let required_miri_ignored_tests: [(&str, &[&str]); 2] = [
-        (
-            "src/protocol/mod.rs",
-            &[
-                "test_room_creation",
-                "test_player_management",
-                "test_authority_management",
-                "test_authority_management_disabled",
-                "test_player_name_uniqueness",
-                "test_authority_protocol_basic_rules",
-                "test_authority_protocol_single_authority_rule",
-                "test_authority_protocol_no_auto_reassignment",
-                "test_authority_protocol_room_support_validation",
-                "test_lobby_state_transitions",
-                "test_lobby_ready_state_changes",
-                "test_peer_connections",
-                "test_lobby_edge_cases",
-            ],
-        ),
-        (
-            "src/reconnection.rs",
-            &[
-                "test_reconnection_token_creation",
-                "test_reconnection_token_validation",
-                "test_event_buffer_push",
-                "test_event_buffer_get_events_after",
-                "test_reconnection_manager_flow",
-                "test_event_buffering",
-            ],
-        ),
-    ];
-
-    let mut violations = Vec::new();
-
-    for (relative_file, test_names) in required_miri_ignored_tests {
-        let source_file = root.join(relative_file);
-        let content = read_file(&source_file);
-        let lines: Vec<&str> = content.lines().collect();
-
-        for test_name in test_names {
-            let marker = format!("fn {test_name}(");
-            let Some(line_idx) = lines.iter().position(|line| line.contains(&marker)) else {
-                violations.push(format!(
-                    "{}: missing expected test function `{}`",
-                    source_file.display(),
-                    test_name
-                ));
-                continue;
-            };
-
-            let search_start = line_idx.saturating_sub(4);
-            let has_miri_ignore = lines
-                .iter()
-                .take(line_idx)
-                .skip(search_start)
-                .any(|line| line.trim().contains("cfg_attr(miri, ignore)"));
-
-            if !has_miri_ignore {
-                violations.push(format!(
-                    "{}:{}: `{}` must include #[cfg_attr(miri, ignore)] to avoid \
-                     Miri clock_gettime isolation failures",
-                    source_file.display(),
-                    line_idx + 1,
-                    test_name
-                ));
-            }
-        }
-    }
-
-    assert!(
-        violations.is_empty(),
-        "Wall-clock-dependent tests missing Miri ignore annotations:\n\n{}\n\n\
-         Fix: add #[cfg_attr(miri, ignore)] above each listed #[test] or \
-         #[tokio::test] function.",
-        violations.join("\n")
-    );
-}
+// The Miri wall-clock guard (a discovery scanner + this blocking test) was
+// retired when the Advanced Safety (Miri) job adopted `-Zmiri-disable-isolation`.
+// With isolation disabled the interpreter services clock_gettime/getrandom/getcwd
+// directly, so a unit test reaching Utc::now()/SystemTime::now() can no longer
+// abort the run — there is nothing left for a per-test annotation guard to
+// enforce. The surviving regression guard is
+// `test_ci_safety_runs_miri_with_isolation_disabled`, which pins the flag.
 
 // ============================================================================
 // Bash Code Block Validation Tests
@@ -13074,6 +18749,9 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
     ".llm/*",
     "target/*",
     "progress/*",
+    "src/*_tests.rs",
+    "src/*_test.rs",
+    "src/*/tests.rs",
     "docs/ci-cd-*",
     "docs/test-*",
     "docs/git-hooks-*",
@@ -13159,6 +18837,21 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
         "scripts are internal tooling",
     ),
     ("tests/ci_config_tests.rs", true, "test files are internal"),
+    (
+        "src/server/message_router_tests.rs",
+        true,
+        "Rust test modules under src are internal",
+    ),
+    (
+        "src/server/ready_state_test.rs",
+        true,
+        "singular Rust test modules under src are internal",
+    ),
+    (
+        "src/server/tests.rs",
+        true,
+        "nested Rust tests.rs modules under src are internal",
+    ),
     (
         "docs/ci-cd-testing.md",
         true,

@@ -7,8 +7,8 @@
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, GameDataEncoding, PlayerId, ProtocolInfoPayload, ServerMessage, Topology,
-    Transport,
+    ClientMessage, GameDataEncoding, IceServer, PlayerId, ProtocolInfoPayload, ServerMessage,
+    SessionPeer, SessionPlanPayload, Topology, Transport,
 };
 
 // ---------------------------------------------------------------------------
@@ -344,5 +344,185 @@ fn server_new_peer_round_trips_json_and_msgpack() {
             assert!(you_initiate);
         }
         other => panic!("expected NewPeer, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P3 SessionPlan wire types (Appendix A/B): exact tag, field names, tokens, and
+// the skip_serializing_if / default omissions.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_plan_mesh_wire_shape_and_tokens() {
+    let peer = PlayerId::new_v4();
+    let msg = ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+        peers: vec![SessionPeer {
+            player_id: peer,
+            player_name: "P2".to_string(),
+            is_authority: false,
+            initiate: true,
+        }],
+        ice_servers: vec![IceServer {
+            urls: vec![
+                "stun:stun.l.google.com:19302".to_string(),
+                "turn:turn.example.com:3478".to_string(),
+            ],
+            username: Some("user".to_string()),
+            credential: Some("pass".to_string()),
+        }],
+        fallback: Transport::Relay,
+    }));
+
+    let value = serde_json::to_value(&msg).unwrap();
+    // Exact envelope: {"type":"SessionPlan","data":{...}} (Appendix A).
+    assert_eq!(value["type"], json!("SessionPlan"));
+    let data = &value["data"];
+    // Wire tokens.
+    assert_eq!(data["topology"], json!("mesh"));
+    assert_eq!(data["transport"], json!("webrtc"));
+    assert_eq!(data["fallback"], json!("relay"));
+    // Field names on the peer.
+    assert_eq!(data["peers"][0]["player_id"], json!(peer.to_string()));
+    assert_eq!(data["peers"][0]["player_name"], json!("P2"));
+    assert_eq!(data["peers"][0]["is_authority"], json!(false));
+    assert_eq!(data["peers"][0]["initiate"], json!(true));
+    // ICE server byte-preserved (urls + auth fields present).
+    assert_eq!(
+        data["ice_servers"][0]["urls"],
+        json!(["stun:stun.l.google.com:19302", "turn:turn.example.com:3478"])
+    );
+    assert_eq!(data["ice_servers"][0]["username"], json!("user"));
+    assert_eq!(data["ice_servers"][0]["credential"], json!("pass"));
+    // host is None => omitted.
+    assert!(
+        data.as_object().unwrap().get("host").is_none(),
+        "host must be omitted when None"
+    );
+}
+
+#[test]
+fn session_plan_host_some_is_present_on_wire() {
+    let host = PlayerId::new_v4();
+    let msg = ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+        topology: Topology::Host,
+        transport: Transport::Direct,
+        host: Some(host),
+        peers: vec![],
+        ice_servers: vec![],
+        fallback: Transport::Relay,
+    }));
+
+    let value = serde_json::to_value(&msg).unwrap();
+    let data = &value["data"];
+    assert_eq!(data["topology"], json!("host"));
+    assert_eq!(data["transport"], json!("direct"));
+    assert_eq!(data["host"], json!(host.to_string()));
+    // ice_servers empty => omitted (skip_serializing_if Vec::is_empty).
+    assert!(
+        data.as_object().unwrap().get("ice_servers").is_none(),
+        "ice_servers must be omitted when empty"
+    );
+}
+
+#[test]
+fn ice_server_omits_credentials_when_none() {
+    let server = IceServer {
+        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        username: None,
+        credential: None,
+    };
+    let value = serde_json::to_value(&server).unwrap();
+    let obj = value.as_object().unwrap();
+    assert_eq!(value["urls"], json!(["stun:stun.l.google.com:19302"]));
+    assert!(
+        !obj.contains_key("username"),
+        "username must be omitted when None"
+    );
+    assert!(
+        !obj.contains_key("credential"),
+        "credential must be omitted when None"
+    );
+}
+
+#[test]
+fn session_plan_round_trips_json_and_msgpack() {
+    let host = PlayerId::new_v4();
+    let peer = PlayerId::new_v4();
+    let original = SessionPlanPayload {
+        topology: Topology::Host,
+        transport: Transport::WebRtc,
+        host: Some(host),
+        peers: vec![SessionPeer {
+            player_id: peer,
+            player_name: "Peer".to_string(),
+            is_authority: true,
+            initiate: true,
+        }],
+        ice_servers: vec![IceServer {
+            urls: vec!["turn:turn.example.com:3478".to_string()],
+            username: Some("u".to_string()),
+            credential: Some("c".to_string()),
+        }],
+        fallback: Transport::Relay,
+    };
+    let msg = ServerMessage::SessionPlan(Box::new(original));
+
+    // JSON round-trip.
+    let json = serde_json::to_string(&msg).unwrap();
+    let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+    assert_session_plan_eq(&msg, &parsed);
+
+    // MessagePack round-trip (named, matching the project's wire convention).
+    let mp = rmp_serde::to_vec_named(&msg).unwrap();
+    let parsed_mp: ServerMessage = rmp_serde::from_slice(&mp).unwrap();
+    assert_session_plan_eq(&msg, &parsed_mp);
+}
+
+#[test]
+fn session_plan_default_ice_servers_when_field_absent() {
+    // ice_servers has #[serde(default)] so an absent field deserializes to empty.
+    let host = PlayerId::new_v4();
+    let json = format!(
+        r#"{{"type":"SessionPlan","data":{{"topology":"host","transport":"webrtc","host":"{host}","peers":[],"fallback":"relay"}}}}"#
+    );
+    let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+    match parsed {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.topology, Topology::Host);
+            assert_eq!(plan.host, Some(host));
+            assert!(
+                plan.ice_servers.is_empty(),
+                "absent ice_servers must default to empty"
+            );
+        }
+        other => panic!("expected SessionPlan, got {other:?}"),
+    }
+}
+
+fn assert_session_plan_eq(expected: &ServerMessage, actual: &ServerMessage) {
+    match (expected, actual) {
+        (ServerMessage::SessionPlan(a), ServerMessage::SessionPlan(b)) => {
+            assert_eq!(a.topology, b.topology);
+            assert_eq!(a.transport, b.transport);
+            assert_eq!(a.host, b.host);
+            assert_eq!(a.fallback, b.fallback);
+            assert_eq!(a.peers.len(), b.peers.len());
+            for (pa, pb) in a.peers.iter().zip(b.peers.iter()) {
+                assert_eq!(pa.player_id, pb.player_id);
+                assert_eq!(pa.player_name, pb.player_name);
+                assert_eq!(pa.is_authority, pb.is_authority);
+                assert_eq!(pa.initiate, pb.initiate);
+            }
+            assert_eq!(a.ice_servers.len(), b.ice_servers.len());
+            for (ia, ib) in a.ice_servers.iter().zip(b.ice_servers.iter()) {
+                assert_eq!(ia.urls, ib.urls);
+                assert_eq!(ia.username, ib.username);
+                assert_eq!(ia.credential, ib.credential);
+            }
+        }
+        other => panic!("expected two SessionPlan messages, got {other:?}"),
     }
 }

@@ -1,8 +1,13 @@
+mod websocket_test_helpers;
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use signal_fish_server::protocol::{LobbyState, RoomJoinedPayload, ServerMessage};
 use std::time::Duration;
-use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{expect_no_server_message_within, next_server_message_within};
+
+const SERVER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Note: These tests require a running signal-fish-server instance
 // They are marked with #[ignore] by default to avoid running in normal test suite
@@ -36,18 +41,9 @@ async fn test_lobby_e2e_websocket_flow() {
         .await
         .unwrap();
 
-    // Receive RoomJoined message
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg1 {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "RoomJoined");
-        assert_eq!(parsed["data"]["lobby_state"], "waiting");
-        assert_eq!(parsed["data"]["ready_players"].as_array().unwrap().len(), 0);
-    }
+    let payload = expect_room_joined(&mut read1, "player 1 initial room join").await;
+    assert_eq!(payload.lobby_state, LobbyState::Waiting);
+    assert_eq!(payload.ready_players.len(), 0);
 
     // Client 2 joins the same room
     let join_msg2 = json!({
@@ -66,49 +62,13 @@ async fn test_lobby_e2e_websocket_flow() {
         .await
         .unwrap();
 
-    // Client 2 receives RoomJoined
-    let msg2 = timeout(Duration::from_secs(5), read2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg2 {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "RoomJoined");
-    }
+    expect_room_joined(&mut read2, "player 2 initial room join").await;
 
-    // Client 1 receives PlayerJoined notification
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg1 {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "PlayerJoined");
-    }
+    expect_player_joined(&mut read1, "player 1 sees player 2 join").await;
 
     // Both clients should receive LobbyStateChanged (room is now full)
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let msg2 = timeout(Duration::from_secs(5), read2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-    for msg in [msg1, msg2] {
-        if let Message::Text(text) = msg {
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(parsed["type"], "LobbyStateChanged");
-            assert_eq!(parsed["data"]["lobby_state"], "lobby");
-            assert_eq!(parsed["data"]["ready_players"].as_array().unwrap().len(), 0);
-            assert_eq!(parsed["data"]["all_ready"], false);
-        }
-    }
+    expect_lobby_state_changed(&mut read1, "player 1 sees full lobby", 0, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees full lobby", 0, false).await;
 
     // Client 1 signals ready
     let ready_msg = json!({
@@ -120,27 +80,8 @@ async fn test_lobby_e2e_websocket_flow() {
         .await
         .unwrap();
 
-    // Both clients should receive LobbyStateChanged with 1 ready player
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let msg2 = timeout(Duration::from_secs(5), read2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-    for msg in [msg1, msg2] {
-        if let Message::Text(text) = msg {
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(parsed["type"], "LobbyStateChanged");
-            assert_eq!(parsed["data"]["lobby_state"], "lobby");
-            assert_eq!(parsed["data"]["ready_players"].as_array().unwrap().len(), 1);
-            assert_eq!(parsed["data"]["all_ready"], false);
-        }
-    }
+    expect_lobby_state_changed(&mut read1, "player 1 sees first ready", 1, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees first ready", 1, false).await;
 
     // Client 2 signals ready
     write2
@@ -148,57 +89,12 @@ async fn test_lobby_e2e_websocket_flow() {
         .await
         .unwrap();
 
-    // Both clients should receive LobbyStateChanged with all_ready = true
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let msg2 = timeout(Duration::from_secs(5), read2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-    for msg in [msg1, msg2] {
-        if let Message::Text(text) = msg {
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(parsed["type"], "LobbyStateChanged");
-            assert_eq!(parsed["data"]["lobby_state"], "lobby");
-            assert_eq!(parsed["data"]["ready_players"].as_array().unwrap().len(), 2);
-            assert_eq!(parsed["data"]["all_ready"], true);
-        }
-    }
+    expect_lobby_state_changed(&mut read1, "player 1 sees all ready", 2, true).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees all ready", 2, true).await;
 
     // Both clients should receive GameStarting message
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let msg2 = timeout(Duration::from_secs(5), read2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-    for msg in [msg1, msg2] {
-        if let Message::Text(text) = msg {
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(parsed["type"], "GameStarting");
-            assert_eq!(
-                parsed["data"]["peer_connections"].as_array().unwrap().len(),
-                2
-            );
-
-            let peers = parsed["data"]["peer_connections"].as_array().unwrap();
-            let auth_count = peers
-                .iter()
-                .filter(|p| p["is_authority"].as_bool().unwrap())
-                .count();
-            assert_eq!(auth_count, 1);
-        }
-    }
+    expect_game_starting(&mut read1, "player 1 game start").await;
+    expect_game_starting(&mut read2, "player 2 game start").await;
 }
 
 #[tokio::test]
@@ -240,18 +136,16 @@ async fn test_lobby_e2e_ready_toggle() {
         .send(Message::Text(join_msg1.to_string().into()))
         .await
         .unwrap();
+    expect_room_joined(&mut read1, "player 1 initial room join").await;
+
     write2
         .send(Message::Text(join_msg2.to_string().into()))
         .await
         .unwrap();
-
-    // Clear initial messages
-    for _ in 0..2 {
-        let _ = read1.next().await;
-    }
-    for _ in 0..2 {
-        let _ = read2.next().await;
-    }
+    expect_room_joined(&mut read2, "player 2 initial room join").await;
+    expect_player_joined(&mut read1, "player 1 sees player 2 join").await;
+    expect_lobby_state_changed(&mut read1, "player 1 sees full lobby", 0, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees full lobby", 0, false).await;
 
     // Player 1 signals ready
     let ready_msg = json!({"type": "PlayerReady"});
@@ -260,9 +154,8 @@ async fn test_lobby_e2e_ready_toggle() {
         .await
         .unwrap();
 
-    // Clear LobbyStateChanged messages
-    let _ = read1.next().await;
-    let _ = read2.next().await;
+    expect_lobby_state_changed(&mut read1, "player 1 sees first ready toggle", 1, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees first ready toggle", 1, false).await;
 
     // Player 1 signals ready again (should toggle to not ready)
     write1
@@ -270,30 +163,8 @@ async fn test_lobby_e2e_ready_toggle() {
         .await
         .unwrap();
 
-    // Should receive LobbyStateChanged with 0 ready players
-    let msg1 = timeout(Duration::from_secs(5), read1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg1 {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "LobbyStateChanged");
-        assert_eq!(parsed["data"]["ready_players"].as_array().unwrap().len(), 0);
-        assert_eq!(parsed["data"]["all_ready"], false);
-    }
-
-    // Player 2 should also receive the same message
-    let msg2 = timeout(Duration::from_secs(5), read2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg2 {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "LobbyStateChanged");
-        assert_eq!(parsed["data"]["ready_players"].as_array().unwrap().len(), 0);
-    }
+    expect_lobby_state_changed(&mut read1, "player 1 sees ready toggle reset", 0, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees ready toggle reset", 0, false).await;
 }
 
 #[tokio::test]
@@ -312,20 +183,7 @@ async fn test_lobby_e2e_error_cases() {
         .await
         .unwrap();
 
-    // Should receive error message
-    let msg = timeout(Duration::from_secs(5), read.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "Error");
-        assert!(parsed["data"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Not in a room"));
-    }
+    expect_error_contains(&mut read, "ready without room error", "Not in a room").await;
 
     // Join a single-player room
     let join_msg = json!({
@@ -344,17 +202,8 @@ async fn test_lobby_e2e_error_cases() {
         .await
         .unwrap();
 
-    // Receive RoomJoined (should be in waiting state)
-    let msg = timeout(Duration::from_secs(5), read.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    if let Message::Text(text) = msg {
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["type"], "RoomJoined");
-        assert_eq!(parsed["data"]["lobby_state"], "waiting");
-    }
+    let payload = expect_room_joined(&mut read, "single player room join").await;
+    assert_eq!(payload.lobby_state, LobbyState::Waiting);
 
     // Try to signal ready in non-lobby room
     write
@@ -362,7 +211,93 @@ async fn test_lobby_e2e_error_cases() {
         .await
         .unwrap();
 
-    // Should not receive any response (no lobby transition for single-player rooms)
-    let result = timeout(Duration::from_secs(2), read.next()).await;
-    assert!(result.is_err()); // Timeout means no message received
+    expect_no_server_message_within(
+        &mut read,
+        Duration::from_secs(2),
+        "single-player ready should not emit a server message",
+    )
+    .await;
+}
+
+async fn expect_room_joined<S>(read: &mut S, context: &str) -> Box<RoomJoinedPayload>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    match next_server_message_within(read, SERVER_MESSAGE_TIMEOUT, context).await {
+        ServerMessage::RoomJoined(payload) => payload,
+        other => panic!("{context}: expected RoomJoined, got {other:?}"),
+    }
+}
+
+async fn expect_player_joined<S>(read: &mut S, context: &str)
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    match next_server_message_within(read, SERVER_MESSAGE_TIMEOUT, context).await {
+        ServerMessage::PlayerJoined { .. } => {}
+        other => panic!("{context}: expected PlayerJoined, got {other:?}"),
+    }
+}
+
+async fn expect_lobby_state_changed<S>(
+    read: &mut S,
+    context: &str,
+    expected_ready_players: usize,
+    expected_all_ready: bool,
+) where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    match next_server_message_within(read, SERVER_MESSAGE_TIMEOUT, context).await {
+        ServerMessage::LobbyStateChanged {
+            lobby_state,
+            ready_players,
+            all_ready,
+            ..
+        } => {
+            assert_eq!(
+                lobby_state,
+                LobbyState::Lobby,
+                "{context}: lobby state should be lobby"
+            );
+            assert_eq!(
+                ready_players.len(),
+                expected_ready_players,
+                "{context}: ready player count"
+            );
+            assert_eq!(all_ready, expected_all_ready, "{context}: all_ready flag");
+        }
+        other => panic!("{context}: expected LobbyStateChanged, got {other:?}"),
+    }
+}
+
+async fn expect_game_starting<S>(read: &mut S, context: &str)
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    match next_server_message_within(read, SERVER_MESSAGE_TIMEOUT, context).await {
+        ServerMessage::GameStarting { peer_connections } => {
+            assert_eq!(peer_connections.len(), 2, "{context}: peer count");
+            let authority_count = peer_connections
+                .iter()
+                .filter(|peer| peer.is_authority)
+                .count();
+            assert_eq!(authority_count, 1, "{context}: authority peer count");
+        }
+        other => panic!("{context}: expected GameStarting, got {other:?}"),
+    }
+}
+
+async fn expect_error_contains<S>(read: &mut S, context: &str, expected_message: &str)
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    match next_server_message_within(read, SERVER_MESSAGE_TIMEOUT, context).await {
+        ServerMessage::Error { message, .. } => {
+            assert!(
+                message.contains(expected_message),
+                "{context}: expected error to contain {expected_message:?}, got {message:?}"
+            );
+        }
+        other => panic!("{context}: expected Error, got {other:?}"),
+    }
 }

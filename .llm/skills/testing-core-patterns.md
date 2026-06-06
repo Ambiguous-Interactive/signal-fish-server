@@ -128,6 +128,10 @@ async fn test_websocket_message_handling() {
     assert_eq!(response, Message::text(r#"{"type":"pong"}"#));
 }
 
+// When filtering/skipping messages, use one absolute deadline for the whole
+// wait, e.g. `timeout_at(deadline, client.next())` inside the loop. Do not
+// restart a relative timeout after each unrelated frame.
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_joins() {
     let server = TestServer::start().await;
@@ -278,7 +282,8 @@ Use `serial_test` (dev-dependency) with `#[serial]` for tests sharing global sta
 - [ ] Regression tests cite the issue number
 - [ ] Test names follow `test_<unit>_<condition>_<expected>` convention
 - [ ] Tests never depend on execution order
-- [ ] Lib tests calling Miri-incompatible APIs (Utc::now, SystemTime::now) have #[cfg_attr(miri, ignore)]
+- [ ] `proptest!` tests carry `#[cfg_attr(miri, ignore)]` (too slow under Miri);
+  wall-clock/entropy need none — the Miri job runs `-Zmiri-disable-isolation`
 - [ ] Flaky tests are treated as bugs — not retried into silence
 
 ---

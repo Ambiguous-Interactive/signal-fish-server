@@ -48,7 +48,7 @@ impl EnhancedGameServer {
 mod tests {
     use crate::config::{
         AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-        TransportSecurityConfig,
+        SessionConfig, TransportSecurityConfig,
     };
     use crate::database::DatabaseConfig;
     use crate::protocol::ServerMessage;
@@ -67,6 +67,7 @@ mod tests {
             },
             ProtocolConfig::default(),
             RelayTypeConfig::default(),
+            SessionConfig::default(),
             DatabaseConfig::InMemory,
             MetricsConfig::default(),
             AuthMaintenanceConfig::default(),

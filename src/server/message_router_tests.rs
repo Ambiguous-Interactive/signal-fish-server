@@ -1,6 +1,6 @@
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    TransportSecurityConfig,
+    SessionConfig, TransportSecurityConfig,
 };
 use crate::database::DatabaseConfig;
 use crate::protocol::{ClientMessage, ServerMessage};
@@ -15,6 +15,7 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
         ServerConfig::default(),
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
+        SessionConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),
@@ -53,13 +54,15 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
         )
         .await;
 
-    assert!(
-        timeout(Duration::from_millis(100), receiver.recv())
-            .await
-            .unwrap_or(None)
-            .is_none(),
-        "authenticate after registration should not send a response"
-    );
+    match timeout(Duration::from_millis(100), receiver.recv()).await {
+        Err(_) => {}
+        Ok(Some(message)) => {
+            panic!("authenticate after registration should not send a response, got {message:?}")
+        }
+        Ok(None) => {
+            panic!("channel closed while checking authenticate-after-registration silence")
+        }
+    }
 }
 
 #[tokio::test]

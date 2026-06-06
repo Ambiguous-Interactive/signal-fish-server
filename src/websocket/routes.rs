@@ -91,6 +91,7 @@ pub async fn run_server(
         server_config.clone(),
         crate::config::ProtocolConfig::default(),
         crate::config::RelayTypeConfig::default(),
+        crate::config::SessionConfig::default(),
         database_config,
         crate::config::MetricsConfig::default(),
         crate::config::AuthMaintenanceConfig::default(),

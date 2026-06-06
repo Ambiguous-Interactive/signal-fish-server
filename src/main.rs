@@ -128,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         server_config,
         cfg.protocol.clone(),
         cfg.relay_types.clone(),
+        cfg.session.clone(),
         database_config,
         cfg.metrics.clone(),
         cfg.auth.clone(),

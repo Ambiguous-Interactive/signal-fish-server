@@ -2,6 +2,7 @@ mod test_helpers;
 
 use signal_fish_server::protocol::*;
 use signal_fish_server::server::ServerConfig;
+use std::sync::Arc;
 use test_helpers::{create_test_server, create_test_server_with_config};
 use tokio::sync::mpsc;
 
@@ -142,16 +143,13 @@ async fn test_game_data_exchange() {
 
     println!("Players joined room");
 
-    // Clear joining messages
-    println!("Clearing messages for player 1");
-    while let Ok(msg) = rx1.try_recv() {
-        println!("Player 1 received: {msg:?}");
-    }
-
-    println!("Clearing messages for player 2");
-    while let Ok(msg) = rx2.try_recv() {
-        println!("Player 2 received: {msg:?}");
-    }
+    expect_room_joined(&mut rx1, "data player 1 room join");
+    expect_player_joined(&mut rx1, player2_id, "data player 1 sees player 2 join");
+    expect_lobby_state_changed(&mut rx1, "data player 1 full-lobby update");
+    expect_room_joined(&mut rx2, "data player 2 room join");
+    expect_lobby_state_changed(&mut rx2, "data player 2 full-lobby update");
+    assert_no_pending_message(&mut rx1, "data player 1 post-join drain");
+    assert_no_pending_message(&mut rx2, "data player 2 post-join drain");
 
     // Player 1 sends game data
     println!("Player 1 sending game data");
@@ -311,16 +309,17 @@ async fn test_authority_transfer() {
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     println!("Players joined room");
 
-    // Clear join messages
-    println!("Clearing messages for player 1");
-    while let Ok(msg) = rx1.try_recv() {
-        println!("Player 1 received: {msg:?}");
-    }
-
-    println!("Clearing messages for player 2");
-    while let Ok(msg) = rx2.try_recv() {
-        println!("Player 2 received: {msg:?}");
-    }
+    expect_room_joined(&mut rx1, "authority player 1 room join");
+    expect_player_joined(
+        &mut rx1,
+        player2_id,
+        "authority player 1 sees player 2 join",
+    );
+    expect_lobby_state_changed(&mut rx1, "authority player 1 full-lobby update");
+    expect_room_joined(&mut rx2, "authority player 2 room join");
+    expect_lobby_state_changed(&mut rx2, "authority player 2 full-lobby update");
+    assert_no_pending_message(&mut rx1, "authority player 1 post-join drain");
+    assert_no_pending_message(&mut rx2, "authority player 2 post-join drain");
 
     // Player 1 first releases authority
     println!("Player 1 releasing authority");
@@ -336,16 +335,12 @@ async fn test_authority_transfer() {
     // Add delay to ensure authority release is processed
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Clear authority release notifications
-    println!("Clearing authority release messages for player 1");
-    while let Ok(msg) = rx1.try_recv() {
-        println!("Player 1 received after release: {msg:?}");
-    }
-
-    println!("Clearing authority release messages for player 2");
-    while let Ok(msg) = rx2.try_recv() {
-        println!("Player 2 received after release: {msg:?}");
-    }
+    expect_authority_response(&mut rx1, true, "player 1 release coordinator response");
+    expect_authority_changed(&mut rx1, None, false, "player 1 release authority update");
+    expect_authority_response(&mut rx1, true, "player 1 release server response");
+    expect_authority_changed(&mut rx2, None, false, "player 2 sees authority release");
+    assert_no_pending_message(&mut rx1, "player 1 post-release drain");
+    assert_no_pending_message(&mut rx2, "player 2 post-release drain");
 
     // Now Player 2 requests authority (should succeed since no one has it)
     println!("Player 2 requesting authority");
@@ -361,90 +356,121 @@ async fn test_authority_transfer() {
     // Add delay to ensure authority request is processed
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Player 2 should receive AuthorityResponse
-    println!("Checking player 2 messages for AuthorityResponse");
-    let response = match rx2.try_recv() {
-        Ok(msg) => {
-            println!("Player 2 received message: {msg:?}");
-            msg
-        }
-        Err(e) => {
-            println!("Error receiving message: {e:?}");
-            panic!("Expected AuthorityResponse message for player 2");
-        }
-    };
+    expect_authority_response(
+        &mut rx2,
+        true,
+        "player 2 authority request coordinator response",
+    );
+    expect_authority_changed(
+        &mut rx1,
+        Some(player2_id),
+        false,
+        "player 1 sees player 2 authority",
+    );
+    expect_authority_changed(
+        &mut rx2,
+        Some(player2_id),
+        true,
+        "player 2 sees own authority",
+    );
+    expect_authority_response(&mut rx2, true, "player 2 authority request server response");
+    assert_no_pending_message(&mut rx1, "player 1 post-authority-transfer drain");
+    assert_no_pending_message(&mut rx2, "player 2 post-authority-transfer drain");
 
-    match response.as_ref() {
+    println!("Authority transfer test completed successfully");
+}
+
+fn recv_now(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+) -> Arc<ServerMessage> {
+    receiver
+        .try_recv()
+        .unwrap_or_else(|error| panic!("{context}: expected message, got {error:?}"))
+}
+
+fn expect_room_joined(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, context: &str) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("{context}: expected RoomJoined, got {other:?}"),
+    }
+}
+
+fn expect_player_joined(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_player_id: PlayerId,
+    context: &str,
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::PlayerJoined { player } => {
+            assert_eq!(player.id, expected_player_id, "{context}: joined player id");
+        }
+        other => panic!("{context}: expected PlayerJoined, got {other:?}"),
+    }
+}
+
+fn expect_lobby_state_changed(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, context: &str) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
+        ServerMessage::LobbyStateChanged { .. } => {}
+        other => panic!("{context}: expected LobbyStateChanged, got {other:?}"),
+    }
+}
+
+fn expect_authority_response(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_granted: bool,
+    context: &str,
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
         ServerMessage::AuthorityResponse {
             granted, reason, ..
         } => {
-            assert!(*granted, "Authority request should be granted");
-            assert!(reason.is_none(), "No reason should be provided for success");
-            println!("Player 2 received correct AuthorityResponse");
+            assert_eq!(*granted, expected_granted, "{context}: granted flag");
+            if expected_granted {
+                assert!(reason.is_none(), "{context}: successful response reason");
+            }
         }
-        _ => panic!("Expected AuthorityResponse message for player 2, got: {response:?}"),
+        other => panic!("{context}: expected AuthorityResponse, got {other:?}"),
     }
+}
 
-    // Both players should receive authority change notifications
-    println!("Checking for AuthorityChanged messages");
-
-    // Player 1 should receive AuthorityChanged
-    let auth1 = match rx1.try_recv() {
-        Ok(msg) => {
-            println!("Player 1 received message: {msg:?}");
-            msg
-        }
-        Err(e) => {
-            println!("Error receiving message for player 1: {e:?}");
-            panic!("Expected AuthorityChanged message for player 1");
-        }
-    };
-
-    match auth1.as_ref() {
+fn expect_authority_changed(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_authority_player: Option<PlayerId>,
+    expected_you_are_authority: bool,
+    context: &str,
+) {
+    let message = recv_now(receiver, context);
+    match message.as_ref() {
         ServerMessage::AuthorityChanged {
             authority_player,
             you_are_authority,
         } => {
             assert_eq!(
-                *authority_player,
-                Some(player2_id),
-                "Player 2 should be the new authority"
+                *authority_player, expected_authority_player,
+                "{context}: authority player"
             );
-            assert!(!*you_are_authority, "Player 1 should not be authority");
-            println!("Player 1 received correct AuthorityChanged message");
-        }
-        _ => panic!("Expected AuthorityChanged message for player 1, got: {auth1:?}"),
-    }
-
-    // Player 2 should receive AuthorityChanged after AuthorityResponse
-    let auth2 = match rx2.try_recv() {
-        Ok(msg) => {
-            println!("Player 2 received second message: {msg:?}");
-            msg
-        }
-        Err(e) => {
-            println!("Error receiving second message for player 2: {e:?}");
-            panic!("Expected AuthorityChanged message for player 2");
-        }
-    };
-
-    match auth2.as_ref() {
-        ServerMessage::AuthorityChanged {
-            authority_player,
-            you_are_authority,
-        } => {
             assert_eq!(
-                *authority_player,
-                Some(player2_id),
-                "Player 2 should be the new authority"
+                *you_are_authority, expected_you_are_authority,
+                "{context}: you_are_authority"
             );
-            assert!(*you_are_authority, "Player 2 should be authority");
-            println!("Player 2 received correct AuthorityChanged message");
         }
-        _ => panic!("Expected AuthorityChanged message for player 2, got: {auth2:?}"),
+        other => panic!("{context}: expected AuthorityChanged, got {other:?}"),
     }
+}
 
-    println!("Authority transfer test completed successfully");
+fn assert_no_pending_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, context: &str) {
+    match receiver.try_recv() {
+        Ok(message) => panic!("{context}: unexpected pending message: {message:?}"),
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        Err(mpsc::error::TryRecvError::Disconnected) => {
+            panic!("{context}: channel disconnected while checking for silence")
+        }
+    }
 }
 
 /// Test player disconnection and cleanup
@@ -488,8 +514,14 @@ async fn test_player_disconnection() {
         )
         .await;
 
-    // Clear join messages
-    let _ = rx2.try_recv();
+    match rx2
+        .try_recv()
+        .expect("player 2 should receive RoomJoined before disconnect test")
+        .as_ref()
+    {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("expected player 2 RoomJoined before disconnect test, got {other:?}"),
+    }
 
     // Player 1 disconnects
     println!("Player 1 disconnecting");

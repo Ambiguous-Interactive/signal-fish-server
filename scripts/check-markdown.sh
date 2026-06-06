@@ -245,6 +245,8 @@ else
         echo "  ./scripts/check-markdown.sh fix"
         echo ""
         echo "Common issues:"
+        echo "  - MD013: Line length exceeds configured limit"
+        echo "    Fix: Reflow paragraphs or split long list items/links across lines"
         echo "  - MD040: Missing language identifier on code blocks"
         echo "    Fix: Add language identifier after opening backticks (e.g., \`\`\`bash)"
         echo "  - MD046: Inconsistent code block style"

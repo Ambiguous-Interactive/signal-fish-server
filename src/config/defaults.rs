@@ -124,6 +124,25 @@ pub const fn default_max_protocol_version() -> u16 {
 }
 
 // =============================================================================
+// Session Defaults
+// =============================================================================
+
+/// Default session topology: the relay floor (v2-equivalent, always available).
+pub const fn default_session_topology() -> crate::protocol::Topology {
+    crate::protocol::Topology::Relay
+}
+
+/// WebRTC transport is enabled by default (it is the only true browser P2P path).
+pub const fn default_enable_webrtc() -> bool {
+    true
+}
+
+/// Direct (LAN / routable) transport is enabled by default.
+pub const fn default_enable_direct() -> bool {
+    true
+}
+
+// =============================================================================
 // Player Name Validation Defaults
 // =============================================================================
 

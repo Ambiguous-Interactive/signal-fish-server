@@ -76,7 +76,6 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/ci-safety.yml'
-      - 'scripts/check-miri-compat.sh'
   pull_request:
     branches: [main]
     paths:
@@ -88,7 +87,6 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/ci-safety.yml'
-      - 'scripts/check-miri-compat.sh'
   schedule:
     # Weekly on Sunday at 02:00 UTC — heavy analysis jobs
     - cron: "0 2 * * 0"
@@ -114,11 +112,11 @@ jobs:
     timeout-minutes: 45
     # Staged: non-blocking until promoted to a required check
     continue-on-error: true
+    env:
+      CARGO_TARGET_DIR: target/miri
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
-      - name: Check Miri compatibility annotations
-        run: bash scripts/check-miri-compat.sh
       - name: Install Rust nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -128,18 +126,32 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          prefix-key: "ci-safety-nightly"
+          # v2 invalidates stale target caches that included trybuild's
+          # target/tests workspaces, which produced noisy rust-cache ENOENTs.
+          prefix-key: "ci-safety-nightly-v2"
+          workspaces: ". -> target/miri"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Setup Miri
         run: cargo +nightly-2026-02-01 miri setup
 
       - name: Run Miri on library tests
+        # Isolation is disabled so the interpreter services wall-clock
+        # (clock_gettime), entropy (getrandom), and getcwd syscalls instead of
+        # aborting on them. The purpose of Miri here is detecting undefined
+        # behavior, data races, and memory errors — not logic determinism — so
+        # passing those syscalls through to the host is the right trade-off, and
+        # it lets ordinary time/UUID-using unit tests run under Miri instead of
+        # being annotated out. This structurally eliminates the entire class of
+        # "test reached an isolated syscall" failures.
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
         run: |
           set -euo pipefail
-          echo "Running Miri on library unit tests..."
+          echo "Running Miri on library unit tests (isolation disabled)..."
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
@@ -153,6 +165,7 @@ jobs:
           echo "ref: ${{ github.ref }}"
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           if [ ! -f miri-output.txt ]; then
             echo "miri-output.txt is missing"
             exit 0
@@ -160,6 +173,26 @@ jobs:
           echo "=== miri-output.txt failure markers ==="
           grep -nE "FAILED|failures:|panicked at|error:|undefined behavior|unsupported operation" \
             miri-output.txt || true
+          # Isolation is disabled (see the run step), so wall-clock / entropy /
+          # getcwd syscalls no longer fail. The failure modes that remain are
+          # genuine undefined behavior and operations Miri cannot interpret at
+          # all (most commonly platform SIMD/FFI intrinsics). Surface whichever
+          # applies with targeted remediation.
+          ub_re="undefined behavior|Undefined Behavior|data race|use-after-free|out-of-bounds|uninitialized"
+          if grep -qE "$ub_re" miri-output.txt; then
+            echo "=== Likely cause: genuine undefined behavior detected by Miri ==="
+            echo "This is the signal Miri exists to catch. Treat it as a real bug in the code under test"
+            echo "(or its unsafe dependencies), not a test-harness artifact."
+            grep -nE "$ub_re" miri-output.txt | tail -n 5 || true
+          elif grep -qE "unsupported operation|can't call foreign function" miri-output.txt; then
+            echo "=== Likely cause: a test reached an operation Miri cannot interpret ==="
+            echo "With isolation disabled, the usual trigger is a platform SIMD/FFI intrinsic"
+            echo "(for example a vendor 'llvm.*' intrinsic) Miri has no model for; it aborts on the first one."
+            echo "Operation(s) reported:"
+            grep -nE "unsupported operation[^\"]*|can't call foreign function[^\"]*" miri-output.txt | tail -n 5 || true
+            echo "Remediation: gate the intrinsic-using path behind cfg(not(miri)) with a portable fallback,"
+            echo "or add #[cfg_attr(miri, ignore)] to the specific test that reaches it."
+          fi
           echo "=== miri-output.txt tail -n 200 ==="
           tail -n 200 miri-output.txt
 
@@ -177,6 +210,9 @@ jobs:
     timeout-minutes: 30
     # Staged: non-blocking until promoted to a required check
     continue-on-error: true
+    env:
+      ASAN_OPTIONS: "detect_odr_violation=0"
+      CARGO_TARGET_DIR: target/asan
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
@@ -188,7 +224,10 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          prefix-key: "ci-safety-nightly"
+          # v2 invalidates stale target caches that included trybuild's
+          # target/tests workspaces, which produced noisy rust-cache ENOENTs.
+          prefix-key: "ci-safety-nightly-v2"
+          workspaces: ". -> target/asan"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Run tests with AddressSanitizer
@@ -197,13 +236,11 @@ jobs:
           echo "Running tests with AddressSanitizer enabled..."
           echo "AddressSanitizer detects memory errors: use-after-free, buffer overflow,"
           echo "stack buffer overflow, and memory leaks."
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           RUSTFLAGS="-Z sanitizer=address" \
             cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu \
             --all-features --no-fail-fast 2>&1 | tee asan-output.txt
           echo "AddressSanitizer analysis complete."
-        env:
-          # AddressSanitizer needs these environment variables
-          ASAN_OPTIONS: "detect_odr_violation=0"
 
       - name: Diagnose AddressSanitizer failures
         if: failure()
@@ -216,6 +253,7 @@ jobs:
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
           echo "ASAN_OPTIONS: ${ASAN_OPTIONS:-<unset>}"
+          echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           if [ ! -f asan-output.txt ]; then
             echo "asan-output.txt is missing"
             exit 0
@@ -225,9 +263,6 @@ jobs:
             asan-output.txt || true
           echo "=== asan-output.txt tail -n 200 ==="
           tail -n 200 asan-output.txt
-        env:
-          ASAN_OPTIONS: "detect_odr_violation=0"
-
       - name: Upload AddressSanitizer output
         if: always()
         uses: actions/upload-artifact@v7.0.1

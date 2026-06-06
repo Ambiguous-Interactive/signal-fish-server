@@ -78,6 +78,13 @@
     "default_relay_type": "matchbox",
     "game_relay_mappings": {}
   },
+  "session": {
+    "default_topology": "relay",
+    "game_topology_mappings": {},
+    "enable_webrtc": true,
+    "enable_direct": true,
+    "ice_servers": []
+  },
   "websocket": {
     "enable_batching": true,
     "batch_size": 10,

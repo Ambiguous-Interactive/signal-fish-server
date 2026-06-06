@@ -1,13 +1,20 @@
-//! End-to-end protocol v3 (P2) targeted-signal-relay tests through the real
-//! WebSocket stack. Two v3 + WebRTC peers join the same room, are paired by the
-//! late-join `NewPeer` handshake (exactly one offerer per pair), and relay a full
+//! End-to-end protocol v3 (P2/P3) targeted-signal-relay tests through the real
+//! WebSocket stack. Two v3 + WebRTC peers join the same room and relay a full
 //! opaque offer -> answer -> ICE sequence through the server with the payloads
-//! byte-preserved. Complements the handler-level tests in
-//! `src/server/signaling_tests.rs` by exercising axum's WebSocket framing.
+//! byte-preserved, exercising axum's WebSocket framing on the unchanged
+//! `handle_signal` path.
+//!
+//! Initial pairing is no longer emitted as `NewPeer` during lobby fill (it is
+//! delivered by `SessionPlan` at finalize, and `NewPeer` is reserved for joins
+//! into an already-active session — PLAN §P3, Appendix L). Over-the-wire pairing
+//! is therefore covered by `tests/v3_session_plan_e2e.rs` (SessionPlan) and the
+//! handler-level unit tests in `src/server/signaling_tests.rs`; this file does
+//! not depend on `NewPeer`.
 
 mod test_helpers;
+mod websocket_test_helpers;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use serde_json::json;
 use signal_fish_server::config::AppAuthEntry;
 use signal_fish_server::protocol::{
@@ -19,8 +26,12 @@ use std::sync::Arc;
 use test_helpers::{test_protocol_config, test_server_config};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{
+    next_matching_server_message_within, next_server_message_within, WsStream,
+};
 
 const APP_ID: &str = "v3-signaling-app";
+const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 
 fn app_entry() -> AppAuthEntry {
     AppAuthEntry {
@@ -48,6 +59,7 @@ async fn start_auth_server_with_handle() -> (std::net::SocketAddr, Arc<EnhancedG
         server_config,
         protocol_config,
         signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::config::SessionConfig::default(),
         signal_fish_server::database::DatabaseConfig::InMemory,
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::AuthMaintenanceConfig::default(),
@@ -88,9 +100,6 @@ async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketA
     addr
 }
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
     let url = format!("ws://{addr}/v3/ws");
     let (ws, _) = tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
@@ -106,30 +115,17 @@ async fn send(ws: &mut WsStream, msg: &ClientMessage) {
 }
 
 async fn next_server_message(ws: &mut WsStream) -> ServerMessage {
-    loop {
-        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
-            .await
-            .expect("recv timeout")
-            .expect("stream closed")
-            .expect("ws error");
-        if let Message::Text(text) = frame {
-            return serde_json::from_str(&text).expect("valid ServerMessage");
-        }
-    }
+    next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "next server message").await
 }
 
 /// Read messages until one matches `pick`, returning the mapped value. Skips
 /// interleaved housekeeping messages (e.g. `PlayerJoined`).
 async fn next_matching<T>(
     ws: &mut WsStream,
-    mut pick: impl FnMut(&ServerMessage) -> Option<T>,
+    context: &str,
+    pick: impl FnMut(ServerMessage) -> Option<T>,
 ) -> T {
-    loop {
-        let msg = next_server_message(ws).await;
-        if let Some(value) = pick(&msg) {
-            return value;
-        }
-    }
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, context, pick).await
 }
 
 /// Authenticate as a v3 + WebRTC client and drain the `Authenticated` +
@@ -173,17 +169,18 @@ async fn join_room(
             game_name: "signaling-game".to_string(),
             room_code,
             player_name: player_name.to_string(),
-            // Keep capacity above the member count so the room does not enter the
-            // lobby/finalization flow — P2 late-join fires on the plain join path.
-            max_players: Some(4),
+            // Capacity 2: the two peers fill the room but never mark ready, so it
+            // never finalizes — no SessionPlan/NewPeer fires and the peers relay
+            // signals directly over the unchanged `handle_signal` path.
+            max_players: Some(2),
             supports_authority: Some(false),
             relay_transport: None,
         },
     )
     .await;
 
-    next_matching(ws, |msg| match msg {
-        ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code.clone(), p.player_id)),
+    next_matching(ws, "room join response", |msg| match msg {
+        ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code, p.player_id)),
         ServerMessage::RoomJoinFailed { reason, error_code } => {
             panic!("room join failed: {reason} ({error_code:?})")
         }
@@ -193,50 +190,29 @@ async fn join_room(
 }
 
 async fn next_signal(ws: &mut WsStream) -> (PlayerId, serde_json::Value) {
-    next_matching(ws, |msg| match msg {
-        ServerMessage::Signal { from, signal } => Some((*from, signal.clone())),
-        _ => None,
-    })
-    .await
-}
-
-async fn next_new_peer(ws: &mut WsStream) -> (PlayerId, bool) {
-    next_matching(ws, |msg| match msg {
-        ServerMessage::NewPeer {
-            peer_id,
-            you_initiate,
-        } => Some((*peer_id, *you_initiate)),
+    next_matching(ws, "relayed signal", |msg| match msg {
+        ServerMessage::Signal { from, signal } => Some((from, signal)),
         _ => None,
     })
     .await
 }
 
 #[tokio::test]
-async fn two_v3_peers_relay_offer_answer_ice_and_are_paired_by_new_peer() {
+async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
     let addr = start_auth_server().await;
 
-    // Peer 1 creates the room.
+    // Peer 1 creates the room (capacity 2).
     let mut peer1 = connect(addr).await;
     authenticate_v3(&mut peer1).await;
     let (_room_id, room_code, peer1_id) = join_room(&mut peer1, None, "PeerOne").await;
 
-    // Peer 2 joins the same room, which triggers the late-join NewPeer handshake.
+    // Peer 2 joins the same room. No NewPeer fires on the plain join path (initial
+    // pairing is the SessionPlan's job at finalize); the peers exchange signals
+    // directly over the unchanged `handle_signal` relay path.
     let mut peer2 = connect(addr).await;
     authenticate_v3(&mut peer2).await;
     let (_room_id, _code, peer2_id) = join_room(&mut peer2, Some(room_code), "PeerTwo").await;
     assert_ne!(peer1_id, peer2_id);
-
-    // Both sides are told about each other, and exactly one is the offerer.
-    let (p1_sees, p1_initiate) = next_new_peer(&mut peer1).await;
-    let (p2_sees, p2_initiate) = next_new_peer(&mut peer2).await;
-    assert_eq!(p1_sees, peer2_id, "peer1's NewPeer should name peer2");
-    assert_eq!(p2_sees, peer1_id, "peer2's NewPeer should name peer1");
-    assert_ne!(
-        p1_initiate, p2_initiate,
-        "exactly one side of the pair must initiate (glare avoidance)"
-    );
-    // The offerer is the lexicographically smaller UUID (Appendix E).
-    assert_eq!(p1_initiate, peer1_id < peer2_id);
 
     // Full opaque offer -> answer -> ICE relay, byte-preserved end to end.
     let offer = json!({ "Offer": "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n" });
@@ -291,10 +267,8 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
     authenticate_v3(&mut old_peer2).await;
     let (room_id, _code, peer2_id) = join_room(&mut old_peer2, Some(room_code), "PeerTwo").await;
 
-    // Drain the original late-join pairing so reconnect notifications do not
-    // hide the post-reconnect signal assertion below.
-    let _ = next_new_peer(&mut peer1).await;
-    let _ = next_new_peer(&mut old_peer2).await;
+    // No NewPeer fires on the plain join path (the room never finalizes), so
+    // there is nothing to drain before the post-reconnect signal assertion.
 
     let room = game_server
         .database()
@@ -329,7 +303,7 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
     )
     .await;
 
-    next_matching(&mut replacement, |msg| match msg {
+    next_matching(&mut replacement, "reconnect response", |msg| match msg {
         ServerMessage::Reconnected(payload) => {
             assert_eq!(payload.player_id, peer2_id);
             Some(())

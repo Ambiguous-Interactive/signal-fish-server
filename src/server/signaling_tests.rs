@@ -8,10 +8,13 @@
 
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    TransportSecurityConfig,
+    SessionConfig, TransportSecurityConfig,
 };
 use crate::database::DatabaseConfig;
-use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, ServerMessage, Topology, Transport};
+use crate::protocol::{
+    ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo, Room, ServerMessage, Topology,
+    Transport,
+};
 use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
 use serde_json::json;
@@ -56,6 +59,7 @@ async fn create_test_server_with_signal_limits(
         config,
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
+        SessionConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),
@@ -65,6 +69,125 @@ async fn create_test_server_with_signal_limits(
     )
     .await
     .expect("failed to construct test server")
+}
+
+/// Build a server whose session policy is the given `SessionConfig`, so the
+/// finalization-gated late-join path can resolve to a non-relay topology.
+async fn create_test_server_with_session(session: SessionConfig) -> Arc<EnhancedGameServer> {
+    EnhancedGameServer::new(
+        ServerConfig::default(),
+        ProtocolConfig::default(),
+        RelayTypeConfig::default(),
+        session,
+        DatabaseConfig::InMemory,
+        MetricsConfig::default(),
+        AuthMaintenanceConfig::default(),
+        CoordinationConfig::default(),
+        TransportSecurityConfig::default(),
+        Vec::new(),
+    )
+    .await
+    .expect("failed to construct test server")
+}
+
+/// A STUN-only `SessionConfig` preferring `mesh` (so an all-v3+webrtc room
+/// resolves to `mesh + webrtc`).
+fn mesh_session_config() -> SessionConfig {
+    SessionConfig {
+        default_topology: Topology::Mesh,
+        ice_servers: vec![IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            username: None,
+            credential: None,
+        }],
+        ..SessionConfig::default()
+    }
+}
+
+/// A STUN-only `SessionConfig` preferring `host` (so an all-v3+webrtc room
+/// resolves to `host + webrtc`).
+fn host_session_config() -> SessionConfig {
+    SessionConfig {
+        default_topology: Topology::Host,
+        ice_servers: vec![IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            username: None,
+            credential: None,
+        }],
+        ..SessionConfig::default()
+    }
+}
+
+/// A `host`-preferring `SessionConfig` with WebRTC disabled, so an all-v3 room
+/// whose members support host+direct resolves to `host + direct` (LAN) — a
+/// non-relay *topology* whose *transport* is not WebRTC.
+fn host_direct_session_config() -> SessionConfig {
+    SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ice_servers: Vec::new(),
+        ..SessionConfig::default()
+    }
+}
+
+/// Fetch a room and mark it `Finalized` so late-join pairing engages (it only
+/// fires for an active, finalized session). Storage state is irrelevant to
+/// `handle_webrtc_late_join`, which reads `lobby_state` from the passed `Room`.
+async fn finalized_room(server: &EnhancedGameServer, room_id: &uuid::Uuid) -> Room {
+    let mut room = server
+        .database
+        .get_room_by_id(room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    room.lobby_state = LobbyState::Finalized;
+    room
+}
+
+/// Fetch a room without changing its (default `Waiting`) lobby state.
+async fn waiting_room(server: &EnhancedGameServer, room_id: &uuid::Uuid) -> Room {
+    server
+        .database
+        .get_room_by_id(room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+}
+
+/// Drive a full (player count == max) room through lobby → all-ready → finalize
+/// in the database, so the reconnect path's fresh room read observes
+/// `LobbyState::Finalized` and re-pairing engages. `players` must list every
+/// member id currently in the room.
+async fn finalize_db_room(server: &EnhancedGameServer, room_id: &uuid::Uuid, players: &[PlayerId]) {
+    server
+        .database
+        .transition_room_to_lobby(room_id)
+        .await
+        .expect("transition to lobby");
+    for player in players {
+        server
+            .database
+            .toggle_player_ready(room_id, player)
+            .await
+            .expect("toggle ready");
+    }
+    server
+        .database
+        .finalize_room_game(room_id)
+        .await
+        .expect("finalize room");
+    let room = server
+        .database
+        .get_room_by_id(room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    assert_eq!(
+        room.lobby_state,
+        LobbyState::Finalized,
+        "room must reach Finalized for the reconnect re-pairing test"
+    );
 }
 
 /// Register a client and return its id plus the receiving half of its channel.
@@ -85,6 +208,28 @@ fn v3_webrtc() -> NegotiatedProtocol {
         version: 3,
         transports: vec![Transport::Relay, Transport::WebRtc],
         topologies: vec![Topology::Relay, Topology::Mesh],
+    }
+}
+
+/// A v3 + WebRTC client that also advertises the `host` topology, so a
+/// host-preferring room resolves to `host + webrtc` rather than downgrading.
+fn v3_webrtc_host() -> NegotiatedProtocol {
+    NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc],
+        topologies: vec![Topology::Relay, Topology::Host, Topology::Mesh],
+    }
+}
+
+/// A v3 client advertising WebRTC *and* Direct transports plus the `host`
+/// topology. It clears the late-join WebRTC gate (it supports WebRTC), so a room
+/// that nonetheless resolves to `host + direct` (the deployment disabled WebRTC)
+/// isolates the plan's *transport* gate rather than the per-peer capability gate.
+fn v3_webrtc_direct_host() -> NegotiatedProtocol {
+    NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
     }
 }
 
@@ -114,13 +259,11 @@ async fn recv(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Arc<ServerMe
 
 /// Assert that no message is pending within a short window.
 async fn assert_silent(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
-    assert!(
-        timeout(Duration::from_millis(100), receiver.recv())
-            .await
-            .unwrap_or(None)
-            .is_none(),
-        "expected no message to be delivered"
-    );
+    match timeout(Duration::from_millis(100), receiver.recv()).await {
+        Err(_) => {}
+        Ok(Some(message)) => panic!("expected no message to be delivered, got {message:?}"),
+        Ok(None) => panic!("channel closed while checking for silence"),
+    }
 }
 
 fn error_code(message: &ServerMessage) -> Option<ErrorCode> {
@@ -595,8 +738,11 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_designates_exactly_one_offerer() {
-    let server = create_test_server().await;
+async fn late_join_into_unfinalized_room_emits_no_new_peer() {
+    // Premature-pairing suppression: a join while the room is still filling
+    // (lobby_state != Finalized) must emit NO `NewPeer` — the SessionPlan owns
+    // finalize-time initial pairing. Receivers are registered and asserted silent.
+    let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
     server.set_client_protocol(&existing, v3_webrtc());
@@ -622,7 +768,51 @@ async fn late_join_designates_exactly_one_offerer() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server.handle_webrtc_late_join(&joiner, &members).await;
+    // Room is in the default `Waiting` state.
+    let room = waiting_room(&server, &room_id).await;
+    server
+        .handle_webrtc_late_join(&room, &joiner, &members)
+        .await;
+
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_finalized_mesh_room_designates_exactly_one_offerer() {
+    // A Finalized room resolving to mesh pairs the joiner with each existing
+    // webrtc member (one offerer per pair, UUID glare rule).
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&joiner, room_id)
+        .await;
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_webrtc_late_join(&room, &joiner, &members)
+        .await;
 
     // Both sides receive a NewPeer naming the other.
     let existing_flag = match recv(&mut existing_rx).await.as_ref() {
@@ -646,7 +836,7 @@ async fn late_join_designates_exactly_one_offerer() {
         other => panic!("joiner expected NewPeer, got {other:?}"),
     };
 
-    // Exactly one side initiates, consistent with local_initiates.
+    // Exactly one side initiates, consistent with local_initiates (mesh rule).
     assert_ne!(existing_flag, joiner_flag);
     assert_eq!(existing_flag, local_initiates(existing, joiner));
     assert_eq!(joiner_flag, local_initiates(joiner, existing));
@@ -657,10 +847,167 @@ async fn late_join_designates_exactly_one_offerer() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_skips_v2_members() {
-    // Appendix K gating: a v2 (relay-only) member in the room receives no
-    // NewPeer, and the joiner is not paired with it.
-    let server = create_test_server().await;
+async fn late_join_finalized_host_room_pairs_client_with_host_only() {
+    // A Finalized room resolving to host topology: a client joiner is told to
+    // offer to the host (you_initiate=true) and the host is told to answer the
+    // client (you_initiate=false). No client is told to initiate to another
+    // client. The owner (existing) joined first, so it is the elected host.
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (client, mut client_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc_host());
+    server.set_client_protocol(&client, v3_webrtc_host());
+
+    let room_id = create_db_room(&server, host).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(client, "client"))
+        .await
+        .expect("add client");
+    server
+        .connection_manager
+        .assign_client_to_room(&host, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&client, room_id)
+        .await;
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    // Make the host explicit and finalize the room.
+    let mut room = finalized_room(&server, &room_id).await;
+    room.authority_player = Some(host);
+    server
+        .handle_webrtc_late_join(&room, &client, &members)
+        .await;
+
+    // The client offers to the host.
+    match recv(&mut client_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, host, "client's only peer is the host");
+            assert!(*you_initiate, "client offers to the host");
+        }
+        other => panic!("client expected NewPeer(host, initiate=true), got {other:?}"),
+    }
+    // The host answers the client.
+    match recv(&mut host_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, client);
+            assert!(!*you_initiate, "host answers (never offers in a star)");
+        }
+        other => panic!("host expected NewPeer(client, initiate=false), got {other:?}"),
+    }
+
+    assert_silent(&mut client_rx).await;
+    assert_silent(&mut host_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_finalized_host_direct_room_emits_no_new_peer() {
+    // Regression (Copilot): a Finalized room that resolves to `host + direct`
+    // (WebRTC disabled in config) must emit NO `NewPeer`. `NewPeer` is a
+    // WebRTC-signaling control message and this room's transport is Direct, not
+    // WebRTC. Both members advertise the WebRTC transport, so the per-peer gate
+    // (`supports_webrtc_signaling`) passes — only the plan's *transport* gate
+    // suppresses pairing. Before the fix this wrongly emitted WebRTC `NewPeer`
+    // for a non-WebRTC session because the match keyed on topology alone.
+    let server = create_test_server_with_session(host_direct_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (client, mut client_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc_direct_host());
+    server.set_client_protocol(&client, v3_webrtc_direct_host());
+
+    let room_id = create_db_room(&server, host).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(client, "client"))
+        .await
+        .expect("add client");
+    server
+        .connection_manager
+        .assign_client_to_room(&host, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&client, room_id)
+        .await;
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let mut room = finalized_room(&server, &room_id).await;
+    room.authority_player = Some(host);
+    server
+        .handle_webrtc_late_join(&room, &client, &members)
+        .await;
+
+    // host + direct ⇒ no WebRTC signaling ⇒ neither side is paired.
+    assert_silent(&mut client_rx).await;
+    assert_silent(&mut host_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_finalized_relay_room_emits_no_new_peer() {
+    // The default-config contradiction is gone: a Finalized room that resolves
+    // to the relay floor (default SessionConfig keeps relay even for all-v3
+    // rooms) emits NO `NewPeer` — the active session is relay.
+    let server = create_test_server().await; // default SessionConfig => relay floor
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&joiner, room_id)
+        .await;
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_webrtc_late_join(&room, &joiner, &members)
+        .await;
+
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pair_webrtc_peer_with_members_skips_v2_members() {
+    // Appendix K gating at the mesh-pairing primitive: a v2 (relay-only) member
+    // receives no NewPeer, and the joiner is not paired with it. (The room-wide
+    // gate is covered by `late_join_*` tests; here we drive the primitive
+    // directly so a v2 member can be present without forcing the plan to relay.)
+    let server = create_test_server_with_session(mesh_session_config()).await;
     let (webrtc_peer, mut webrtc_rx) = register_client(&server).await;
     let (legacy, mut legacy_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
@@ -697,7 +1044,12 @@ async fn late_join_skips_v2_members() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server.handle_webrtc_late_join(&joiner, &members).await;
+    // A relay-only member forces the room-wide plan to relay, which would emit
+    // no NewPeer at all. To exercise the per-member skip while still resolving
+    // to mesh, drive the mesh primitive directly with the legacy member present.
+    server
+        .pair_webrtc_peer_with_members(&joiner, &members)
+        .await;
 
     // The WebRTC peer and the joiner are paired.
     match recv(&mut webrtc_rx).await.as_ref() {
@@ -718,7 +1070,9 @@ async fn late_join_skips_v2_members() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn late_join_noop_when_joiner_is_relay_only() {
-    let server = create_test_server().await;
+    // The joiner gate fires before finalization/topology is even considered: a
+    // relay-only joiner is never paired, regardless of room state.
+    let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
     server.set_client_protocol(&existing, v3_webrtc());
@@ -744,24 +1098,186 @@ async fn late_join_noop_when_joiner_is_relay_only() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server.handle_webrtc_late_join(&joiner, &members).await;
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_webrtc_late_join(&room, &joiner, &members)
+        .await;
 
     // A relay-only joiner triggers no NewPeer in either direction.
     assert_silent(&mut existing_rx).await;
     assert_silent(&mut joiner_rx).await;
 }
 
+// ---------------------------------------------------------------------------
+// Pairing primitives (direct).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pair_webrtc_peer_with_members_designates_one_offerer_per_pair() {
+    // The mesh primitive: pair one peer with every other webrtc member, exactly
+    // one offerer per pair (UUID glare rule).
+    let server = create_test_server().await;
+    let (peer, mut peer_rx) = register_client(&server).await;
+    let (other, mut other_rx) = register_client(&server).await;
+    server.set_client_protocol(&peer, v3_webrtc());
+    server.set_client_protocol(&other, v3_webrtc());
+
+    let members = vec![player_info(peer, "peer"), player_info(other, "other")];
+    server.pair_webrtc_peer_with_members(&peer, &members).await;
+
+    let other_flag = match recv(&mut other_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, peer);
+            *you_initiate
+        }
+        other => panic!("other expected NewPeer, got {other:?}"),
+    };
+    let peer_flag = match recv(&mut peer_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, other);
+            *you_initiate
+        }
+        other => panic!("peer expected NewPeer, got {other:?}"),
+    };
+    assert_ne!(peer_flag, other_flag);
+    assert_eq!(peer_flag, local_initiates(peer, other));
+
+    assert_silent(&mut peer_rx).await;
+    assert_silent(&mut other_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pair_webrtc_peer_with_host_client_offers_host_answers() {
+    // The star primitive: a client joiner offers to the host; the host answers.
+    let server = create_test_server().await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (client, mut client_rx) = register_client(&server).await;
+    let (other_client, mut other_client_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc());
+    server.set_client_protocol(&client, v3_webrtc());
+    server.set_client_protocol(&other_client, v3_webrtc());
+
+    let members = vec![
+        player_info(host, "host"),
+        player_info(client, "client"),
+        player_info(other_client, "other"),
+    ];
+    server
+        .pair_webrtc_peer_with_host(&client, host, &members)
+        .await;
+
+    // Client offers to the host.
+    match recv(&mut client_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, host);
+            assert!(*you_initiate);
+        }
+        other => panic!("client expected NewPeer(host, true), got {other:?}"),
+    }
+    // Host answers the client.
+    match recv(&mut host_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, client);
+            assert!(!*you_initiate);
+        }
+        other => panic!("host expected NewPeer(client, false), got {other:?}"),
+    }
+
+    // The other client is never paired with this client (clients never mesh).
+    assert_silent(&mut other_client_rx).await;
+    assert_silent(&mut client_rx).await;
+    assert_silent(&mut host_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pair_webrtc_peer_with_host_host_joiner_pairs_every_client() {
+    // When the host itself (re)joins, it is paired with every webrtc client; each
+    // client offers, the host answers.
+    let server = create_test_server().await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (client_a, mut client_a_rx) = register_client(&server).await;
+    let (client_b, mut client_b_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc());
+    server.set_client_protocol(&client_a, v3_webrtc());
+    server.set_client_protocol(&client_b, v3_webrtc());
+
+    let members = vec![
+        player_info(host, "host"),
+        player_info(client_a, "a"),
+        player_info(client_b, "b"),
+    ];
+    server
+        .pair_webrtc_peer_with_host(&host, host, &members)
+        .await;
+
+    // Each client is told to offer to the host.
+    for rx in [&mut client_a_rx, &mut client_b_rx] {
+        match recv(rx).await.as_ref() {
+            ServerMessage::NewPeer {
+                peer_id,
+                you_initiate,
+            } => {
+                assert_eq!(*peer_id, host);
+                assert!(*you_initiate, "clients offer to the host");
+            }
+            other => panic!("client expected NewPeer(host, true), got {other:?}"),
+        }
+    }
+
+    // The host answers both clients (two NewPeer, both initiate=false).
+    let mut answered = std::collections::HashSet::new();
+    for _ in 0..2 {
+        match recv(&mut host_rx).await.as_ref() {
+            ServerMessage::NewPeer {
+                peer_id,
+                you_initiate,
+            } => {
+                assert!(!*you_initiate, "host answers every client");
+                answered.insert(*peer_id);
+            }
+            other => panic!("host expected NewPeer, got {other:?}"),
+        }
+    }
+    assert!(answered.contains(&client_a));
+    assert!(answered.contains(&client_b));
+
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut client_a_rx).await;
+    assert_silent(&mut client_b_rx).await;
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_restores_room_membership_and_webrtc_pairing() {
-    let server = create_test_server().await;
+    // Reconnect re-pairing is now finalization + transport gated: only a Finalized
+    // room whose plan uses the WebRTC transport re-pairs via NewPeer (mesh+webrtc
+    // here; a non-relay `host+direct` plan would not). Set up a mesh server and a
+    // finalized 2-player room so the reconnecting peer is re-meshed with the
+    // existing peer.
+    let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (reconnecting, _old_rx) = register_client(&server).await;
     let (current, mut current_rx) = register_client(&server).await;
     server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&reconnecting, v3_webrtc());
     server.set_client_protocol(&current, v3_webrtc());
 
-    let room_id = create_db_room(&server, existing).await;
+    let room_id = create_db_room_with_max(&server, existing, 2).await;
     let reconnecting_info = player_info(reconnecting, "reconnecting");
     server
         .database
@@ -776,6 +1292,9 @@ async fn reconnect_restores_room_membership_and_webrtc_pairing() {
         .connection_manager
         .assign_client_to_room(&reconnecting, room_id)
         .await;
+
+    // Finalize the (now full) room so the post-reconnect re-pairing engages.
+    finalize_db_room(&server, &room_id, &[existing, reconnecting]).await;
 
     let token = server
         .reconnection_manager()

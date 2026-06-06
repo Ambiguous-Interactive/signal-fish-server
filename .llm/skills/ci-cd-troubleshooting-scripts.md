@@ -20,8 +20,8 @@ or `cargo test` multi-filter syntax errors.
 
 - **Missing `--locked`**: Add to all Cargo commands that resolve dependencies
 - **AWK patterns**: Use prefix matching (`/^```rust/`) for flexibility, not exact patterns
-- **Miri clock_gettime**: Add `#[cfg_attr(miri, ignore)]` to tests that call wall-clock APIs
-- **Miri getcwd (proptest)**: Add `#[cfg_attr(miri, ignore)]` to all tests inside `proptest!` blocks
+- **Miri wall-clock/entropy**: No annotation needed — the Miri job runs with `-Zmiri-disable-isolation`
+- **Miri + proptest**: Keep `#[cfg_attr(miri, ignore)]` on tests inside `proptest!` blocks (too slow under Miri)
 - **Bash code blocks**: Tag non-bash content as `text` (not `bash`) so shellcheck passes
 - **POSIX shell portability**: Use `[[:space:]]` not `\s`; avoid `tac` on macOS
 
@@ -96,36 +96,33 @@ only reporting flags on `report`:
 
 ---
 
-## Pattern 12: Proptest Tests Fail Under Miri
-
-### Symptom
-
-```text
-error: unsupported operation: `getcwd` not available when isolation is enabled
-```
+## Pattern 12: Proptest Tests Under Miri
 
 ### Root Cause
 
-Proptest's failure-persistence layer calls `std::env::current_dir()` to absolutize
-source file paths. Miri blocks `getcwd` in isolation mode, aborting the entire test binary.
+A `proptest!` test runs hundreds of generated cases per test. Under Miri's
+interpreter (10–50× slower) that is far too slow for the job's time budget, and
+proptest's value — exploring the input space — is orthogonal to Miri's value:
+detecting undefined behavior on a single concrete execution. (Historically these
+also aborted on `getcwd` under isolation, but the job now runs with
+`-Zmiri-disable-isolation`, so syscalls are no longer the issue — speed is.)
 
 ### Solution
 
-Add `#[cfg_attr(miri, ignore)]` above each `#[test]` inside `proptest!` blocks,
-with a comment explaining the `getcwd` / isolation reason:
+Keep each `#[test]` inside a `proptest!` block annotated `#[cfg_attr(miri, ignore)]`:
 
 ```rust
 proptest! {
     #[test]
-    #[cfg_attr(miri, ignore)]  // proptest getcwd blocked by Miri isolation
+    #[cfg_attr(miri, ignore)]  // proptest runs hundreds of cases — too slow under Miri
     fn my_property_test(input in any::<u32>()) { /* ... */ }
 }
 ```
 
 CI config test `proptest_tests_ignored_under_miri` enforces this automatically.
 
-Also see: **Miri clock_gettime** — add `#[cfg_attr(miri, ignore)]` to any test
-that calls `chrono::Utc::now()` or any wall-clock API.
+Ordinary (non-proptest) tests need no Miri annotation: with isolation disabled,
+`chrono::Utc::now()`, `getrandom`, and friends run under Miri normally.
 
 ---
 

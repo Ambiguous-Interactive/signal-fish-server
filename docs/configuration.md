@@ -118,7 +118,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW` | `server.reconnection_window` | `300` | Seconds a reconnection token stays valid |
 | `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE` | `server.event_buffer_size` | `100` | Max events buffered for reconnection replay |
 | `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION` | `server.enable_reconnection` | `true` | Enable reconnection support |
-| `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS` | `server.heartbeat_throttle_secs` | `30` | Min seconds between heartbeat logs |
+| `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS` | `server.heartbeat_throttle_secs` | `30` | Min seconds between `last_seen` heartbeat writes |
 | `SIGNAL_FISH__SERVER__REGION_ID` | `server.region_id` | `default` | Region identifier for metrics and room codes |
 | `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX` | `server.room_code_prefix` | `null` | Optional prefix for generated room codes |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS` | `rate_limit.max_room_creations` | `5` | Max room creations per player per window |

@@ -7,7 +7,7 @@
 #
 # Usage:
 #   ./scripts/run-local-ci.sh           # Run all checks
-#   ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests)
+#   ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests, clippy, nested policy scans)
 #   ./scripts/run-local-ci.sh --fix     # Auto-fix issues where possible
 #
 # Exit codes:
@@ -52,7 +52,7 @@ for arg in "$@"; do
             echo "Usage: $0 [--fast] [--fix]"
             echo ""
             echo "Options:"
-            echo "  --fast    Skip slow checks (tests, full clippy)"
+            echo "  --fast    Skip slow checks (tests, clippy, nested policy scans)"
             echo "  --fix     Auto-fix issues where possible (fmt, clippy suggestions)"
             echo "  --help    Show this help message"
             exit 0
@@ -72,7 +72,7 @@ cd "$REPO_ROOT"
 echo -e "${BOLD}${BLUE}Local CI Runner${NC}"
 echo -e "${BLUE}Repository: $REPO_ROOT${NC}"
 if [ "$FAST_MODE" = true ]; then
-    echo -e "${YELLOW}Mode: Fast (skipping tests and full linting)${NC}"
+    echo -e "${YELLOW}Mode: Fast (skipping tests, clippy, and nested policy scans)${NC}"
 fi
 if [ "$FIX_MODE" = true ]; then
     echo -e "${YELLOW}Mode: Auto-fix enabled${NC}"
@@ -153,8 +153,10 @@ if [ "$FIX_MODE" = true ]; then
     run_check "clippy-all" "Running clippy with auto-fix (all features)" \
         cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings || true
 else
-    run_check "clippy-all" "Running clippy (all features)" \
-        cargo clippy --locked --all-targets --all-features -- -D warnings
+    if [ "$FAST_MODE" = false ]; then
+        run_check "clippy-all" "Running clippy (all features)" \
+            cargo clippy --locked --all-targets --all-features -- -D warnings
+    fi
 fi
 
 # Check 4: Tests (default features)
@@ -188,7 +190,7 @@ if [ -f scripts/validate-workflow-awk.sh ]; then
 fi
 
 # Check 9: No Panic Patterns
-if [ -f scripts/check-no-panics.sh ]; then
+if [ "$FAST_MODE" = false ] && [ -f scripts/check-no-panics.sh ]; then
     run_check_quiet "no-panics" "Checking for panic-prone patterns" \
         scripts/check-no-panics.sh patterns
 fi
@@ -199,7 +201,21 @@ if [ -f scripts/validate-ci.sh ]; then
         scripts/validate-ci.sh --quiet
 fi
 
-# Check 11: Markdown Linting
+# Check 11: GitHub Actions syntax validation
+if command -v actionlint > /dev/null 2>&1; then
+    ACTIONLINT_WORKFLOWS=()
+    for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+        [ -f "$workflow" ] && ACTIONLINT_WORKFLOWS+=("$workflow")
+    done
+
+    run_check_quiet "actionlint" "Validating GitHub Actions workflow syntax" \
+        actionlint "${ACTIONLINT_WORKFLOWS[@]}"
+else
+    echo -e "${YELLOW}⚠ SKIP${NC}: actionlint (actionlint not installed)"
+    echo ""
+fi
+
+# Check 12: Markdown Linting
 if [ -f scripts/check-markdown.sh ]; then
     if [ "$FIX_MODE" = true ]; then
         echo -e "${BOLD}${BLUE}[markdown]${NC} Fixing markdown files"
@@ -233,19 +249,19 @@ else
     FAILED_CHECKS+=("markdown")
 fi
 
-# Check 12: README Badge Style Consistency
+# Check 13: README Badge Style Consistency
 if [ -f scripts/check-readme-badges.sh ]; then
     run_check_quiet "readme-badges" "Checking Shields badge style consistency in README" \
         scripts/check-readme-badges.sh README.md
 fi
 
-# Check 13: Dockerfile shell portability
+# Check 14: Dockerfile shell portability
 if [ -f scripts/check-dockerfile-portability.sh ]; then
     run_check_quiet "dockerfile-portability" "Checking Dockerfile shell portability" \
         scripts/check-dockerfile-portability.sh --quiet
 fi
 
-# Check 14: Dependency Advisory Check
+# Check 15: Dependency Advisory Check
 if [ -f scripts/check-advisories.sh ]; then
     run_check_quiet "advisories" "Checking for RUSTSEC dependency advisories" \
         scripts/check-advisories.sh
@@ -254,7 +270,7 @@ else
     echo ""
 fi
 
-# Check 15: Documentation + changelog consistency
+# Check 16: Documentation + changelog consistency
 if [ -f scripts/check-doc-consistency.sh ]; then
     run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
         scripts/check-doc-consistency.sh
@@ -264,7 +280,7 @@ else
     FAILED_CHECKS+=("doc-consistency")
 fi
 
-# Check 16: Documentation consistency policy tests
+# Check 17: Documentation consistency policy tests
 if [ "$FAST_MODE" = false ]; then
     run_check "doc-policy-tests" "Running docs/changelog policy tests" \
         cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests

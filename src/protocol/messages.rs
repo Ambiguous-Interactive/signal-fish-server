@@ -5,7 +5,7 @@ use super::error_codes::ErrorCode;
 use super::room_state::LobbyState;
 use super::types::{
     ConnectionInfo, GameDataEncoding, PeerConnectionInfo, PlayerId, PlayerInfo,
-    ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SpectatorInfo,
+    ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SessionPlanPayload, SpectatorInfo,
     SpectatorStateChangeReason, Topology, Transport,
 };
 
@@ -236,12 +236,24 @@ pub enum ServerMessage {
     /// A new peer is available for a direct (WebRTC) connection (v3 only).
     ///
     /// `you_initiate` designates exactly one side of each pair as the offerer,
-    /// avoiding glare (Appendix E mesh rule: the recipient initiates iff its id
-    /// is the lesser of the two UUIDs).
+    /// avoiding glare. In `mesh` topology the recipient initiates iff its id is
+    /// the lesser of the two UUIDs (Appendix E glare rule); in `host` topology
+    /// the direction is fixed — the client initiates to the host and the host
+    /// answers, regardless of UUID order.
     NewPeer {
         peer_id: PlayerId,
         you_initiate: bool,
     },
+    /// Per-recipient session directive emitted at lobby finalization (v3 only).
+    ///
+    /// Sent alongside the unchanged [`ServerMessage::GameStarting`] (and only to
+    /// v3-capable members) when a room negotiates a non-relay plan. It carries
+    /// the chosen topology/transport, the host (for `host` topology), the
+    /// recipient's peer list with per-recipient `initiate` flags, ICE servers,
+    /// and the relay `fallback`. A relay-only room emits no `SessionPlan`, so v2
+    /// clients never observe it (boxed to keep the enum small, mirroring
+    /// [`ServerMessage::RoomJoined`]).
+    SessionPlan(Box<SessionPlanPayload>),
     /// Pong response to ping
     Pong,
     /// Reconnection successful (boxed to reduce enum size)

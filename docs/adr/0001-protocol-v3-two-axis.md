@@ -92,7 +92,8 @@ stateless rule -- no perfect-negotiation dance:
 - **Host (star):** every non-host client offers to the `host`; the host offers to
   none and answers all. Clients never signal each other.
 - **Late join/reconnect:** both peers receive `NewPeer { peer_id, you_initiate }`
-  using the same deterministic rule, so either side may be the offerer.
+  using the topology's offerer rule above -- the UUID compare in mesh (either side
+  may offer), the fixed client-offers-to-host direction in star.
 
 ### 6. Signaling integrity
 

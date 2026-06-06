@@ -20,32 +20,40 @@ impl EnhancedGameServer {
             return;
         };
 
-        if let Err(e) = self
+        match self
             .room_coordinator
             .handle_player_ready(&room_id, player_id, self.client_app_id(player_id))
             .await
         {
-            tracing::debug!(
-                "Player {:?} attempted to change ready status: {}",
-                player_id,
-                e
-            );
-            let error_message = if e.to_string().contains("room may not be in lobby state") {
-                "Cannot change ready status. Room must be in lobby state (full with all players joined)."
-                    .to_string()
-            } else {
-                "Failed to update ready state".to_string()
-            };
-            let _ = self
-                .message_coordinator
-                .send_to_player(
+            // The room finalized on this toggle: emit the per-recipient v3
+            // SessionPlan AFTER GameStarting was broadcast (gated to v3 clients).
+            Ok(Some(finalized)) => {
+                self.emit_session_plan(&room_id, &finalized).await;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(
+                    "Player {:?} attempted to change ready status: {}",
                     player_id,
-                    Arc::new(ServerMessage::Error {
-                        message: error_message,
-                        error_code: Some(ErrorCode::InvalidRoomState),
-                    }),
-                )
-                .await;
+                    e
+                );
+                let error_message = if e.to_string().contains("room may not be in lobby state") {
+                    "Cannot change ready status. Room must be in lobby state (full with all players joined)."
+                        .to_string()
+                } else {
+                    "Failed to update ready state".to_string()
+                };
+                let _ = self
+                    .message_coordinator
+                    .send_to_player(
+                        player_id,
+                        Arc::new(ServerMessage::Error {
+                            message: error_message,
+                            error_code: Some(ErrorCode::InvalidRoomState),
+                        }),
+                    )
+                    .await;
+            }
         }
     }
 }

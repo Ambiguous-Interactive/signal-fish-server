@@ -30,12 +30,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client omits it. The public router now mounts this alias only at the top level, avoiding a
   nested `/v2/v3/ws` route. This change is fully backward compatible: clients that omit the new
   fields on `/v2/ws` negotiate as pure v2 (relay-only) and observe byte-identical v2 behavior.
+- Added per-room session plan / topology selection (protocol v3 phase P3). At lobby
+  finalization (all players ready), the server now computes a single room-wide plan from the
+  intersection of every member's negotiated capabilities and sends a per-recipient
+  `ServerMessage::SessionPlan` (`{topology, transport, host?, peers, ice_servers?, fallback}`)
+  to each v3-capable member, alongside the unchanged `GameStarting`. The selection ladder is
+  `mesh+webrtc` → `host+webrtc` → `host+direct` → `relay` floor, where any member lacking the
+  required capability (or a disabled transport) downgrades the whole room to relay; host election
+  prefers the authority, else the earliest joiner (smaller UUID tie-break); each recipient's
+  `peers[].initiate` is set by the deterministic glare rule (mesh: lesser UUID offers; host:
+  clients offer to the host, the host offers to none). A room that resolves to the relay floor
+  emits no `SessionPlan` and behaves byte-identically to v2 — v2 (and v3-relay-only) clients never
+  receive one. Initial pairing is delivered exclusively by this `SessionPlan` at finalize; the
+  late-join / reconnect `ServerMessage::NewPeer` path is now finalization-gated and transport-gated
+  (it fires only for a join or reconnect into an already-`Finalized` room whose recomputed plan uses
+  the WebRTC transport, then pairs per the plan's topology: mesh pairs the joiner with every other
+  WebRTC peer, host pairs a client with the elected host only — clients never offer to each other —
+  while a non-WebRTC plan, the relay floor _or_ a `host+direct` (LAN) session, emits no `NewPeer`).
+  This supersedes the P2 behavior where `NewPeer` fired on every lobby-fill join. Added
+  a `[session]` config block (`default_topology`, `game_topology_mappings`, `enable_webrtc`,
+  `enable_direct`, `ice_servers`) with validation; the new `IceServer`, `SessionPeer`, and
+  `SessionPlanPayload` types are additive over the frozen v2 wire format (`host`/`ice_servers`/
+  credentials omitted when absent).
 - Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
   relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
   `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.
   On room join, existing v3 WebRTC peers and the joiner are paired via `ServerMessage::NewPeer
   { peer_id, you_initiate }`, where the deterministic glare rule (lesser UUID initiates) designates
-  exactly one offerer per pair. Same-room enforcement, WebRTC-transport negotiation, and a
+  exactly one offerer per pair; P3's host topology later fixes this direction for star sessions
+  (the client offers, the host answers). Same-room enforcement, WebRTC-transport negotiation, and a
   per-connection valid-signal rate limit (`rate_limit.max_signals`, default 600) are enforced.
   Rejected signal attempts use a separate `rate_limit.max_signal_errors` budget (default 60) so
   invalid targets and unsupported transports cannot bypass rate limiting or consume the valid ICE
@@ -51,6 +74,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed in-memory room-operation lock cleanup so lobby transitions, authority changes,
+  distributed room operations, and `PlayerReady` finalization release distributed locks
+  immediately instead of relying on TTL expiry; protocol v3 session-plan e2e tests now
+  document their receive timeout as a CI scheduling budget, not lock TTL compensation.
+- Corrected `heartbeat_throttle_secs` documentation to describe throttled `last_seen`
+  heartbeat writes rather than heartbeat logs.
+- Hardened Rust CI policy detectors by replacing hand-rolled comment/string/char stripping with
+  `syn`-based source analysis. The `bash_command` import/call-site check now handles ASCII,
+  escaped, byte, and delimiter char literals, lifetimes, raw strings, comments, aliases, and both
+  import/call cfg mismatch directions; the direct `Command::new("bash")` guard now ignores text in
+  strings and comments while retaining line diagnostics. The no-panics pattern scan now also
+  delegates Rust syntax classification to a parser-backed integration test instead of shell brace
+  scanning.
+- Fixed the protocol v3 session-plan selection ladder so a `desired` topology acts as a _ceiling_
+  rather than an exact match: a `mesh`-preferring room that cannot run mesh now correctly falls back
+  to `host+webrtc`, then `host+direct`, before the relay floor — instead of collapsing straight to
+  relay (the previous code gated the host rungs on `desired == host`). This matches ADR-0001 §1 and
+  the documented `mesh+webrtc → host+webrtc → host+direct → relay` ladder. The ladder is now expressed
+  as a single data-driven constant (`UPGRADE_LADDER`) walked by topology-richness rank, the four legal
+  `(topology, transport)` pairings are enforced by `is_valid_pair` plus a `debug_assert!`, and an
+  exhaustive selection-invariant test guards the whole class of topology/transport drift.
+- Fixed `handle_webrtc_late_join` emitting WebRTC `NewPeer` control messages for a non-WebRTC active
+  session. Late-join pairing is now gated on the plan's _transport_
+  (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == webrtc`) rather than its _topology_,
+  so a `host+direct` (LAN) room — a non-relay topology whose transport is not WebRTC — no longer pushes
+  clients into WebRTC negotiation. This mirrors `emit_session_plan`, which advertises ICE only for a
+  WebRTC transport. The two emission gates (`is_relay` for `SessionPlan`, `uses_webrtc_signaling` for
+  `NewPeer`/`Signal`) and their `host+direct` divergence are now pinned by a data-driven truth-table
+  test, and the module/protocol doc comments corrected to describe the late-join gate as the WebRTC
+  transport rather than a "non-relay" plan (a `host+direct` room is non-relay yet emits no `NewPeer`).
+- Hardened `session.ice_servers` validation to reject any blank or whitespace-only URL (even alongside
+  valid ones) and to report an empty `urls` list distinctly, instead of accepting a server as long as
+  a single URL was non-blank. Blank URLs are propagated verbatim to clients and break `RTCIceServer`
+  parsing, so they are now a configuration error with an index-pointed message.
 - Fixed README protocol-reference formatting for the `Reconnect` row and typical session-flow diagram alignment.
 - Fixed config-token drift by documenting canonical lowercase/snake_case values, making related
   config enum deserialization tolerate legacy mixed-case tokens, and adding doc/reference guards.
@@ -72,9 +129,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed cross-platform hook/link-checker issues: shared PowerShell native-process helpers now avoid
   synchronous stream deadlocks, Bash hook scripts avoid Bash 4-only features, and the fast link
   checker initializes empty file sets safely.
+- Fixed the Rustdoc Validation CI failure by repairing two broken intra-doc links introduced by the
+  protocol v3 work: the `config` module overview now uses explicit `crate::config::*` paths (a bare
+  `` [`session`] `` did not resolve), and `config::session` no longer links to the private
+  `server::session_policy` module.
+- Fixed the Advanced Safety (Miri) CI failure: the protocol v3 session-policy tests reached
+  `chrono::Utc::now()` through a fixture helper, which aborts under Miri's REALTIME-clock isolation.
+  The pure-logic tests now build fixtures from a deterministic `base_time()` constant, so they run
+  under Miri and no longer depend on real-clock skew for host-election tie-breaks.
 
 ### Changed
 
+- Simplified the Miri (Advanced Safety) job to run with `MIRIFLAGS=-Zmiri-disable-isolation`,
+  which lets the interpreter service wall-clock (`clock_gettime`), entropy (`getrandom`), and
+  `getcwd` syscalls instead of aborting on them. This structurally eliminates the entire
+  "test reached an isolated syscall" failure class, so the bespoke guard for it — a discovery
+  scanner (`scripts/check-miri-compat.sh`), its parser-contract regression
+  (`tests/miri_compat_gate_tests.rs`), the blocking `test_wall_clock_tests_ignored_under_miri`
+  check, the CI pre-flight step, and ~30 per-test `#[cfg_attr(miri, ignore)]` annotations — was
+  removed. Ordinary time/UUID-using unit tests — including `tokio::spawn` concurrency tests on the
+  default current-thread runtime, a useful target for Miri's data-race detection — now run under
+  Miri (increasing undefined-behavior coverage); only `proptest!` cases stay annotated for this
+  reason (hundreds of generated cases are too slow under the interpreter). Pre-existing
+  `#[cfg_attr(miri, ignore)]` annotations on async tests that need real I/O, timers, or multi-thread
+  runtimes are unrelated and untouched. A new `test_ci_safety_runs_miri_with_isolation_disabled`
+  pins the flag against regression.
 - Moved the optional feature compile matrix out of the default Rust test suite and into a single CI script step to avoid
   repeated nested Cargo builds in nextest, coverage, MSRV, Miri, and sanitizer jobs.
 - Upgraded `sha2` from `0.10.9` to `0.11.0` and `hmac` from `0.12.1` to `0.13.0-rc.6` to align
