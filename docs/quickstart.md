@@ -239,7 +239,9 @@ Signal Fish Server includes a lobby system that tracks when players are
 ready. `PlayerReady` is a toggle (ready/unready for the sending player). Once
 all players are ready at the same time, the lobby transitions through
 `Lobby` to `Finalized` and the server sends a `GameStarting` event
-with peer connection information.
+with legacy peer metadata. Negotiated v3 non-relay rooms also receive
+per-recipient `SessionPlan` messages with topology, transport, peer, relay
+fallback, and ICE only when the selected transport is WebRTC.
 
 After both clients have joined the room, send the ready signal:
 
@@ -284,9 +286,9 @@ Lobby state: finalized
 Game is starting!
 ```
 
-At this point the server has done its job: players are matched, ready,
-and have the information they need to establish direct peer-to-peer
-connections.
+At this point the server has done its job: players are matched and ready; v2
+clients receive the legacy handoff, and negotiated v3 clients use `SessionPlan`
+for any non-relay data path.
 
 ## What's Next
 

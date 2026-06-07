@@ -188,21 +188,25 @@ pub struct SessionPlanPayload {
     pub fallback: Transport,
 }
 
-/// Connection information for P2P establishment
+/// Legacy, self-declared peer metadata carried in `GameStarting`.
+///
+/// This is preserved for the v2/back-compat handoff surface. It is not protocol
+/// v3 transport negotiation and must not be treated as proof of direct/WebRTC
+/// reachability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionInfo {
-    /// Direct IP:port connection (for Mirror, FishNet, Unity NetCode direct)
+    /// Self-declared direct IP:port endpoint metadata.
     #[serde(rename = "direct")]
     Direct { host: String, port: u16 },
-    /// Unity Relay allocation (for Unity NetCode via Unity Relay)
+    /// Self-declared Unity Relay allocation metadata.
     #[serde(rename = "unity_relay")]
     UnityRelay {
         allocation_id: String,
         connection_data: String,
         key: String,
     },
-    /// Built-in relay server (for Unity NetCode, FishNet, Mirror)
+    /// Self-declared relay server metadata.
     #[serde(rename = "relay")]
     Relay {
         /// Relay server host
@@ -220,7 +224,7 @@ pub enum ConnectionInfo {
         #[serde(skip_serializing_if = "Option::is_none")]
         client_id: Option<u16>,
     },
-    /// WebRTC connection info (for matchbox relay)
+    /// Self-declared WebRTC metadata.
     #[serde(rename = "webrtc")]
     WebRTC {
         sdp: Option<String>,
@@ -239,7 +243,7 @@ pub struct PlayerInfo {
     pub is_authority: bool,
     pub is_ready: bool,
     pub connected_at: chrono::DateTime<chrono::Utc>,
-    /// Connection info for P2P establishment (provided when player is ready)
+    /// Legacy self-declared peer metadata for `GameStarting`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
     /// Deployment region that currently hosts this player (internal only).
@@ -279,20 +283,20 @@ pub enum SpectatorStateChangeReason {
     RoomClosed,
 }
 
-/// Peer connection information for game start
+/// Legacy peer metadata included in `GameStarting`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConnectionInfo {
     pub player_id: PlayerId,
     pub player_name: String,
     pub is_authority: bool,
     pub relay_type: String,
-    /// Connection info provided by the peer for P2P establishment
+    /// Self-declared metadata provided by the peer, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
 }
 
 impl PeerConnectionInfo {
-    /// Build wire-level peer connection data from a room member snapshot.
+    /// Build wire-level legacy peer metadata from a room member snapshot.
     pub fn from_player(player: &PlayerInfo, relay_type: &str) -> Self {
         Self {
             player_id: player.id,
@@ -303,7 +307,7 @@ impl PeerConnectionInfo {
         }
     }
 
-    /// Build wire-level peer connection data for each room member.
+    /// Build wire-level legacy peer metadata for each room member.
     pub fn from_players<'a>(
         players: impl IntoIterator<Item = &'a PlayerInfo>,
         relay_type: &str,

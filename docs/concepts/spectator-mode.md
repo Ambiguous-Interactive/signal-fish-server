@@ -80,7 +80,8 @@ receive:
   Finalized).
 - `GameData` -- Game data sent between players.
 - `AuthorityChanged` -- The room's authority player changed.
-- `GameStarting` -- The game has been finalized with peer connection info.
+- `GameStarting` -- The game has been finalized with legacy, self-declared
+  peer metadata.
 - `NewSpectatorJoined` -- Another spectator joined.
 - `SpectatorDisconnected` -- Another spectator left.
 

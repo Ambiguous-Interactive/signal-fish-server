@@ -35,19 +35,20 @@ directly to each other and the signaling server steps out of the way.
                     | (coordination)   |
                     +------------------+
        |                                          |
-       |  2. Exchange connection info             |
+       |  2. Exchange legacy peer metadata        |
        +<-----------------------------------------+
        |                                          |
-       |  3. Establish direct P2P connection      |
+       |  3. Establish negotiated data path       |
        +<========================================>+
        |       (game traffic flows here)          |
 ```
 
 1. Both clients connect to Signal Fish over WebSocket.
-2. Signal Fish coordinates room creation, matchmaking, and relays each
-   player's connection details to the other.
-3. Players use those details to establish a direct connection (WebRTC, UDP,
-   TCP, or a relay) and start playing.
+2. Signal Fish coordinates room creation, matchmaking, and relays each player's
+   legacy peer metadata through `GameStarting`.
+3. Protocol v3 clients use the negotiated `SessionPlan` for topology,
+   transport, peers, relay fallback, and ICE only when the selected transport is
+   WebRTC; v2 clients keep using the legacy `GameStarting` handoff.
 
 ## What Signal Fish Does
 
@@ -56,9 +57,9 @@ directly to each other and the signaling server steps out of the way.
 - **Lobby system with ready-up flow** -- Rooms transition through Waiting,
   Lobby, and Finalized states so everyone can signal readiness before the
   game starts.
-- **Connection info relay** -- Each player provides their connection
-  details, and Signal Fish distributes them to all peers when the game
-  starts.
+- **Session handoff** -- v2 clients receive legacy, self-declared
+  `GameStarting` metadata, while negotiated v3 clients use `SessionPlan` for
+  topology, transport, peers, relay fallback, and WebRTC ICE when applicable.
 - **Authority system** -- Optionally designate one player as the
   authoritative host for game logic decisions.
 - **Spectator mode** -- Read-only observers can watch a room without
@@ -96,7 +97,9 @@ JSON object with a `type` field and an optional `data` field.
 }
 ```
 
-The WebSocket endpoint is served at `/v2/ws`. Clients connect, optionally
+The WebSocket endpoints are served at `/v2/ws` and `/v3/ws`. Both use the same
+protocol; the `/v3/ws` alias defaults omitted `protocol_version` values to 3,
+while `/v2/ws` defaults omitted versions to 2. Clients connect, optionally
 authenticate, then create or join rooms.
 
 For the complete list of client and server message types, see the

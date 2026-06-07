@@ -505,7 +505,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             if all_ready {
                 let finalized_members = room_players;
 
-                // Use P2P connection info from players (no relay server support in signal-fish-server)
+                // Preserve the legacy GameStarting metadata; v3 transport proof
+                // comes from negotiation and TransportStatus, not this payload.
                 let peer_connections =
                     PeerConnectionInfo::from_players(&finalized_members, &room.relay_type);
 
@@ -799,7 +800,7 @@ mod tests {
             name: player.name.clone(),
             is_authority: player.is_authority,
             connection_info: serde_json::to_value(&player.connection_info)
-                .expect("connection info serializes"),
+                .expect("legacy peer metadata serializes"),
         }
     }
 
@@ -808,7 +809,7 @@ mod tests {
             name: peer.player_name.clone(),
             is_authority: peer.is_authority,
             connection_info: serde_json::to_value(&peer.connection_info)
-                .expect("connection info serializes"),
+                .expect("legacy peer metadata serializes"),
         }
     }
 
@@ -1341,13 +1342,13 @@ mod tests {
         assert_eq!(
             finalized_member_map(&finalized.members),
             peer_connection_map(peer_connections),
-            "FinalizedRoom members must match the same room-player snapshot used for GameStarting peers"
+            "FinalizedRoom members must match the same room-player snapshot used for GameStarting metadata"
         );
         assert!(
             peer_connections
                 .iter()
                 .all(|peer| peer.relay_type == "custom-relay"),
-            "peer connections must carry the finalized room relay type"
+            "GameStarting metadata must carry the finalized room relay type"
         );
     }
 }

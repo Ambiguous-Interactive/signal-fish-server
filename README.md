@@ -91,6 +91,7 @@ ws://localhost:3536/v2/ws
 | Path               | Method    | Description                                |
 | ------------------ | --------- | ------------------------------------------ |
 | `/v2/ws`           | WebSocket | Signaling WebSocket endpoint               |
+| `/v3/ws`           | WebSocket | Protocol v3 WebSocket alias                |
 | `/v2/health`       | GET       | Health check (returns 200 OK)              |
 | `/metrics`         | GET       | JSON server metrics                        |
 | `/v1/metrics`      | GET       | JSON server metrics (alias)                |
@@ -271,7 +272,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 | `GameData`         | Send arbitrary game data to other players in the room                            |
 | `AuthorityRequest` | Request or release game authority                                                |
 | `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
-| `ProvideConnectionInfo` | Share peer connection information for P2P establishment                     |
+| `ProvideConnectionInfo` | Share legacy self-declared metadata for v2/back-compat; not v3 capability proof |
 | `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`        |
 | `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
 | `LeaveSpectator`   | Leave spectator mode                                                             |

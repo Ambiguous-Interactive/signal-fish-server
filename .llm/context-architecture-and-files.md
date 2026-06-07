@@ -52,3 +52,13 @@ connection reassignment succeeds.
 
 Session-plan topology/transport selection invariants are documented in
 [Protocol v3 Session-Plan Selection](skills/protocol-v3-session-plan.md).
+
+Protocol v3 `TransportStatus` is informational, but still a negotiated-capability
+boundary: accept reports only from v3 connections and only for transports present
+in that connection's negotiated transport set. Invalid reports must not update
+stored per-connection status or transport metrics.
+
+`ProvideConnectionInfo` / `GameStarting.peer_connections` is legacy,
+self-declared metadata for the v2 handoff surface. It is preserved for backward
+compatibility and must not be treated as proof of negotiated v3 `direct` or
+`webrtc` transport capability.

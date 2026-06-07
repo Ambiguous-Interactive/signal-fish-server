@@ -169,7 +169,12 @@ provided to the client for reconnection purposes.
 
 ### ProvideConnectionInfo
 
-Provide connection info for P2P establishment.
+Provide legacy, self-declared peer connection metadata for the v2
+`GameStarting.peer_connections` handoff. This metadata is preserved for
+backward compatibility and is not part of protocol v3 capability negotiation:
+it does not prove that a client negotiated `direct` or `webrtc`, and it does not
+drive v3 `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, or transport
+metrics.
 
 ```json
 
@@ -485,7 +490,7 @@ Note: The `reason` and `error_code` fields are optional.
 
 ### GameStarting
 
-Game is starting with peer connection information.
+Game is starting with legacy peer metadata.
 
 ```json
 
@@ -504,6 +509,12 @@ Game is starting with peer connection information.
 }
 
 ```
+
+`peer_connections` carries player identity, authority, relay type, and optional
+self-declared `connection_info` from `ProvideConnectionInfo`. It is kept for
+v2/back-compat and does not prove direct or WebRTC reachability. v3 clients use
+the negotiated `SessionPlan` for topology, transport, peers, ICE servers, and
+relay fallback.
 
 ### Error
 
@@ -830,17 +841,19 @@ message:
 
 - `protocol_version` — the highest protocol version the client speaks. When absent, the endpoint default is used
   (`/v2/ws` ⇒ 2, `/v3/ws` ⇒ 3).
-- `supported_transports` — data-path transports the client supports. Absent ⇒ relay-only (v2). Tokens: `relay`,
-  `direct`, `webrtc`.
-- `supported_topologies` — session topologies the client supports. Absent ⇒ relay-only (v2). Tokens: `relay`,
-  `host`, `mesh`.
+- `supported_transports` — data-path transports the client supports. Absent means the capability set is relay-only
+  even when `/v3/ws` defaulted the protocol version to 3. Tokens: `relay`, `direct`, `webrtc`.
+- `supported_topologies` — session topologies the client supports. Absent means the capability set is relay-only
+  even when `/v3/ws` defaulted the protocol version to 3. Tokens: `relay`, `host`, `mesh`.
 
 The server clamps the negotiated version into its configured range:
 `negotiated = clamp(client_max, min_protocol_version, max_protocol_version)`, i.e.
 `min(client_max, max_protocol_version)` raised to at least `min_protocol_version`. A client that advertises a higher
 version than the deployment speaks is clamped **down** to `max_protocol_version`; one that omits the field is
-treated as a pure v2 client. If the negotiated version is below 3, the connection is **relay-only** regardless of
-the advertised transports/topologies. Defaults: `min_protocol_version = 2`, `max_protocol_version = 3`.
+negotiated from the endpoint default (`/v2/ws` defaults to v2; `/v3/ws` defaults to v3). If the negotiated
+version is below 3, the connection is **relay-only** regardless of the advertised transports/topologies. If the
+negotiated version is 3 but transports/topologies are absent, the connection is v3 relay-only. Defaults:
+`min_protocol_version = 2`, `max_protocol_version = 3`.
 
 The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 fields plus three new ones):
 
@@ -875,7 +888,7 @@ These four messages exist only on a negotiated v3 connection.
 | Message | Direction | Purpose |
 |---|---|---|
 | `Signal` | client ⇄ server | Relay an opaque, matchbox-shaped WebRTC signal to/from a specific peer in the same room |
-| `NewPeer` | server → client | A new peer is available for a direct connection (late join); designates the offerer |
+| `NewPeer` | server → client | A new peer is available for a WebRTC connection (late join); designates the offerer |
 | `SessionPlan` | server → client | Per-recipient session directive emitted at finalization (alongside `GameStarting`) |
 | `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
 
@@ -907,7 +920,7 @@ Server → client (`from` names the originating peer):
 #### NewPeer
 
 `NewPeer` is the **late-join** pairing message: it tells an already-running v3 session that a peer is now available
-for a direct (WebRTC) connection. `you_initiate` designates exactly one side of each pair as the offerer, avoiding
+for a WebRTC peer connection. `you_initiate` designates exactly one side of each pair as the offerer, avoiding
 glare (see the glare rule below).
 
 ```json
@@ -925,7 +938,9 @@ _after_ finalization. See the [late-join decision table](#late-join-decision-tab
 `SessionPlan` is the **per-recipient** session directive emitted at lobby finalization. It is sent alongside the
 unchanged `GameStarting` (and only to v3-capable members) when a room negotiates a non-relay plan. A relay-only
 room emits **no** `SessionPlan`, so v2 clients never observe it. Each recipient gets its own tailored `peers` list,
-`initiate` flags, and freshly minted ICE credentials.
+`initiate` flags, and, for WebRTC transports, ICE servers with freshly minted TURN credentials. It carries
+topology, transport, peers, ICE servers, and relay fallback; it does not carry legacy `ConnectionInfo` or direct
+host/port endpoint details.
 
 ```json
 {
@@ -964,7 +979,10 @@ Fields:
 `TransportStatus` lets a client report its current data-path transport state, so the server can distinguish
 P2P-connected peers from relay-fallback peers (this drives metrics). It is **purely informational**: the relay
 floor never closes regardless of what is reported. Metrics count the first report for a connection and real
-per-connection state transitions; duplicate `(transport, connected)` reports do not move counters.
+per-connection state transitions; duplicate `(transport, connected)` reports do not move counters. The server
+accepts a report only from a negotiated v3 connection and only when `transport` is in that connection's
+negotiated transport set. Reports from non-v3 clients or for unnegotiated transports are ignored and do not
+update per-connection state or metrics.
 
 ```json
 {
@@ -999,8 +1017,8 @@ This ladder is the single source of truth in `src/server/session_policy.rs` (`UP
 
 ### Late-join decision table
 
-`NewPeer` pairing for a peer joining or reconnecting _after_ finalization is gated on both the room's
-`lobby_state` and the resolved topology:
+`NewPeer` pairing for a peer joining or reconnecting _after_ finalization is gated on the room's `lobby_state`,
+the resolved WebRTC transport, and the resolved topology:
 
 | `room.lobby_state` | Resolved topology | `NewPeer` behavior |
 |---|---|---|
@@ -1010,7 +1028,9 @@ This ladder is the single source of truth in `src/server/session_policy.rs` (`UP
 | `Finalized` | `Host` **(webrtc)** | star: client ⇄ host only; host joiner ⇄ all clients; never client ⇄ client |
 
 `NewPeer` is emitted only when the resolved **transport** is `webrtc`; a `host + direct` (LAN) finalized room emits
-no `NewPeer` (clients use the `SessionPlan`'s direct connection info).
+no `NewPeer` because there is no WebRTC signaling to broker. `SessionPlan` still names the selected
+`host + direct` topology/transport and peers; any address metadata remains the legacy, self-declared
+`GameStarting.peer_connections` / `ProvideConnectionInfo` surface rather than a negotiated v3 transport proof.
 
 ### Glare / offerer rule
 

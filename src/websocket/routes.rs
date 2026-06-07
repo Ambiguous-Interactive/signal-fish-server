@@ -77,7 +77,7 @@ async fn health_check(
     }
 }
 
-/// Start the server with both the new WebSocket protocol and legacy matchbox relay support
+/// Start the server with both the WebSocket protocol and legacy relay support.
 #[allow(dead_code)]
 pub async fn run_server(
     addr: std::net::SocketAddr,

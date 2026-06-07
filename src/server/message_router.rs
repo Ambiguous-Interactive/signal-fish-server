@@ -88,10 +88,11 @@ impl EnhancedGameServer {
     /// Record a client's reported data-path transport state (Protocol v3, PLAN §P5).
     ///
     /// Purely informational and v3-only: a v2 client can never legitimately send
-    /// this, so a non-v3 connection's report is ignored (debug-logged) as
-    /// defense-in-depth (Appendix K). The relay floor never closes regardless of
-    /// what is reported — this only drives observability and, in future, targeted
-    /// relay for stuck peers.
+    /// this, and a v3 report is accepted only for a transport negotiated by that
+    /// connection. Invalid reports are ignored (debug-logged) as defense-in-depth
+    /// (Appendix K). The relay floor never closes regardless of what is reported
+    /// — this only drives observability and, in future, targeted relay for stuck
+    /// peers.
     ///
     /// Duplicate reports of the same `(transport, connected)` pair update no
     /// counters; the metrics below are emitted only for the first report or a
@@ -114,16 +115,6 @@ impl EnhancedGameServer {
     ) {
         use crate::protocol::Transport;
 
-        if !self.client_supports_v3(player_id) {
-            tracing::debug!(
-                %player_id,
-                ?transport,
-                connected,
-                "Ignoring TransportStatus from a non-v3 connection (v3-only message)"
-            );
-            return;
-        }
-
         match self.set_client_transport_status(player_id, transport, connected) {
             TransportStatusUpdate::Changed => {}
             TransportStatusUpdate::Duplicate => {
@@ -141,6 +132,26 @@ impl EnhancedGameServer {
                     ?transport,
                     connected,
                     "Ignoring TransportStatus for connection that no longer exists"
+                );
+                return;
+            }
+            TransportStatusUpdate::UnsupportedProtocolVersion => {
+                tracing::debug!(
+                    %player_id,
+                    ?transport,
+                    connected,
+                    "Ignoring TransportStatus from a non-v3 connection (v3-only message)"
+                );
+                return;
+            }
+            TransportStatusUpdate::UnsupportedTransport => {
+                let protocol = self.client_protocol(player_id);
+                tracing::debug!(
+                    %player_id,
+                    ?transport,
+                    connected,
+                    negotiated_transports = ?protocol.transports,
+                    "Ignoring TransportStatus for transport not negotiated by connection"
                 );
                 return;
             }

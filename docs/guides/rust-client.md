@@ -114,7 +114,8 @@ pub enum ClientMessage {
     AuthorityRequest {
         become_authority: bool,
     },
-    /// Provide connection info for P2P establishment.
+    /// Provide legacy, self-declared metadata for GameStarting peer snapshots.
+    /// This is not proof of negotiated v3 direct or WebRTC capability.
     ProvideConnectionInfo {
         connection_info: serde_json::Value,
     },
@@ -163,7 +164,7 @@ pub struct SpectatorInfo {
     pub connected_at: DateTime<Utc>,
 }
 
-/// Peer connection information provided when the game starts.
+/// Legacy, self-declared peer metadata provided when the game starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConnectionInfo {
     pub player_id: PlayerId,
@@ -241,7 +242,7 @@ pub enum ServerMessage {
         ready_players: Vec<PlayerId>,
         all_ready: bool,
     },
-    /// Game is starting with peer connection details.
+    /// Game is starting with legacy, self-declared peer metadata.
     GameStarting {
         peer_connections: Vec<PeerConnectionInfo>,
     },

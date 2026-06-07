@@ -123,6 +123,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed protocol v3 `TransportStatus` validation so reports for transports that
+  were not negotiated by the connection are ignored and no longer update
+  per-connection status or inflate P2P / relay-fallback metrics.
 - Fixed protocol v3 `TransportStatus` metrics so duplicate reports of the same
   `(transport, connected)` state no longer inflate P2P-established or
   relay-fallback counters; counters now move only on a first report or a real

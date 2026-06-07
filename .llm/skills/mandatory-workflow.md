@@ -30,7 +30,7 @@
 
 1. **Read the code** before modifying it — NEVER modify code you haven't read.
 2. **Run the appropriate linters** after every change (see table below).
-3. **Zero warnings, zero errors** — all linters enforce strict compliance.
+3. **Zero warnings, zero errors, zero production panic macros** — all linters and policy checks enforce strict compliance.
 4. **For user-visible changes**: run changelog flow
    [Classify User Visible Changes](./classify-user-visible-changes.md) ->
    [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) ->
@@ -148,6 +148,14 @@ pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Work
 cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
 cargo test --locked --test ci_config_tests
 ```
+
+If hook files or hook-adjacent policy code changed, rerun pre-commit with profiling enabled and keep it sub-second:
+
+```bash
+SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+```
+
+Any run above 1000ms must be investigated and optimized before handoff.
 
 **Why this matters**: The agent workflow runs hook/local-policy test suites
 that validate script output, internal path classifications, and CI config

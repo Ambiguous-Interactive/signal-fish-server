@@ -13,10 +13,14 @@ $script:Failed = 0
 $script:Skipped = 0
 $script:IndexTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+# Keep hooks sub-second on normal local workloads and auto-report slowest checks if exceeded.
 $script:MaxBatchedBlobBytes = 2 * 1024 * 1024
+# Batch staged blob reads only when enough files are involved to beat per-file git show calls.
 $script:PreloadBatchThreshold = 3
 $script:PreloadError = $null
 $script:InspectWorktree = $false
+$script:HookBudgetMs = 1000
+$script:CheckTimings = [System.Collections.Generic.List[object]]::new()
 $script:HookPolicyFiles = @(
     ".githooks/pre-commit",
     ".githooks/pre-push",
@@ -56,6 +60,10 @@ function Invoke-Check {
         & $Check
     } finally {
         $timer.Stop()
+        [void]$script:CheckTimings.Add([pscustomobject]@{
+                Name = $Name
+                ElapsedMilliseconds = [long]$timer.ElapsedMilliseconds
+            })
         Write-Profile -Name $Name -ElapsedMilliseconds $timer.ElapsedMilliseconds
     }
 
@@ -1662,21 +1670,28 @@ function Get-RustPanicCandidateKey {
 function Get-NewRustPanicMacroCandidates {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles,
+        [Nullable[bool]]$TestContextMarkersChanged = $null
     )
 
     if ($Candidates.Count -eq 0) {
         return @()
     }
 
-    if (Test-RustTestContextMarkersChanged -CandidateFiles $CandidateFiles) {
-        $productionCandidates = Select-ProductionRustPanicMacroCandidates -Candidates $Candidates
+    $contextMarkersChanged = if ($null -eq $TestContextMarkersChanged) {
+        Test-RustTestContextMarkersChanged -CandidateFiles $CandidateFiles
+    } else {
+        [bool]$TestContextMarkersChanged
+    }
+
+    if ($contextMarkersChanged) {
+        $productionCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $Candidates)
         if ($productionCandidates.Count -eq 0) {
             return @()
         }
 
-        $headCandidates = Get-HeadRustPanicMacroCandidates -Pathspecs $CandidateFiles
-        $productionHeadCandidates = Select-ProductionRustPanicMacroCandidates -Candidates $headCandidates -Head
+        $headCandidates = @(Get-HeadRustPanicMacroCandidates -Pathspecs $CandidateFiles)
+        $productionHeadCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $headCandidates -Head)
         $headProductionCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
         foreach ($candidate in $productionHeadCandidates) {
             $key = Get-RustPanicCandidateKey -Candidate $candidate
@@ -1735,6 +1750,7 @@ function Test-RustAddedPanicPatterns {
 
     $violations = [System.Collections.Generic.List[string]]::new()
     $candidates = @()
+    $candidatesPreFilteredToProduction = $false
 
     if ($script:InspectWorktree) {
         $scannableFiles = [string[]]@($changedProductionRustFiles | Where-Object {
@@ -1757,14 +1773,17 @@ function Test-RustAddedPanicPatterns {
 
     $candidateFiles = [string[]]@($candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
     try {
-        $panicMacroDiffChanged = Test-RustPanicMacroDiffChanged -CandidateFiles $candidateFiles
         $testContextMarkersChanged = Test-RustTestContextMarkersChanged -CandidateFiles $candidateFiles
-        if (-not $panicMacroDiffChanged -and -not $testContextMarkersChanged) {
-            Pass "Rust panic patterns"
-            return
+        if (-not $testContextMarkersChanged) {
+            $panicMacroDiffChanged = Test-RustPanicMacroDiffChanged -CandidateFiles $candidateFiles
+            if (-not $panicMacroDiffChanged) {
+                Pass "Rust panic patterns"
+                return
+            }
         }
 
-        $candidates = @(Get-NewRustPanicMacroCandidates -Candidates $candidates -CandidateFiles $candidateFiles)
+        $candidates = @(Get-NewRustPanicMacroCandidates -Candidates $candidates -CandidateFiles $candidateFiles -TestContextMarkersChanged:$testContextMarkersChanged)
+        $candidatesPreFilteredToProduction = $testContextMarkersChanged
     } catch {
         Fail "Rust panic patterns" $_.Exception.Message
         return
@@ -1785,13 +1804,26 @@ function Test-RustAddedPanicPatterns {
     }
 
     foreach ($file in @($candidateFiles | Sort-Object)) {
-        $content = Get-PolicyText -Path $file
-        if ($null -eq $content) {
+        $fileCandidates = @($candidates | Where-Object { $_.File -eq $file } | Sort-Object -Property Line)
+        if ($fileCandidates.Count -eq 0) {
             continue
         }
 
-        $fileCandidates = @($candidates | Where-Object { $_.File -eq $file } | Sort-Object -Property Line)
-        if ($fileCandidates.Count -eq 0) {
+        if ($candidatesPreFilteredToProduction) {
+            foreach ($candidate in $fileCandidates) {
+                [void]$violations.Add("$($candidate.File):$($candidate.Line): $($candidate.Text)")
+                if ($violations.Count -ge 5) {
+                    break
+                }
+            }
+            if ($violations.Count -ge 5) {
+                break
+            }
+            continue
+        }
+
+        $content = Get-PolicyText -Path $file
+        if ($null -eq $content) {
             continue
         }
 
@@ -2045,6 +2077,18 @@ if ($SourceOnly) {
 function Complete-PreCommit {
     $script:PreCommitTimer.Stop()
     Write-Host "[pre-commit] Completed in $($script:PreCommitTimer.ElapsedMilliseconds)ms"
+
+    if ($script:PreCommitTimer.ElapsedMilliseconds -gt $script:HookBudgetMs) {
+        $slowestChecks = @($script:CheckTimings |
+                Sort-Object -Property ElapsedMilliseconds -Descending |
+                Select-Object -First 3)
+        if ($slowestChecks.Count -gt 0) {
+            $summary = @($slowestChecks | ForEach-Object { "$($_.Name)=$($_.ElapsedMilliseconds)ms" }) -join ", "
+            Write-Host "[pre-commit] WARN: runtime $($script:PreCommitTimer.ElapsedMilliseconds)ms exceeded ${script:HookBudgetMs}ms target. Slowest checks: $summary"
+        } else {
+            Write-Host "[pre-commit] WARN: runtime $($script:PreCommitTimer.ElapsedMilliseconds)ms exceeded ${script:HookBudgetMs}ms target."
+        }
+    }
 
     if ($script:Failed -gt 0) {
         Write-Host "[pre-commit] $script:Failed failed, $script:Passed passed, $script:Skipped skipped."

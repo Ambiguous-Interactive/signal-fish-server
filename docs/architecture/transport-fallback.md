@@ -29,12 +29,20 @@ simply keeps using the WebSocket relay exactly as in v2.
 on SessionPlan(plan):
     if plan.transport == relay:
         use GameData over the WebSocket relay            # the floor
-    else:
-        start P2P (WebRTC / direct) using plan + plan.ice_servers
+    else if plan.transport == direct:
+        start direct host/client P2P using plan.host + plan.peers
+        if direct path established within the timeout:
+            (optionally) stop sending GameData over the relay
+            emit ClientMessage::TransportStatus { transport, connected: true }
+        else (failure or timeout):
+            resume GameData over the WebSocket relay
+            emit ClientMessage::TransportStatus { transport, connected: false }
+    else if plan.transport == webrtc:
+        start WebRTC P2P using plan + plan.ice_servers
         for each peer where initiate == true: send Offer
         for each peer where initiate == false: await Offer, then send Answer
         relay all Offer / Answer / IceCandidate via ClientMessage::Signal { to, signal }
-        if P2P established within the timeout:
+        if WebRTC path established within the timeout:
             (optionally) stop sending GameData over the relay
             emit ClientMessage::TransportStatus { transport, connected: true }
         else (failure or timeout):
@@ -94,13 +102,15 @@ all `GameData` reliably, so the unreliable channel is purely a P2P optimization.
 
 `transport` is one of `relay`, `direct`, or `webrtc`; `connected` is a boolean. The
 message is **v3 only** — the server ignores it from any connection that did not
-negotiate v3 (a v2 client can never legitimately send it). It is purely
-informational and never causes the relay floor to close.
+negotiate v3 (a v2 client can never legitimately send it). The reported transport
+must also be present in that connection's negotiated transport set; unnegotiated
+transport reports are ignored and do not update stored state or metrics. It is
+purely informational and never causes the relay floor to close.
 
 Server-side interpretation (drives the metrics below): duplicate reports of the
-same `(transport, connected)` state update only the stored per-connection state;
-they do not move counters. Counters move on the first report for a connection and
-on later real per-connection state transitions.
+same `(transport, connected)` state are ignored; they leave stored
+per-connection state unchanged and do not move counters. Counters move on the
+first report for a connection and on later real per-connection state transitions.
 
 - `connected: true` with a P2P transport (`direct` or `webrtc`) — a peer-to-peer
   data path came up; counts as **P2P established** when it is a first report or a

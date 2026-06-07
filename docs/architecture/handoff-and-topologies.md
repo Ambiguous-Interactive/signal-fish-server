@@ -48,8 +48,9 @@ strictly `GameStarting` **then** `SessionPlan`:
    when present; otherwise the earliest joiner, breaking ties by the smaller UUID
    for determinism.
 4. **Emit per-recipient `SessionPlan`s.** Each v3 member receives a plan tailored
-   to it — its own `peers` list, per-recipient `initiate` flags, and freshly
-   minted ICE credentials. A relay-floor room emits **no** plan.
+   to it — its own `peers` list, per-recipient `initiate` flags, and ICE servers
+   only when the selected transport is WebRTC. A relay-floor room emits **no**
+   plan.
 
 ```text
 all ready
@@ -65,7 +66,8 @@ choose_session_plan(members, config)         # ladder walk; all-members-v3 gate
    +-- non-relay plan:
          for each v3 member:
              build per-recipient peers + initiate flags
-             build per-recipient ICE servers (STUN + minted TURN)
+             if transport == webrtc:
+                 build per-recipient ICE servers (STUN + minted TURN)
              send SessionPlan  (after GameStarting, ordering preserved)
 ```
 
@@ -89,7 +91,9 @@ The same room produces a different plan for each recipient:
 
 A peer joining or reconnecting _after_ finalization re-runs the same selection and
 is paired via `NewPeer` (not a fresh `SessionPlan`), gated on the room's
-`lobby_state` and the resolved topology. See the
+`lobby_state`, the resolved WebRTC transport, and the resolved topology. A
+`host + direct` room has a non-relay topology, but no WebRTC signaling transport,
+so it emits no `NewPeer`. See the
 [late-join decision table](../protocol.md#late-join-decision-table) for the exact
 behavior. The key invariant: initial pairing is owned by the finalize-time
 `SessionPlan`; `NewPeer` only covers post-finalization arrivals.

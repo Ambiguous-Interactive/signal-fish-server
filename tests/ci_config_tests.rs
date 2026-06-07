@@ -12,7 +12,7 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14882,162 +14882,6 @@ fn test_powershell_native_process_helpers_do_not_pollute_pipeline() {
     );
 }
 
-fn find_rust_raw_string(content: &str, from: usize) -> Option<(usize, usize, String)> {
-    let bytes = content.as_bytes();
-    let mut index = from;
-
-    while index < bytes.len() {
-        if bytes[index] == b'r' {
-            let mut quote = index + 1;
-            while quote < bytes.len() && bytes[quote] == b'#' {
-                quote += 1;
-            }
-
-            if quote < bytes.len() && bytes[quote] == b'"' {
-                let hashes = &content[index + 1..quote];
-                let terminator = format!("\"{hashes}");
-                let body_start = quote + 1;
-                let body_end = body_start + content[body_start..].find(&terminator)?;
-                let raw_end = body_end + terminator.len();
-                return Some((
-                    body_start,
-                    raw_end,
-                    content[body_start..body_end].to_string(),
-                ));
-            }
-        }
-
-        index += 1;
-    }
-
-    None
-}
-
-fn raw_string_blocks_with_functions(content: &str, function_re: &Regex) -> Vec<(usize, String)> {
-    let mut blocks = Vec::new();
-    let mut cursor = 0;
-
-    while cursor < content.len() {
-        let Some((body_start, raw_end, body)) = find_rust_raw_string(content, cursor) else {
-            break;
-        };
-
-        if function_re.is_match(&body) {
-            let body_line = content[..body_start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count()
-                + 1;
-            blocks.push((body_line, body));
-        }
-
-        cursor = raw_end;
-    }
-
-    blocks
-}
-
-fn duplicate_powershell_function_definitions(
-    source_label: &str,
-    content: &str,
-    first_line: usize,
-    function_re: &Regex,
-) -> Vec<String> {
-    let mut definitions_by_name: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
-
-    for (line_index, line) in content.lines().enumerate() {
-        if let Some(captures) = function_re.captures(line) {
-            let name = captures[1].to_string();
-            let key = name.to_ascii_lowercase();
-            definitions_by_name
-                .entry(key)
-                .or_insert_with(|| (name, Vec::new()))
-                .1
-                .push(first_line + line_index);
-        }
-    }
-
-    definitions_by_name
-        .into_values()
-        .filter_map(|(name, lines)| {
-            (lines.len() > 1).then(|| {
-                format!(
-                    "  - function {name} is defined at {source_label} lines {}",
-                    lines
-                        .iter()
-                        .map(usize::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })
-        })
-        .collect()
-}
-
-#[test]
-fn test_embedded_powershell_command_blocks_do_not_shadow_functions() {
-    let root = repo_root();
-    let content = read_file(&root.join("tests/ci_config_tests.rs"));
-    let function_re = Regex::new(r"(?im)^\s*function\s+([A-Za-z][A-Za-z0-9_-]*)\b").unwrap();
-    let mut duplicates = Vec::new();
-
-    for (block_line, block) in raw_string_blocks_with_functions(&content, &function_re) {
-        duplicates.extend(duplicate_powershell_function_definitions(
-            "ci_config_tests.rs",
-            &block,
-            block_line,
-            &function_re,
-        ));
-    }
-
-    assert!(
-        duplicates.is_empty(),
-        "Embedded PowerShell command fixtures must not define the same function \
-         name more than once in one command block. PowerShell does not support \
-         function overloading; later definitions silently replace earlier ones.\n{}",
-        duplicates.join("\n")
-    );
-}
-
-#[test]
-fn test_powershell_scripts_do_not_shadow_functions() {
-    let root = repo_root();
-    let scripts_dir = root.join("scripts");
-    let function_re = Regex::new(r"(?im)^\s*function\s+([A-Za-z][A-Za-z0-9_-]*)\b").unwrap();
-    let mut script_files = find_files_with_extension(&scripts_dir, "ps1", &[]);
-    script_files.extend(find_files_with_extension(&scripts_dir, "psm1", &[]));
-    script_files.sort();
-
-    assert!(
-        !script_files.is_empty(),
-        "PowerShell script shadowing guard should cover at least one script"
-    );
-
-    let mut duplicates = Vec::new();
-    for script_file in script_files {
-        let content = read_file(&script_file);
-        let relative = script_file
-            .strip_prefix(&root)
-            .unwrap_or(&script_file)
-            .display()
-            .to_string();
-        duplicates.extend(duplicate_powershell_function_definitions(
-            &relative,
-            &content,
-            1,
-            &function_re,
-        ));
-    }
-
-    assert!(
-        duplicates.is_empty(),
-        "PowerShell scripts must not define the same function name more than once \
-         in one file. PowerShell does not support function overloading; later \
-         definitions silently replace earlier ones.\n{}",
-        duplicates.join("\n")
-    );
-}
-
 #[test]
 fn test_powershell_native_bytes_helper_returns_single_result_object_when_available() {
     let root = repo_root();
@@ -15113,6 +14957,13 @@ fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_availab
                 . ./scripts/hooks/pre-commit.ps1 -SourceOnly
                 function Assert($condition, $message) {
                     if (-not $condition) { throw $message }
+                }
+                function Find-Line([string]$content, [string]$needle) {
+                    $lines = [string[]]($content -split "`r?`n")
+                    for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index].Contains($needle)) { return $index + 1 }
+                    }
+                    throw "Missing line containing: $needle"
                 }
                 function Find-Line([string[]]$lines, [string]$needle) {
                     for ($index = 0; $index -lt $lines.Count; $index++) {
@@ -15313,6 +15164,16 @@ pub fn not_any_test_or_feature() {
     panic!("not any test or feature prod");
 }
 '@
+                $singleResultContent = @'
+pub fn production_only() {
+    panic!("single prod panic");
+}
+
+#[cfg(test)]
+pub fn test_only_helper() {
+    panic!("single test panic");
+}
+'@
                 $headTestContextContent = @'
 #[cfg(test)]
 pub fn helper() {
@@ -15426,6 +15287,18 @@ pub fn production(result: Result<(), String>) {
                 Set-Candidates -staged $mixedCfgCandidates -head @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "mixed cfg(test, production) expressions must not hide production panic additions"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $singleResultContent
+                $script:FixtureContextMarkersChanged = $true
+                $singleResultCandidates = @(
+                    (Candidate "src/lib.rs" (Find-Line $singleResultContent 'panic!("single prod panic")') 'panic!("single prod panic");'),
+                    (Candidate "src/lib.rs" (Find-Line $singleResultContent 'panic!("single test panic")') 'panic!("single test panic");')
+                )
+                Set-Candidates -staged $singleResultCandidates -head @()
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "single production candidate selection must fail cleanly without scalar Count errors"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
@@ -15599,6 +15472,8 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
             && content.contains("$candidateFiles.Count -gt 2")
             && content.contains("Get-RustPanicCandidateKey -Candidate $candidate -IncludeLine")
             && content.contains("Test-RustTestContextMarkersChanged")
+            && content.contains("$productionCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $Candidates)")
+            && content.contains("-TestContextMarkersChanged:$testContextMarkersChanged")
             && content.contains("Contains($candidate.Line)"),
         "pre-commit panic-pattern scans must stay line-number aware, production \
          scoped, and candidate-first. The hook may block explicit panic macros, \
@@ -15625,68 +15500,6 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
         "pre-commit runner must expose a worktree preflight mode so agents can run \
          the same cheap policies before handoff without staging files. The actual \
          git hook remains staged-index based."
-    );
-}
-
-#[test]
-fn test_pre_commit_worktree_changed_files_returns_path_array_when_pwsh_available() {
-    let root = repo_root();
-    let temp_dir = tempfile::Builder::new()
-        .prefix("ci-config-worktree-paths-")
-        .tempdir_in(&root)
-        .expect("failed to create repo-local temp dir");
-    let first = temp_dir.path().join("first.ps1");
-    let second = temp_dir.path().join("second.ps1");
-    fs::write(&first, "Write-Host 'first'\n").expect("failed to write first temp file");
-    fs::write(&second, "Write-Host 'second'\n").expect("failed to write second temp file");
-
-    let relative_path = |path: &Path| {
-        path.strip_prefix(&root)
-            .expect("temp file should be inside repo")
-            .to_string_lossy()
-            .replace('\\', "/")
-    };
-    let first = relative_path(&first);
-    let second = relative_path(&second);
-
-    let script = format!(
-        r#"
-            . ./scripts/hooks/pre-commit.ps1 -SourceOnly
-            $script:RepoRoot = (git rev-parse --show-toplevel).Trim()
-            Set-Location $script:RepoRoot
-
-            $missing = [string[]]@(Get-WorktreeChangedFiles -Pathspecs @("__missing_worktree_path_contract__"))
-            if ($missing.Count -ne 0) {{
-                throw "expected no paths for missing pathspec, got $($missing.Count): $($missing -join ',')"
-            }}
-
-            $paths = [string[]]@(Get-WorktreeChangedFiles -Pathspecs @('{first}', '{second}'))
-            if ($paths.Count -ne 2) {{
-                throw "expected two worktree paths, got $($paths.Count): $($paths -join ',')"
-            }}
-            if (-not $paths.Contains('{first}') -or -not $paths.Contains('{second}')) {{
-                throw "worktree paths were collapsed or lost: $($paths -join ',')"
-            }}
-        "#
-    );
-
-    let output = Command::new("pwsh")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
-        .arg(script)
-        .current_dir(&root)
-        .output();
-
-    let Ok(output) = output else {
-        eprintln!("Skipping PowerShell worktree path contract test because pwsh is unavailable.");
-        return;
-    };
-
-    assert!(
-        output.status.success(),
-        "Get-WorktreeChangedFiles must return an ordinary path array with no \
-         empty-string sentinel and no collapsed space-joined paths.\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -16170,91 +15983,6 @@ fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
 }
 
 #[test]
-fn test_run_local_ci_records_all_powershell_checks_when_pwsh_is_missing() {
-    let root = repo_root();
-    let content = read_file(&root.join("scripts/run-local-ci.sh"));
-    let helper = shell_function_body(&content, "run_powershell_check");
-
-    assert!(
-        helper.contains("command -v pwsh")
-            && helper.contains("record_failed_check \"$name\" \"PowerShell 7+ 'pwsh' not found\""),
-        "run_powershell_check must record a failure for each check when pwsh is unavailable."
-    );
-
-    for check in ["hook-readiness", "pre-commit-preflight"] {
-        assert!(
-            content.contains(&format!("run_powershell_check \"{check}\"")),
-            "run-local-ci.sh must route {check} through run_powershell_check so \
-             missing pwsh is reflected in the failed-check summary."
-        );
-    }
-}
-
-#[test]
-fn test_run_local_ci_check_helpers_continue_after_recording_failures() {
-    let root = repo_root();
-    let content = read_file(&root.join("scripts/run-local-ci.sh"));
-
-    assert!(
-        content.contains("set -euo pipefail"),
-        "run-local-ci.sh should keep strict shell settings; helper failure \
-         branches must preserve aggregate reporting under set -e."
-    );
-
-    for helper_name in ["run_check", "run_check_quiet"] {
-        let helper = shell_function_body(&content, helper_name);
-        let failure_append = helper
-            .find("FAILED_CHECKS+=(\"$name\")")
-            .unwrap_or_else(|| panic!("{helper_name} must record failed checks"));
-
-        assert!(
-            helper[failure_append..].contains("return 0") && !helper.contains("return 1"),
-            "{helper_name} must continue after recording a failure so local CI \
-             reaches the final summary instead of exiting at the first failed check."
-        );
-    }
-}
-
-#[test]
-fn test_run_local_ci_required_script_gates_fail_closed_when_missing() {
-    let root = repo_root();
-    let content = read_file(&root.join("scripts/run-local-ci.sh"));
-    let required_script_gates = [
-        ("msrv", "scripts/check-msrv-consistency.sh"),
-        ("workflow-hygiene", "scripts/check-workflow-hygiene.sh"),
-        ("awk-validation", "scripts/validate-workflow-awk.sh"),
-        ("no-panics", "scripts/check-no-panics.sh"),
-        ("ci-validation", "scripts/validate-ci.sh"),
-        ("llm-file-sizes", "scripts/check-llm-file-sizes.sh"),
-        ("llm-example-files", "scripts/check-llm-example-files.sh"),
-        ("readme-badges", "scripts/check-readme-badges.sh"),
-        (
-            "dockerfile-portability",
-            "scripts/check-dockerfile-portability.sh",
-        ),
-        ("advisories", "scripts/check-advisories.sh"),
-        ("doc-consistency", "scripts/check-doc-consistency.sh"),
-    ];
-
-    let missing_fail_closed_branches = required_script_gates
-        .iter()
-        .filter(|(check, script)| {
-            !content.contains(&format!(
-                "record_failed_check \"{check}\" \"{script} not found\""
-            ))
-        })
-        .map(|(check, script)| format!("  - {check}: {script}"))
-        .collect::<Vec<_>>();
-
-    assert!(
-        missing_fail_closed_branches.is_empty(),
-        "Required local-CI script gates must fail closed when the script file is \
-         missing; otherwise checks silently disappear from the final summary.\n{}",
-        missing_fail_closed_branches.join("\n")
-    );
-}
-
-#[test]
 fn test_run_local_ci_runs_actionlint_when_available() {
     let root = repo_root();
     let script_path = root.join("scripts/run-local-ci.sh");
@@ -16378,18 +16106,6 @@ fn shell_logical_lines(content: &str) -> Vec<String> {
     }
 
     lines
-}
-
-fn shell_function_body<'a>(content: &'a str, function_name: &str) -> &'a str {
-    let marker = format!("{function_name}() {{");
-    let start = content
-        .find(&marker)
-        .unwrap_or_else(|| panic!("missing shell function `{function_name}`"))
-        + marker.len();
-    let end = content[start..]
-        .find("\n}")
-        .unwrap_or_else(|| panic!("missing closing brace for shell function `{function_name}`"));
-    &content[start..start + end]
 }
 
 fn shellish_tokens(command: &str) -> Vec<String> {

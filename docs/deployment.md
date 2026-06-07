@@ -135,7 +135,7 @@ server {
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
-    location /v2/ws {
+    location ~ ^/(v2|v3)/ws$ {
         proxy_pass http://signal_fish;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -172,7 +172,8 @@ server {
 ```text
 
 signal.yourgame.com {
-    reverse_proxy /v2/ws localhost:3536 {
+    @websocket path /v2/ws /v3/ws
+    reverse_proxy @websocket localhost:3536 {
         header_up X-Real-IP {remote_host}
     }
 

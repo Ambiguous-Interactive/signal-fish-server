@@ -95,7 +95,7 @@ pub trait GameDatabase: Send + Sync {
         name: &str,
     ) -> Result<bool>;
 
-    /// Update player connection info for P2P establishment
+    /// Update legacy self-declared peer metadata for `GameStarting`.
     async fn update_player_connection_info(
         &self,
         room_id: &RoomId,

@@ -154,6 +154,112 @@ async fn duplicate_transport_status_reports_do_not_inflate_metrics() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn transport_status_for_unnegotiated_transport_is_ignored() {
+    let server = create_test_server().await;
+    let (sender, mut receiver) = mpsc::channel(4);
+    let addr: SocketAddr = "127.0.0.1:50062".parse().unwrap();
+    let player_id = server
+        .connection_manager
+        .register_client(sender, addr, server.instance_id)
+        .await
+        .expect("client registration succeeds");
+
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay],
+            topologies: vec![Topology::Relay],
+        },
+    );
+
+    server
+        .handle_client_message(
+            &player_id,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    match timeout(Duration::from_millis(100), receiver.recv()).await {
+        Err(_) => {}
+        Ok(Some(message)) => {
+            panic!("unnegotiated TransportStatus should not send a response, got {message:?}")
+        }
+        Ok(None) => panic!("channel closed while checking unnegotiated TransportStatus silence"),
+    }
+
+    assert_eq!(
+        server.client_transport_status(&player_id),
+        None,
+        "an unnegotiated transport report must not update per-connection state"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        0,
+        "an unnegotiated p2p report must not move p2p_established"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        0,
+        "an unnegotiated transport report must not move relay_fallback"
+    );
+
+    server
+        .handle_client_message(
+            &player_id,
+            ClientMessage::TransportStatus {
+                transport: Transport::Relay,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&player_id),
+        Some((Transport::Relay, true)),
+        "a negotiated relay report should still update per-connection state"
+    );
+
+    server
+        .handle_client_message(
+            &player_id,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: false,
+            },
+        )
+        .await;
+
+    match timeout(Duration::from_millis(100), receiver.recv()).await {
+        Err(_) => {}
+        Ok(Some(message)) => {
+            panic!("unnegotiated fallback report should not send a response, got {message:?}")
+        }
+        Ok(None) => panic!("channel closed while checking unnegotiated fallback silence"),
+    }
+
+    assert_eq!(
+        server.client_transport_status(&player_id),
+        Some((Transport::Relay, true)),
+        "an unnegotiated fallback report must not replace the last valid transport state"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        0,
+        "an unnegotiated fallback report must not move p2p_established"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        0,
+        "an unnegotiated fallback report must not move relay_fallback"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn transport_status_update_results_are_distinct() {
     let server = create_test_server().await;
     let missing_player_id = PlayerId::new_v4();
@@ -170,6 +276,38 @@ async fn transport_status_update_results_are_distinct() {
         .register_client(sender, addr, server.instance_id)
         .await
         .expect("client registration succeeds");
+
+    assert_eq!(
+        server.set_client_transport_status(&player_id, Transport::WebRtc, true),
+        TransportStatusUpdate::UnsupportedProtocolVersion
+    );
+
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay],
+            topologies: vec![Topology::Relay],
+        },
+    );
+
+    assert_eq!(
+        server.set_client_transport_status(&player_id, Transport::WebRtc, true),
+        TransportStatusUpdate::UnsupportedTransport
+    );
+    assert_eq!(
+        server.set_client_transport_status(&player_id, Transport::Relay, true),
+        TransportStatusUpdate::Changed
+    );
+
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::WebRtc],
+            topologies: vec![Topology::Relay, Topology::Mesh],
+        },
+    );
 
     assert_eq!(
         server.set_client_transport_status(&player_id, Transport::WebRtc, true),

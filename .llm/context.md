@@ -87,6 +87,20 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance.
 
+### Hook Reliability Rules (Required)
+
+- Git hooks are last-resort guards and must stay cross-platform (`pwsh` + `git` only) and sub-second.
+- If you touch hook files or hook-adjacent policy code, run:
+  - `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1`
+  - `SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree`
+- Runtime target: full pre-commit suite under 1000ms on normal local workloads. Any slower run must be investigated and optimized before handoff.
+- PowerShell collection safety (strict mode):
+  - Always wrap function outputs with `@(...)` before using `.Count`.
+  - Example: `if ((Get-Items).Count -eq 0) {}` can fail in strict mode when output collapses to a scalar; `if (@(Get-Items).Count -eq 0) {}` is safe.
+  - When returning a collection that must stay a collection, use `Write-Output -NoEnumerate` or a unary array return.
+  - Prefer typed array boundaries (`[string[]]@(...)`, `[int[]]@(...)`) for helper function inputs.
+- Do not add `cargo`, `npm`, `npx`, or installer/bootstrap commands to git hooks.
+
 ---
 
 ## Core Reference Map

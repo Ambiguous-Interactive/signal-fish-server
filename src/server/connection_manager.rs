@@ -63,6 +63,8 @@ pub(crate) enum TransportStatusUpdate {
     Changed,
     Duplicate,
     MissingConnection,
+    UnsupportedProtocolVersion,
+    UnsupportedTransport,
 }
 
 pub(crate) struct ConnectionManager {
@@ -231,6 +233,14 @@ impl ConnectionManager {
         connected: bool,
     ) -> TransportStatusUpdate {
         if let Some(mut connection) = self.clients.get_mut(player_id) {
+            if connection.protocol.version < 3 {
+                return TransportStatusUpdate::UnsupportedProtocolVersion;
+            }
+
+            if !connection.protocol.transports.contains(&transport) {
+                return TransportStatusUpdate::UnsupportedTransport;
+            }
+
             let new_status = Some((transport, connected));
             if connection.transport_status == new_status {
                 return TransportStatusUpdate::Duplicate;
