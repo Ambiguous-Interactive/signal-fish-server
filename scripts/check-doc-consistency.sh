@@ -304,7 +304,7 @@ validate_changelog() {
         if [[ "$release_ref" =~ /compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.v${version}([#?].*)?$ ]]; then
             local previous_version
             previous_version="${BASH_REMATCH[1]}"
-            if ! printf '%s\n' "$versions" | grep -Fxq "$previous_version"; then
+            if ! grep -Fxq "$previous_version" <<< "$versions"; then
                 action_error "[$version] compare link references unknown previous version v$previous_version (link: $release_ref)"
             fi
             continue

@@ -41,7 +41,7 @@ assert_fails() {
         echo -e "${RED}[FAIL]${NC} $test_name: expected failure but got success"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     else
-        if echo "$output" | grep -qiE "$expected_pattern"; then
+        if grep -qiE "$expected_pattern" <<< "$output"; then
             echo -e "${GREEN}[PASS]${NC} $test_name"
             TESTS_PASSED=$((TESTS_PASSED + 1))
         else
@@ -76,7 +76,7 @@ assert_warns() {
     echo "$dockerfile" > "$TEMP_DIR/Dockerfile"
     local output
     output=$("$CHECKER" --quiet 2>&1) || true
-    if echo "$output" | grep -qiE "$expected_pattern"; then
+    if grep -qiE "$expected_pattern" <<< "$output"; then
         echo -e "${GREEN}[PASS]${NC} $test_name"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -94,7 +94,7 @@ assert_no_warn() {
     echo "$dockerfile" > "$TEMP_DIR/Dockerfile"
     local output
     output=$("$CHECKER" --quiet 2>&1) || true
-    if echo "$output" | grep -qiE "$unwanted_pattern"; then
+    if grep -qiE "$unwanted_pattern" <<< "$output"; then
         echo -e "${RED}[FAIL]${NC} $test_name: found unwanted pattern '$unwanted_pattern'"
         echo "  Output: $output"
         TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -268,7 +268,7 @@ fi
 
 # --files with nonexistent file should warn
 if output=$("$CHECKER" --quiet --files "/nonexistent/Dockerfile" 2>&1); then
-    if echo "$output" | grep -qi "not found"; then
+    if grep -qi "not found" <<< "$output"; then
         echo -e "${GREEN}[PASS]${NC} --files with nonexistent file warns"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -319,7 +319,7 @@ RUN find /usr -name '*.so' -exec ls {} +"
 echo "$warn_dockerfile" > "$TEMP_DIR/Dockerfile"
 quiet_warn_exit=0
 quiet_warn_output=$("$CHECKER" --quiet --files "$TEMP_DIR/Dockerfile" 2>&1) || quiet_warn_exit=$?
-if echo "$quiet_warn_output" | grep -qi "WARN" && [ "$quiet_warn_exit" -eq 0 ]; then
+if grep -qi "WARN" <<< "$quiet_warn_output" && [ "$quiet_warn_exit" -eq 0 ]; then
     echo -e "${GREEN}[PASS]${NC} --quiet still shows warnings and exits 0"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else

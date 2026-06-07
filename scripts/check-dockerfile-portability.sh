@@ -195,14 +195,19 @@ check_brace_expansion() {
     local file="$1" line_num="$2" cmd="$3"
     # Match {word,word} patterns but skip shell variable expansions like ${var}
     # and --option={value} with no comma (not brace expansion)
-    if echo "$cmd" | grep -qE '\{[^}]*,[^}]*\}'; then
+    if grep -qE '\{[^}]*,[^}]*\}' <<< "$cmd"; then
         # Exclude ${var:-default} and ${var:+alt} and ${var} patterns
         local stripped
-        stripped=$(echo "$cmd" | sed -E 's/\$\{[^}]*\}//g')
-        if echo "$stripped" | grep -qE '\{[^}]*,[^}]*\}'; then
+        stripped=$(sed -E 's/\$\{[^}]*\}//g' <<< "$cmd")
+        if grep -qE '\{[^}]*,[^}]*\}' <<< "$stripped"; then
             fail "$file:$line_num: Brace expansion detected (not supported by /bin/sh)"
             local match
-            match=$(echo "$stripped" | grep -oE '\{[^}]*,[^}]*\}' | head -1)
+            match=$(awk '
+                match($0, /\{[^}]*,[^}]*\}/) {
+                    print substr($0, RSTART, RLENGTH)
+                    exit
+                }
+            ' <<< "$stripped")
             printf '         Found: %s\n' "$match"
             suggest "Expand braces manually, e.g., change {a,b} to explicit arguments"
             return 1
@@ -214,7 +219,7 @@ check_brace_expansion() {
 # Check for [[ ]] double-bracket tests
 check_double_brackets() {
     local file="$1" line_num="$2" cmd="$3"
-    if echo "$cmd" | grep -qE '\[\[[[:space:]]'; then
+    if grep -qE '\[\[[[:space:]]' <<< "$cmd"; then
         fail "$file:$line_num: Bash-style [[ ]] test detected (not supported by /bin/sh)"
         suggest "Use single [ ] brackets or 'test' command instead"
         return 1
@@ -225,7 +230,7 @@ check_double_brackets() {
 # Check for bash-style arrays: var=(a b c)
 check_arrays() {
     local file="$1" line_num="$2" cmd="$3"
-    if echo "$cmd" | grep -qE '[a-zA-Z_][a-zA-Z0-9_]*=\('; then
+    if grep -qE '[a-zA-Z_][a-zA-Z0-9_]*=\(' <<< "$cmd"; then
         fail "$file:$line_num: Bash-style array assignment detected (not supported by /bin/sh)"
         suggest "Use space-separated strings with IFS or individual variables"
         return 1
@@ -237,7 +242,7 @@ check_arrays() {
 check_source_command() {
     local file="$1" line_num="$2" cmd="$3"
     # Match 'source' as a command (beginning of command, after && or ||, after ;)
-    if echo "$cmd" | grep -qE '(^|&&|\|\||;)[[:space:]]*source[[:space:]]+'; then
+    if grep -qE '(^|&&|\|\||;)[[:space:]]*source[[:space:]]+' <<< "$cmd"; then
         fail "$file:$line_num: 'source' command detected (not portable; use '.' instead)"
         suggest "Replace 'source file' with '. file'"
         return 1
@@ -248,7 +253,7 @@ check_source_command() {
 # Check for process substitution <() or >()
 check_process_substitution() {
     local file="$1" line_num="$2" cmd="$3"
-    if echo "$cmd" | grep -qE '[<>]\('; then
+    if grep -qE '[<>]\(' <<< "$cmd"; then
         # Exclude legitimate redirect-to-subshell patterns like >(command)
         # but catch actual process substitution
         fail "$file:$line_num: Process substitution <() or >() detected (not supported by /bin/sh)"
@@ -262,12 +267,12 @@ check_process_substitution() {
 check_find_missing_type() {
     local file="$1" line_num="$2" cmd="$3"
     # Look for: find ... -name '*.ext' without -type f
-    if echo "$cmd" | grep -qE 'find[[:space:]].*-name[[:space:]]'; then
+    if grep -qE 'find[[:space:]].*-name[[:space:]]' <<< "$cmd"; then
         # Check specifically for -type f, not just any -type flag.
         # e.g., -type d or -type l should still trigger the warning.
-        if ! echo "$cmd" | grep -qE 'find[[:space:]].*-type[[:space:]]+f([[:space:]]|$)'; then
+        if ! grep -qE 'find[[:space:]].*-type[[:space:]]+f([[:space:]]|$)' <<< "$cmd"; then
             # Check if the -name pattern looks like a file extension
-            if echo "$cmd" | grep -qE -- "-name[[:space:]]+['\"]?\*\\."; then
+            if grep -qE -- "-name[[:space:]]+['\"]?\*\\." <<< "$cmd"; then
                 warn "$file:$line_num: find command with -name '*.ext' pattern but no -type f"
                 suggest "Add '-type f' to restrict matches to regular files"
                 return 0
@@ -296,7 +301,7 @@ check_dockerfile() {
         if [ "$first_field" = "SHELL" ]; then
             local directive_content
             directive_content=$(printf '%s' "$raw_line" | cut -f3-)
-            if echo "$directive_content" | grep -qE 'bash'; then
+            if grep -qE 'bash' <<< "$directive_content"; then
                 has_shell_bash=true
                 shell_line=$(printf '%s' "$raw_line" | cut -f2)
             fi
@@ -326,7 +331,7 @@ check_dockerfile() {
         # Bash-ism checks: skip if SHELL sets bash or if command starts with bash -c
         # (both make bash features valid).
         local uses_bash_c=false
-        if echo "$cmd" | grep -qE '^bash[[:space:]]+-c[[:space:]]'; then
+        if grep -qE '^bash[[:space:]]+-c[[:space:]]' <<< "$cmd"; then
             uses_bash_c=true
         fi
 

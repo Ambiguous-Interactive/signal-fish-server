@@ -375,9 +375,9 @@ fn very_long_function() {
     let line9 = "Line 9";
     let line10 = "Line 10";
 
-    println!("{} {} {} {} {} {} {} {} {} {}",
-        line1, line2, line3, line4, line5,
-        line6, line7, line8, line9, line10
+    println!(
+        "{} {} {} {} {} {} {} {} {} {}",
+        line1, line2, line3, line4, line5, line6, line7, line8, line9, line10
     );
 }
 ```
@@ -406,10 +406,7 @@ fn no_gap_after_header() {
 
 ```rust
 fn with_empty_lines() {
-
-
     println!("Has multiple empty lines above");
-
 
     println!("And multiple empty lines between");
 }

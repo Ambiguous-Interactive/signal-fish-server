@@ -65,7 +65,7 @@ Output format: `line_number\tattributes\tcontent\0` (NUL-delimited)
 python3 .github/test-fixtures/extract-rust-blocks.py README.md | tr '\0' '\n' | wc -l
 
 # View first block
-python3 .github/test-fixtures/extract-rust-blocks.py README.md | tr '\0' '\n' | head -1
+python3 .github/test-fixtures/extract-rust-blocks.py README.md | tr '\0' '\n' | sed -n '1p'
 ```
 
 ## Troubleshooting

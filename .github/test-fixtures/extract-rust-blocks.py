@@ -5,7 +5,7 @@ Extract Rust code blocks from Markdown files.
 This script implements the same extraction logic as the AWK script in the
 doc-validation.yml workflow, but in Python for better portability and testing.
 
-Output format: line_number:::attributes:::content (NUL-separated records)
+Output format: line_number\tattributes\tcontent (NUL-separated records)
 """
 
 import re

@@ -114,7 +114,7 @@ fi
 
 # Check for sensible timeout
 if grep -qE 'timeout = [0-9]+' .lychee.toml; then
-    timeout=$(grep -oP 'timeout = \K[0-9]+' .lychee.toml || echo "0")
+    timeout=$(awk -F ' = ' '$1 == "timeout" { print $2 + 0; exit }' .lychee.toml)
     if [ "$timeout" -lt 5 ]; then
         warn "Timeout is very short ($timeout seconds)"
         warn "Consider increasing to at least 10 seconds"
@@ -128,7 +128,7 @@ fi
 
 # Check for max_concurrency
 if grep -qE 'max_concurrency = [0-9]+' .lychee.toml; then
-    concurrency=$(grep -oP 'max_concurrency = \K[0-9]+' .lychee.toml || echo "0")
+    concurrency=$(awk -F ' = ' '$1 == "max_concurrency" { print $2 + 0; exit }' .lychee.toml)
     if [ "$concurrency" -lt 1 ]; then
         error "max_concurrency must be at least 1"
     elif [ "$concurrency" -gt 100 ]; then

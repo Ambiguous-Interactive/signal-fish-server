@@ -108,7 +108,7 @@ fi
 # Check 3: Dockerfile (production build)
 if [ -f Dockerfile ]; then
     # Extract Rust version from FROM rust:X.Y line (handles both 1.88 and 1.88.0 formats)
-    DOCKERFILE_RUST=$(grep '^FROM rust:' Dockerfile | head -1 | sed -E 's/FROM rust:([0-9]+\.[0-9]+).*/\1/')
+    DOCKERFILE_RUST=$(sed -nE '/^FROM rust:/ { s/FROM rust:([0-9]+\.[0-9]+).*/\1/; p; q; }' Dockerfile)
     # Normalize MSRV to major.minor for comparison (1.88.0 -> 1.88)
     MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
     check_file "Dockerfile" "$MSRV_SHORT" "$DOCKERFILE_RUST" "rust"

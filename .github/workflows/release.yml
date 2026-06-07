@@ -292,7 +292,7 @@ jobs:
 
       - name: Verify version consistency
         run: |
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          CARGO_VERSION=$(awk -F '"' '$1 == "version = " { print $2; exit }' Cargo.toml)
           echo "Cargo.toml version: $CARGO_VERSION"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -330,7 +330,7 @@ jobs:
       - name: Create and push git tag
         if: github.event_name == 'workflow_dispatch'
         run: |
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          CARGO_VERSION=$(awk -F '"' '$1 == "version = " { print $2; exit }' Cargo.toml)
           TAG_NAME="v${CARGO_VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -341,7 +341,7 @@ jobs:
         id: get_version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+            VERSION=$(awk -F '"' '$1 == "version = " { print $2; exit }' Cargo.toml)
           else
             VERSION=${GITHUB_REF#refs/tags/v}
           fi

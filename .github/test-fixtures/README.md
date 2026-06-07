@@ -91,7 +91,7 @@ in_block {
 ```awk
 END {
   if (in_block) {
-    printf "%s:::%s:::%s\0", block_start, attrs, content
+    printf "%s%c%s%c%s%c", block_start, 31, attrs, 31, content, 0
   }
 }
 ```

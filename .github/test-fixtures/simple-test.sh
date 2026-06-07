@@ -73,7 +73,9 @@ test_validate() {
 
     local temp_dir
     temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' RETURN
+    local temp_dir_quoted
+    printf -v temp_dir_quoted '%q' "$temp_dir"
+    trap "rm -rf $temp_dir_quoted" RETURN
 
     local total=0 validated=0 skipped=0
 
@@ -90,21 +92,21 @@ test_validate() {
         fi
 
         # Skip by attribute
-        if echo "$attrs" | grep -qE 'ignore|should_panic'; then
+        if grep -qE 'ignore|should_panic' <<< "$attrs"; then
             [ $VERBOSE -eq 1 ] && echo "  Skipping block $total (attribute: $attrs)"
             skipped=$((skipped + 1))
             continue
         fi
 
         # Skip placeholders
-        if echo "$content" | grep -qE 'todo!\(\)|^\.\.\.|// \.\.\.|/\* \.\.\. \*/'; then
+        if grep -qE 'todo!\(\)|^\.\.\.|// \.\.\.|/\* \.\.\. \*/' <<< "$content"; then
             [ $VERBOSE -eq 1 ] && echo "  Skipping block $total (placeholder)"
             skipped=$((skipped + 1))
             continue
         fi
 
         # Skip documentation snippets
-        if echo "$content" | grep -qE '// Note:|// Example:|/\* config \*/'; then
+        if grep -qE '// Note:|// Example:|/\* config \*/' <<< "$content"; then
             [ $VERBOSE -eq 1 ] && echo "  Skipping block $total (doc snippet)"
             skipped=$((skipped + 1))
             continue
@@ -142,17 +144,25 @@ test_validate() {
 # Helper to parse extractor output (handles tabs in content)
 parse_block() {
     local input="$1"
-    local line_var="$2"
-    local attrs_var="$3"
-    local content_var="$4"
+    local -n line_ref="$2"
+    local -n attrs_ref="$3"
+    local -n content_ref="$4"
+    local remainder
 
-    # Read first two tab-separated fields, rest is content
-    local line attrs rest
-    IFS=$'\t' read -r line attrs rest <<< "$input"
+    line_ref="${input%%$'\t'*}"
+    if [ "$line_ref" = "$input" ]; then
+        attrs_ref=""
+        content_ref=""
+        return 0
+    fi
 
-    eval "$line_var='$line'"
-    eval "$attrs_var='$attrs'"
-    eval "$content_var='$rest'"
+    remainder="${input#*$'\t'}"
+    attrs_ref="${remainder%%$'\t'*}"
+    if [ "$attrs_ref" = "$remainder" ]; then
+        content_ref=""
+    else
+        content_ref="${remainder#*$'\t'}"
+    fi
 }
 
 # Test: Empty first line (Bug #1)
@@ -161,7 +171,9 @@ test_empty_first_line() {
 
     local temp_md
     temp_md=$(mktemp --suffix=.md)
-    trap 'rm -f "$temp_md"' RETURN
+    local temp_md_quoted
+    printf -v temp_md_quoted '%q' "$temp_md"
+    trap "rm -f $temp_md_quoted" RETURN
 
     cat > "$temp_md" << 'EOF'
 ```rust
@@ -173,8 +185,15 @@ fn test() {
 EOF
 
     # Extract and check content
-    local output line attrs content
-    output=$(python3 "$EXTRACTOR" "$temp_md" | tr '\0' '\n' | head -1)
+    local output line attrs content raw_block found
+    output=""
+    found=0
+    while IFS= read -r -d '' raw_block; do
+        if [ "$found" -eq 0 ]; then
+            output="$raw_block"
+            found=1
+        fi
+    done < <(python3 "$EXTRACTOR" "$temp_md")
     parse_block "$output" line attrs content
 
     if ! grep -q "fn test" <<< "$content"; then
@@ -193,7 +212,9 @@ test_unclosed_eof() {
 
     local temp_md
     temp_md=$(mktemp --suffix=.md)
-    trap 'rm -f "$temp_md"' RETURN
+    local temp_md_quoted
+    printf -v temp_md_quoted '%q' "$temp_md"
+    trap "rm -f $temp_md_quoted" RETURN
 
     # Note: no closing ```
     cat > "$temp_md" << 'EOF'
@@ -227,7 +248,9 @@ test_case_insensitive() {
 
     local temp_md
     temp_md=$(mktemp --suffix=.md)
-    trap 'rm -f "$temp_md"' RETURN
+    local temp_md_quoted
+    printf -v temp_md_quoted '%q' "$temp_md"
+    trap "rm -f $temp_md_quoted" RETURN
 
     cat > "$temp_md" << 'EOF'
 ```rust
@@ -262,7 +285,9 @@ test_attributes() {
 
     local temp_md
     temp_md=$(mktemp --suffix=.md)
-    trap 'rm -f "$temp_md"' RETURN
+    local temp_md_quoted
+    printf -v temp_md_quoted '%q' "$temp_md"
+    trap "rm -f $temp_md_quoted" RETURN
 
     cat > "$temp_md" << 'EOF'
 ```rust,ignore

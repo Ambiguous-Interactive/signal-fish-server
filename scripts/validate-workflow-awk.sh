@@ -56,23 +56,42 @@ check_awk_antipatterns() {
     CHECKED=$((CHECKED + 1))
     local file_errors=0
 
-    # Anti-pattern 1: GNU-specific match() function (not POSIX compatible)
-    # Exclude comments (lines starting with # after whitespace)
-    if grep -v '^\s*#' "$workflow" | grep -n 'match(' | grep -q 'awk'; then
-        echo -e "${RED}✗${NC} Uses match() function in AWK - not POSIX compatible (mawk doesn't support it)"
-        local match_lines
-        match_lines=$(grep -v '^\s*#' "$workflow" | grep -n 'match(' | grep 'awk' | cut -d: -f1 | head -3)
+    local scan_results
+    scan_results=$(awk -f scripts/validate-workflow-awk-scanner.awk "$workflow")
+
+    local match_lines=""
+    local nul_printf_found=false
+    local complex_warnings=()
+    local scan_kind scan_value scan_extra
+
+    while IFS=$'\t' read -r scan_kind scan_value scan_extra; do
+        case "$scan_kind" in
+            MATCH_LINES)
+                match_lines="$scan_value"
+                ;;
+            NUL_PRINTF)
+                nul_printf_found=true
+                ;;
+            COMPLEX)
+                complex_warnings+=("$scan_value"$'\t'"$scan_extra")
+                ;;
+            "")
+                ;;
+        esac
+    done <<< "$scan_results"
+
+    if [ -n "$match_lines" ]; then
+        echo -e "${RED}✗${NC} Uses match() capture array in AWK - not POSIX compatible"
         echo "  Lines: $match_lines"
-        echo "  Fix: Use sub() or gsub() instead"
+        echo "  Fix: Use POSIX two-argument match(), sub(), or gsub() instead"
         echo ""
         ERRORS=$((ERRORS + 1))
         file_errors=$((file_errors + 1))
     fi
 
     # Anti-pattern 2: \0 in printf (not POSIX compatible)
-    # Exclude comments (lines starting with # after whitespace)
-    if grep -v '^\s*#' "$workflow" | grep -n 'printf.*\\0' | grep -q 'awk'; then
-        echo -e "${YELLOW}⚠${NC} Uses \\0 in printf in AWK - not POSIX compatible"
+    if [ "$nul_printf_found" = true ]; then
+        printf '%b⚠%b Uses \\0 in printf in AWK - not POSIX compatible\n' "$YELLOW" "$NC"
         echo "  Fix: Use printf \"%c\", 0 instead"
         echo ""
         WARNINGS=$((WARNINGS + 1))
@@ -89,41 +108,14 @@ check_awk_antipatterns() {
     fi
 
     # Anti-pattern 4: Missing comments explaining complex AWK scripts
-    # Look for awk scripts longer than 10 lines without nearby comments
-    local in_awk=false
-    local awk_line_count=0
-    local awk_start=0
-    local has_comment=false
-
-    while IFS= read -r line; do
-        if echo "$line" | grep -qE "^\s*awk\s+['\"]"; then
-            in_awk=true
-            awk_start=$LINENO
-            awk_line_count=0
-            has_comment=false
-            # Check previous 5 lines for explanatory comments
-            if [ $LINENO -ge 5 ]; then
-                if sed -n "$((LINENO-5)),$((LINENO-1))p" "$workflow" | grep -q '#.*AWK'; then
-                    has_comment=true
-                fi
-            fi
-        fi
-
-        if [ "$in_awk" = true ]; then
-            awk_line_count=$((awk_line_count + 1))
-            # Detect end of AWK block (simplified heuristic)
-            if echo "$line" | grep -qE "^\s*['\"]"; then
-                if [ $awk_line_count -gt 15 ] && [ "$has_comment" = false ]; then
-                    echo -e "${YELLOW}⚠${NC} Complex AWK script (${awk_line_count} lines) lacks explanatory comments"
-                    echo "  Near line: $awk_start"
-                    echo "  Consider adding comments explaining what the AWK script does"
-                    echo ""
-                    WARNINGS=$((WARNINGS + 1))
-                fi
-                in_awk=false
-            fi
-        fi
-    done < "$workflow"
+    for complex_warning in "${complex_warnings[@]}"; do
+        IFS=$'\t' read -r awk_start awk_line_count <<< "$complex_warning"
+        echo -e "${YELLOW}⚠${NC} Complex AWK script (${awk_line_count} lines) lacks explanatory comments"
+        echo "  Near line: $awk_start"
+        echo "  Consider adding comments explaining what the AWK script does"
+        echo ""
+        WARNINGS=$((WARNINGS + 1))
+    done
 
     if [ $file_errors -eq 0 ]; then
         echo -e "${GREEN}✓${NC} No critical anti-patterns found"
@@ -157,7 +149,7 @@ if [ "$ERRORS" -gt 0 ]; then
     echo "Fix errors before committing. Warnings are recommendations."
     echo ""
     echo "Common fixes:"
-    echo "  - Replace match() with sub() or gsub()"
+    echo "  - Replace match() capture arrays with POSIX two-argument match(), sub(), or gsub()"
     echo "  - Use prefix match /^pattern/ instead of /^pattern(,.*)?$/"
     echo "  - Use printf \"%c\", 0 instead of printf \"\\0\""
     echo ""

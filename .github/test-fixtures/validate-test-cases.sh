@@ -68,7 +68,7 @@ EOF
 OUTPUT=$(python3 "$EXTRACTOR" "$TEMP_MD" | tr '\0' '\n')
 rm "$TEMP_MD"
 
-if echo "$OUTPUT" | grep -q "test_empty_first_line"; then
+if grep -q "test_empty_first_line" <<< "$OUTPUT"; then
     log_pass "Empty first line handled correctly"
 else
     log_fail "Empty first line handling failed"
@@ -88,7 +88,7 @@ EOF
 OUTPUT=$(python3 "$EXTRACTOR" "$TEMP_MD" | tr '\0' '\n')
 rm "$TEMP_MD"
 
-if echo "$OUTPUT" | grep -q "test_unclosed"; then
+if grep -q "test_unclosed" <<< "$OUTPUT"; then
     log_pass "Unclosed EOF handled correctly"
 else
     log_fail "Unclosed EOF handling failed"
@@ -113,8 +113,8 @@ rm "$TEMP_MD"
 
 LOWER_OK=0
 UPPER_OK=0
-echo "$OUTPUT" | grep -q "fn lowercase" && LOWER_OK=1
-echo "$OUTPUT" | grep -q "fn uppercase" && UPPER_OK=1
+grep -q "fn lowercase" <<< "$OUTPUT" && LOWER_OK=1
+grep -q "fn uppercase" <<< "$OUTPUT" && UPPER_OK=1
 
 if [ $LOWER_OK -eq 1 ] && [ $UPPER_OK -eq 1 ]; then
     log_pass "Case-insensitive matching works"
@@ -141,8 +141,8 @@ rm "$TEMP_MD"
 
 IGNORE_OK=0
 NO_RUN_OK=0
-echo "$OUTPUT" | grep -q "ignore" && IGNORE_OK=1
-echo "$OUTPUT" | grep -q "no_run" && NO_RUN_OK=1
+grep -q "ignore" <<< "$OUTPUT" && IGNORE_OK=1
+grep -q "no_run" <<< "$OUTPUT" && NO_RUN_OK=1
 
 if [ $IGNORE_OK -eq 1 ] && [ $NO_RUN_OK -eq 1 ]; then
     log_pass "Attribute extraction works"

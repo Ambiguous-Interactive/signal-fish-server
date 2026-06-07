@@ -18,6 +18,7 @@ BEGIN { in_block = 0 }
   in_block = 1          # Enter code block state
   block_start = NR      # Record starting line number
   content = ""          # Reset content accumulator
+  seen_content = 0      # Track first content line without losing leading blanks
   attributes = $0       # Save full fence line for reference
   # POSIX-compatible: use sub() instead of match() for mawk compatibility
   # Extract attributes after rust (case-insensitive)
@@ -45,10 +46,11 @@ BEGIN { in_block = 0 }
 # Accumulate content while in block
 # Always append lines with newline separator, handling empty first lines
 in_block {
-  if (content == "") {
-    content = $0        # First line: no leading newline
-  } else {
+  if (seen_content) {
     content = content "\n" $0  # Subsequent lines: add newline separator
+  } else {
+    content = $0        # First line: no leading newline
+    seen_content = 1
   }
 }
 # Reset if we hit another opening fence while already in a block (nested/malformed)

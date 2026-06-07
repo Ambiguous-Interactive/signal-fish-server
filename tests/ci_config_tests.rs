@@ -14,12 +14,14 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
 use common::bash_command;
-use common::{read_file, repo_root};
+use common::{read_file, repo_root, unique_temp_dir, write_file};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
 use syn::parse::Parser;
@@ -1429,6 +1431,1261 @@ fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
 }
 
 #[test]
+fn test_strict_shell_automation_avoids_sigpipe_prone_early_exit_pipelines() {
+    fn has_unclosed_shell_quote(text: &str) -> bool {
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+
+        for char in text.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if char == '\\' && !in_single {
+                escaped = true;
+                continue;
+            }
+            if char == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if char == '"' && !in_single {
+                in_double = !in_double;
+            }
+        }
+
+        in_single || in_double
+    }
+
+    fn continues_logical_shell_line(line: &str, logical_line: &str) -> bool {
+        let trimmed = line.trim_end();
+        let yaml_block_scalar = trimmed.ends_with(": |")
+            || trimmed.ends_with(": >")
+            || trimmed == "run: |"
+            || trimmed == "run: >";
+        trimmed.ends_with('\\')
+            || (trimmed.ends_with('|') && !trimmed.ends_with("||") && !yaml_block_scalar)
+            || trimmed.ends_with("|&")
+            || has_unclosed_shell_quote(logical_line)
+    }
+
+    fn normalized_shell_piece(line: &str) -> String {
+        let mut piece = line.trim().to_string();
+        if piece.ends_with('\\') {
+            piece.pop();
+            piece = piece.trim_end().to_string();
+        }
+        piece
+    }
+
+    fn logical_shell_lines(content: &str) -> Vec<(usize, String)> {
+        let mut lines = Vec::new();
+        let mut pending: Option<(usize, String)> = None;
+
+        for (line_index, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') && pending.is_none() {
+                continue;
+            }
+
+            let piece = normalized_shell_piece(line);
+            let (start_line, logical) = match pending.take() {
+                Some((start_line, mut logical)) => {
+                    if !piece.is_empty() {
+                        logical.push(' ');
+                        logical.push_str(&piece);
+                    }
+                    (start_line, logical)
+                }
+                None => (line_index + 1, piece),
+            };
+
+            if continues_logical_shell_line(line, &logical) {
+                pending = Some((start_line, logical));
+            } else if !logical.trim().is_empty() {
+                lines.push((start_line, logical));
+            }
+        }
+
+        if let Some((start_line, logical)) = pending {
+            if !logical.trim().is_empty() {
+                lines.push((start_line, logical));
+            }
+        }
+
+        lines
+    }
+
+    fn shell_words_until_separator(command: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut in_word = false;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+
+        for char in command.chars() {
+            if escaped {
+                current.push(char);
+                in_word = true;
+                escaped = false;
+                continue;
+            }
+            if char == '\\' && !in_single {
+                escaped = true;
+                in_word = true;
+                continue;
+            }
+            if char == '\'' && !in_double {
+                in_single = !in_single;
+                in_word = true;
+                continue;
+            }
+            if char == '"' && !in_single {
+                in_double = !in_double;
+                in_word = true;
+                continue;
+            }
+            if !in_single && !in_double && char.is_whitespace() {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+                continue;
+            }
+            if !in_single && !in_double && matches!(char, ';' | '|' | '&') {
+                break;
+            }
+
+            current.push(char);
+            in_word = true;
+        }
+
+        if in_word {
+            words.push(current);
+        }
+
+        words
+    }
+
+    fn command_basename(word: &str) -> &str {
+        word.rsplit('/').next().unwrap_or(word)
+    }
+
+    fn is_awk_command(word: &str) -> bool {
+        matches!(command_basename(word), "awk" | "gawk" | "mawk" | "nawk")
+    }
+
+    fn is_grep_command(word: &str) -> bool {
+        matches!(command_basename(word), "grep" | "egrep" | "fgrep")
+    }
+
+    fn is_sed_command(word: &str) -> bool {
+        command_basename(word) == "sed"
+    }
+
+    fn is_head_command(word: &str) -> bool {
+        command_basename(word) == "head"
+    }
+
+    fn is_no_operand_awk_option(word: &str) -> bool {
+        if ["-D", "-d", "-g", "-I", "-L", "-o", "-p"]
+            .iter()
+            .any(|prefix| word.starts_with(prefix) && word.len() > prefix.len())
+        {
+            return true;
+        }
+        matches!(
+            word,
+            "--bignum"
+                | "--characters-as-bytes"
+                | "--copyright"
+                | "--debug"
+                | "--gen-pot"
+                | "--help"
+                | "--lint"
+                | "--lint-old"
+                | "--non-decimal-data"
+                | "--no-optimize"
+                | "--optimize"
+                | "--posix"
+                | "--pretty-print"
+                | "--profile"
+                | "--re-interval"
+                | "--sandbox"
+                | "--traditional"
+                | "--trace"
+                | "--use-lc-numeric"
+                | "--version"
+        ) || word.starts_with("--lint=")
+            || word.starts_with("--pretty-print=")
+            || word.starts_with("--profile=")
+            || word.starts_with("--dump-variables")
+            || word.starts_with("--debug=")
+            || word.starts_with("--gen-pot=")
+            || matches!(
+                word,
+                "-b" | "-c"
+                    | "-C"
+                    | "-D"
+                    | "-d"
+                    | "-g"
+                    | "-h"
+                    | "-I"
+                    | "-L"
+                    | "-M"
+                    | "-N"
+                    | "-n"
+                    | "-O"
+                    | "-o"
+                    | "-p"
+                    | "-P"
+                    | "-r"
+                    | "-S"
+                    | "-s"
+                    | "-t"
+                    | "-V"
+            )
+    }
+
+    enum WOption<'a> {
+        Source(&'a str),
+        File,
+        Other,
+    }
+
+    fn classify_w_option<'a>(tokens: &'a [String], index: &mut usize) -> WOption<'a> {
+        let Some(token) = tokens.get(*index) else {
+            return WOption::Other;
+        };
+        if let Some(source) = token.strip_prefix("source=") {
+            return WOption::Source(source);
+        }
+        if token.starts_with("exec=") {
+            return WOption::File;
+        }
+        if token == "source" {
+            *index += 1;
+            return tokens
+                .get(*index)
+                .map_or(WOption::Other, |source| WOption::Source(source));
+        }
+        if token == "exec" {
+            *index += 1;
+            return WOption::File;
+        }
+        WOption::Other
+    }
+
+    fn is_shell_assignment(word: &str) -> bool {
+        let Some((name, _)) = word.split_once('=') else {
+            return false;
+        };
+        let mut chars = name.chars();
+        matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|char| char == '_' || char.is_ascii_alphanumeric())
+    }
+
+    fn strip_assignment_prefix(tokens: &[String]) -> Vec<String> {
+        tokens
+            .iter()
+            .skip_while(|token| is_shell_assignment(token))
+            .cloned()
+            .collect()
+    }
+
+    fn command_tokens_after_optional_env(tokens: &[String]) -> Vec<String> {
+        let mut index = 0;
+        while tokens
+            .get(index)
+            .is_some_and(|token| is_shell_assignment(token))
+        {
+            index += 1;
+        }
+        if matches!(
+            tokens.get(index).map(|word| command_basename(word)),
+            Some("env")
+        ) {
+            index += 1;
+            while let Some(token) = tokens.get(index) {
+                match token.as_str() {
+                    "-u" | "--unset" | "-C" | "--chdir" => {
+                        index += 2;
+                        continue;
+                    }
+                    "-S" | "--split-string" => {
+                        if let Some(split_string) = tokens.get(index + 1) {
+                            let mut split_tokens = shell_words_until_separator(split_string);
+                            split_tokens.extend(tokens.iter().skip(index + 2).cloned());
+                            return command_tokens_after_optional_env(&split_tokens);
+                        }
+                        return Vec::new();
+                    }
+                    _ => {}
+                }
+                if token.starts_with("--unset=")
+                    || token.starts_with("--chdir=")
+                    || token.starts_with("-u")
+                    || token.starts_with("-C")
+                {
+                    index += 1;
+                    continue;
+                }
+                if token.starts_with("--split-string=") {
+                    let split_string = token
+                        .split_once('=')
+                        .map_or("", |(_, split_string)| split_string);
+                    let mut split_tokens = shell_words_until_separator(split_string);
+                    split_tokens.extend(tokens.iter().skip(index + 1).cloned());
+                    return command_tokens_after_optional_env(&split_tokens);
+                }
+                if token.starts_with('-') || is_shell_assignment(token) {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+        }
+        strip_assignment_prefix(&tokens[index..])
+    }
+
+    fn push_program(programs: &mut Vec<String>, source: impl Into<String>) {
+        programs.push(source.into());
+    }
+
+    fn awk_program_from_piped_tail(tail: &str) -> Option<String> {
+        let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
+        let mut index = 0;
+        let mut programs = Vec::new();
+        let mut program_supplied = false;
+
+        if !tokens.get(index).is_some_and(|word| is_awk_command(word)) {
+            return None;
+        }
+        index += 1;
+
+        while let Some(token) = tokens.get(index) {
+            match token.as_str() {
+                "-e" | "--source" => {
+                    if let Some(source) = tokens.get(index + 1) {
+                        push_program(&mut programs, source.clone());
+                        program_supplied = true;
+                    }
+                    index += 2;
+                    continue;
+                }
+                "-f" | "--file" | "-E" | "--exec" | "-F" | "--field-separator" | "-v"
+                | "--assign" => {
+                    if matches!(token.as_str(), "-f" | "--file" | "-E" | "--exec") {
+                        program_supplied = true;
+                    }
+                    index += 2;
+                    continue;
+                }
+                "-i" | "--include" | "-l" | "--load" => {
+                    index += 2;
+                    continue;
+                }
+                "-W" => {
+                    index += 1;
+                    match classify_w_option(&tokens, &mut index) {
+                        WOption::Source(source) => {
+                            push_program(&mut programs, source.to_string());
+                            program_supplied = true;
+                        }
+                        WOption::File => {
+                            program_supplied = true;
+                        }
+                        WOption::Other => {}
+                    }
+                    index += 1;
+                    continue;
+                }
+                "--" => {
+                    index += 1;
+                    continue;
+                }
+                _ => {}
+            }
+
+            if let Some(source) = token.strip_prefix("-e").filter(|source| !source.is_empty()) {
+                push_program(&mut programs, source.to_string());
+                program_supplied = true;
+                index += 1;
+                continue;
+            }
+            if let Some(source) = token.strip_prefix("--source=") {
+                push_program(&mut programs, source.to_string());
+                program_supplied = true;
+                index += 1;
+                continue;
+            }
+            if let Some(rest) = token.strip_prefix("-W") {
+                if let Some(source) = rest.strip_prefix("source=") {
+                    push_program(&mut programs, source.to_string());
+                    program_supplied = true;
+                    index += 1;
+                    continue;
+                }
+                if rest.starts_with("exec=") {
+                    program_supplied = true;
+                    index += 1;
+                    continue;
+                }
+            }
+            if token.starts_with("-f")
+                || token.starts_with("--file=")
+                || token.starts_with("-E")
+                || token.starts_with("--exec=")
+                || token.starts_with("-F")
+                || token.starts_with("--field-separator=")
+                || token.starts_with("-v")
+                || token.starts_with("--assign=")
+                || token.starts_with("-i")
+                || token.starts_with("--include=")
+                || token.starts_with("-l")
+                || token.starts_with("--load=")
+                || is_no_operand_awk_option(token)
+            {
+                if token.starts_with("-f")
+                    || token.starts_with("--file=")
+                    || token.starts_with("-E")
+                    || token.starts_with("--exec=")
+                {
+                    program_supplied = true;
+                }
+                index += 1;
+                continue;
+            }
+            if token.starts_with('-') {
+                index += 1;
+                continue;
+            }
+
+            if !program_supplied {
+                push_program(&mut programs, token.clone());
+            }
+            break;
+        }
+
+        if programs.is_empty() {
+            None
+        } else {
+            Some(programs.join("\n"))
+        }
+    }
+
+    fn piped_command_tails(line: &str) -> Vec<&str> {
+        let mut tails = Vec::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        let mut skip_next = false;
+
+        for (index, char) in line.char_indices() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if char == '\\' && !in_single {
+                escaped = true;
+                continue;
+            }
+            if char == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if char == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+            if !in_single && !in_double && char == '|' {
+                if line[index..].starts_with("||") {
+                    skip_next = true;
+                    continue;
+                }
+                let tail_start = if line[index..].starts_with("|&") {
+                    index + 2
+                } else {
+                    index + 1
+                };
+                tails.push(&line[tail_start..]);
+            }
+        }
+
+        tails
+    }
+
+    fn head_tail_is_guarded(tail: &str) -> bool {
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+
+        for (index, char) in tail.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if char == '\\' && !in_single {
+                escaped = true;
+                continue;
+            }
+            if char == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if char == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+            if !in_single && !in_double && char == '#' {
+                return false;
+            }
+            if !in_single && !in_double && tail[index..].starts_with("||") {
+                let fallback_tokens = shell_words_until_separator(&tail[index + 2..]);
+                return fallback_tokens
+                    .first()
+                    .is_some_and(|word| matches!(command_basename(word), "true" | ":"));
+            }
+            if !in_single && !in_double && matches!(char, ';' | '&' | '|') {
+                return false;
+            }
+        }
+
+        false
+    }
+
+    fn has_unguarded_head_pipeline(line: &str) -> bool {
+        piped_command_tails(line).into_iter().any(|tail| {
+            let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
+            tokens.first().is_some_and(|word| is_head_command(word)) && !head_tail_is_guarded(tail)
+        })
+    }
+
+    fn grep_option_exits_early(option: &str, skip_next: &mut bool) -> Option<&'static str> {
+        if option == "--quiet" {
+            return Some("quiet grep fed by a pipeline");
+        }
+        if option == "--regexp" || option == "--file" {
+            *skip_next = true;
+            return None;
+        }
+        if option == "--max-count" || option.starts_with("--max-count=") {
+            *skip_next = option == "--max-count";
+            return Some("grep max-count fed by a pipeline");
+        }
+        if !option.starts_with('-') || option == "-" || option.starts_with("--") {
+            return None;
+        }
+
+        let mut chars = option[1..].chars().peekable();
+        while let Some(char) = chars.next() {
+            match char {
+                'q' => return Some("quiet grep fed by a pipeline"),
+                'm' => {
+                    *skip_next = chars.peek().is_none();
+                    return Some("grep max-count fed by a pipeline");
+                }
+                'e' | 'f' => {
+                    *skip_next = chars.peek().is_none();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn has_grep_early_exit_pipeline(line: &str) -> Option<&'static str> {
+        for tail in piped_command_tails(line) {
+            let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
+            let mut index = 0;
+            if !tokens.get(index).is_some_and(|word| is_grep_command(word)) {
+                continue;
+            }
+            index += 1;
+
+            let mut skip_next = false;
+            while let Some(token) = tokens.get(index) {
+                if skip_next {
+                    skip_next = false;
+                    index += 1;
+                    continue;
+                }
+                if token == "--" {
+                    break;
+                }
+                if !token.starts_with('-') || token == "-" {
+                    break;
+                }
+                if let Some(rule_name) = grep_option_exits_early(token, &mut skip_next) {
+                    return Some(rule_name);
+                }
+                index += 1;
+            }
+        }
+        None
+    }
+
+    fn sed_scripts_from_piped_tail(tail: &str) -> Vec<String> {
+        let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
+        let mut scripts = Vec::new();
+        let mut index = 0;
+        let mut script_supplied = false;
+        if !tokens.get(index).is_some_and(|word| is_sed_command(word)) {
+            return scripts;
+        }
+        index += 1;
+
+        while let Some(token) = tokens.get(index) {
+            match token.as_str() {
+                "-e" | "--expression" => {
+                    if let Some(script) = tokens.get(index + 1) {
+                        scripts.push(script.clone());
+                        script_supplied = true;
+                    }
+                    index += 2;
+                    continue;
+                }
+                "-f" | "--file" => {
+                    script_supplied = true;
+                    index += 2;
+                    continue;
+                }
+                "--" => {
+                    index += 1;
+                    if !script_supplied {
+                        if let Some(script) = tokens.get(index) {
+                            scripts.push(script.clone());
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            }
+
+            if let Some(script) = token.strip_prefix("--expression=") {
+                scripts.push(script.to_string());
+                script_supplied = true;
+                index += 1;
+                continue;
+            }
+            if token.starts_with("--file=") {
+                script_supplied = true;
+                index += 1;
+                continue;
+            }
+            if token.starts_with('-') && token != "-" {
+                let short_options = &token[1..];
+                if let Some(script) = short_options.strip_prefix('e').filter(|s| !s.is_empty()) {
+                    scripts.push(script.to_string());
+                    script_supplied = true;
+                } else if short_options.starts_with('f') {
+                    script_supplied = true;
+                }
+                index += 1;
+                continue;
+            }
+
+            if !script_supplied {
+                scripts.push(token.clone());
+            }
+            break;
+        }
+
+        scripts
+    }
+
+    fn sed_script_quits_early(script: &str) -> bool {
+        let mut normalized = String::with_capacity(script.len());
+        let mut chars = script.chars().peekable();
+        while let Some(char) = chars.next() {
+            if char == 's' && matches!(chars.peek(), Some('/')) {
+                normalized.push(' ');
+                let Some(delimiter) = chars.next() else {
+                    break;
+                };
+                normalized.push(' ');
+                for _ in 0..2 {
+                    while let Some(next) = chars.next() {
+                        normalized.push(' ');
+                        if next == '\\' {
+                            if chars.next().is_some() {
+                                normalized.push(' ');
+                            }
+                            continue;
+                        }
+                        if next == '/' {
+                            break;
+                        }
+                    }
+                }
+                if matches!(chars.peek(), Some(next) if *next == delimiter) {
+                    chars.next();
+                    normalized.push(' ');
+                }
+                while matches!(chars.peek(), Some(flag) if flag.is_ascii_alphabetic()) {
+                    chars.next();
+                    normalized.push(' ');
+                }
+                continue;
+            }
+            normalized.push(char);
+            if char != '/' {
+                continue;
+            }
+            while let Some(next) = chars.next() {
+                normalized.push(' ');
+                if next == '\\' {
+                    if chars.next().is_some() {
+                        normalized.push(' ');
+                    }
+                    continue;
+                }
+                if next == '/' {
+                    break;
+                }
+            }
+        }
+
+        normalized
+            .split(|char: char| char.is_whitespace() || matches!(char, ';' | '{' | '}'))
+            .filter(|token| !token.is_empty())
+            .any(|token| {
+                let command = token.trim_start_matches(|char: char| {
+                    char.is_ascii_digit() || matches!(char, ',' | '$' | '!' | '~' | '+' | '-')
+                });
+                if command.starts_with('s') {
+                    return false;
+                }
+                command.starts_with('q') || command.starts_with('Q')
+            })
+    }
+
+    fn has_sed_quit_pipeline(line: &str) -> bool {
+        piped_command_tails(line).into_iter().any(|tail| {
+            sed_scripts_from_piped_tail(tail)
+                .iter()
+                .any(|script| sed_script_quits_early(script))
+        })
+    }
+
+    fn awk_code_without_strings_or_comments(program: &str) -> String {
+        fn last_significant_token(text: &str) -> &str {
+            let trimmed = text.trim_end();
+            let end = trimmed.len();
+            let start = trimmed
+                .char_indices()
+                .rev()
+                .find(|(_, char)| !char.is_ascii_alphanumeric() && *char != '_')
+                .map_or(0, |(index, _)| index + 1);
+            &trimmed[start..end]
+        }
+
+        let mut code = String::new();
+        let mut chars = program.chars().peekable();
+        let mut in_string = false;
+        let mut in_regex = false;
+        let mut escaped = false;
+        let mut last_significant = '\0';
+
+        while let Some(char) = chars.next() {
+            if escaped {
+                escaped = false;
+                if !in_string && !in_regex {
+                    code.push(' ');
+                }
+                continue;
+            }
+            if char == '\\' {
+                escaped = true;
+                if !in_string && !in_regex {
+                    code.push(' ');
+                }
+                continue;
+            }
+            if in_regex {
+                if char == '/' {
+                    in_regex = false;
+                }
+                code.push(' ');
+                continue;
+            }
+            if in_string {
+                if char == '"' {
+                    in_string = false;
+                }
+                code.push(' ');
+                continue;
+            }
+            if char == '"' {
+                in_string = true;
+                code.push(' ');
+                continue;
+            }
+            let token = last_significant_token(&code);
+            if char == '/'
+                && (last_significant == '\0'
+                    || "~(,=:{;![?+-*%&|".contains(last_significant)
+                    || matches!(token, "print" | "printf" | "return"))
+            {
+                in_regex = true;
+                code.push(' ');
+                continue;
+            }
+            if char == '#' {
+                while let Some(next) = chars.peek() {
+                    if *next == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+                code.push(' ');
+                continue;
+            }
+            code.push(char);
+            if !char.is_whitespace() {
+                last_significant = char;
+            }
+        }
+
+        code
+    }
+
+    fn awk_program_exits_early(program: &str) -> bool {
+        awk_code_without_strings_or_comments(program)
+            .split(|char: char| !char.is_ascii_alphanumeric() && char != '_')
+            .any(|token| token == "exit")
+    }
+
+    fn has_awk_exit_pipeline(line: &str) -> bool {
+        piped_command_tails(line).into_iter().any(|tail| {
+            awk_program_from_piped_tail(tail)
+                .as_deref()
+                .is_some_and(awk_program_exits_early)
+        })
+    }
+
+    fn should_scan_sigpipe_policy(relative: &Path, content: &str) -> bool {
+        let extension = relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default();
+        if matches!(extension, "yml" | "yaml") {
+            return content.contains("run:");
+        }
+        content.contains("pipefail")
+            || content.starts_with("#!/usr/bin/env bash")
+            || content.starts_with("#!/bin/bash")
+    }
+
+    fn collect_sigpipe_violations(relative: &Path, content: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        if !should_scan_sigpipe_policy(relative, content) {
+            return violations;
+        }
+
+        for (line_number, logical_line) in logical_shell_lines(content) {
+            let trimmed = logical_line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            if has_unguarded_head_pipeline(&logical_line) {
+                violations.push(format!(
+                    "{}:{}: unguarded head in strict pipeline can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Drain the input, move truncation after capture, or explicitly guard diagnostic-only output with `|| true`.",
+                    relative.display(),
+                    line_number,
+                    trimmed
+                ));
+            }
+            if let Some(rule_name) = has_grep_early_exit_pipeline(&logical_line) {
+                violations.push(format!(
+                    "{}:{}: {} can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Use grep on a file/here-string, drain the producer, or use a shell test that does not close the pipeline early.",
+                    relative.display(),
+                    line_number,
+                    rule_name,
+                    trimmed
+                ));
+            }
+            if has_sed_quit_pipeline(&logical_line) {
+                violations.push(format!(
+                    "{}:{}: sed q in pipeline can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Avoid early `sed q` consumers under pipefail, or feed sed from a file/here-string.",
+                    relative.display(),
+                    line_number,
+                    trimmed
+                ));
+            }
+            if has_awk_exit_pipeline(&logical_line) {
+                violations.push(format!(
+                    "{}:{}: awk exit in pipeline can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Avoid early `awk exit` consumers under pipefail, or feed awk from a file/here-string.",
+                    relative.display(),
+                    line_number,
+                    trimmed
+                ));
+            }
+        }
+
+        violations
+    }
+
+    let regression_cases = [
+        (
+            "short quiet grep",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep -q foo\n",
+            true,
+        ),
+        (
+            "env unset quiet grep",
+            "fixture.sh",
+            "set -o pipefail\nproducer | env -u LC_ALL grep -q foo\n",
+            true,
+        ),
+        (
+            "env chdir quiet grep",
+            "fixture.sh",
+            "set -o pipefail\nproducer | env -C /tmp grep -q foo\n",
+            true,
+        ),
+        (
+            "env split-string quiet grep unquoted",
+            "fixture.sh",
+            "set -o pipefail\nproducer | env -S grep -q foo\n",
+            true,
+        ),
+        (
+            "env split-string quiet grep quoted",
+            "fixture.sh",
+            "set -o pipefail\nproducer | env -S \"grep -q\" foo\n",
+            true,
+        ),
+        (
+            "assignment before env split-string quiet grep",
+            "fixture.sh",
+            "set -o pipefail\nproducer | LC_ALL=C env -S \"grep -q\" foo\n",
+            true,
+        ),
+        (
+            "assignment prefixed quiet grep",
+            "fixture.sh",
+            "set -o pipefail\nproducer | LC_ALL=C grep -q foo\n",
+            true,
+        ),
+        (
+            "long quiet grep",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep --quiet foo\n",
+            true,
+        ),
+        (
+            "grep short max-count",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep -m1 foo\n",
+            true,
+        ),
+        (
+            "grep separate max-count",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep -m 1 foo\n",
+            true,
+        ),
+        (
+            "grep long max-count",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep --max-count=1 foo\n",
+            true,
+        ),
+        (
+            "grep long regexp operand is not quiet option",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep --regexp -q\n",
+            false,
+        ),
+        (
+            "grep long file operand is not quiet option",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep --file -q\n",
+            false,
+        ),
+        (
+            "grep pattern after double dash is not quiet option",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep -- '-q'\n",
+            false,
+        ),
+        (
+            "grep pattern after double dash is not max-count option",
+            "fixture.sh",
+            "set -o pipefail\nproducer | grep -- '-m'\n",
+            false,
+        ),
+        (
+            "sed semicolon q pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n '1p; q'\n",
+            true,
+        ),
+        (
+            "sed braced q pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n '1{p;q;}'\n",
+            true,
+        ),
+        (
+            "sed addressed q pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n '/done/q'\n",
+            true,
+        ),
+        (
+            "assignment prefixed sed q pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | LC_ALL=C sed -n q\n",
+            true,
+        ),
+        (
+            "sed regex address semicolon is not command separator",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n '/a;q/p'\n",
+            false,
+        ),
+        (
+            "sed substitution containing q is not quit command",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n 's/q/x/p'\n",
+            false,
+        ),
+        (
+            "sed substitution replacement q is not quit command",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n 's/foo/q/p'\n",
+            false,
+        ),
+        (
+            "sed expression makes later q filename an input file",
+            "fixture.sh",
+            "set -o pipefail\nproducer | sed -n -e 'p' q.txt\n",
+            false,
+        ),
+        (
+            "awk exit pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk 'NR == 1 { print; exit }'\n",
+            true,
+        ),
+        (
+            "assignment prefixed awk exit pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | LC_ALL=C awk 'NR == 1 { print; exit }'\n",
+            true,
+        ),
+        (
+            "multiline awk exit pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk '\n  NR == 1 { print; exit }\n'\n",
+            true,
+        ),
+        (
+            "second awk source operand exit pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk -e '{ print }' -e 'NR == 1 { exit }'\n",
+            true,
+        ),
+        (
+            "awk w exec file operand is not inline source",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk -W exec './exit.awk' input.txt\n",
+            false,
+        ),
+        (
+            "awk file option makes later exit filename an input file",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk -f safe.awk exit.txt\n",
+            false,
+        ),
+        (
+            "awk string literal exit is not executable exit",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk '{ print \"exit\" }'\n",
+            false,
+        ),
+        (
+            "awk comment exit is not executable exit",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk '\n  { print $0 } # exit\n'\n",
+            false,
+        ),
+        (
+            "awk regex literal exit is not executable exit",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk '/exit/ { print }'\n",
+            false,
+        ),
+        (
+            "awk print regex literal exit is not executable exit",
+            "fixture.sh",
+            "set -o pipefail\nproducer | awk 'BEGIN { print /exit/ }'\n",
+            false,
+        ),
+        (
+            "split head pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer |\n  head -n 1\n",
+            true,
+        ),
+        (
+            "backslash split head pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | \\\n  head -n 1\n",
+            true,
+        ),
+        (
+            "pipe stderr and stdout head pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer |& head -n 1\n",
+            true,
+        ),
+        (
+            "assignment prefixed head pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | LC_ALL=C head -n 1\n",
+            true,
+        ),
+        (
+            "guarded diagnostic head",
+            "fixture.sh",
+            "set -o pipefail\nproducer |\n  head -n 1 || true\n",
+            false,
+        ),
+        (
+            "colon guarded diagnostic head",
+            "fixture.sh",
+            "set -o pipefail\nproducer | head -n 1 || :\n",
+            false,
+        ),
+        (
+            "false fallback does not guard head",
+            "fixture.sh",
+            "set -o pipefail\nproducer | head -n 1 || false\n",
+            true,
+        ),
+        (
+            "echo fallback does not guard head",
+            "fixture.sh",
+            "set -o pipefail\nproducer | head -n 1 || echo ok\n",
+            true,
+        ),
+        (
+            "head comment text does not guard pipeline",
+            "fixture.sh",
+            "set -o pipefail\nproducer | head -n 1 # || true\n",
+            true,
+        ),
+        (
+            "guarded first head does not guard second head",
+            "fixture.sh",
+            "set -o pipefail\nproducer | head -n 1 || true; producer | head -n 1\n",
+            true,
+        ),
+        (
+            "logical or head is not a pipeline",
+            "fixture.sh",
+            "set -o pipefail\nfalse || head -n 1 file.txt\n",
+            false,
+        ),
+        (
+            "quoted head pipeline text is ignored",
+            "fixture.sh",
+            "set -o pipefail\necho '| head -n 1'\n",
+            false,
+        ),
+        (
+            "logical or grep is not a pipeline",
+            "fixture.sh",
+            "set -o pipefail\nfalse || grep --quiet foo file.txt\n",
+            false,
+        ),
+        (
+            "here string grep is not a producer pipeline",
+            "fixture.sh",
+            "set -o pipefail\ngrep --quiet foo <<< \"$value\"\n",
+            false,
+        ),
+        (
+            "workflow run block without inline pipefail",
+            ".github/workflows/fixture.yml",
+            "name: fixture\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          producer | grep --quiet foo\n",
+            true,
+        ),
+        (
+            "non-strict plain text shell fragment is ignored",
+            "fixture.sh",
+            "producer | grep --quiet foo\n",
+            false,
+        ),
+    ];
+
+    for (name, path, content, should_flag) in regression_cases {
+        let violations = collect_sigpipe_violations(Path::new(path), content);
+        assert_eq!(
+            !violations.is_empty(),
+            should_flag,
+            "SIGPIPE regression case `{name}` mismatch.\nViolations:\n{}",
+            violations.join("\n\n")
+        );
+    }
+
+    fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files(&path, files);
+                continue;
+            }
+
+            let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+                continue;
+            };
+            if matches!(extension, "sh" | "yml" | "yaml") {
+                files.push(path);
+            }
+        }
+    }
+
+    let root = repo_root();
+    let mut files = Vec::new();
+    for relative_dir in ["scripts", ".github/workflows", ".github/test-fixtures"] {
+        collect_files(&root.join(relative_dir), &mut files);
+    }
+    files.sort();
+
+    let mut violations = Vec::new();
+    for path in files {
+        let content = read_file(&path);
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        violations.extend(collect_sigpipe_violations(relative, &content));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Strict shell automation contains early-exiting pipeline consumers:\n\n{}\n\n\
+         These are fragile under `set -o pipefail` because upstream commands can receive SIGPIPE \
+         when downstream consumers exit early.",
+        violations.join("\n\n")
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn test_ci_clippy_shell_status_handling_preserves_pipeline_failures() {
     let cases = [
@@ -1507,6 +2764,95 @@ exit "$status"
             "{name}: shell status contract did not report final status.\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_check_ci_config_accepts_protocol_suffixed_expose_port() {
+    let temp_dir = unique_temp_dir("ci-config-expose-port");
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", bin_dir.display()));
+
+    let cargo_stub = bin_dir.join("cargo");
+    write_file(
+        &cargo_stub,
+        r#"#!/usr/bin/env bash
+if [ "${1:-}" = "deny" ]; then
+  exit 0
+fi
+exit 0
+"#,
+    );
+    fs::set_permissions(&cargo_stub, fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("failed to make {} executable: {e}", cargo_stub.display()));
+
+    let cargo_deny_stub = bin_dir.join("cargo-deny");
+    write_file(
+        &cargo_deny_stub,
+        r#"#!/usr/bin/env bash
+exit 0
+"#,
+    );
+    fs::set_permissions(&cargo_deny_stub, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
+        panic!(
+            "failed to make {} executable: {e}",
+            cargo_deny_stub.display()
+        )
+    });
+
+    write_file(&temp_dir.path().join("Cargo.lock"), "version = 4\n");
+    write_file(&temp_dir.path().join("deny.toml"), "[licenses]\n");
+    write_file(
+        &temp_dir.path().join(".github/workflows/ci.yml"),
+        r#"name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 3); do
+            echo retry
+          done
+          docker logs signal-fish-server
+"#,
+    );
+    write_file(
+        &temp_dir.path().join("Dockerfile"),
+        r#"FROM scratch
+ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
+ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
+EXPOSE 3536/tcp
+HEALTHCHECK CMD curl --fail http://localhost:3536/health || exit 1
+"#,
+    );
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let output = bash_command()
+        .arg(repo_root().join("scripts/check-ci-config.sh"))
+        .current_dir(temp_dir.path())
+        .env("PATH", format!("{}:{original_path}", bin_dir.display()))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run check-ci-config fixture: {e}"));
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "check-ci-config should accept EXPOSE protocol suffixes.\nOutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("HEALTHCHECK port (3536) matches EXPOSE port (3536)"),
+        "check-ci-config did not normalize EXPOSE 3536/tcp before comparing ports.\nOutput:\n{combined}"
+    );
+    assert!(
+        !combined.contains("EXPOSE port (3536/tcp)"),
+        "check-ci-config leaked the protocol suffix into port comparison diagnostics.\nOutput:\n{combined}"
+    );
 }
 
 #[test]
@@ -12061,25 +13407,489 @@ fn test_awk_files_have_valid_syntax() {
 
     let root = repo_root();
 
-    let mut awk_files = Vec::new();
+    fn collect_repo_awk_files(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
 
-    // Look for .awk files in known locations
-    let scripts_dir = root.join(".github/scripts");
-    if scripts_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map(|e| e == "awk").unwrap_or(false) {
-                    awk_files.push(path);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+
+            if path.is_dir() {
+                if relative == Path::new("target")
+                    || relative == Path::new(".git")
+                    || relative == Path::new("third_party")
+                {
+                    continue;
                 }
+                collect_repo_awk_files(&path, root, files);
+            } else if path.extension().map(|e| e == "awk").unwrap_or(false) {
+                files.push(path);
             }
         }
     }
+
+    let mut awk_files = Vec::new();
+    collect_repo_awk_files(&root, &root, &mut awk_files);
 
     if awk_files.is_empty() {
         // No AWK files to validate
         return;
     }
+    awk_files.sort();
+
+    for expected in [
+        ".github/scripts/extract-rust-blocks.awk",
+        "scripts/validate-workflow-awk-scanner.awk",
+    ] {
+        assert!(
+            awk_files.iter().any(|path| {
+                path.strip_prefix(&root)
+                    .map(|relative| relative == Path::new(expected))
+                    .unwrap_or(false)
+            }),
+            "AWK policy test did not include expected file {expected}. Included files:\n{}",
+            awk_files
+                .iter()
+                .map(|path| path
+                    .strip_prefix(&root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    fn last_significant_char(text: &str) -> Option<char> {
+        text.chars().rev().find(|ch| !ch.is_whitespace())
+    }
+
+    fn last_significant_token(text: &str) -> Option<&str> {
+        let trimmed = text.trim_end();
+        let end = trimmed.len();
+        let start = trimmed
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    None
+                } else {
+                    Some(index + ch.len_utf8())
+                }
+            })
+            .unwrap_or(0);
+
+        if start == end {
+            None
+        } else {
+            Some(&trimmed[start..end])
+        }
+    }
+
+    fn starts_regex_literal(text: &str) -> bool {
+        let Some(prev) = last_significant_char(text) else {
+            return true;
+        };
+        if "~(,=:{;![?+-*%&|".contains(prev) {
+            return true;
+        }
+        matches!(
+            last_significant_token(text),
+            Some("print" | "printf" | "return")
+        )
+    }
+
+    fn is_ident_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    fn match_open_index(line: &str, start: usize) -> Option<usize> {
+        let bytes = line.as_bytes();
+        let mut cursor = start;
+        let mut in_string = false;
+        let mut in_regex = false;
+        let mut escaped = false;
+
+        while cursor < bytes.len() {
+            let ch = line[cursor..].chars().next()?;
+            let ch_len = ch.len_utf8();
+
+            if escaped {
+                escaped = false;
+                cursor += ch_len;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                cursor += ch_len;
+                continue;
+            }
+            if in_string {
+                if ch == '"' {
+                    in_string = false;
+                }
+                cursor += ch_len;
+                continue;
+            }
+            if in_regex {
+                if ch == '/' {
+                    in_regex = false;
+                }
+                cursor += ch_len;
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+                cursor += ch_len;
+                continue;
+            }
+            if ch == '/' && starts_regex_literal(&line[..cursor]) {
+                in_regex = true;
+                cursor += ch_len;
+                continue;
+            }
+            if !line[cursor..].starts_with("match") {
+                cursor += ch_len;
+                continue;
+            }
+
+            let before_is_ident = cursor > 0 && is_ident_byte(bytes[cursor - 1]);
+            let after_index = cursor + "match".len();
+            let after_is_ident = after_index < bytes.len() && is_ident_byte(bytes[after_index]);
+            if before_is_ident || after_is_ident {
+                cursor = after_index;
+                continue;
+            }
+
+            let mut open_cursor = after_index;
+            while open_cursor < bytes.len() && bytes[open_cursor].is_ascii_whitespace() {
+                open_cursor += 1;
+            }
+            if open_cursor < bytes.len() && bytes[open_cursor] == b'(' {
+                return Some(open_cursor);
+            }
+            cursor = after_index;
+        }
+
+        None
+    }
+
+    fn strip_awk_inline_comment(line: &str) -> String {
+        let mut out = String::new();
+        let mut in_string = false;
+        let mut in_regex = false;
+        let mut escaped = false;
+
+        for ch in line.chars() {
+            if escaped {
+                out.push(ch);
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                out.push(ch);
+                escaped = true;
+                continue;
+            }
+            if in_string {
+                if ch == '"' {
+                    in_string = false;
+                }
+                out.push(ch);
+                continue;
+            }
+            if in_regex {
+                if ch == '/' {
+                    in_regex = false;
+                }
+                out.push(ch);
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+                out.push(ch);
+                continue;
+            }
+            if ch == '/' && starts_regex_literal(&out) {
+                in_regex = true;
+                out.push(ch);
+                continue;
+            }
+            if ch == '#' {
+                break;
+            }
+            out.push(ch);
+        }
+
+        out
+    }
+
+    fn match_capture_array_lines(content: &str) -> Vec<usize> {
+        let mut lines = Vec::new();
+        let mut in_match_call = false;
+        let mut match_depth = 0usize;
+        let mut match_commas = 0usize;
+        let mut match_line = 0usize;
+        let mut in_string = false;
+        let mut in_regex = false;
+        let mut escaped = false;
+
+        for (line_index, line) in content.lines().enumerate() {
+            let line_number = line_index + 1;
+            let line = strip_awk_inline_comment(line);
+            if !in_match_call && line.trim().is_empty() {
+                continue;
+            }
+
+            let mut cursor = 0usize;
+            while cursor < line.len() {
+                if !in_match_call {
+                    if let Some(open_index) = match_open_index(&line, cursor) {
+                        in_match_call = true;
+                        match_depth = 1;
+                        match_commas = 0;
+                        match_line = line_number;
+                        in_string = false;
+                        in_regex = false;
+                        escaped = false;
+                        cursor = open_index + 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let Some(ch) = line[cursor..].chars().next() else {
+                    break;
+                };
+                cursor += ch.len_utf8();
+
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if in_string {
+                    if ch == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                if in_regex {
+                    if ch == '/' {
+                        in_regex = false;
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = true;
+                    continue;
+                }
+                if ch == '/' && starts_regex_literal(&line[..cursor - ch.len_utf8()]) {
+                    in_regex = true;
+                    continue;
+                }
+                if ch == '(' {
+                    match_depth += 1;
+                    continue;
+                }
+                if ch == ')' {
+                    match_depth -= 1;
+                    if match_depth == 0 {
+                        if match_commas >= 2 {
+                            lines.push(match_line);
+                        }
+                        in_match_call = false;
+                    }
+                    continue;
+                }
+                if ch == ',' && match_depth == 1 {
+                    match_commas += 1;
+                }
+            }
+        }
+
+        lines
+    }
+
+    fn nul_printf_lines(content: &str) -> Vec<usize> {
+        fn has_nul_printf_format(line: &str) -> bool {
+            let bytes = line.as_bytes();
+            let mut cursor = 0usize;
+            let mut in_string = false;
+            let mut in_regex = false;
+            let mut escaped = false;
+
+            while cursor < line.len() {
+                let Some(ch) = line[cursor..].chars().next() else {
+                    break;
+                };
+                let ch_len = ch.len_utf8();
+
+                if escaped {
+                    escaped = false;
+                    cursor += ch_len;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    cursor += ch_len;
+                    continue;
+                }
+                if in_string {
+                    if ch == '"' {
+                        in_string = false;
+                    }
+                    cursor += ch_len;
+                    continue;
+                }
+                if in_regex {
+                    if ch == '/' {
+                        in_regex = false;
+                    }
+                    cursor += ch_len;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = true;
+                    cursor += ch_len;
+                    continue;
+                }
+                if ch == '/' && starts_regex_literal(&line[..cursor]) {
+                    in_regex = true;
+                    cursor += ch_len;
+                    continue;
+                }
+                if !line[cursor..].starts_with("printf") {
+                    cursor += ch_len;
+                    continue;
+                }
+
+                let before_is_ident = cursor > 0 && is_ident_byte(bytes[cursor - 1]);
+                let after_index = cursor + "printf".len();
+                let after_is_ident = after_index < bytes.len() && is_ident_byte(bytes[after_index]);
+                if before_is_ident || after_is_ident {
+                    cursor = after_index;
+                    continue;
+                }
+
+                let mut format_start = after_index;
+                while format_start < bytes.len() && bytes[format_start].is_ascii_whitespace() {
+                    format_start += 1;
+                }
+                if format_start < bytes.len() && bytes[format_start] == b'(' {
+                    format_start += 1;
+                    while format_start < bytes.len() && bytes[format_start].is_ascii_whitespace() {
+                        format_start += 1;
+                    }
+                }
+                if format_start >= bytes.len() || bytes[format_start] != b'"' {
+                    cursor = after_index;
+                    continue;
+                }
+
+                let mut index = format_start + 1;
+                let mut format_escaped = false;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'0' if format_escaped => return true,
+                        b'\\' if !format_escaped => {
+                            format_escaped = true;
+                            index += 1;
+                            continue;
+                        }
+                        b'"' if !format_escaped => break,
+                        _ => {}
+                    }
+                    format_escaped = false;
+                    index += 1;
+                }
+
+                cursor = after_index;
+            }
+
+            false
+        }
+
+        content
+            .lines()
+            .enumerate()
+            .filter_map(|(line_index, line)| {
+                let code_line = strip_awk_inline_comment(line);
+                if has_nul_printf_format(&code_line) {
+                    Some(line_index + 1)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    assert_eq!(
+        match_capture_array_lines(r#"{ print $0 } # old code: match($0, /foo/, captures)"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore capture-array examples in inline comments"
+    );
+    assert_eq!(
+        match_capture_array_lines(r#"{ print "match($0, /foo/, captures)" }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore capture-array examples in string literals"
+    );
+    assert_eq!(
+        match_capture_array_lines(r#"$0 ~ /match($0, /foo/, captures)/ { print $0 }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore capture-array examples in regex literals"
+    );
+    assert_eq!(
+        match_capture_array_lines(r#"BEGIN { print /match($0, \/foo\/, captures)/ }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore capture-array examples in regex constants"
+    );
+    assert_eq!(
+        match_capture_array_lines(r#"BEGIN { ok = flag && /match($0, \/foo\/, captures)/ }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore regex constants after &&"
+    );
+    assert_eq!(
+        match_capture_array_lines(r#"BEGIN { ok = flag || /match($0, \/foo\/, captures)/ }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore regex constants after ||"
+    );
+    assert_eq!(
+        match_capture_array_lines(
+            r#"{
+  if (match($0,
+    /foo/,
+    captures)) print captures[1]
+}"#
+        ),
+        vec![2],
+        "AWK policy scanner must catch multiline match() capture arrays"
+    );
+    assert_eq!(
+        nul_printf_lines(r#"{ print "printf \"%s\\0\", value" }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore printf NUL examples in string literals"
+    );
+    assert_eq!(
+        nul_printf_lines(r#"$0 ~ /printf "%s\\0"/ { print $0 }"#),
+        Vec::<usize>::new(),
+        "AWK policy scanner must ignore printf NUL examples in regex literals"
+    );
+    assert_eq!(
+        nul_printf_lines(r#"printf "%s\0", value"#),
+        vec![1],
+        "AWK policy scanner must catch printf NUL format strings"
+    );
+    assert_eq!(
+        nul_printf_lines(r#"{ printf "%s\0", value }"#),
+        vec![1],
+        "AWK policy scanner must catch printf NUL format strings inside actions"
+    );
 
     let mut issues = Vec::new();
 
@@ -12087,32 +13897,24 @@ fn test_awk_files_have_valid_syntax() {
         let content = read_file(awk_file);
         let relative_path = awk_file.strip_prefix(&root).unwrap_or(awk_file);
 
-        // Check for non-POSIX match() function (GNU-specific, breaks on mawk)
-        for (line_idx, line) in content.lines().enumerate() {
-            let trimmed = line.trim();
-            // Skip comments
-            if trimmed.starts_with('#') {
-                continue;
-            }
+        // Check for non-POSIX match() capture arrays (GNU-specific, breaks on mawk)
+        for line_number in match_capture_array_lines(&content) {
+            issues.push(format!(
+                "{}:{}: Uses match() capture array (not POSIX compatible with mawk).\n  \
+                 Fix: Use POSIX two-argument match(), sub(), or gsub() instead.",
+                relative_path.display(),
+                line_number
+            ));
+        }
 
-            if trimmed.contains("match(") {
-                issues.push(format!(
-                    "{}:{}: Uses match() function (not POSIX compatible with mawk).\n  \
-                     Fix: Use sub() or gsub() instead.",
-                    relative_path.display(),
-                    line_idx + 1
-                ));
-            }
-
-            // Check for \0 in printf (not POSIX)
-            if trimmed.contains("printf") && trimmed.contains("\\0") {
-                issues.push(format!(
-                    "{}:{}: Uses \\0 in printf (not POSIX compatible).\n  \
-                     Fix: Use printf \"%c\", 0 instead.",
-                    relative_path.display(),
-                    line_idx + 1
-                ));
-            }
+        // Check for \0 in printf format strings (not POSIX)
+        for line_number in nul_printf_lines(&content) {
+            issues.push(format!(
+                "{}:{}: Uses \\0 in printf (not POSIX compatible).\n  \
+                 Fix: Use printf \"%c\", 0 instead.",
+                relative_path.display(),
+                line_number
+            ));
         }
     }
 
@@ -12122,7 +13924,7 @@ fn test_awk_files_have_valid_syntax() {
              Why this matters:\n\
              - GitHub Actions runners may use mawk (not gawk)\n\
              - Non-POSIX AWK features cause silent failures in CI\n\
-             - match() and \\0 are common portability problems\n\n\
+             - match() capture arrays and \\0 are common portability problems\n\n\
              Verify: ./scripts/validate-ci.sh --awk",
             issues.join("\n\n")
         );

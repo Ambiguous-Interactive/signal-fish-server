@@ -245,13 +245,13 @@ jobs:
               should_skip=0      # Set to 1 to skip validation entirely
               should_compile=1   # Set to 0 to skip compilation (syntax-only check)
 
-              if echo "$attributes" | grep -qE 'ignore'; then
+              if grep -qE 'ignore' <<< "$attributes"; then
                 echo "  ⊘ Skipping block at line $line_num (marked ignore)"
                 should_skip=1
-              elif echo "$attributes" | grep -qE 'no_run'; then
+              elif grep -qE 'no_run' <<< "$attributes"; then
                 echo "  ⊘ Compiling but not running block at line $line_num (marked no_run)"
                 should_compile=1
-              elif echo "$attributes" | grep -qE 'should_panic'; then
+              elif grep -qE 'should_panic' <<< "$attributes"; then
                 echo "  ⊘ Skipping block at line $line_num (marked should_panic)"
                 should_skip=1
               fi
@@ -269,12 +269,12 @@ jobs:
 
               # Check for common placeholder patterns in content
               # Match ellipsis anywhere in the block (not just at start of line)
-              if [ "$should_skip" -eq 0 ] && echo "$content" | grep -qE 'todo!\(\)|\.\.\.|\.\. |// omitted|/\* \.\.\. \*/|unimplemented!\(\)'; then
+              if [ "$should_skip" -eq 0 ] && grep -qE 'todo!\(\)|\.\.\.|\.\. |// omitted|/\* \.\.\. \*/|unimplemented!\(\)' <<< "$content"; then
                 echo "  ⊘ Skipping block at line $line_num (incomplete/placeholder code)"
                 should_skip=1
               fi
 
-              if [ "$should_skip" -eq 0 ] && echo "$content" | grep -qE '// Note:|// Example:|/\* config \*/|<your_|YOUR_|PLACEHOLDER'; then
+              if [ "$should_skip" -eq 0 ] && grep -qE '// Note:|// Example:|/\* config \*/|<your_|YOUR_|PLACEHOLDER' <<< "$content"; then
                 echo "  ⊘ Skipping block at line $line_num (documentation snippet)"
                 should_skip=1
               fi
@@ -282,7 +282,7 @@ jobs:
               # Skip blocks that are clearly partial: single expressions or bare
               # statements without a fn wrapper (no item-level keywords at all)
               if [ "$should_skip" -eq 0 ]; then
-                if ! echo "$content" | grep -qE '^(fn |struct |enum |impl |trait |type |const |static |mod |use |pub |extern |#\[|async fn |unsafe )'; then
+                if ! grep -qE '^(fn |struct |enum |impl |trait |type |const |static |mod |use |pub |extern |#\[|async fn |unsafe )' <<< "$content"; then
                   echo "  ⊘ Skipping block at line $line_num (partial snippet, no item-level keywords)"
                   should_skip=1
                 fi
@@ -311,7 +311,7 @@ jobs:
               # Attempt compilation for blocks that look like complete programs or lib items
               if [ "$should_compile" -eq 1 ]; then
                 # Check if this looks like a complete program or lib snippet
-                if echo "$content" | grep -qE '^(fn main|use |mod |pub |extern |fn |struct |enum |impl |trait |type |const |static |async fn |unsafe )'; then
+                if grep -qE '^(fn main|use |mod |pub |extern |fn |struct |enum |impl |trait |type |const |static |async fn |unsafe )' <<< "$content"; then
                   # Try to compile as a standalone library crate
                   compile_file="$TEMP_DIR/compile_${total}.rs"
                   {
@@ -737,7 +737,7 @@ jobs:
             ' "$md_file" | while IFS=$'\t' read -r -d '' line_num content; do
               [ -z "$content" ] && continue
               # Skip placeholder/example-only blocks
-              if echo "$content" | grep -qE '^#.*example|^# Note:|^\.\.\.$'; then
+              if grep -qE '^#.*example|^# Note:|^\.\.\.$' <<< "$content"; then
                 continue
               fi
 
