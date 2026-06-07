@@ -2841,6 +2841,43 @@ fn test_check_markdown_script_common_issue_guidance_is_data_driven() {
 }
 
 #[test]
+fn test_check_markdown_script_md013_diagnostics_are_data_driven() {
+    struct DiagnosticCase {
+        expected_fragment: &'static str,
+        purpose: &'static str,
+    }
+
+    let root = repo_root();
+    let script = root.join("scripts/check-markdown.sh");
+    let content = read_file(&script);
+
+    let cases = [
+        DiagnosticCase {
+            expected_fragment: "MD013 diagnostics (source lines):",
+            purpose: "prints a dedicated MD013 diagnostics heading",
+        },
+        DiagnosticCase {
+            expected_fragment: "grep \"MD013/line-length\"",
+            purpose: "extracts MD013 failures from markdownlint output",
+        },
+        DiagnosticCase {
+            expected_fragment: "sed -n \"${line_number}p\"",
+            purpose: "prints the offending source line for faster debugging",
+        },
+    ];
+
+    for case in cases {
+        assert!(
+            content.contains(case.expected_fragment),
+            "check-markdown.sh is missing MD013 diagnostic behavior: {}.\nExpected fragment: {}\nFile: {}",
+            case.purpose,
+            case.expected_fragment,
+            script.display()
+        );
+    }
+}
+
+#[test]
 fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");

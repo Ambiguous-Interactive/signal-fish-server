@@ -230,7 +230,10 @@ if [ "$FIX_MODE" = true ]; then
     fi
 else
     echo "Running markdownlint-cli2..."
-    if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_INPUTS[@]}"; then
+    MARKDOWNLINT_LOG="$(mktemp)"
+    trap 'rm -f "$MARKDOWNLINT_LOG"' EXIT
+
+    if "${MARKDOWNLINT_CMD[@]}" "${MARKDOWNLINT_INPUTS[@]}" 2>&1 | tee "$MARKDOWNLINT_LOG"; then
         if [ -x ./scripts/check-markdown-link-text.sh ]; then
             echo "Running markdown link text policy checks..."
             ./scripts/check-markdown-link-text.sh
@@ -241,6 +244,23 @@ else
         echo ""
         echo -e "${RED}Markdown linting failed${NC}"
         echo ""
+
+        if grep -q "MD013/line-length" "$MARKDOWNLINT_LOG"; then
+            echo -e "${YELLOW}MD013 diagnostics (source lines):${NC}"
+            while IFS= read -r violation; do
+                if [[ "$violation" =~ ^([^:]+):([0-9]+): ]]; then
+                    file_path="${BASH_REMATCH[1]}"
+                    line_number="${BASH_REMATCH[2]}"
+                    source_line="$(sed -n "${line_number}p" "$file_path" 2>/dev/null || true)"
+                    printf "  - %s:%s\n" "$file_path" "$line_number"
+                    if [ -n "$source_line" ]; then
+                        printf "    %s\n" "$source_line"
+                    fi
+                fi
+            done < <(grep "MD013/line-length" "$MARKDOWNLINT_LOG")
+            echo ""
+        fi
+
         echo "To auto-fix issues:"
         echo "  ./scripts/check-markdown.sh fix"
         echo ""

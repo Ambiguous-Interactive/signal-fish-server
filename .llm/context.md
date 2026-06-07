@@ -93,10 +93,12 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 - If you touch hook files or hook-adjacent policy code, run:
   - `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1`
   - `SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree`
-- Runtime target: full pre-commit suite under 1000ms on normal local workloads. Any slower run must be investigated and optimized before handoff.
+- Runtime target: full pre-commit suite under 1000ms on normal local workloads.
+  Any slower run must be investigated and optimized before handoff.
 - PowerShell collection safety (strict mode):
   - Always wrap function outputs with `@(...)` before using `.Count`.
-  - Example: `if ((Get-Items).Count -eq 0) {}` can fail in strict mode when output collapses to a scalar; `if (@(Get-Items).Count -eq 0) {}` is safe.
+  - Example: `if ((Get-Items).Count -eq 0) {}` can fail in strict mode when output
+    collapses to a scalar; `if (@(Get-Items).Count -eq 0) {}` is safe.
   - When returning a collection that must stay a collection, use `Write-Output -NoEnumerate` or a unary array return.
   - Prefer typed array boundaries (`[string[]]@(...)`, `[int[]]@(...)`) for helper function inputs.
 - Do not add `cargo`, `npm`, `npx`, or installer/bootstrap commands to git hooks.
