@@ -73,26 +73,26 @@ fi
 check_dependencies() {
     log_info "Checking dependencies..."
 
-    local missing_deps=()
+    local missing_deps=""
 
     if ! command -v rustc &>/dev/null; then
-        missing_deps+=("rustc")
+        missing_deps="${missing_deps:+$missing_deps }rustc"
     fi
 
     if ! command -v rustfmt &>/dev/null; then
-        missing_deps+=("rustfmt")
+        missing_deps="${missing_deps:+$missing_deps }rustfmt"
     fi
 
     if ! command -v "$AWK_CMD" &>/dev/null; then
-        missing_deps+=("$AWK_CMD")
+        missing_deps="${missing_deps:+$missing_deps }$AWK_CMD"
     fi
 
     if [ ! -f "$AWK_EXTRACTOR" ]; then
-        missing_deps+=("$AWK_EXTRACTOR")
+        missing_deps="${missing_deps:+$missing_deps }$AWK_EXTRACTOR"
     fi
 
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        log_error "Missing required dependencies: ${missing_deps[*]}"
+    if [ -n "$missing_deps" ]; then
+        log_error "Missing required dependencies: $missing_deps"
         exit 2
     fi
 

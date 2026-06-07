@@ -33,6 +33,7 @@ on:
       - 'scripts/check-workflow-hygiene.sh'
       - 'scripts/check-workflow-toolchain.sh'
       - 'scripts/validate-workflow-awk.sh'
+      - 'scripts/validate-workflow-awk-scanner.awk'
       - '.github/workflows/workflow-hygiene.yml'
   pull_request:
     branches: [main]
@@ -42,6 +43,7 @@ on:
       - 'scripts/check-workflow-hygiene.sh'
       - 'scripts/check-workflow-toolchain.sh'
       - 'scripts/validate-workflow-awk.sh'
+      - 'scripts/validate-workflow-awk-scanner.awk'
       - '.github/workflows/workflow-hygiene.yml'
   schedule:
     # Run weekly on Monday at 06:00 UTC to detect stale nightly toolchains

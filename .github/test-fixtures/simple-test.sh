@@ -32,13 +32,13 @@ log_error() { echo -e "${RED}[FAIL]${NC} $*"; }
 
 # Check dependencies
 check_deps() {
-    local missing=()
-    command -v python3 >/dev/null || missing+=("python3")
-    command -v rustc >/dev/null || missing+=("rustc")
-    command -v rustfmt >/dev/null || missing+=("rustfmt")
+    local missing=""
+    command -v python3 >/dev/null || missing="${missing:+$missing }python3"
+    command -v rustc >/dev/null || missing="${missing:+$missing }rustc"
+    command -v rustfmt >/dev/null || missing="${missing:+$missing }rustfmt"
 
-    if [ ${#missing[@]} -gt 0 ]; then
-        log_error "Missing: ${missing[*]}"
+    if [ -n "$missing" ]; then
+        log_error "Missing: $missing"
         exit 2
     fi
     log_success "Dependencies OK"
@@ -52,9 +52,8 @@ test_extract() {
     while IFS= read -r -d '' raw_block; do
         count=$((count + 1))
         if [ $VERBOSE -eq 1 ]; then
-            local line attrs content
-            parse_block "$raw_block" line attrs content
-            echo "  Block $count at line $line"
+            parse_block "$raw_block"
+            echo "  Block $count at line $PARSED_LINE"
         fi
     done < <(python3 "$EXTRACTOR" "$TEST_FIXTURE")
 
@@ -82,8 +81,9 @@ test_validate() {
     while IFS= read -r -d '' raw_block; do
         total=$((total + 1))
 
-        local line attrs content
-        parse_block "$raw_block" line attrs content
+        parse_block "$raw_block"
+        local attrs="$PARSED_ATTRS"
+        local content="$PARSED_CONTENT"
 
         # Skip empty
         if [ -z "$content" ]; then
@@ -144,24 +144,21 @@ test_validate() {
 # Helper to parse extractor output (handles tabs in content)
 parse_block() {
     local input="$1"
-    local -n line_ref="$2"
-    local -n attrs_ref="$3"
-    local -n content_ref="$4"
     local remainder
 
-    line_ref="${input%%$'\t'*}"
-    if [ "$line_ref" = "$input" ]; then
-        attrs_ref=""
-        content_ref=""
+    PARSED_LINE="${input%%$'\t'*}"
+    if [ "$PARSED_LINE" = "$input" ]; then
+        PARSED_ATTRS=""
+        PARSED_CONTENT=""
         return 0
     fi
 
     remainder="${input#*$'\t'}"
-    attrs_ref="${remainder%%$'\t'*}"
-    if [ "$attrs_ref" = "$remainder" ]; then
-        content_ref=""
+    PARSED_ATTRS="${remainder%%$'\t'*}"
+    if [ "$PARSED_ATTRS" = "$remainder" ]; then
+        PARSED_CONTENT=""
     else
-        content_ref="${remainder#*$'\t'}"
+        PARSED_CONTENT="${remainder#*$'\t'}"
     fi
 }
 
@@ -185,7 +182,7 @@ fn test() {
 EOF
 
     # Extract and check content
-    local output line attrs content raw_block found
+    local output raw_block found
     output=""
     found=0
     while IFS= read -r -d '' raw_block; do
@@ -194,11 +191,11 @@ EOF
             found=1
         fi
     done < <(python3 "$EXTRACTOR" "$temp_md")
-    parse_block "$output" line attrs content
+    parse_block "$output"
 
-    if ! grep -q "fn test" <<< "$content"; then
+    if ! grep -q "fn test" <<< "$PARSED_CONTENT"; then
         log_error "Empty first line caused content loss"
-        [ $VERBOSE -eq 1 ] && echo "Content: [$content]"
+        [ $VERBOSE -eq 1 ] && echo "Content: [$PARSED_CONTENT]"
         return 1
     fi
 
@@ -226,9 +223,8 @@ EOF
 
     local found=0
     while IFS= read -r -d '' raw_block; do
-        local line attrs content
-        parse_block "$raw_block" line attrs content
-        if grep -q "fn unclosed" <<< "$content"; then
+        parse_block "$raw_block"
+        if grep -q "fn unclosed" <<< "$PARSED_CONTENT"; then
             found=1
         fi
     done < <(python3 "$EXTRACTOR" "$temp_md")
@@ -264,10 +260,9 @@ EOF
 
     local lower=0 upper=0
     while IFS= read -r -d '' raw_block; do
-        local line attrs content
-        parse_block "$raw_block" line attrs content
-        grep -q "fn lowercase" <<< "$content" && lower=1
-        grep -q "fn uppercase" <<< "$content" && upper=1
+        parse_block "$raw_block"
+        grep -q "fn lowercase" <<< "$PARSED_CONTENT" && lower=1
+        grep -q "fn uppercase" <<< "$PARSED_CONTENT" && upper=1
     done < <(python3 "$EXTRACTOR" "$temp_md")
 
     if [ $lower -eq 0 ] || [ $upper -eq 0 ]; then
@@ -301,10 +296,9 @@ EOF
 
     local ignore=0 no_run=0
     while IFS= read -r -d '' raw_block; do
-        local line attrs content
-        parse_block "$raw_block" line attrs content
-        grep -q "ignore" <<< "$attrs" && ignore=1
-        grep -q "no_run" <<< "$attrs" && no_run=1
+        parse_block "$raw_block"
+        grep -q "ignore" <<< "$PARSED_ATTRS" && ignore=1
+        grep -q "no_run" <<< "$PARSED_ATTRS" && no_run=1
     done < <(python3 "$EXTRACTOR" "$temp_md")
 
     if [ $ignore -eq 0 ] || [ $no_run -eq 0 ]; then

@@ -21,7 +21,9 @@ use std::process::Command;
 
 #[cfg(unix)]
 use common::bash_command;
-use common::{read_file, repo_root, unique_temp_dir, write_file};
+use common::{read_file, repo_root};
+#[cfg(unix)]
+use common::{unique_temp_dir, write_file};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
 use syn::parse::Parser;
@@ -13064,7 +13066,7 @@ fn test_internal_link_validators_check_tracked_targets() {
 #[test]
 fn test_repo_shell_scripts_avoid_bash4_only_features() {
     let root = repo_root();
-    let scripts_dir = root.join("scripts");
+    let script_dirs = ["scripts", ".github/test-fixtures"];
     let mut violations = Vec::new();
     let forbidden = [
         ("mapfile", "Bash 4+; macOS system Bash is 3.2"),
@@ -13072,29 +13074,47 @@ fn test_repo_shell_scripts_avoid_bash4_only_features() {
         ("declare -A", "associative arrays require Bash 4+"),
         ("local -n", "nameref variables require Bash 4.3+"),
     ];
+    let forbidden_regexes = [(
+        Regex::new(r"\blocal[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\(\)").unwrap(),
+        "local empty arrays are fragile under Bash 3.2 with set -u",
+    )];
 
-    for entry in fs::read_dir(&scripts_dir)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", scripts_dir.display()))
-    {
-        let entry = entry.unwrap_or_else(|e| panic!("failed to read scripts entry: {e}"));
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "sh") {
-            continue;
-        }
-        let content = read_file(&path);
-        let relative = path.strip_prefix(&root).unwrap_or(&path);
-        for (line_idx, line) in content.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('#') {
+    for script_dir in script_dirs {
+        let script_dir = root.join(script_dir);
+        for entry in fs::read_dir(&script_dir)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", script_dir.display()))
+        {
+            let entry = entry
+                .unwrap_or_else(|e| panic!("failed to read {} entry: {e}", script_dir.display()));
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "sh") {
                 continue;
             }
-            for (pattern, reason) in forbidden {
-                if line.contains(pattern) {
-                    violations.push(format!(
-                        "{}:{}: uses `{pattern}` ({reason})",
-                        relative.display(),
-                        line_idx + 1
-                    ));
+            let content = read_file(&path);
+            let relative = path.strip_prefix(&root).unwrap_or(&path);
+            for (line_idx, line) in content.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                for (pattern, reason) in forbidden {
+                    if line.contains(pattern) {
+                        violations.push(format!(
+                            "{}:{}: uses `{pattern}` ({reason})",
+                            relative.display(),
+                            line_idx + 1
+                        ));
+                    }
+                }
+                for (pattern, reason) in &forbidden_regexes {
+                    if pattern.is_match(line) {
+                        violations.push(format!(
+                            "{}:{}: uses `{}` ({reason})",
+                            relative.display(),
+                            line_idx + 1,
+                            pattern.as_str()
+                        ));
+                    }
                 }
             }
         }
@@ -17482,13 +17502,32 @@ fn test_workflow_hygiene_ci_runs_awk_validator() {
     let root = repo_root();
     let workflow = root.join(".github/workflows/workflow-hygiene.yml");
     let content = read_file(&workflow);
+    let required_path_filters = [
+        "scripts/validate-workflow-awk.sh",
+        "scripts/validate-workflow-awk-scanner.awk",
+    ];
+    let required_run_commands = ["run: bash scripts/validate-workflow-awk.sh"];
+
+    let missing_path_filters = required_path_filters
+        .iter()
+        .filter(|path| !content.contains(&format!("- '{path}'")))
+        .map(|path| format!("  - {path}"))
+        .collect::<Vec<_>>();
+    let missing_run_commands = required_run_commands
+        .iter()
+        .filter(|command| !content.contains(**command))
+        .map(|command| format!("  - {command}"))
+        .collect::<Vec<_>>();
 
     assert!(
-        content.contains("scripts/validate-workflow-awk.sh"),
-        "workflow-hygiene.yml must trigger and run scripts/validate-workflow-awk.sh.\n\
+        missing_path_filters.is_empty() && missing_run_commands.is_empty(),
+        "workflow-hygiene.yml must trigger and run the workflow AWK validator \
+         and its scanner dependency.\n\
          Local hooks already validate workflow AWK snippets; CI should run the \
          same fast checker so workflow portability issues cannot bypass local tooling.\n\
-         File: {}",
+         Missing path filters:\n{}\nMissing run commands:\n{}\nFile: {}",
+        missing_path_filters.join("\n"),
+        missing_run_commands.join("\n"),
         workflow.display()
     );
 }

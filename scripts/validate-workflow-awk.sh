@@ -41,6 +41,7 @@ cd "$REPO_ROOT"
 
 echo -e "${BLUE}Workflow AWK Anti-Pattern Checker${NC}"
 echo "Repository: $REPO_ROOT"
+echo "Bash: ${BASH_VERSION:-unknown}"
 echo ""
 
 ERRORS=0
@@ -61,7 +62,7 @@ check_awk_antipatterns() {
 
     local match_lines=""
     local nul_printf_found=false
-    local complex_warnings=()
+    local complex_warnings=""
     local scan_kind scan_value scan_extra
 
     while IFS=$'\t' read -r scan_kind scan_value scan_extra; do
@@ -73,7 +74,7 @@ check_awk_antipatterns() {
                 nul_printf_found=true
                 ;;
             COMPLEX)
-                complex_warnings+=("$scan_value"$'\t'"$scan_extra")
+                complex_warnings+="$scan_value"$'\t'"$scan_extra"$'\n'
                 ;;
             "")
                 ;;
@@ -108,14 +109,17 @@ check_awk_antipatterns() {
     fi
 
     # Anti-pattern 4: Missing comments explaining complex AWK scripts
-    for complex_warning in "${complex_warnings[@]}"; do
-        IFS=$'\t' read -r awk_start awk_line_count <<< "$complex_warning"
-        echo -e "${YELLOW}⚠${NC} Complex AWK script (${awk_line_count} lines) lacks explanatory comments"
-        echo "  Near line: $awk_start"
-        echo "  Consider adding comments explaining what the AWK script does"
-        echo ""
-        WARNINGS=$((WARNINGS + 1))
-    done
+    if [ -n "$complex_warnings" ]; then
+        local awk_start awk_line_count
+        while IFS=$'\t' read -r awk_start awk_line_count; do
+            [ -n "$awk_start" ] || continue
+            echo -e "${YELLOW}⚠${NC} Complex AWK script (${awk_line_count} lines) lacks explanatory comments"
+            echo "  Near line: $awk_start"
+            echo "  Consider adding comments explaining what the AWK script does"
+            echo ""
+            WARNINGS=$((WARNINGS + 1))
+        done <<< "$complex_warnings"
+    fi
 
     if [ $file_errors -eq 0 ]; then
         echo -e "${GREEN}✓${NC} No critical anti-patterns found"
