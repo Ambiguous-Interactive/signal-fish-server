@@ -1714,7 +1714,7 @@ async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner(
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn handle_signal_increments_signals_relayed_on_successful_relay() {
+async fn handle_signal_increments_signals_relayed_on_accepted_dispatch() {
     let server = create_test_server().await;
     let (alice, _alice_rx) = register_client(&server).await;
     let (bob, mut bob_rx) = register_client(&server).await;
@@ -1741,7 +1741,7 @@ async fn handle_signal_increments_signals_relayed_on_successful_relay() {
         .handle_signal(&alice, bob, json!({ "Offer": "x" }))
         .await;
 
-    // Sanity: the relay actually delivered (so the metric reflects a real event).
+    // Sanity: the best-effort dispatch reached this receiver in the available-channel case.
     match recv(&mut bob_rx).await.as_ref() {
         ServerMessage::Signal { from, .. } => assert_eq!(*from, alice),
         other => panic!("expected Signal, got {other:?}"),
@@ -1749,7 +1749,40 @@ async fn handle_signal_increments_signals_relayed_on_successful_relay() {
     assert_eq!(
         server.metrics.signals_relayed.load(Ordering::Relaxed),
         1,
-        "a successful relay must increment signals_relayed exactly once"
+        "an accepted dispatch must increment signals_relayed exactly once"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn handle_signal_counts_valid_dispatch_when_receiver_is_closed() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    drop(bob_rx);
+
+    server
+        .handle_signal(&alice, bob, json!({ "Offer": "x" }))
+        .await;
+
+    assert_silent(&mut alice_rx).await;
+    assert_eq!(
+        server.metrics.signals_relayed.load(Ordering::Relaxed),
+        1,
+        "signals_relayed counts accepted best-effort dispatch, not receiver delivery"
     );
 }
 

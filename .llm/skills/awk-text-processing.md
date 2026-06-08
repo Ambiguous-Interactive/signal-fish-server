@@ -67,8 +67,8 @@ awk '
     next
   }
   in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
   }
   END {
     # CRITICAL: Handle unclosed blocks at EOF
@@ -85,7 +85,7 @@ Key patterns:
 
 1. **NUL byte output**: `printf "%s%c", content, 0` (POSIX compatible)
 2. **NUL byte input**: `while IFS= read -r -d '' block`
-3. **Empty first line**: Check `if (content == "")` before appending
+3. **Empty first line**: Track `seen_content` separately before appending
 4. **EOF handling**: `END` block handles unclosed blocks
 
 ---
@@ -122,8 +122,8 @@ sub(/^prefix/, "", attrs)        # Remove prefix, keep rest
 
 ```awk
 # FRAGILE: Only matches specific formats
-/^```[Rr]ust(,.*)?$/ { ... }
-# Fails on: ```rust ignore (space), ```rust,no_run ignore (multiple attrs)
+/^```rust$/ { ... }
+# Fails on: ```Rust, ```rust,ignore, ```rust ignore
 
 # ROBUST: Matches any fence format
 /^```[Rr]ust/ {
@@ -160,22 +160,23 @@ If Rust uses `char::is_whitespace()`, AWK should normally use `[[:space:]]` for 
 ```awk
 awk '
   /^```rust/ {
-    in_block = 1; block_start = NR; content = ""
+    in_block = 1; block_start = NR; content = ""; seen_content = 0
     attrs = $0
     sub(/^```[Rr]ust,?/, "", attrs)
+    if (attrs == "") attrs = "none"
     next
   }
   /^```$/ && in_block {
-    # Custom separator (:::) unlikely to appear in content
-    printf "%s:::%s:::%s%c", block_start, attrs, content, 0
+    # Canonical field separator is TAB; records end with NUL.
+    printf "%s\t%s\t%s%c", block_start, attrs, content, 0
     in_block = 0; next
   }
   in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
   }
   END {
-    if (in_block) { printf "%s:::%s:::%s%c", block_start, attrs, content, 0 }
+    if (in_block) { printf "%s\t%s\t%s%c", block_start, attrs, content, 0 }
   }
 ' file.md | while IFS=$'\t' read -r -d '' record; do
   # NOTE: IFS is a character set, not a string — use single-char delimiter
@@ -184,7 +185,7 @@ done
 ```
 
 **Important**: `IFS=':::'` does NOT split on `:::` — bash `IFS` treats each character
-independently (`IFS=':'`). Use `IFS=$'\t'` (tab) or another single character.
+independently (`IFS=':'`). Use the canonical `IFS=$'\t'` tab separator or another single character.
 
 ---
 
@@ -235,10 +236,10 @@ END { if (in_block) printf "%s%c", content, 0 }
 # WRONG: First line becomes leading newline
 in_block { content = content "\n" $0 }
 
-# CORRECT: Check if content is empty
+# CORRECT: Track seen content separately from accumulated text
 in_block {
-  if (content == "") content = $0
-  else content = content "\n" $0
+  if (seen_content) content = content "\n" $0
+  else { content = $0; seen_content = 1 }
 }
 ```
 

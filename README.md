@@ -215,7 +215,7 @@ complete reference.
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`    | `5`       | Max room creations per player per window            |
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`           | `60`      | Rate limit window in seconds                        |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`     | `20`      | Max join attempts per player per window             |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max valid WebRTC signals per player per window      |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max validated WebRTC Signal dispatch attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS`      | `rate_limit.max_signal_errors`     | `60`      | Max rejected WebRTC signals per player per window   |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`    | `64`      | Max characters in a game name                       |
 | `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Length of generated room codes                      |

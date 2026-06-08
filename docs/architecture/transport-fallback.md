@@ -142,7 +142,7 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
 - `signal_fish_transport_relay_fallback_total` — first reports or state transitions
   where clients reported falling back to the relay floor via `TransportStatus`.
 - `signal_fish_transport_signals_relayed_total` — opaque WebRTC `Signal` messages
-  successfully relayed between peers.
+  accepted for best-effort dispatch to same-room WebRTC peers.
 - `signal_fish_transport_turn_credentials_issued_total` — ephemeral TURN
   credentials minted into `SessionPlan`s.
 

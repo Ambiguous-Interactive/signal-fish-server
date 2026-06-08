@@ -84,14 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signal_fish_transport_signals_relayed_total`, and
   `signal_fish_transport_turn_credentials_issued_total`. Selection counters are recorded once per
   finalize in `emit_session_plan` (relay-resolved rooms included; the late-join path never counts,
-  avoiding double-counting); `signals_relayed` counts a `Signal` at successful dispatch only;
-  `turn_credentials_issued` counts each minted TURN credential. Documented the client
+  avoiding double-counting); `signals_relayed` counts a `Signal` after validation, before
+  best-effort dispatch; `turn_credentials_issued` counts each minted TURN credential. Documented the client
   transport/fallback state machine, the unconditional relay guarantee, the two-data-channel
   recommendation, and the metrics in `docs/architecture/transport-fallback.md`. The v2 wire format
   is unchanged — adding a `ClientMessage` variant leaves every existing variant byte-identical.
 - Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
   relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
-  `IceCandidate`) to a single peer in the same room, delivered as `ServerMessage::Signal { from, signal }`.
+  `IceCandidate`) to a single peer in the same room, dispatched on the best-effort relay path as
+  `ServerMessage::Signal { from, signal }`.
   On room join, existing v3 WebRTC peers and the joiner are paired via `ServerMessage::NewPeer
   { peer_id, you_initiate }`, where the deterministic glare rule (lesser UUID initiates) designates
   exactly one offerer per pair; P3's host topology later fixes this direction for star sessions

@@ -11,7 +11,14 @@
 
 # Initialize state variables explicitly to silence AWK --lint warnings
 # about uninitialized variables (particularly in_block used in the END block)
-BEGIN { in_block = 0 }
+BEGIN {
+  in_block = 0
+  cr = sprintf("%c", 13)
+}
+
+# Normalize CRLF markdown input so fixture helpers and CI parse the same
+# logical fence/content lines on Windows-created files.
+{ sub(cr "$", "") }
 
 # Match opening fence with optional attributes (case-insensitive)
 /^```[Rr]ust/ {

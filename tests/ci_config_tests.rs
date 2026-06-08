@@ -6987,6 +6987,52 @@ fn test_markdown_common_patterns_are_correct() {
 // AWK Script Testing
 // ============================================================================
 
+fn run_rust_block_awk_extractor(markdown: &str) -> Vec<(String, String, String)> {
+    let root = repo_root();
+    let temp_dir = tempfile::Builder::new()
+        .prefix("signal-fish-awk-extractor-")
+        .tempdir()
+        .expect("create temp dir");
+    let fixture = temp_dir.path().join("fixture.md");
+    fs::write(&fixture, markdown).expect("write markdown fixture");
+
+    let output = Command::new("awk")
+        .arg("-f")
+        .arg(root.join(".github/scripts/extract-rust-blocks.awk"))
+        .arg(&fixture)
+        .current_dir(&root)
+        .output()
+        .expect("run canonical Rust-block AWK extractor");
+
+    assert!(
+        output.status.success(),
+        "AWK extractor failed for {}:\nstdout:\n{}\nstderr:\n{}",
+        fixture.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let fields: Vec<&[u8]> = record.splitn(3, |byte| *byte == b'\t').collect();
+            assert_eq!(
+                fields.len(),
+                3,
+                "extractor record must be line<TAB>attributes<TAB>content<NUL>: {:?}",
+                String::from_utf8_lossy(record)
+            );
+            (
+                String::from_utf8_lossy(fields[0]).into_owned(),
+                String::from_utf8_lossy(fields[1]).into_owned(),
+                String::from_utf8_lossy(fields[2]).into_owned(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn test_doc_validation_awk_script_extraction() {
     // This test validates the AWK scripts used by doc-validation for Rust
@@ -7052,13 +7098,14 @@ fn test_doc_validation_awk_script_extraction() {
          The END block should check 'if (in_block)' and output remaining content."
     );
 
-    // Verify content accumulation handles empty first lines correctly
-    // The fix uses: if (content == "") { content = $0 } else { content = content "\n" $0 }
+    // Verify content accumulation handles empty first lines correctly by
+    // separating the "seen content" state from the accumulated text.
     assert!(
-        awk_content.contains("content = $0")
+        awk_content.contains("seen_content")
+            && awk_content.contains("content = $0")
             && awk_content.contains("content = content \"\\n\" $0"),
         "Rust block extraction AWK script should properly handle empty first lines.\n\
-         Correct pattern: if (content == \"\") {{ content = $0 }} else {{ content = content \"\\n\" $0 }}\n\
+         Correct pattern: track seen_content separately from content accumulation.\n\
          This prevents losing empty lines at the start of code blocks."
     );
 
@@ -7069,6 +7116,109 @@ fn test_doc_validation_awk_script_extraction() {
         "Rust block extraction AWK script should extract attributes after rust fence.\n\
          Pattern: sub(/^```[Rr]ust,?/, \"\", attrs) removes fence and optional comma,\n\
          leaving attributes like 'ignore', 'no_run', 'should_panic'."
+    );
+
+    assert!(
+        awk_content.contains("if (attrs == \"\") attrs = \"none\""),
+        "Rust block extraction AWK script should emit `none` for plain rust fences.\n\
+         This avoids Bash IFS tab-collapsing when records are parsed."
+    );
+}
+
+#[test]
+fn test_rust_block_awk_extractor_emits_exact_tab_nul_schema() {
+    let records = run_rust_block_awk_extractor(
+        "\
+# fixture
+
+```rust
+fn plain() {}
+```
+
+```Rust,ignore
+fn ignored() {}
+```
+
+```rust ignore
+fn spaced() {}
+```
+
+```rust
+
+fn leading_blank() {}
+```
+
+```rust,no_run
+fn unclosed() {}
+",
+    );
+
+    assert_eq!(
+        records,
+        vec![
+            (
+                "3".to_string(),
+                "none".to_string(),
+                "fn plain() {}".to_string()
+            ),
+            (
+                "7".to_string(),
+                "ignore".to_string(),
+                "fn ignored() {}".to_string(),
+            ),
+            (
+                "11".to_string(),
+                " ignore".to_string(),
+                "fn spaced() {}".to_string(),
+            ),
+            (
+                "15".to_string(),
+                "none".to_string(),
+                "\nfn leading_blank() {}".to_string(),
+            ),
+            (
+                "20".to_string(),
+                "no_run".to_string(),
+                "fn unclosed() {}".to_string(),
+            ),
+        ],
+        "canonical extractor output format drifted; expected line<TAB>attrs<TAB>content<NUL>"
+    );
+
+    let crlf_records = run_rust_block_awk_extractor(
+        "# fixture\r\n\r\n```rust\r\nfn plain_crlf() {}\r\n```\r\n\r\n```Rust,ignore\r\nfn ignored_crlf() {}\r\n```\r\n\r\n```rust no_run\r\nfn spaced_crlf() {}\r\n```\r\n\r\n```rust\r\n\r\nfn leading_blank_crlf() {}\r\n```\r\n\r\n```rust,no_run\r\nfn unclosed_crlf() {}\r\n",
+    );
+
+    assert_eq!(
+        crlf_records,
+        vec![
+            (
+                "3".to_string(),
+                "none".to_string(),
+                "fn plain_crlf() {}".to_string()
+            ),
+            (
+                "7".to_string(),
+                "ignore".to_string(),
+                "fn ignored_crlf() {}".to_string(),
+            ),
+            (
+                "11".to_string(),
+                " no_run".to_string(),
+                "fn spaced_crlf() {}".to_string(),
+            ),
+            (
+                "15".to_string(),
+                "none".to_string(),
+                "\nfn leading_blank_crlf() {}".to_string(),
+            ),
+            (
+                "20".to_string(),
+                "no_run".to_string(),
+                "fn unclosed_crlf() {}".to_string(),
+            ),
+        ],
+        "canonical extractor must normalize CRLF input to the same tab/NUL schema"
     );
 }
 
@@ -7123,6 +7273,11 @@ fn test_awk_pattern_matching_with_fixtures() {
             "Comma-separated attributes (```rust,ignore)",
         ),
         (
+            "awk-patterns-space-separated.md",
+            1,
+            "Space-separated attributes (```rust ignore)",
+        ),
+        (
             "awk-patterns-nested-blocks.md",
             2,
             "Nested/multiple code blocks",
@@ -7144,42 +7299,42 @@ fn test_awk_pattern_matching_with_fixtures() {
             continue;
         }
 
-        let fixture_content = read_file(&fixture_path);
+        let records = {
+            let output = Command::new("awk")
+                .arg("-f")
+                .arg(root.join(".github/scripts/extract-rust-blocks.awk"))
+                .arg(&fixture_path)
+                .current_dir(&root)
+                .output()
+                .expect("run canonical Rust-block AWK extractor");
 
-        // Count actual code blocks by looking for opening fences at start of lines
-        // This avoids counting inline code references like "```rust" in descriptions
-        let mut rust_blocks = 0;
-        for line in fixture_content.lines() {
-            let trimmed = line.trim_start();
-            // Match opening fences: ```rust or ```Rust (with optional attributes)
-            if trimmed.starts_with("```rust") || trimmed.starts_with("```Rust") {
-                rust_blocks += 1;
+            if !output.status.success() {
+                violations.push(format!(
+                    "AWK extractor failed for {fixture_file}\n  \
+                     Description: {description}\n  \
+                     stdout:\n{}\n  \
+                     stderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+                continue;
             }
-        }
 
-        if rust_blocks != *expected_blocks {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|record| !record.is_empty())
+                .count()
+        };
+
+        if records != *expected_blocks {
             violations.push(format!(
-                "Fixture {fixture_file} block count mismatch\n  \
+                "Fixture {fixture_file} extractor record count mismatch\n  \
                  Description: {description}\n  \
                  Expected: {expected_blocks} blocks\n  \
-                 Found: {rust_blocks} blocks\n  \
-                 This indicates the test fixture needs updating or the pattern is incorrect."
+                 Found: {records} records\n  \
+                 This indicates the test fixture or canonical AWK extractor needs updating."
             ));
-        }
-    }
-
-    // Verify that the space-separated fixture exists (even if pattern doesn't support it yet)
-    let space_separated = fixtures_dir.join("awk-patterns-space-separated.md");
-    if space_separated.exists() {
-        let space_content = read_file(&space_separated);
-        // Note: space-separated attributes are less common, but should be documented
-        if !space_content.contains("```rust ignore") {
-            violations.push(
-                "Space-separated fixture should contain ```rust ignore pattern\n  \
-                 This tests whether AWK script handles space-separated attributes.\n  \
-                 Note: Current implementation may not support this variant."
-                    .to_string(),
-            );
         }
     }
 
@@ -7194,6 +7349,53 @@ fn test_awk_pattern_matching_with_fixtures() {
             violations.join("\n\n")
         );
     }
+}
+
+#[test]
+fn test_rust_block_extractor_docs_avoid_legacy_field_delimiters() {
+    let root = repo_root();
+    let docs_to_check = [
+        ".github/test-fixtures/README.md",
+        ".github/test-fixtures/TESTING.md",
+        ".llm/skills/github-actions-awk.md",
+        ".llm/skills/awk-text-processing.md",
+    ];
+    let forbidden = [
+        ("ASCII 31", "legacy unit-separator field delimiter"),
+        (
+            "printf \"%s%c%s%c%s%c\"",
+            "legacy unit-separator printf schema",
+        ),
+        (
+            "line_number:::attributes:::content",
+            "legacy ::: field schema",
+        ),
+        ("printf \"%s:::%s:::%s%c\"", "legacy ::: printf schema"),
+        (
+            "Output: line_number:::attributes:::content\\0",
+            "legacy ::: output docs",
+        ),
+    ];
+    let mut violations = Vec::new();
+
+    for relative_path in docs_to_check {
+        let path = root.join(relative_path);
+        let content = read_file(&path);
+
+        for (needle, description) in forbidden {
+            if content.contains(needle) {
+                violations.push(format!(
+                    "{relative_path}: contains {description}: {needle:?}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Rust-block extractor docs must document the canonical line<TAB>attrs<TAB>content<NUL> format:\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]

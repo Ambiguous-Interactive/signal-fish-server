@@ -579,8 +579,8 @@ awk: line 1: syntax error at or near /
 Use POSIX-compatible AWK patterns:
 
 ```bash
-# Before (GNU awk only)
-awk '/^```[Rr]ust(,.*)?$/ { ... }'
+# Before (too strict)
+awk '/^```rust$/ { ... }'
 
 # After (POSIX compatible)
 awk '/^```[Rr]ust/ { ... }'

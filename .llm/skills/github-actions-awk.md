@@ -27,7 +27,7 @@ or debugging AWK failures on Ubuntu runners.
 - NUL byte delimiters (`printf "%s%c", content, 0`) preserve multi-line blocks through pipelines
 - Use `printf "%c", 0` not `"\0"` — mawk (Ubuntu default) does not support `"\0"` escape
 - Use POSIX `sub()` not gawk's `match()` with capture groups — mawk incompatible
-- Use prefix patterns (`/^```rust/`) not exact matches (`/^```rust(,.*)?$/`) for flexibility
+- Use prefix patterns (`/^```rust/`) not exact matches (`/^```rust$/`) for flexibility
 - Always test AWK scripts on Ubuntu/mawk before pushing
 
 ---
@@ -62,8 +62,8 @@ awk '
     next
   }
   in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
   }
 ' file.md | while IFS= read -r -d '' block; do
   # Entire block arrives as one record
@@ -73,7 +73,7 @@ done
 
 ### Multi-Field AWK Output with NUL Delimiters
 
-When you need multiple fields (e.g., line number, attributes, content), use a custom field separator:
+When you need multiple fields (e.g., line number, attributes, content), use the canonical tab field separator:
 
 ```bash
 awk '
@@ -81,27 +81,29 @@ awk '
     in_block=1
     block_start=NR
     content=""
+    seen_content=0
     attrs = $0
     sub(/^```[Rr]ust,?/, "", attrs)  # Extract attributes (POSIX-compatible)
+    if (attrs == "") attrs = "none"
     next
   }
   /^```$/ && in_block {
-    # Output: line_number:::attributes:::content\0
-    printf "%s:::%s:::%s%c", block_start, attrs, content, 0
+    # Output: line_number<TAB>attributes<TAB>content<NUL>
+    printf "%s\t%s\t%s%c", block_start, attrs, content, 0
     in_block=0
     next
   }
   in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
   }
   END {
     # CRITICAL: Handle unclosed blocks at EOF
     if (in_block) {
-      printf "%s:::%s:::%s%c", block_start, attrs, content, 0
+      printf "%s\t%s\t%s%c", block_start, attrs, content, 0
     }
   }
-' file.md | while IFS=':::' read -r -d '' line_num attributes content; do
+' file.md | while IFS=$'\t' read -r -d '' line_num attributes content; do
   echo "Processing block at line $line_num with attributes: $attributes"
   echo "$content" | validate_code
 done
@@ -137,11 +139,10 @@ sub(/pattern/, "", var)       # Use sub() instead of match() for extraction
 ### The Problem: Fragile Exact Patterns
 
 ```awk
-# ❌ FRAGILE: Alternation with optional suffix
-/^```[Rr]ust(,.*)?$/ {
-  # Matches: ```rust, ```Rust, ```rust,ignore
-  # FAILS on: ```rust ignore (space instead of comma)
-  # FAILS on: ```rust,no_run or other valid fence formats
+# ❌ FRAGILE: Exact lowercase fence only
+/^```rust$/ {
+  # Matches: ```rust
+  # FAILS on: ```Rust, ```rust,ignore, and ```rust ignore
 }
 ```
 
@@ -165,12 +166,6 @@ sub(/pattern/, "", var)       # Use sub() instead of match() for extraction
   next
 }
 ```
-
-**Benefits:**
-
-1. **Flexible** — Works with: `rust,ignore`, `rust ignore`, `rust,no_run`, `rust,edition2021`
-2. **Future-proof** — New attribute formats automatically supported
-3. **Portable** — Uses POSIX `sub()` instead of gawk-specific `match()`
 
 ### Pattern Selection Guide
 
@@ -231,10 +226,10 @@ done
 ## 5. Key AWK Patterns Reference
 
 ```awk
-# Empty first line handling — ALWAYS check if content is empty before appending
+# Empty first line handling — track seen content separately from accumulated text
 in_block {
-  if (content == "") content = $0
-  else content = content "\n" $0
+  if (seen_content) content = content "\n" $0
+  else { content = $0; seen_content = 1 }
 }
 
 # END block for unclosed blocks at EOF

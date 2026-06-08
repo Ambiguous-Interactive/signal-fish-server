@@ -504,8 +504,11 @@ These test cases are automatically validated by the GitHub Actions workflow:
 To run locally:
 
 ```bash
-# Extract Rust blocks (from the workflow)
-.github/workflows/doc-validation.yml  # markdown-code-samples job
+# Validate the canonical extractor and fixture expectations
+.github/test-fixtures/validate-test-cases.sh
+
+# Inspect canonical Rust-block extraction output directly
+awk -f .github/scripts/extract-rust-blocks.awk .github/test-fixtures/markdown-validation-test-cases.md
 
 # Or run the full workflow locally with act:
 act -j markdown-code-samples

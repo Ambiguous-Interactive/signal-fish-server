@@ -492,7 +492,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_transport_signals_relayed_total",
-        "Opaque WebRTC Signal messages successfully relayed between peers",
+        "Opaque WebRTC Signal messages accepted for best-effort dispatch to same-room WebRTC peers",
         snapshot.transport.signals_relayed,
     );
     counter(
@@ -661,26 +661,72 @@ mod tests {
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
 
-        // Each new metric name must be present with a HELP, a TYPE counter line, and
-        // its value.
+        // Each new metric name must be present with its exact HELP, a TYPE
+        // counter line, and its value. Exact HELP assertions keep operator
+        // semantics from drifting (for example, best-effort dispatch is not
+        // guaranteed end-to-end delivery).
         let expectations = [
-            ("signal_fish_transport_session_plans_emitted_total", 1u64),
-            ("signal_fish_transport_topology_mesh_selected_total", 1),
-            ("signal_fish_transport_topology_host_selected_total", 1),
-            ("signal_fish_transport_topology_relay_selected_total", 1),
-            ("signal_fish_transport_webrtc_selected_total", 1),
-            ("signal_fish_transport_direct_selected_total", 1),
-            ("signal_fish_transport_relay_selected_total", 1),
-            ("signal_fish_transport_p2p_established_total", 1),
-            ("signal_fish_transport_relay_fallback_total", 1),
-            ("signal_fish_transport_signals_relayed_total", 1),
-            ("signal_fish_transport_turn_credentials_issued_total", 3),
+            (
+                "signal_fish_transport_session_plans_emitted_total",
+                "Non-relay v3 SessionPlans emitted (one per finalized non-relay room)",
+                1u64,
+            ),
+            (
+                "signal_fish_transport_topology_mesh_selected_total",
+                "Finalized rooms whose chosen session topology was mesh",
+                1,
+            ),
+            (
+                "signal_fish_transport_topology_host_selected_total",
+                "Finalized rooms whose chosen session topology was host",
+                1,
+            ),
+            (
+                "signal_fish_transport_topology_relay_selected_total",
+                "Finalized rooms that resolved to the relay floor topology",
+                1,
+            ),
+            (
+                "signal_fish_transport_webrtc_selected_total",
+                "Finalized rooms whose chosen data-path transport was webrtc",
+                1,
+            ),
+            (
+                "signal_fish_transport_direct_selected_total",
+                "Finalized rooms whose chosen data-path transport was direct",
+                1,
+            ),
+            (
+                "signal_fish_transport_relay_selected_total",
+                "Finalized rooms that resolved to the relay floor transport",
+                1,
+            ),
+            (
+                "signal_fish_transport_p2p_established_total",
+                "First TransportStatus reports or state transitions clients reported as established P2P",
+                1,
+            ),
+            (
+                "signal_fish_transport_relay_fallback_total",
+                "First TransportStatus reports or state transitions clients reported as relay fallback",
+                1,
+            ),
+            (
+                "signal_fish_transport_signals_relayed_total",
+                "Opaque WebRTC Signal messages accepted for best-effort dispatch to same-room WebRTC peers",
+                1,
+            ),
+            (
+                "signal_fish_transport_turn_credentials_issued_total",
+                "Ephemeral TURN credentials minted into SessionPlans",
+                3,
+            ),
         ];
 
-        for (name, value) in expectations {
+        for (name, help, value) in expectations {
             assert!(
-                rendered.contains(&format!("# HELP {name} ")),
-                "missing HELP line for {name}"
+                rendered.contains(&format!("# HELP {name} {help}")),
+                "missing exact HELP line for {name}"
             );
             assert!(
                 rendered.contains(&format!("# TYPE {name} counter")),

@@ -9,7 +9,7 @@ Quick reference for running and validating the markdown code extraction tests.
 .github/test-fixtures/validate-test-cases.sh
 ```
 
-Expected result: All 5 tests pass
+Expected result: extraction plus all focused checks pass
 
 ## What Gets Tested
 
@@ -20,6 +20,8 @@ Expected result: All 5 tests pass
 3. **Case-insensitive matching** - Both `rust` and `Rust` fence markers work
 4. **Attribute extraction** - Attributes like `ignore`, `no_run` are parsed correctly
 5. **File-based counters** - Counter values persist across subshell boundaries (in CI)
+6. **Extractor parity** - Python helper output matches canonical AWK output byte-for-byte,
+   including CRLF input
 
 ### Test Coverage
 
@@ -53,7 +55,7 @@ This workflow runs on:
 ### Test a specific markdown file
 
 ```bash
-python3 .github/test-fixtures/extract-rust-blocks.py your-file.md
+awk -f .github/scripts/extract-rust-blocks.awk your-file.md
 ```
 
 Output format: `line_number\tattributes\tcontent\0` (NUL-delimited)
@@ -62,24 +64,28 @@ Output format: `line_number\tattributes\tcontent\0` (NUL-delimited)
 
 ```bash
 # Extract and count blocks
-python3 .github/test-fixtures/extract-rust-blocks.py README.md | tr '\0' '\n' | wc -l
+count=0
+while IFS= read -r -d '' _record; do
+  count=$((count + 1))
+done < <(awk -f .github/scripts/extract-rust-blocks.awk README.md)
+printf '%s\n' "$count"
 
 # View first block
-python3 .github/test-fixtures/extract-rust-blocks.py README.md | tr '\0' '\n' | sed -n '1p'
+awk -f .github/scripts/extract-rust-blocks.awk README.md | tr '\0' '\n' | sed -n '1p'
 ```
 
 ## Troubleshooting
 
 ### Tests fail locally but pass in CI
 
-- Ensure you have Python 3, rustc, and rustfmt installed
+- Ensure you have Python 3 and awk installed
 - Check that you're using bash (not sh or zsh)
 - Verify file permissions: `chmod +x .github/test-fixtures/*.sh`
 
 ### AWK-related errors
 
-- The GitHub Actions workflow uses `gawk` (GNU AWK)
-- Some systems use `mawk` which has different syntax
+- The GitHub Actions workflow invokes `awk -f .github/scripts/extract-rust-blocks.awk`
+- Some systems use different AWK implementations with different extension support
 - The Python extractor (`extract-rust-blocks.py`) is portable across all systems
 
 ### Extraction returns 0 blocks

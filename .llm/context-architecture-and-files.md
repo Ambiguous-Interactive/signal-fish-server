@@ -32,10 +32,10 @@ top-level `/v3/ws` separately. Standalone/library servers that serve Signal Fish
 at the HTTP root should use `websocket::create_standalone_router()` when they
 want both `/ws` and `/v3/ws`.
 
-Signaling rate limits are split intentionally: `max_signals` counts valid
-deliverable WebRTC relays, while `max_signal_errors` counts rejected `Signal`
-attempts. Do not move target/transport validation in a way that lets invalid
-traffic avoid `max_signal_errors` or consume the valid ICE budget.
+Signaling rate limits are split intentionally: `max_signals` counts validated
+WebRTC `Signal` dispatch attempts, while `max_signal_errors` counts rejected
+`Signal` attempts. Do not move target/transport validation in a way that lets
+invalid traffic avoid `max_signal_errors` or consume the valid ICE budget.
 
 Room finalization: borrow one player snapshot for peers, then move it into
 `FinalizedRoom`; no deep clone. In-memory room-operation locks are operation

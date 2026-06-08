@@ -2,8 +2,8 @@
 """
 Extract Rust code blocks from Markdown files.
 
-This script implements the same extraction logic as the AWK script in the
-doc-validation.yml workflow, but in Python for better portability and testing.
+This script mirrors the canonical AWK extractor used by doc-validation.yml.
+Keep its output byte-compatible with .github/scripts/extract-rust-blocks.awk.
 
 Output format: line_number\tattributes\tcontent (NUL-separated records)
 """
@@ -20,34 +20,39 @@ def extract_rust_blocks(content: str) -> Iterator[Tuple[int, str, str]]:
     Yields:
         (line_number, attributes, content) tuples
     """
-    lines = content.split('\n')
+    lines = content.splitlines()
     in_block = False
     block_start = 0
-    block_content = []
+    block_content = ""
+    seen_content = False
     attributes = ""
 
     for i, line in enumerate(lines, 1):
-        # Match opening fence with case-insensitive rust
-        if re.match(r'^```[Rr]ust(,.*)?$', line):
+        # Match the canonical AWK prefix pattern with case-insensitive rust.
+        if re.match(r'^```[Rr]ust', line):
             in_block = True
             block_start = i
-            block_content = []
-            # Extract attributes
-            match = re.match(r'^```[Rr]ust,(.*)$', line)
-            attributes = match.group(1) if match else ""
+            block_content = ""
+            seen_content = False
+            attributes = re.sub(r'^```[Rr]ust,?', '', line, count=1)
+            if attributes == "":
+                attributes = "none"
             continue
 
         # Match closing fence
         if line == '```' and in_block:
             # Yield the block
-            content_str = '\n'.join(block_content)
-            yield (block_start, attributes, content_str)
+            yield (block_start, attributes, block_content)
             in_block = False
             continue
 
         # Accumulate content while in block
         if in_block:
-            block_content.append(line)
+            if seen_content:
+                block_content = block_content + '\n' + line
+            else:
+                block_content = line
+                seen_content = True
 
         # Handle nested/malformed blocks (another opening fence while in block)
         if line.startswith('```') and in_block and not line == '```':
@@ -55,8 +60,7 @@ def extract_rust_blocks(content: str) -> Iterator[Tuple[int, str, str]]:
 
     # Handle unclosed block at EOF
     if in_block:
-        content_str = '\n'.join(block_content)
-        yield (block_start, attributes, content_str)
+        yield (block_start, attributes, block_content)
 
 
 def main():
