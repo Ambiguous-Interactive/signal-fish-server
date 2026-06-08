@@ -106,7 +106,7 @@ foreach ($tool in $requiredTools) {
     }
 }
 
-$optionalTools = @("cargo", "node", "npm", "shellcheck", "yamllint", "lychee", "jq", "yq", "taplo")
+$optionalTools = @("cargo", "node", "npm", "shellcheck", "yamllint", "lychee", "jq", "yq", "taplo", "fd", "docker")
 foreach ($tool in $optionalTools) {
     if (Command-Exists $tool) {
         Ok "Optional workflow tool available: $tool"

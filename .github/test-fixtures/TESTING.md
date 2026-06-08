@@ -17,11 +17,11 @@ Expected result: extraction plus all focused checks pass
 
 1. **Empty first line handling** - Code blocks with empty first lines are extracted correctly
 2. **Unclosed EOF blocks** - Code blocks without closing fence at EOF are handled
-3. **Case-insensitive matching** - Both `rust` and `Rust` fence markers work
+3. **Canonical Rust fence matching** - `rust` and `Rust` fence markers work; non-canonical variants such as `RUST` are ignored consistently
 4. **Attribute extraction** - Attributes like `ignore`, `no_run` are parsed correctly
 5. **File-based counters** - Counter values persist across subshell boundaries (in CI)
 6. **Extractor parity** - Python helper output matches canonical AWK output byte-for-byte,
-   including CRLF input
+   including CRLF input and POSIX-whitespace fence attributes
 
 ### Test Coverage
 
@@ -34,20 +34,23 @@ Expected result: extraction plus all focused checks pass
 
 | Script | Purpose | Use When |
 |--------|---------|----------|
-| `validate-test-cases.sh` | Fast, simple validation | Running locally, CI checks |
+| `validate-test-cases.sh` | Canonical AWK/Python extractor parity validation | Running locally, CI checks |
 | `extract-rust-blocks.py` | Python extractor tool | Debugging, manual testing |
-| `simple-test.sh` | Intermediate test suite | Detailed diagnostics |
-| `test-markdown-validation.sh` | Comprehensive suite | Full AWK compatibility check |
+| `simple-test.sh` | Compatibility wrapper for `validate-test-cases.sh` | Existing local workflows |
+| `test-markdown-validation.sh` | Compatibility wrapper for `validate-test-cases.sh` | Existing local workflows |
 
 ## Continuous Integration
 
-The test fixture is automatically validated by:
+The fixture parity script is automatically validated by:
 
 `.github/workflows/doc-validation.yml`
 
+Fixtures are intentionally excluded from normal repository markdown validation because
+they include malformed examples. The workflow runs `validate-test-cases.sh` directly.
+
 This workflow runs on:
 
-- Push to `main` (when markdown or Rust files change)
+- Push to `main` (when markdown, Rust, workflow helper, or fixture files change)
 - Pull requests to `main`
 
 ## Manual Testing
@@ -92,7 +95,7 @@ awk -f .github/scripts/extract-rust-blocks.awk README.md | tr '\0' '\n' | sed -n
 
 - Verify the markdown file has properly formatted code fences
 - Check that fences use ` ```rust ` not ` ~~~rust `
-- Ensure there's no indentation before the fence markers
+- CommonMark allows up to three leading spaces before fence markers; four or more spaces are indented code and will not start a fenced block
 
 ## Adding New Test Cases
 

@@ -27,7 +27,7 @@ or debugging AWK failures on Ubuntu runners.
 - NUL byte delimiters (`printf "%s%c", content, 0`) preserve multi-line blocks through pipelines
 - Use `printf "%c", 0` not `"\0"` — mawk (Ubuntu default) does not support `"\0"` escape
 - Use POSIX `sub()` not gawk's `match()` with capture groups — mawk incompatible
-- Use prefix patterns (`/^```rust/`) not exact matches (`/^```rust$/`) for flexibility
+- Use token-boundary patterns (`/^[Rr]ust([[:space:],]|$)/`) for language info strings
 - Always test AWK scripts on Ubuntu/mawk before pushing
 
 ---
@@ -46,7 +46,7 @@ Use NUL bytes as record separators to preserve multi-line content through pipeli
 
 ```bash
 # ❌ WRONG: Newline separator breaks multi-line blocks
-awk '/^```rust/ {in_block=1; next} /^```$/ && in_block {
+awk '/^```+[Rr]ust([[:space:],]|$)/ {in_block=1; next} /^```+$/ && in_block {
   print content; in_block=0; next
 } in_block {content = content "\n" $0}' file.md | while read -r block; do
   # Each LINE of the block arrives as a separate record — validation fails
@@ -55,8 +55,8 @@ done
 
 # ✅ CORRECT: NUL byte separator preserves entire block
 awk '
-  /^```rust/ {in_block=1; content=""; next}
-  /^```$/ && in_block {
+  /^```+[Rr]ust([[:space:],]|$)/ {in_block=1; content=""; next}
+  /^```+$/ && in_block {
     printf "%s%c", content, 0  # NUL byte separator (POSIX-compatible)
     in_block=0
     next
@@ -77,13 +77,14 @@ When you need multiple fields (e.g., line number, attributes, content), use the 
 
 ```bash
 awk '
-  /^```[Rr]ust/ {
+  /^```+[Rr]ust([[:space:],]|$)/ {
     in_block=1
     block_start=NR
     content=""
     seen_content=0
     attrs = $0
-    sub(/^```[Rr]ust,?/, "", attrs)  # Extract attributes (POSIX-compatible)
+    sub(/^```+[Rr]ust,?/, "", attrs)  # Extract attributes (POSIX-compatible)
+    sub(/^[[:space:]]+/, "", attrs)
     if (attrs == "") attrs = "none"
     next
   }
@@ -152,16 +153,17 @@ sub(/pattern/, "", var)       # Use sub() instead of match() for extraction
 2. **Maintenance burden** — Adding new fence formats requires pattern updates
 3. **Portability concerns** — Complex regex behaves differently across AWK versions
 
-### The Solution: Prefix Patterns
+### The Solution: Token-Boundary Patterns
 
 ```awk
-# ✅ ROBUST: Prefix pattern (matches any fence format)
-/^```[Rr]ust/ {
+# ✅ ROBUST: token-boundary pattern (matches rust/Rust, rejects rustic/rusty)
+/^```+[Rr]ust([[:space:],]|$)/ {
   in_block = 1
   block_start = NR
   content = ""
   attrs = $0
-  sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, keep attributes
+  sub(/^```+[Rr]ust,?/, "", attrs)  # Remove prefix, keep attributes
+  sub(/^[[:space:]]+/, "", attrs)
   # Now attrs contains: "ignore", "no_run", "", "ignore no_run", etc.
   next
 }
@@ -171,7 +173,7 @@ sub(/pattern/, "", var)       # Use sub() instead of match() for extraction
 
 | Scenario                       | Pattern Type | Example                | Rationale                      |
 |--------------------------------|--------------|------------------------|--------------------------------|
-| Code fence detection           | Prefix       | `/^```[Rr]ust/`        | Flexible attribute handling    |
+| Code fence detection           | Token boundary | `/^```+[Rr]ust([[:space:],]|$)/` | Flexible attribute handling without overmatching |
 | Closing fence                  | Exact        | `/^```$/`              | Must match exactly (no prefix) |
 | Language detection (no attrs)  | Exact        | `/^```Rust$/`          | Only plain code blocks         |
 | Strict validation              | Exact        | `/^```Rust,ignore$/`   | Enforce specific format        |
@@ -183,14 +185,15 @@ sub(/pattern/, "", var)       # Use sub() instead of match() for extraction
 
 ```bash
 # Test with both gawk and mawk
-echo '```rust ignore' | gawk '/^```[Rr]ust/ {print "match"}'
-echo '```rust ignore' | mawk '/^```[Rr]ust/ {print "match"}'
+echo '```rust ignore' | gawk '/^```+[Rr]ust([[:space:],]|$)/ {print "match"}'
+echo '```rust ignore' | mawk '/^```+[Rr]ust([[:space:],]|$)/ {print "match"}'
 
 # Test attribute extraction
 echo '```rust,ignore' | awk '
-  /^```[Rr]ust/ {
+  /^```+[Rr]ust([[:space:],]|$)/ {
     attrs = $0
-    sub(/^```[Rr]ust,?/, "", attrs)
+    sub(/^```+[Rr]ust,?/, "", attrs)
+    sub(/^[[:space:]]+/, "", attrs)
     print "attrs: [" attrs "]"
   }
 '
@@ -212,7 +215,7 @@ test_fences=(
 )
 
 for fence in "${test_fences[@]}"; do
-  result=$(echo "$fence" | awk '/^```[Rr]ust/ {print "MATCH"}')
+  result=$(echo "$fence" | awk '/^```+[Rr]ust([[:space:],]|$)/ {print "MATCH"}')
   if [ "$result" = "MATCH" ]; then
     echo "PASS: $fence"
   else
@@ -239,8 +242,8 @@ END {
   }
 }
 
-# Case-insensitive matching (handles both "rust" and "Rust")
-/^```[Rr]ust/ { in_block = 1 }
+# Canonical rust/Rust matching with a token boundary
+/^```+[Rr]ust([[:space:],]|$)/ { in_block = 1 }
 
 # Extract attributes: POSIX-compatible sub() instead of gawk match()
 # ❌ WRONG (gawk-only):
@@ -248,7 +251,8 @@ END {
 
 # ✅ CORRECT (POSIX-compatible):
 attrs = $0
-sub(/^```[Rr]ust,?/, "", attrs)  # Remove prefix, leaving only attributes
+sub(/^```+[Rr]ust,?/, "", attrs)  # Remove prefix, leaving only attributes
+sub(/^[[:space:]]+/, "", attrs)
 ```
 
 ---

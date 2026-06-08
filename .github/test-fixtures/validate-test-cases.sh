@@ -58,11 +58,30 @@ extract_blocks() {
 
 count_records() {
     local count=0
-    local record
-    while IFS= read -r -d '' record; do
+    local _record
+    while IFS= read -r -d '' _record; do
         count=$((count + 1))
     done
     printf '%s\n' "$count"
+}
+
+TEMP_DIRS=()
+
+# ShellCheck does not treat EXIT trap references as normal call sites.
+# shellcheck disable=SC2317
+cleanup_temp_dirs() {
+    local temp_dir
+    for temp_dir in "${TEMP_DIRS[@]}"; do
+        rm -rf "$temp_dir"
+    done
+}
+trap cleanup_temp_dirs EXIT
+
+make_temp_markdown_file() {
+    local temp_dir
+    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/rust-md-fixture.XXXXXX")
+    TEMP_DIRS+=("$temp_dir")
+    printf '%s\n' "$temp_dir/case.md"
 }
 
 log_info "Running markdown validation tests..."
@@ -80,7 +99,7 @@ log_pass "Extracted $BLOCK_COUNT blocks"
 
 # Test 1: Empty first line handling
 log_info "Testing empty first line handling..."
-TEMP_MD=$(mktemp --suffix=.md)
+TEMP_MD=$(make_temp_markdown_file)
 cat > "$TEMP_MD" << 'EOF'
 ```rust
 
@@ -102,7 +121,7 @@ fi
 
 # Test 2: Unclosed block at EOF
 log_info "Testing unclosed block at EOF..."
-TEMP_MD=$(mktemp --suffix=.md)
+TEMP_MD=$(make_temp_markdown_file)
 cat > "$TEMP_MD" << 'EOF'
 ```rust
 fn test_unclosed() {
@@ -120,9 +139,9 @@ else
     exit 1
 fi
 
-# Test 3: Case-insensitive rust/Rust
-log_info "Testing case-insensitive rust/Rust..."
-TEMP_MD=$(mktemp --suffix=.md)
+# Test 3: Canonical rust/Rust matching
+log_info "Testing canonical rust/Rust matching..."
+TEMP_MD=$(make_temp_markdown_file)
 cat > "$TEMP_MD" << 'EOF'
 ```rust
 fn lowercase() {}
@@ -142,15 +161,15 @@ grep -q "fn lowercase" <<< "$OUTPUT" && LOWER_OK=1
 grep -q "fn uppercase" <<< "$OUTPUT" && UPPER_OK=1
 
 if [ $LOWER_OK -eq 1 ] && [ $UPPER_OK -eq 1 ]; then
-    log_pass "Case-insensitive matching works"
+    log_pass "Canonical rust/Rust matching works"
 else
-    log_fail "Case-insensitive matching failed (lower=$LOWER_OK, upper=$UPPER_OK)"
+    log_fail "Canonical rust/Rust matching failed (lower=$LOWER_OK, upper=$UPPER_OK)"
     exit 1
 fi
 
 # Test 4: Attribute extraction
 log_info "Testing attribute extraction..."
-TEMP_MD=$(mktemp --suffix=.md)
+TEMP_MD=$(make_temp_markdown_file)
 cat > "$TEMP_MD" << 'EOF'
 ```rust,ignore
 fn ignored() {}
@@ -178,7 +197,7 @@ fi
 
 # Test 5: Multiple blocks
 log_info "Testing multiple consecutive blocks..."
-TEMP_MD=$(mktemp --suffix=.md)
+TEMP_MD=$(make_temp_markdown_file)
 cat > "$TEMP_MD" << 'EOF'
 ```rust
 fn first() {}
@@ -205,8 +224,9 @@ fi
 
 # Test 6: Python helper parity with the canonical AWK extractor
 log_info "Testing Python extractor parity..."
-TEMP_MD=$(mktemp --suffix=.md)
-cat > "$TEMP_MD" << 'EOF'
+TEMP_MD=$(make_temp_markdown_file)
+{
+cat << 'EOF'
 ```rust
 fn plain() {}
 ```
@@ -215,9 +235,43 @@ fn plain() {}
 fn ignored() {}
 ```
 
+```RUST
+fn all_caps_is_not_canonical() {}
+```
+
 ```rust ignore
 fn space_separated() {}
 ```
+
+EOF
+printf '%s' '```rust'
+printf '\f'
+printf '%s\n' 'ignore' 'fn form_feed_separated() {}' '```' ''
+cat << 'EOF'
+
+   ```rust,should_panic
+fn indented_fence() {}
+EOF
+printf '%s\n' '   ```   '
+cat << 'EOF'
+
+```rust,no_run
+fn trailing_space_close() {}
+EOF
+printf '%s\n' '```   '
+cat << 'EOF'
+
+````text
+```rust
+fn literal_rust_inside_text_fence() {}
+```
+````
+
+````rust no_run
+fn long_rust_fence() {}
+```
+fn content_after_short_fence() {}
+````
 
 ```rust
 
@@ -227,6 +281,7 @@ fn leading_blank() {}
 ```rust,no_run
 fn unclosed() {}
 EOF
+} > "$TEMP_MD"
 
 if cmp -s \
     <(extract_blocks "$TEMP_MD") \
@@ -240,7 +295,7 @@ fi
 rm "$TEMP_MD"
 
 log_info "Testing CRLF extractor parity..."
-TEMP_MD=$(mktemp --suffix=.md)
+TEMP_MD=$(make_temp_markdown_file)
 printf '%s' $'# CRLF\r\n\r\n```rust\r\nfn crlf_plain() {}\r\n```\r\n\r\n```Rust,ignore\r\nfn crlf_ignored() {}\r\n```\r\n\r\n```rust no_run\r\nfn crlf_spaced() {}\r\n```\r\n\r\n```rust,no_run\r\nfn crlf_unclosed() {}\r\n' > "$TEMP_MD"
 
 if cmp -s \
@@ -261,7 +316,7 @@ log_info "Summary:"
 echo "  - Extracted $BLOCK_COUNT blocks from test fixture"
 echo "  - Empty first line handling: OK"
 echo "  - Unclosed EOF handling: OK"
-echo "  - Case-insensitive matching: OK"
+echo "  - Canonical rust/Rust matching: OK"
 echo "  - Attribute extraction: OK"
 echo "  - Multiple blocks: OK"
 echo "  - Python extractor parity: OK"

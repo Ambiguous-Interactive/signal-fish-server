@@ -35,7 +35,7 @@ on:
     branches: [main]
   schedule:
     # Daily security audit at noon UTC to catch new CVEs
-    - cron: '0 12 * * *'
+    - cron: "0 12 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -166,6 +166,10 @@ jobs:
         uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
+
+      - name: Validate CI/devcontainer tool parity
+        shell: bash
+        run: bash scripts/check-tooling-parity.sh
 
       - name: Collect changed files
         id: changes

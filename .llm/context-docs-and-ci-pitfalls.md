@@ -40,6 +40,28 @@ Config and binary wire-format drift rules:
 - **Use descriptive markdown link text for internal docs** -- avoid filename-as-label links
   like `[testing-core-patterns](...)`; prefer human-readable labels like
   `[Core Testing Patterns](...)`. Enforce with `./scripts/check-markdown-link-text.sh`.
+- **Rust Markdown block validation needs extractor + classifier coverage** -- the Rust
+  extractor preserves leading blank lines, while the validator classifies snippets
+  against a leading-blank-normalized copy. Keep that distinction so CI compiles
+  complete items that start after blank lines without mutating the content written
+  to `rustfmt`/`rustc`. Extractor tests must cover CommonMark closing fences with
+  trailing whitespace, and external-context downgrades must only warn when every
+  compiler error is a missing-context diagnostic; mixed syntax errors must fail.
+  Placeholder-looking tokens or comments (`.. Default::default()`, `// Example:`,
+  `// Note:`) may only skip non-item fragments; item-level Rust must compile or
+  fail. User-facing `docs/*` Rust blocks are validated, Rustdoc-style top-level
+  statement snippets may compile through a wrapper harness, intentionally
+  non-compilable Rust-shaped inventories should be marked `rust,ignore` rather
+  than hidden through path-based skips. The canonical extractor recognizes `rust`
+  and `Rust` fences only; helper extractors and fixtures must preserve byte-for-byte
+  parity with that behavior, including ignored non-canonical forms such as `RUST`.
+  Do not reintroduce bare AWK fence prefixes like `/^```[Rr]ust/`; workflow AWK
+  hygiene should flag Rust fence regexes unless they use a token boundary such as
+  `^```+[Rr]ust([[:space:],]|$)` or delegate to the canonical extractor.
+  The AWK/Python extractor parity fixture must stay wired into `doc-validation.yml`,
+  and release preflight path filters must include every doc-validation trigger path
+  so fixture, tooling, or internal-link-checker-only release commits do not bypass
+  Documentation Validation.
 - **Dependabot auto-merge gating must be CI-aware and squash-only** -- never enable
   Dependabot auto-merge while pull request CI workflows are pending or failing; require
   completed workflow runs with `success`/`skipped` conclusions, then use

@@ -10,12 +10,14 @@
 #   2. Shell scripts pass shellcheck
 #   3. Markdown relative links from docs/ to .llm/ use ../ prefix
 #   4. GitHub Actions scripts (.github/scripts/) are valid
+#   5. CI/devcontainer tooling parity stays synchronized
 #
 # Usage:
 #   ./scripts/validate-ci.sh              # Run all validations
 #   ./scripts/validate-ci.sh --awk        # AWK validation only
 #   ./scripts/validate-ci.sh --shell      # Shell script validation only
 #   ./scripts/validate-ci.sh --links      # Markdown link validation only
+#   ./scripts/validate-ci.sh --tools      # Tooling parity validation only
 #   ./scripts/validate-ci.sh --quiet      # Suppress success messages
 #
 # Exit codes:
@@ -57,6 +59,7 @@ fi
 RUN_AWK=true
 RUN_SHELL=true
 RUN_LINKS=true
+RUN_TOOLS=true
 QUIET=false
 
 for arg in "$@"; do
@@ -65,27 +68,37 @@ for arg in "$@"; do
             RUN_AWK=true
             RUN_SHELL=false
             RUN_LINKS=false
+            RUN_TOOLS=false
             ;;
         --shell)
             RUN_AWK=false
             RUN_SHELL=true
             RUN_LINKS=false
+            RUN_TOOLS=false
             ;;
         --links)
             RUN_AWK=false
             RUN_SHELL=false
             RUN_LINKS=true
+            RUN_TOOLS=false
+            ;;
+        --tools)
+            RUN_AWK=false
+            RUN_SHELL=false
+            RUN_LINKS=false
+            RUN_TOOLS=true
             ;;
         --quiet|-q)
             QUIET=true
             ;;
         --help|-h)
-            echo "Usage: $0 [--awk] [--shell] [--links] [--quiet]"
+            echo "Usage: $0 [--awk] [--shell] [--links] [--tools] [--quiet]"
             echo ""
             echo "Options:"
             echo "  --awk      Validate AWK files only"
             echo "  --shell    Validate shell scripts only"
             echo "  --links    Validate markdown links only"
+            echo "  --tools    Validate CI/devcontainer tooling parity only"
             echo "  --quiet    Suppress success messages"
             echo "  --help     Show this help"
             echo ""
@@ -721,6 +734,26 @@ validate_markdown_links() {
 }
 
 # -----------------------------------------------------------------------
+# 4. CI/devcontainer tooling parity validation
+# -----------------------------------------------------------------------
+
+validate_tooling_parity() {
+    CHECKS_RUN=$((CHECKS_RUN + 1))
+    info "Validating CI/devcontainer tooling parity..."
+
+    if [ ! -f scripts/check-tooling-parity.sh ]; then
+        fail "scripts/check-tooling-parity.sh not found"
+        return
+    fi
+
+    if bash scripts/check-tooling-parity.sh --quiet; then
+        success "CI/devcontainer tooling parity is synchronized"
+    else
+        fail "CI/devcontainer tooling parity check failed"
+    fi
+}
+
+# -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
 
@@ -751,6 +784,13 @@ if [ "$RUN_LINKS" = true ]; then
     fi
 fi
 
+if [ "$RUN_TOOLS" = true ]; then
+    validate_tooling_parity
+    if [ "$QUIET" = false ]; then
+        echo ""
+    fi
+fi
+
 # -----------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------
@@ -766,6 +806,7 @@ if [ "$ERRORS" -gt 0 ]; then
     echo "  ./scripts/validate-ci.sh --awk      # Re-check AWK files"
     echo "  ./scripts/validate-ci.sh --shell    # Re-check shell scripts"
     echo "  ./scripts/validate-ci.sh --links    # Re-check markdown links"
+    echo "  ./scripts/validate-ci.sh --tools    # Re-check tooling parity"
     exit 1
 elif [ "$QUIET" = false ]; then
     echo "=========================================="

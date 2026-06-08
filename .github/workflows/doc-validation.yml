@@ -28,23 +28,25 @@ on:
   push:
     branches: [main]
     paths:
-      - '**/*.md'
-      - '**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/check-internal-links.sh'
-      - '.github/workflows/doc-validation.yml'
-      - '.github/scripts/**'
+      - "**/*.md"
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-internal-links.sh"
+      - ".github/workflows/doc-validation.yml"
+      - ".github/scripts/**"
+      - ".github/test-fixtures/**"
   pull_request:
     branches: [main]
     paths:
-      - '**/*.md'
-      - '**/*.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/check-internal-links.sh'
-      - '.github/workflows/doc-validation.yml'
-      - '.github/scripts/**'
+      - "**/*.md"
+      - "**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-internal-links.sh"
+      - ".github/workflows/doc-validation.yml"
+      - ".github/scripts/**"
+      - ".github/test-fixtures/**"
 
 # Minimal required permissions (security best practice)
 permissions:
@@ -56,6 +58,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep these pinned versions in sync with .devcontainer/Dockerfile ARGs.
+  # Enforced by scripts/check-tooling-parity.sh.
   TAPLO_CLI_VERSION: 0.10.0
   YQ_VERSION: v4.53.2
   # Enforce strict rustdoc validation
@@ -65,7 +69,7 @@ jobs:
   shellcheck-workflow:
     name: Shellcheck Workflow Scripts
     runs-on: ubuntu-latest
-    timeout-minutes: 5  # Short timeout - this is a fast validation step
+    timeout-minutes: 5 # Short timeout - this is a fast validation step
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Install shellcheck
@@ -109,12 +113,19 @@ jobs:
             fi
           done
 
+          echo "Validating workflow helper shell scripts..."
+          echo "Checking Rust markdown validator helper"
+          if ! shellcheck -s bash .github/scripts/validate-rust-markdown-blocks.sh; then
+            echo "✗ Shellcheck found issues in Rust markdown validator helper"
+            exit 1
+          fi
+
           echo "✓ All workflow inline scripts pass shellcheck validation"
 
   rustdoc:
     name: Rustdoc Validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Generous timeout for building documentation with all features
+    timeout-minutes: 15 # Generous timeout for building documentation with all features
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
@@ -140,7 +151,7 @@ jobs:
   doc-tests:
     name: Documentation Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Generous timeout for running all doc tests with features
+    timeout-minutes: 15 # Generous timeout for running all doc tests with features
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
@@ -166,7 +177,7 @@ jobs:
   markdown-code-samples:
     name: Markdown Code Validation
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # Longer timeout - validates multiple languages (Rust, JSON, YAML, TOML, Bash)
+    timeout-minutes: 20 # Longer timeout - validates multiple languages (Rust, JSON, YAML, TOML, Bash)
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Read Rust toolchain
@@ -189,199 +200,12 @@ jobs:
       - name: Extract and validate Rust code blocks
         run: |
           set -euo pipefail
+          bash .github/scripts/validate-rust-markdown-blocks.sh
 
-          # Constants - use UPPERCASE for cross-script values
-          TEMP_DIR=$(mktemp -d)
-          trap 'rm -rf "$TEMP_DIR"' EXIT
-
-          # Use files to accumulate counters (avoids bash subshell scope issues)
-          # File-based counters are necessary because bash subshells (from pipes and while loops)
-          # cannot modify parent shell variables. By writing to a file, we persist state across subshells.
-          COUNTER_FILE="$TEMP_DIR/counters"
-          # Counter file format: 5 space-separated integers (total validated skipped warned failed)
-          # Example: "10 5 3 2 0" means 10 total, 5 validated, 3 skipped, 2 warned, 0 failed
-          echo "0 0 0 0 0" > "$COUNTER_FILE"
-
-          echo "========================================="
-          echo "Extracting Rust code blocks from markdown"
-          echo "========================================="
-
-          # Find all markdown files recursively (not hardcoded)
-          # Exclude test fixtures (intentional test cases), build artifacts, and vendored code
-          find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
-
-            # Local variable - use lowercase
-            [ -f "$md_file" ] || continue
-
-            echo ""
-            echo "Processing: $md_file"
-
-            # Extract Rust code blocks using external AWK script.
-            # The AWK script is in a separate file to avoid shell quoting issues
-            # (shellcheck cannot parse AWK programs embedded in single-quoted strings).
-            #
-            # AWK outputs NUL-delimited records in format: line_number<TAB>attributes<TAB>content
-            # See .github/scripts/extract-rust-blocks.awk for full documentation.
-            awk -f .github/scripts/extract-rust-blocks.awk "$md_file" | while IFS=$'\t' read -r -d '' line_num attributes content; do
-              # Read current counters from file
-              read -r total validated skipped warned failed < "$COUNTER_FILE"
-              total=$((total + 1))
-
-              # Validate: Skip empty code blocks
-              if [ -z "$content" ] || [ "$content" = $'\n' ]; then
-                echo "  ⊘ Skipping empty block at line $line_num"
-                skipped=$((skipped + 1))
-                echo "$total $validated $skipped $warned $failed" > "$COUNTER_FILE"
-                continue
-              fi
-
-              # Check if block has ignore, no_run, or should_panic attributes
-              # Boolean flags: 0 = false, 1 = true
-              should_skip=0      # Set to 1 to skip validation entirely
-              should_compile=1   # Set to 0 to skip compilation (syntax-only check)
-
-              if grep -qE 'ignore' <<< "$attributes"; then
-                echo "  ⊘ Skipping block at line $line_num (marked ignore)"
-                should_skip=1
-              elif grep -qE 'no_run' <<< "$attributes"; then
-                echo "  ⊘ Compiling but not running block at line $line_num (marked no_run)"
-                should_compile=1
-              elif grep -qE 'should_panic' <<< "$attributes"; then
-                echo "  ⊘ Skipping block at line $line_num (marked should_panic)"
-                should_skip=1
-              fi
-
-              # Skip blocks from reference documentation directories (.llm/skills/, docs/)
-              # These contain educational snippets not meant to be compiled standalone
-              if [ "$should_skip" -eq 0 ]; then
-                case "$md_file" in
-                  ./.llm/skills/*|./docs/*)
-                    echo "  ⊘ Skipping block at line $line_num (reference documentation file)"
-                    should_skip=1
-                    ;;
-                esac
-              fi
-
-              # Check for common placeholder patterns in content
-              # Match ellipsis anywhere in the block (not just at start of line)
-              if [ "$should_skip" -eq 0 ] && grep -qE 'todo!\(\)|\.\.\.|\.\. |// omitted|/\* \.\.\. \*/|unimplemented!\(\)' <<< "$content"; then
-                echo "  ⊘ Skipping block at line $line_num (incomplete/placeholder code)"
-                should_skip=1
-              fi
-
-              if [ "$should_skip" -eq 0 ] && grep -qE '// Note:|// Example:|/\* config \*/|<your_|YOUR_|PLACEHOLDER' <<< "$content"; then
-                echo "  ⊘ Skipping block at line $line_num (documentation snippet)"
-                should_skip=1
-              fi
-
-              # Skip blocks that are clearly partial: single expressions or bare
-              # statements without a fn wrapper (no item-level keywords at all)
-              if [ "$should_skip" -eq 0 ]; then
-                if ! grep -qE '^(fn |struct |enum |impl |trait |type |const |static |mod |use |pub |extern |#\[|async fn |unsafe )' <<< "$content"; then
-                  echo "  ⊘ Skipping block at line $line_num (partial snippet, no item-level keywords)"
-                  should_skip=1
-                fi
-              fi
-
-              if [ "$should_skip" -eq 1 ]; then
-                skipped=$((skipped + 1))
-                echo "$total $validated $skipped $warned $failed" > "$COUNTER_FILE"
-                continue
-              fi
-
-              # Create test file
-              test_file="$TEMP_DIR/test_${total}.rs"
-              echo "$content" > "$test_file"
-
-              # Run rustfmt as an informational check (WARNING, not ERROR)
-              # rustfmt cannot parse partial code snippets, so failures here
-              # are expected for many valid documentation blocks
-              rustfmt_ok=0
-              if rustfmt --edition 2021 --check "$test_file" >/dev/null 2>&1; then
-                rustfmt_ok=1
-              else
-                echo "  ⚠ rustfmt warning: Block at line $line_num has formatting issues (non-fatal)"
-              fi
-
-              # Attempt compilation for blocks that look like complete programs or lib items
-              if [ "$should_compile" -eq 1 ]; then
-                # Check if this looks like a complete program or lib snippet
-                if grep -qE '^(fn main|use |mod |pub |extern |fn |struct |enum |impl |trait |type |const |static |async fn |unsafe )' <<< "$content"; then
-                  # Try to compile as a standalone library crate
-                  compile_file="$TEMP_DIR/compile_${total}.rs"
-                  {
-                    echo "// Auto-generated test harness for markdown code block"
-                    echo "#![allow(unused)]"
-                    echo "$content"
-                  } > "$compile_file"
-
-                  if ! rustc --edition 2021 --crate-type lib "$compile_file" -o "$TEMP_DIR/test_${total}.rlib" 2>"$TEMP_DIR/compile_err_${total}.txt"; then
-                    # Compilation failed - check if it's due to expected reasons
-                    # (missing crates, unresolved imports, incomplete context)
-                    if grep -qE 'can.t find crate|unresolved import|not found in this scope|cannot find|use of undeclared|failed to resolve' "$TEMP_DIR/compile_err_${total}.txt"; then
-                      echo "  ⊙ Block at line $line_num requires external context (syntax valid)"
-                      warned=$((warned + 1))
-                    else
-                      echo "  ✗ FAILED: Block at line $line_num failed compilation"
-                      echo "--- Compilation errors ---"
-                      cat "$TEMP_DIR/compile_err_${total}.txt"
-                      echo "--- End errors ---"
-                      failed=$((failed + 1))
-                      echo "$total $validated $skipped $warned $failed" > "$COUNTER_FILE"
-                      continue
-                    fi
-                  else
-                    echo "  ✓ Compiled and validated block at line $line_num"
-                    validated=$((validated + 1))
-                  fi
-                else
-                  # Block has item keywords but does not start with a compilable pattern
-                  if [ "$rustfmt_ok" -eq 1 ]; then
-                    echo "  ✓ Syntax validated block at line $line_num (snippet, no compilation)"
-                    validated=$((validated + 1))
-                  else
-                    echo "  ⊙ Syntax-checked block at line $line_num (best effort)"
-                    warned=$((warned + 1))
-                  fi
-                fi
-              else
-                if [ "$rustfmt_ok" -eq 1 ]; then
-                  echo "  ✓ Syntax validated block at line $line_num"
-                  validated=$((validated + 1))
-                else
-                  echo "  ⊙ Syntax-checked block at line $line_num (best effort)"
-                  warned=$((warned + 1))
-                fi
-              fi
-
-              echo "$total $validated $skipped $warned $failed" > "$COUNTER_FILE"
-            done
-          done
-
-          # Read final counters
-          read -r total validated skipped warned failed < "$COUNTER_FILE"
-
-          echo ""
-          echo "========================================="
-          echo "Documentation validation complete!"
-          echo "Total blocks: $total"
-          echo "Validated: $validated"
-          echo "Skipped: $skipped"
-          echo "Warned: $warned (informational, non-blocking)"
-          echo "Failed: $failed"
-          echo "========================================="
-
-          # Exit with error code 1 if any blocks failed validation
-          # Only true compilation failures on complete programs count as errors
-          # rustfmt warnings and missing-dependency failures are non-blocking
-          if [ "$failed" -gt 0 ]; then
-            exit 1  # Non-zero exit code indicates failure
-          fi
+      - name: Validate Rust markdown extractor fixtures
+        run: |
+          set -euo pipefail
+          bash .github/test-fixtures/validate-test-cases.sh
 
       # Validate non-Rust code blocks (JSON, YAML, TOML, Bash)
       - name: Validate JSON code blocks
@@ -784,7 +608,7 @@ jobs:
   link-check:
     name: Documentation Link Check
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Moderate timeout for checking all external and internal links
+    timeout-minutes: 10 # Moderate timeout for checking all external and internal links
     steps:
       - uses: actions/checkout@v6.0.2
       # Use lychee for comprehensive link checking (external + internal + anchors)
@@ -829,7 +653,7 @@ jobs:
   inline-code-references:
     name: Validate Inline Code References
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Moderate timeout for future implementation of code reference validation
+    timeout-minutes: 10 # Moderate timeout for future implementation of code reference validation
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Check inline code references

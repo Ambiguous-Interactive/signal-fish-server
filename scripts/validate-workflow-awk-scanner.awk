@@ -2,6 +2,7 @@
 #
 # Emits tab-delimited findings for scripts/validate-workflow-awk.sh:
 #   MATCH_LINES<TAB>line[, line...]
+#   RUST_FENCE_PATTERN_LINES<TAB>line[, line...]
 #   NUL_PRINTF
 #   COMPLEX<TAB>start_line<TAB>line_count
 
@@ -121,6 +122,114 @@ function remember_line(line_number) {
     lines = lines line_number
   }
   count++
+}
+
+function remember_rust_fence_line(line_number) {
+  if (rust_fence_count < 3) {
+    if (rust_fence_lines != "") {
+      rust_fence_lines = rust_fence_lines ", "
+    }
+    rust_fence_lines = rust_fence_lines line_number
+  }
+  rust_fence_count++
+}
+
+function starts_with(text, prefix) {
+  return substr(text, 1, length(prefix)) == prefix
+}
+
+function rust_fence_lang_end(pattern,    pos) {
+  if (!starts_with(pattern, "^```")) {
+    return 0
+  }
+
+  pos = 5
+  if (substr(pattern, pos, 1) == "+") {
+    pos++
+  }
+
+  if (substr(pattern, pos, 7) == "[Rr]ust" ||
+      substr(pattern, pos, 7) == "[rR]ust") {
+    return pos + 6
+  }
+  if (substr(pattern, pos, 4) == "rust" ||
+      substr(pattern, pos, 4) == "Rust") {
+    return pos + 3
+  }
+  return 0
+}
+
+function rust_fence_has_token_boundary(pattern, lang_end,    rest) {
+  rest = substr(pattern, lang_end + 1)
+  return starts_with(rest, "([[:space:],]|$)") ||
+    starts_with(rest, "([,[:space:]]|$)")
+}
+
+function rust_fence_pattern_lacks_boundary(pattern,    lang_end) {
+  lang_end = rust_fence_lang_end(pattern)
+  return lang_end && !rust_fence_has_token_boundary(pattern, lang_end)
+}
+
+function scan_rust_fence_regex_literals(line,    i, j, char, body, in_string, in_regex, escaped) {
+  i = 1
+  while (i <= length(line)) {
+    char = substr(line, i, 1)
+    if (escaped) {
+      escaped = 0
+      i++
+      continue
+    }
+    if (char == "\\") {
+      escaped = 1
+      i++
+      continue
+    }
+    if (in_string) {
+      if (char == "\"") {
+        in_string = 0
+      }
+      i++
+      continue
+    }
+    if (char == "\"") {
+      in_string = 1
+      i++
+      continue
+    }
+    if (char != "/" || !starts_regex_literal(substr(line, 1, i - 1))) {
+      i++
+      continue
+    }
+
+    in_regex = 1
+    body = ""
+    escaped = 0
+    for (j = i + 1; j <= length(line); j++) {
+      char = substr(line, j, 1)
+      if (escaped) {
+        body = body "\\" char
+        escaped = 0
+        continue
+      }
+      if (char == "\\") {
+        escaped = 1
+        continue
+      }
+      if (char == "/") {
+        in_regex = 0
+        if (rust_fence_pattern_lacks_boundary(body)) {
+          remember_rust_fence_line(NR)
+        }
+        break
+      }
+      body = body char
+    }
+    if (in_regex) {
+      return
+    }
+    escaped = 0
+    i = j + 1
+  }
 }
 
 function reset_match_call() {
@@ -689,6 +798,7 @@ function scan_awk_line(line,    code_line) {
   awk_line_count++
   code_line = strip_awk_comment(line)
   if (code_line !~ /^[[:space:]]*$/) {
+    scan_rust_fence_regex_literals(code_line)
     scan_match_calls(code_line)
   }
   if (has_nul_printf_format(code_line)) {
@@ -1024,6 +1134,9 @@ END {
   finish_awk()
   if (lines != "") {
     print "MATCH_LINES\t" lines
+  }
+  if (rust_fence_lines != "") {
+    print "RUST_FENCE_PATTERN_LINES\t" rust_fence_lines
   }
   if (nul_found) {
     print "NUL_PRINTF"

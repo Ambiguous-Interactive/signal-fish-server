@@ -1166,6 +1166,87 @@ jobs:
             must_not_contain: vec![],
         },
         ValidatorCase {
+            name: "rust_fence_bare_prefix_regex_fails",
+            workflow: r#"name: AWK Rust Fence Prefix
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate
+        run: |
+          awk '$0 ~ /^```[Rr]ust/ { print $0 }' docs.md
+"#,
+            expected_success: false,
+            must_contain: vec![
+                "Rust fence AWK regex lacks an explicit language-token boundary",
+                "Bare prefixes like /^```[Rr]ust/",
+                "FOUND ISSUES:",
+                "Lines: 10",
+            ],
+            must_not_contain: vec![],
+        },
+        ValidatorCase {
+            name: "rust_fence_lowercase_bare_prefix_regex_fails",
+            workflow: r#"name: AWK Rust Fence Lowercase Prefix
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate
+        run: |
+          awk '$0 ~ /^```rust/ { print $0 }' docs.md
+"#,
+            expected_success: false,
+            must_contain: vec![
+                "Rust fence AWK regex lacks an explicit language-token boundary",
+                "FOUND ISSUES:",
+                "Lines: 10",
+            ],
+            must_not_contain: vec![],
+        },
+        ValidatorCase {
+            name: "rust_fence_comma_only_regex_fails",
+            workflow: r#"name: AWK Rust Fence Comma Only
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate
+        run: |
+          awk '$0 ~ /^```[Rr]ust(,.*)?$/ { print $0 }' docs.md
+"#,
+            expected_success: false,
+            must_contain: vec![
+                "Rust fence AWK regex lacks an explicit language-token boundary",
+                "FOUND ISSUES:",
+                "Lines: 10",
+            ],
+            must_not_contain: vec![],
+        },
+        ValidatorCase {
+            name: "rust_fence_token_boundary_regex_passes",
+            workflow: r#"name: AWK Rust Fence Token Boundary
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate
+        run: |
+          awk '$0 ~ /^```+[Rr]ust([[:space:],]|$)/ { print $0 }' docs.md
+"#,
+            expected_success: true,
+            must_contain: vec!["SUCCESS: No AWK anti-patterns found"],
+            must_not_contain: vec!["Rust fence AWK regex lacks"],
+        },
+        ValidatorCase {
             name: "nul_printf_text_in_awk_string_is_ignored",
             workflow: r#"name: AWK NUL String
 on: [push]

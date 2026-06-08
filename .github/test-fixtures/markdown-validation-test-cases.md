@@ -41,7 +41,7 @@ fn lowercase_rust() {
 ```
 
 **Expected behavior:** Should validate and compile successfully.
-**Tests:** Case-insensitive regex matching for `rust` fence.
+**Tests:** Canonical lowercase `rust` fence matching.
 
 ---
 
@@ -55,7 +55,7 @@ fn uppercase_rust() {
 ```
 
 **Expected behavior:** Should validate and compile successfully.
-**Tests:** Bug fix #3 - Case-insensitive regex for Rust/rust.
+**Tests:** Bug fix #3 - canonical `Rust`/`rust` fence matching.
 **Bug context:** AWK script was not matching uppercase `Rust` fence markers.
 
 ---
@@ -355,7 +355,7 @@ fn mixed_case_with_attribute() {
 ```
 
 **Expected behavior:** Should compile but not run.
-**Tests:** Combination of case-insensitive fence and attribute handling.
+**Tests:** Combination of canonical capitalized fence and attribute handling.
 
 ---
 

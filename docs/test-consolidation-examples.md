@@ -6,7 +6,7 @@ This document provides concrete code examples for consolidating the CI configura
 
 ### Before (3 separate tests)
 
-```rust
+```rust,ignore
 #[test]
 fn test_msrv_consistency_across_config_files() {
     let root = repo_root();
@@ -294,7 +294,7 @@ fn test_ci_workflow_has_required_jobs() {
 
 ### After (1 consolidated data-driven test)
 
-```rust
+```rust,ignore
 /// Specification for a required workflow file
 struct WorkflowSpec {
     filename: &'static str,
@@ -924,7 +924,7 @@ assert!(
 
 ### 4. Helper Functions
 
-```rust
+```rust,ignore
 // Extract common operations
 fn read_file_or_panic(path: &Path, context: &str) -> String {
     // ...

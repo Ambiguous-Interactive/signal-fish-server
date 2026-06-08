@@ -61,6 +61,7 @@ check_awk_antipatterns() {
     scan_results=$(awk -f scripts/validate-workflow-awk-scanner.awk "$workflow")
 
     local match_lines=""
+    local rust_fence_pattern_lines=""
     local nul_printf_found=false
     local complex_warnings=""
     local scan_kind scan_value scan_extra
@@ -69,6 +70,9 @@ check_awk_antipatterns() {
         case "$scan_kind" in
             MATCH_LINES)
                 match_lines="$scan_value"
+                ;;
+            RUST_FENCE_PATTERN_LINES)
+                rust_fence_pattern_lines="$scan_value"
                 ;;
             NUL_PRINTF)
                 nul_printf_found=true
@@ -90,6 +94,16 @@ check_awk_antipatterns() {
         file_errors=$((file_errors + 1))
     fi
 
+    if [ -n "$rust_fence_pattern_lines" ]; then
+        echo -e "${RED}✗${NC} Rust fence AWK regex lacks an explicit language-token boundary"
+        echo "  Lines: $rust_fence_pattern_lines"
+        printf '%s\n' "  Problem: Bare prefixes like /^\`\`\`[Rr]ust/ also match \`\`\`rustic and \`\`\`rusty"
+        echo '  Fix: Use /^```+[Rr]ust([[:space:],]|$)/ or the canonical .github/scripts/extract-rust-blocks.awk extractor'
+        echo ""
+        ERRORS=$((ERRORS + 1))
+        file_errors=$((file_errors + 1))
+    fi
+
     # Anti-pattern 2: \0 in printf (not POSIX compatible)
     if [ "$nul_printf_found" = true ]; then
         printf '%b⚠%b Uses \\0 in printf in AWK - not POSIX compatible\n' "$YELLOW" "$NC"
@@ -98,17 +112,7 @@ check_awk_antipatterns() {
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    # Anti-pattern 3: Overly strict regex with (,.*)?$ suffix
-    # Example: /^```[Rr]ust(,.*)?$/ should be /^```[Rr]ust/
-    if grep -nE '/\^\`\`\`[^/]+\(,\.\*\)\?\$/' "$workflow"; then
-        echo -e "${YELLOW}⚠${NC} Uses strict regex with (,.*)?$ - might not match space-separated attributes"
-        echo '  Example: /^```[Rr]ust(,.*)?$/ misses "rust ignore" (space-separated)'
-        echo '  Fix: Use simpler prefix match: /^```[Rr]ust/'
-        echo ""
-        WARNINGS=$((WARNINGS + 1))
-    fi
-
-    # Anti-pattern 4: Missing comments explaining complex AWK scripts
+    # Anti-pattern 3: Missing comments explaining complex AWK scripts
     if [ -n "$complex_warnings" ]; then
         local awk_start awk_line_count
         while IFS=$'\t' read -r awk_start awk_line_count; do
@@ -154,8 +158,8 @@ if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "Common fixes:"
     echo "  - Replace match() capture arrays with POSIX two-argument match(), sub(), or gsub()"
-    echo "  - Use prefix match /^pattern/ instead of /^pattern(,.*)?$/"
-    echo "  - Use printf \"%c\", 0 instead of printf \"\\0\""
+    echo "  - Use token-boundary Rust fence matches instead of bare prefix or comma-only fence regexes"
+    printf '%s\n' '  - Use printf "%c", 0 instead of printf "\0"'
     echo ""
     exit 1
 elif [ "$WARNINGS" -gt 0 ]; then

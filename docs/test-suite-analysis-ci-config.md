@@ -176,7 +176,7 @@ assert_eq!(
 
 **Data-Driven Improvement:**
 
-```rust
+```rust,ignore
 struct WorkflowSpec {
     filename: &'static str,
     description: &'static str,
@@ -559,13 +559,15 @@ const AWK_RULES: &[AwkValidationRule] = &[
     AwkValidationRule {
         name: "case-insensitive-rust-pattern",
         check: |content| {
-            if !content.contains("/^```[Rr]ust/") {
-                Some("AWK pattern should match both ```rust and ```Rust".to_string())
+            if !content.contains("^[Rr]ust([[:space:],]|$)")
+                && !content.contains("^```+[Rr]ust([[:space:],]|$)")
+            {
+                Some("AWK Rust fence matching should use the canonical extractor or an explicit token boundary".to_string())
             } else {
                 None
             }
         },
-        description: "Ensures case-insensitive matching for Rust code blocks",
+        description: "Ensures Rust code block matching is case-aware without accepting rustic/rusty prefixes",
     },
     AwkValidationRule {
         name: "end-block-for-unclosed",
@@ -1052,7 +1054,7 @@ Many tests reimplement similar logic:
 
 ### Recommended Helper Functions
 
-```rust
+```rust,ignore
 // 1. File operations
 fn read_file_or_panic(path: &Path, context: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| {

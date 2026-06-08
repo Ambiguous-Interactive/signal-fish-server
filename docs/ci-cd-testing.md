@@ -576,17 +576,20 @@ awk: line 1: syntax error at or near /
 
 **Solution:**
 
-Use POSIX-compatible AWK patterns:
+Use POSIX-compatible AWK patterns with an explicit Rust language-token boundary:
 
 ```bash
-# Before (too strict)
+# Before (too strict and misses space-separated attributes)
 awk '/^```rust$/ { ... }'
 
 # After (POSIX compatible)
-awk '/^```[Rr]ust/ { ... }'
+awk '/^```+[Rr]ust([[:space:],]|$)/ { ... }'
 ```
 
-**Why it happens:** Different AWK implementations (gawk vs mawk).
+**Why it happens:** Different AWK implementations (gawk vs mawk), plus CommonMark
+fences can have attributes separated by commas or spaces. Bare prefixes such as
+`/^```[Rr]ust/` are also unsafe because they match non-canonical languages like
+`rustic` and `rusty`.
 
 **Test that prevents this:** `test_doc_validation_workflow_has_shellcheck`
 

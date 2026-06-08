@@ -103,6 +103,16 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   - Prefer typed array boundaries (`[string[]]@(...)`, `[int[]]@(...)`) for helper function inputs.
 - Do not add `cargo`, `npm`, `npx`, or installer/bootstrap commands to git hooks.
 
+### Tooling Parity Rules (Required)
+
+- Keep CI and devcontainer tool pins synchronized.
+- If you change `YQ_VERSION` or `TAPLO_CLI_VERSION` in
+  `.github/workflows/doc-validation.yml`, update matching ARG values in
+  `.devcontainer/Dockerfile` in the same PR.
+- Keep Docker CLI support enabled in `.devcontainer/devcontainer.json` for local
+  Docker CI parity.
+- Run `bash scripts/check-tooling-parity.sh` after tooling changes.
+
 ---
 
 ## Core Reference Map

@@ -15,7 +15,7 @@ anyhow = "1"
 
 ## Basic Embedded Server
 
-```rust
+```rust,ignore
 
 use signal_fish_server::{
     config,

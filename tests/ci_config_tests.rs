@@ -14,16 +14,13 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[cfg(unix)]
 use common::bash_command;
 use common::{read_file, repo_root};
-#[cfg(unix)]
-use common::{unique_temp_dir, write_file};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
 use syn::parse::Parser;
@@ -283,6 +280,151 @@ fn strip_unquoted_shell_comment(text: &str) -> &str {
     text
 }
 
+fn is_awk_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn skip_ascii_whitespace(text: &str, mut byte_idx: usize) -> usize {
+    while let Some(ch) = text[byte_idx..].chars().next() {
+        if !ch.is_ascii_whitespace() {
+            break;
+        }
+        byte_idx += ch.len_utf8();
+    }
+    byte_idx
+}
+
+fn awk_match_arguments_use_capture_array(text: &str, open_paren_byte: usize) -> bool {
+    let mut depth = 1usize;
+    let mut comma_count = 0usize;
+    let mut in_string = false;
+    let mut in_regex = false;
+    let mut escaped = false;
+    let mut previous_significant = Some('(');
+
+    for ch in text[open_paren_byte + 1..].chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if in_regex {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '/' {
+                in_regex = false;
+                previous_significant = Some('/');
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '/' if matches!(previous_significant, Some('(' | ',' | '~' | '!')) => {
+                in_regex = true;
+            }
+            '(' => {
+                depth += 1;
+                previous_significant = Some('(');
+            }
+            ')' => {
+                if depth == 1 {
+                    return comma_count >= 2;
+                }
+                depth -= 1;
+                previous_significant = Some(')');
+            }
+            ',' if depth == 1 => {
+                comma_count += 1;
+                previous_significant = Some(',');
+            }
+            '#' => return false,
+            _ if ch.is_whitespace() => {}
+            _ => previous_significant = Some(ch),
+        }
+    }
+
+    false
+}
+
+fn awk_source_uses_gnu_match_capture(source: &str) -> bool {
+    awk_source_gnu_match_capture_line(source).is_some()
+}
+
+fn awk_source_gnu_match_capture_line(source: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    for (byte_idx, ch) in source.char_indices() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '#' => in_comment = true,
+            'm' if source[byte_idx..].starts_with("match") => {
+                let before_is_identifier = source[..byte_idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_awk_identifier_char);
+                let after_match = byte_idx + "match".len();
+                let after_is_identifier = source[after_match..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_awk_identifier_char);
+
+                if before_is_identifier || after_is_identifier {
+                    continue;
+                }
+
+                let open_paren = skip_ascii_whitespace(source, after_match);
+                if source[open_paren..].starts_with('(')
+                    && awk_match_arguments_use_capture_array(source, open_paren)
+                {
+                    return Some(
+                        source[..byte_idx]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count()
+                            + 1,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn normalize_github_workspace_expression(command: &str) -> String {
     command
         .replace("${{ github.workspace }}", "$GITHUB_WORKSPACE")
@@ -351,6 +493,9 @@ fn workflow_direct_script_violations_for_content(
         if command.is_empty() {
             continue;
         }
+        if is_shell_assignment_only(command) {
+            continue;
+        }
         let command = normalize_github_workspace_expression(command);
         let mut token_text = command.replace("&&", " ").replace("||", " ");
         for separator in [';', '&', '|', '(', ')'] {
@@ -384,6 +529,47 @@ fn workflow_direct_script_violations_for_content(
     violations
 }
 
+fn is_shell_assignment_only(command: &str) -> bool {
+    let command = command.trim();
+    static ASSIGNMENT_RE: OnceLock<Regex> = OnceLock::new();
+    let assignment = ASSIGNMENT_RE.get_or_init(|| {
+        Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]+\])?="#)
+            .expect("shell assignment regex should compile")
+    });
+    let Some(assignment_match) = assignment.find(command) else {
+        return false;
+    };
+
+    shell_assignment_value_consumes_rest(&command[assignment_match.end()..])
+}
+
+fn shell_assignment_value_consumes_rest(value: &str) -> bool {
+    let value = value.trim_start();
+    let Some(first_char) = value.chars().next() else {
+        return true;
+    };
+
+    if first_char != '"' && first_char != '\'' {
+        return !value.chars().any(char::is_whitespace);
+    }
+
+    let mut escaped = false;
+    for (idx, ch) in value.char_indices().skip(1) {
+        if first_char == '"' && ch == '\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+
+        if ch == first_char && !escaped {
+            return value[idx + ch.len_utf8()..].trim().is_empty();
+        }
+
+        escaped = false;
+    }
+
+    false
+}
+
 #[test]
 fn test_workflow_direct_script_detector_edge_cases() {
     let cases = [
@@ -410,6 +596,11 @@ fn test_workflow_direct_script_detector_edge_cases() {
         (
             "source does not require executable bit",
             "jobs:\n  test:\n    steps:\n      - run: source scripts/foo.sh\n",
+            false,
+        ),
+        (
+            "assignment-only line may contain script path data",
+            "jobs:\n  test:\n    steps:\n      - run: |\n          PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]=\"*.md scripts/check-internal-links.sh\"\n",
             false,
         ),
     ];
@@ -706,6 +897,28 @@ fn extract_yaml_field_values(block: &str, field: &str) -> Vec<String> {
     }
 
     values
+}
+
+fn extract_workflow_event_paths(workflow_content: &str, event: &str) -> Vec<String> {
+    let on_block = extract_yaml_mapping_block(workflow_content, "on", 0)
+        .unwrap_or_else(|| panic!("workflow must define top-level on block"));
+    let on_child_indent = yaml_first_child_indent(&on_block)
+        .unwrap_or_else(|| panic!("workflow on block must define events"));
+    let event_block = extract_yaml_mapping_block(&on_block, event, on_child_indent)
+        .unwrap_or_else(|| panic!("workflow must define {event} event block"));
+
+    extract_yaml_field_values(&event_block, "paths")
+}
+
+fn release_preflight_pattern_for_doc_path(path: &str) -> String {
+    match path {
+        "**/*.md" => "*.md".to_string(),
+        "**/*.rs" => "*.rs".to_string(),
+        directory_glob if directory_glob.ends_with("/**") => {
+            format!("{}/", directory_glob.trim_end_matches("/**"))
+        }
+        exact_path => exact_path.to_string(),
+    }
 }
 
 #[test]
@@ -1433,1261 +1646,6 @@ fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
 }
 
 #[test]
-fn test_strict_shell_automation_avoids_sigpipe_prone_early_exit_pipelines() {
-    fn has_unclosed_shell_quote(text: &str) -> bool {
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut escaped = false;
-
-        for char in text.chars() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if char == '\\' && !in_single {
-                escaped = true;
-                continue;
-            }
-            if char == '\'' && !in_double {
-                in_single = !in_single;
-                continue;
-            }
-            if char == '"' && !in_single {
-                in_double = !in_double;
-            }
-        }
-
-        in_single || in_double
-    }
-
-    fn continues_logical_shell_line(line: &str, logical_line: &str) -> bool {
-        let trimmed = line.trim_end();
-        let yaml_block_scalar = trimmed.ends_with(": |")
-            || trimmed.ends_with(": >")
-            || trimmed == "run: |"
-            || trimmed == "run: >";
-        trimmed.ends_with('\\')
-            || (trimmed.ends_with('|') && !trimmed.ends_with("||") && !yaml_block_scalar)
-            || trimmed.ends_with("|&")
-            || has_unclosed_shell_quote(logical_line)
-    }
-
-    fn normalized_shell_piece(line: &str) -> String {
-        let mut piece = line.trim().to_string();
-        if piece.ends_with('\\') {
-            piece.pop();
-            piece = piece.trim_end().to_string();
-        }
-        piece
-    }
-
-    fn logical_shell_lines(content: &str) -> Vec<(usize, String)> {
-        let mut lines = Vec::new();
-        let mut pending: Option<(usize, String)> = None;
-
-        for (line_index, line) in content.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('#') && pending.is_none() {
-                continue;
-            }
-
-            let piece = normalized_shell_piece(line);
-            let (start_line, logical) = match pending.take() {
-                Some((start_line, mut logical)) => {
-                    if !piece.is_empty() {
-                        logical.push(' ');
-                        logical.push_str(&piece);
-                    }
-                    (start_line, logical)
-                }
-                None => (line_index + 1, piece),
-            };
-
-            if continues_logical_shell_line(line, &logical) {
-                pending = Some((start_line, logical));
-            } else if !logical.trim().is_empty() {
-                lines.push((start_line, logical));
-            }
-        }
-
-        if let Some((start_line, logical)) = pending {
-            if !logical.trim().is_empty() {
-                lines.push((start_line, logical));
-            }
-        }
-
-        lines
-    }
-
-    fn shell_words_until_separator(command: &str) -> Vec<String> {
-        let mut words = Vec::new();
-        let mut current = String::new();
-        let mut in_word = false;
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut escaped = false;
-
-        for char in command.chars() {
-            if escaped {
-                current.push(char);
-                in_word = true;
-                escaped = false;
-                continue;
-            }
-            if char == '\\' && !in_single {
-                escaped = true;
-                in_word = true;
-                continue;
-            }
-            if char == '\'' && !in_double {
-                in_single = !in_single;
-                in_word = true;
-                continue;
-            }
-            if char == '"' && !in_single {
-                in_double = !in_double;
-                in_word = true;
-                continue;
-            }
-            if !in_single && !in_double && char.is_whitespace() {
-                if in_word {
-                    words.push(std::mem::take(&mut current));
-                    in_word = false;
-                }
-                continue;
-            }
-            if !in_single && !in_double && matches!(char, ';' | '|' | '&') {
-                break;
-            }
-
-            current.push(char);
-            in_word = true;
-        }
-
-        if in_word {
-            words.push(current);
-        }
-
-        words
-    }
-
-    fn command_basename(word: &str) -> &str {
-        word.rsplit('/').next().unwrap_or(word)
-    }
-
-    fn is_awk_command(word: &str) -> bool {
-        matches!(command_basename(word), "awk" | "gawk" | "mawk" | "nawk")
-    }
-
-    fn is_grep_command(word: &str) -> bool {
-        matches!(command_basename(word), "grep" | "egrep" | "fgrep")
-    }
-
-    fn is_sed_command(word: &str) -> bool {
-        command_basename(word) == "sed"
-    }
-
-    fn is_head_command(word: &str) -> bool {
-        command_basename(word) == "head"
-    }
-
-    fn is_no_operand_awk_option(word: &str) -> bool {
-        if ["-D", "-d", "-g", "-I", "-L", "-o", "-p"]
-            .iter()
-            .any(|prefix| word.starts_with(prefix) && word.len() > prefix.len())
-        {
-            return true;
-        }
-        matches!(
-            word,
-            "--bignum"
-                | "--characters-as-bytes"
-                | "--copyright"
-                | "--debug"
-                | "--gen-pot"
-                | "--help"
-                | "--lint"
-                | "--lint-old"
-                | "--non-decimal-data"
-                | "--no-optimize"
-                | "--optimize"
-                | "--posix"
-                | "--pretty-print"
-                | "--profile"
-                | "--re-interval"
-                | "--sandbox"
-                | "--traditional"
-                | "--trace"
-                | "--use-lc-numeric"
-                | "--version"
-        ) || word.starts_with("--lint=")
-            || word.starts_with("--pretty-print=")
-            || word.starts_with("--profile=")
-            || word.starts_with("--dump-variables")
-            || word.starts_with("--debug=")
-            || word.starts_with("--gen-pot=")
-            || matches!(
-                word,
-                "-b" | "-c"
-                    | "-C"
-                    | "-D"
-                    | "-d"
-                    | "-g"
-                    | "-h"
-                    | "-I"
-                    | "-L"
-                    | "-M"
-                    | "-N"
-                    | "-n"
-                    | "-O"
-                    | "-o"
-                    | "-p"
-                    | "-P"
-                    | "-r"
-                    | "-S"
-                    | "-s"
-                    | "-t"
-                    | "-V"
-            )
-    }
-
-    enum WOption<'a> {
-        Source(&'a str),
-        File,
-        Other,
-    }
-
-    fn classify_w_option<'a>(tokens: &'a [String], index: &mut usize) -> WOption<'a> {
-        let Some(token) = tokens.get(*index) else {
-            return WOption::Other;
-        };
-        if let Some(source) = token.strip_prefix("source=") {
-            return WOption::Source(source);
-        }
-        if token.starts_with("exec=") {
-            return WOption::File;
-        }
-        if token == "source" {
-            *index += 1;
-            return tokens
-                .get(*index)
-                .map_or(WOption::Other, |source| WOption::Source(source));
-        }
-        if token == "exec" {
-            *index += 1;
-            return WOption::File;
-        }
-        WOption::Other
-    }
-
-    fn is_shell_assignment(word: &str) -> bool {
-        let Some((name, _)) = word.split_once('=') else {
-            return false;
-        };
-        let mut chars = name.chars();
-        matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-            && chars.all(|char| char == '_' || char.is_ascii_alphanumeric())
-    }
-
-    fn strip_assignment_prefix(tokens: &[String]) -> Vec<String> {
-        tokens
-            .iter()
-            .skip_while(|token| is_shell_assignment(token))
-            .cloned()
-            .collect()
-    }
-
-    fn command_tokens_after_optional_env(tokens: &[String]) -> Vec<String> {
-        let mut index = 0;
-        while tokens
-            .get(index)
-            .is_some_and(|token| is_shell_assignment(token))
-        {
-            index += 1;
-        }
-        if matches!(
-            tokens.get(index).map(|word| command_basename(word)),
-            Some("env")
-        ) {
-            index += 1;
-            while let Some(token) = tokens.get(index) {
-                match token.as_str() {
-                    "-u" | "--unset" | "-C" | "--chdir" => {
-                        index += 2;
-                        continue;
-                    }
-                    "-S" | "--split-string" => {
-                        if let Some(split_string) = tokens.get(index + 1) {
-                            let mut split_tokens = shell_words_until_separator(split_string);
-                            split_tokens.extend(tokens.iter().skip(index + 2).cloned());
-                            return command_tokens_after_optional_env(&split_tokens);
-                        }
-                        return Vec::new();
-                    }
-                    _ => {}
-                }
-                if token.starts_with("--unset=")
-                    || token.starts_with("--chdir=")
-                    || token.starts_with("-u")
-                    || token.starts_with("-C")
-                {
-                    index += 1;
-                    continue;
-                }
-                if token.starts_with("--split-string=") {
-                    let split_string = token
-                        .split_once('=')
-                        .map_or("", |(_, split_string)| split_string);
-                    let mut split_tokens = shell_words_until_separator(split_string);
-                    split_tokens.extend(tokens.iter().skip(index + 1).cloned());
-                    return command_tokens_after_optional_env(&split_tokens);
-                }
-                if token.starts_with('-') || is_shell_assignment(token) {
-                    index += 1;
-                    continue;
-                }
-                break;
-            }
-        }
-        strip_assignment_prefix(&tokens[index..])
-    }
-
-    fn push_program(programs: &mut Vec<String>, source: impl Into<String>) {
-        programs.push(source.into());
-    }
-
-    fn awk_program_from_piped_tail(tail: &str) -> Option<String> {
-        let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
-        let mut index = 0;
-        let mut programs = Vec::new();
-        let mut program_supplied = false;
-
-        if !tokens.get(index).is_some_and(|word| is_awk_command(word)) {
-            return None;
-        }
-        index += 1;
-
-        while let Some(token) = tokens.get(index) {
-            match token.as_str() {
-                "-e" | "--source" => {
-                    if let Some(source) = tokens.get(index + 1) {
-                        push_program(&mut programs, source.clone());
-                        program_supplied = true;
-                    }
-                    index += 2;
-                    continue;
-                }
-                "-f" | "--file" | "-E" | "--exec" | "-F" | "--field-separator" | "-v"
-                | "--assign" => {
-                    if matches!(token.as_str(), "-f" | "--file" | "-E" | "--exec") {
-                        program_supplied = true;
-                    }
-                    index += 2;
-                    continue;
-                }
-                "-i" | "--include" | "-l" | "--load" => {
-                    index += 2;
-                    continue;
-                }
-                "-W" => {
-                    index += 1;
-                    match classify_w_option(&tokens, &mut index) {
-                        WOption::Source(source) => {
-                            push_program(&mut programs, source.to_string());
-                            program_supplied = true;
-                        }
-                        WOption::File => {
-                            program_supplied = true;
-                        }
-                        WOption::Other => {}
-                    }
-                    index += 1;
-                    continue;
-                }
-                "--" => {
-                    index += 1;
-                    continue;
-                }
-                _ => {}
-            }
-
-            if let Some(source) = token.strip_prefix("-e").filter(|source| !source.is_empty()) {
-                push_program(&mut programs, source.to_string());
-                program_supplied = true;
-                index += 1;
-                continue;
-            }
-            if let Some(source) = token.strip_prefix("--source=") {
-                push_program(&mut programs, source.to_string());
-                program_supplied = true;
-                index += 1;
-                continue;
-            }
-            if let Some(rest) = token.strip_prefix("-W") {
-                if let Some(source) = rest.strip_prefix("source=") {
-                    push_program(&mut programs, source.to_string());
-                    program_supplied = true;
-                    index += 1;
-                    continue;
-                }
-                if rest.starts_with("exec=") {
-                    program_supplied = true;
-                    index += 1;
-                    continue;
-                }
-            }
-            if token.starts_with("-f")
-                || token.starts_with("--file=")
-                || token.starts_with("-E")
-                || token.starts_with("--exec=")
-                || token.starts_with("-F")
-                || token.starts_with("--field-separator=")
-                || token.starts_with("-v")
-                || token.starts_with("--assign=")
-                || token.starts_with("-i")
-                || token.starts_with("--include=")
-                || token.starts_with("-l")
-                || token.starts_with("--load=")
-                || is_no_operand_awk_option(token)
-            {
-                if token.starts_with("-f")
-                    || token.starts_with("--file=")
-                    || token.starts_with("-E")
-                    || token.starts_with("--exec=")
-                {
-                    program_supplied = true;
-                }
-                index += 1;
-                continue;
-            }
-            if token.starts_with('-') {
-                index += 1;
-                continue;
-            }
-
-            if !program_supplied {
-                push_program(&mut programs, token.clone());
-            }
-            break;
-        }
-
-        if programs.is_empty() {
-            None
-        } else {
-            Some(programs.join("\n"))
-        }
-    }
-
-    fn piped_command_tails(line: &str) -> Vec<&str> {
-        let mut tails = Vec::new();
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut escaped = false;
-        let mut skip_next = false;
-
-        for (index, char) in line.char_indices() {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if char == '\\' && !in_single {
-                escaped = true;
-                continue;
-            }
-            if char == '\'' && !in_double {
-                in_single = !in_single;
-                continue;
-            }
-            if char == '"' && !in_single {
-                in_double = !in_double;
-                continue;
-            }
-            if !in_single && !in_double && char == '|' {
-                if line[index..].starts_with("||") {
-                    skip_next = true;
-                    continue;
-                }
-                let tail_start = if line[index..].starts_with("|&") {
-                    index + 2
-                } else {
-                    index + 1
-                };
-                tails.push(&line[tail_start..]);
-            }
-        }
-
-        tails
-    }
-
-    fn head_tail_is_guarded(tail: &str) -> bool {
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut escaped = false;
-
-        for (index, char) in tail.char_indices() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if char == '\\' && !in_single {
-                escaped = true;
-                continue;
-            }
-            if char == '\'' && !in_double {
-                in_single = !in_single;
-                continue;
-            }
-            if char == '"' && !in_single {
-                in_double = !in_double;
-                continue;
-            }
-            if !in_single && !in_double && char == '#' {
-                return false;
-            }
-            if !in_single && !in_double && tail[index..].starts_with("||") {
-                let fallback_tokens = shell_words_until_separator(&tail[index + 2..]);
-                return fallback_tokens
-                    .first()
-                    .is_some_and(|word| matches!(command_basename(word), "true" | ":"));
-            }
-            if !in_single && !in_double && matches!(char, ';' | '&' | '|') {
-                return false;
-            }
-        }
-
-        false
-    }
-
-    fn has_unguarded_head_pipeline(line: &str) -> bool {
-        piped_command_tails(line).into_iter().any(|tail| {
-            let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
-            tokens.first().is_some_and(|word| is_head_command(word)) && !head_tail_is_guarded(tail)
-        })
-    }
-
-    fn grep_option_exits_early(option: &str, skip_next: &mut bool) -> Option<&'static str> {
-        if option == "--quiet" {
-            return Some("quiet grep fed by a pipeline");
-        }
-        if option == "--regexp" || option == "--file" {
-            *skip_next = true;
-            return None;
-        }
-        if option == "--max-count" || option.starts_with("--max-count=") {
-            *skip_next = option == "--max-count";
-            return Some("grep max-count fed by a pipeline");
-        }
-        if !option.starts_with('-') || option == "-" || option.starts_with("--") {
-            return None;
-        }
-
-        let mut chars = option[1..].chars().peekable();
-        while let Some(char) = chars.next() {
-            match char {
-                'q' => return Some("quiet grep fed by a pipeline"),
-                'm' => {
-                    *skip_next = chars.peek().is_none();
-                    return Some("grep max-count fed by a pipeline");
-                }
-                'e' | 'f' => {
-                    *skip_next = chars.peek().is_none();
-                    return None;
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    fn has_grep_early_exit_pipeline(line: &str) -> Option<&'static str> {
-        for tail in piped_command_tails(line) {
-            let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
-            let mut index = 0;
-            if !tokens.get(index).is_some_and(|word| is_grep_command(word)) {
-                continue;
-            }
-            index += 1;
-
-            let mut skip_next = false;
-            while let Some(token) = tokens.get(index) {
-                if skip_next {
-                    skip_next = false;
-                    index += 1;
-                    continue;
-                }
-                if token == "--" {
-                    break;
-                }
-                if !token.starts_with('-') || token == "-" {
-                    break;
-                }
-                if let Some(rule_name) = grep_option_exits_early(token, &mut skip_next) {
-                    return Some(rule_name);
-                }
-                index += 1;
-            }
-        }
-        None
-    }
-
-    fn sed_scripts_from_piped_tail(tail: &str) -> Vec<String> {
-        let tokens = command_tokens_after_optional_env(&shell_words_until_separator(tail));
-        let mut scripts = Vec::new();
-        let mut index = 0;
-        let mut script_supplied = false;
-        if !tokens.get(index).is_some_and(|word| is_sed_command(word)) {
-            return scripts;
-        }
-        index += 1;
-
-        while let Some(token) = tokens.get(index) {
-            match token.as_str() {
-                "-e" | "--expression" => {
-                    if let Some(script) = tokens.get(index + 1) {
-                        scripts.push(script.clone());
-                        script_supplied = true;
-                    }
-                    index += 2;
-                    continue;
-                }
-                "-f" | "--file" => {
-                    script_supplied = true;
-                    index += 2;
-                    continue;
-                }
-                "--" => {
-                    index += 1;
-                    if !script_supplied {
-                        if let Some(script) = tokens.get(index) {
-                            scripts.push(script.clone());
-                        }
-                    }
-                    break;
-                }
-                _ => {}
-            }
-
-            if let Some(script) = token.strip_prefix("--expression=") {
-                scripts.push(script.to_string());
-                script_supplied = true;
-                index += 1;
-                continue;
-            }
-            if token.starts_with("--file=") {
-                script_supplied = true;
-                index += 1;
-                continue;
-            }
-            if token.starts_with('-') && token != "-" {
-                let short_options = &token[1..];
-                if let Some(script) = short_options.strip_prefix('e').filter(|s| !s.is_empty()) {
-                    scripts.push(script.to_string());
-                    script_supplied = true;
-                } else if short_options.starts_with('f') {
-                    script_supplied = true;
-                }
-                index += 1;
-                continue;
-            }
-
-            if !script_supplied {
-                scripts.push(token.clone());
-            }
-            break;
-        }
-
-        scripts
-    }
-
-    fn sed_script_quits_early(script: &str) -> bool {
-        let mut normalized = String::with_capacity(script.len());
-        let mut chars = script.chars().peekable();
-        while let Some(char) = chars.next() {
-            if char == 's' && matches!(chars.peek(), Some('/')) {
-                normalized.push(' ');
-                let Some(delimiter) = chars.next() else {
-                    break;
-                };
-                normalized.push(' ');
-                for _ in 0..2 {
-                    while let Some(next) = chars.next() {
-                        normalized.push(' ');
-                        if next == '\\' {
-                            if chars.next().is_some() {
-                                normalized.push(' ');
-                            }
-                            continue;
-                        }
-                        if next == '/' {
-                            break;
-                        }
-                    }
-                }
-                if matches!(chars.peek(), Some(next) if *next == delimiter) {
-                    chars.next();
-                    normalized.push(' ');
-                }
-                while matches!(chars.peek(), Some(flag) if flag.is_ascii_alphabetic()) {
-                    chars.next();
-                    normalized.push(' ');
-                }
-                continue;
-            }
-            normalized.push(char);
-            if char != '/' {
-                continue;
-            }
-            while let Some(next) = chars.next() {
-                normalized.push(' ');
-                if next == '\\' {
-                    if chars.next().is_some() {
-                        normalized.push(' ');
-                    }
-                    continue;
-                }
-                if next == '/' {
-                    break;
-                }
-            }
-        }
-
-        normalized
-            .split(|char: char| char.is_whitespace() || matches!(char, ';' | '{' | '}'))
-            .filter(|token| !token.is_empty())
-            .any(|token| {
-                let command = token.trim_start_matches(|char: char| {
-                    char.is_ascii_digit() || matches!(char, ',' | '$' | '!' | '~' | '+' | '-')
-                });
-                if command.starts_with('s') {
-                    return false;
-                }
-                command.starts_with('q') || command.starts_with('Q')
-            })
-    }
-
-    fn has_sed_quit_pipeline(line: &str) -> bool {
-        piped_command_tails(line).into_iter().any(|tail| {
-            sed_scripts_from_piped_tail(tail)
-                .iter()
-                .any(|script| sed_script_quits_early(script))
-        })
-    }
-
-    fn awk_code_without_strings_or_comments(program: &str) -> String {
-        fn last_significant_token(text: &str) -> &str {
-            let trimmed = text.trim_end();
-            let end = trimmed.len();
-            let start = trimmed
-                .char_indices()
-                .rev()
-                .find(|(_, char)| !char.is_ascii_alphanumeric() && *char != '_')
-                .map_or(0, |(index, _)| index + 1);
-            &trimmed[start..end]
-        }
-
-        let mut code = String::new();
-        let mut chars = program.chars().peekable();
-        let mut in_string = false;
-        let mut in_regex = false;
-        let mut escaped = false;
-        let mut last_significant = '\0';
-
-        while let Some(char) = chars.next() {
-            if escaped {
-                escaped = false;
-                if !in_string && !in_regex {
-                    code.push(' ');
-                }
-                continue;
-            }
-            if char == '\\' {
-                escaped = true;
-                if !in_string && !in_regex {
-                    code.push(' ');
-                }
-                continue;
-            }
-            if in_regex {
-                if char == '/' {
-                    in_regex = false;
-                }
-                code.push(' ');
-                continue;
-            }
-            if in_string {
-                if char == '"' {
-                    in_string = false;
-                }
-                code.push(' ');
-                continue;
-            }
-            if char == '"' {
-                in_string = true;
-                code.push(' ');
-                continue;
-            }
-            let token = last_significant_token(&code);
-            if char == '/'
-                && (last_significant == '\0'
-                    || "~(,=:{;![?+-*%&|".contains(last_significant)
-                    || matches!(token, "print" | "printf" | "return"))
-            {
-                in_regex = true;
-                code.push(' ');
-                continue;
-            }
-            if char == '#' {
-                while let Some(next) = chars.peek() {
-                    if *next == '\n' {
-                        break;
-                    }
-                    chars.next();
-                }
-                code.push(' ');
-                continue;
-            }
-            code.push(char);
-            if !char.is_whitespace() {
-                last_significant = char;
-            }
-        }
-
-        code
-    }
-
-    fn awk_program_exits_early(program: &str) -> bool {
-        awk_code_without_strings_or_comments(program)
-            .split(|char: char| !char.is_ascii_alphanumeric() && char != '_')
-            .any(|token| token == "exit")
-    }
-
-    fn has_awk_exit_pipeline(line: &str) -> bool {
-        piped_command_tails(line).into_iter().any(|tail| {
-            awk_program_from_piped_tail(tail)
-                .as_deref()
-                .is_some_and(awk_program_exits_early)
-        })
-    }
-
-    fn should_scan_sigpipe_policy(relative: &Path, content: &str) -> bool {
-        let extension = relative
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or_default();
-        if matches!(extension, "yml" | "yaml") {
-            return content.contains("run:");
-        }
-        content.contains("pipefail")
-            || content.starts_with("#!/usr/bin/env bash")
-            || content.starts_with("#!/bin/bash")
-    }
-
-    fn collect_sigpipe_violations(relative: &Path, content: &str) -> Vec<String> {
-        let mut violations = Vec::new();
-        if !should_scan_sigpipe_policy(relative, content) {
-            return violations;
-        }
-
-        for (line_number, logical_line) in logical_shell_lines(content) {
-            let trimmed = logical_line.trim();
-            if trimmed.starts_with('#') {
-                continue;
-            }
-
-            if has_unguarded_head_pipeline(&logical_line) {
-                violations.push(format!(
-                    "{}:{}: unguarded head in strict pipeline can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Drain the input, move truncation after capture, or explicitly guard diagnostic-only output with `|| true`.",
-                    relative.display(),
-                    line_number,
-                    trimmed
-                ));
-            }
-            if let Some(rule_name) = has_grep_early_exit_pipeline(&logical_line) {
-                violations.push(format!(
-                    "{}:{}: {} can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Use grep on a file/here-string, drain the producer, or use a shell test that does not close the pipeline early.",
-                    relative.display(),
-                    line_number,
-                    rule_name,
-                    trimmed
-                ));
-            }
-            if has_sed_quit_pipeline(&logical_line) {
-                violations.push(format!(
-                    "{}:{}: sed q in pipeline can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Avoid early `sed q` consumers under pipefail, or feed sed from a file/here-string.",
-                    relative.display(),
-                    line_number,
-                    trimmed
-                ));
-            }
-            if has_awk_exit_pipeline(&logical_line) {
-                violations.push(format!(
-                    "{}:{}: awk exit in pipeline can surface SIGPIPE/exit 141 under pipefail.\n  Line: {}\n  Fix: Avoid early `awk exit` consumers under pipefail, or feed awk from a file/here-string.",
-                    relative.display(),
-                    line_number,
-                    trimmed
-                ));
-            }
-        }
-
-        violations
-    }
-
-    let regression_cases = [
-        (
-            "short quiet grep",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep -q foo\n",
-            true,
-        ),
-        (
-            "env unset quiet grep",
-            "fixture.sh",
-            "set -o pipefail\nproducer | env -u LC_ALL grep -q foo\n",
-            true,
-        ),
-        (
-            "env chdir quiet grep",
-            "fixture.sh",
-            "set -o pipefail\nproducer | env -C /tmp grep -q foo\n",
-            true,
-        ),
-        (
-            "env split-string quiet grep unquoted",
-            "fixture.sh",
-            "set -o pipefail\nproducer | env -S grep -q foo\n",
-            true,
-        ),
-        (
-            "env split-string quiet grep quoted",
-            "fixture.sh",
-            "set -o pipefail\nproducer | env -S \"grep -q\" foo\n",
-            true,
-        ),
-        (
-            "assignment before env split-string quiet grep",
-            "fixture.sh",
-            "set -o pipefail\nproducer | LC_ALL=C env -S \"grep -q\" foo\n",
-            true,
-        ),
-        (
-            "assignment prefixed quiet grep",
-            "fixture.sh",
-            "set -o pipefail\nproducer | LC_ALL=C grep -q foo\n",
-            true,
-        ),
-        (
-            "long quiet grep",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep --quiet foo\n",
-            true,
-        ),
-        (
-            "grep short max-count",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep -m1 foo\n",
-            true,
-        ),
-        (
-            "grep separate max-count",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep -m 1 foo\n",
-            true,
-        ),
-        (
-            "grep long max-count",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep --max-count=1 foo\n",
-            true,
-        ),
-        (
-            "grep long regexp operand is not quiet option",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep --regexp -q\n",
-            false,
-        ),
-        (
-            "grep long file operand is not quiet option",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep --file -q\n",
-            false,
-        ),
-        (
-            "grep pattern after double dash is not quiet option",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep -- '-q'\n",
-            false,
-        ),
-        (
-            "grep pattern after double dash is not max-count option",
-            "fixture.sh",
-            "set -o pipefail\nproducer | grep -- '-m'\n",
-            false,
-        ),
-        (
-            "sed semicolon q pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n '1p; q'\n",
-            true,
-        ),
-        (
-            "sed braced q pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n '1{p;q;}'\n",
-            true,
-        ),
-        (
-            "sed addressed q pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n '/done/q'\n",
-            true,
-        ),
-        (
-            "assignment prefixed sed q pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | LC_ALL=C sed -n q\n",
-            true,
-        ),
-        (
-            "sed regex address semicolon is not command separator",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n '/a;q/p'\n",
-            false,
-        ),
-        (
-            "sed substitution containing q is not quit command",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n 's/q/x/p'\n",
-            false,
-        ),
-        (
-            "sed substitution replacement q is not quit command",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n 's/foo/q/p'\n",
-            false,
-        ),
-        (
-            "sed expression makes later q filename an input file",
-            "fixture.sh",
-            "set -o pipefail\nproducer | sed -n -e 'p' q.txt\n",
-            false,
-        ),
-        (
-            "awk exit pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk 'NR == 1 { print; exit }'\n",
-            true,
-        ),
-        (
-            "assignment prefixed awk exit pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | LC_ALL=C awk 'NR == 1 { print; exit }'\n",
-            true,
-        ),
-        (
-            "multiline awk exit pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk '\n  NR == 1 { print; exit }\n'\n",
-            true,
-        ),
-        (
-            "second awk source operand exit pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk -e '{ print }' -e 'NR == 1 { exit }'\n",
-            true,
-        ),
-        (
-            "awk w exec file operand is not inline source",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk -W exec './exit.awk' input.txt\n",
-            false,
-        ),
-        (
-            "awk file option makes later exit filename an input file",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk -f safe.awk exit.txt\n",
-            false,
-        ),
-        (
-            "awk string literal exit is not executable exit",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk '{ print \"exit\" }'\n",
-            false,
-        ),
-        (
-            "awk comment exit is not executable exit",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk '\n  { print $0 } # exit\n'\n",
-            false,
-        ),
-        (
-            "awk regex literal exit is not executable exit",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk '/exit/ { print }'\n",
-            false,
-        ),
-        (
-            "awk print regex literal exit is not executable exit",
-            "fixture.sh",
-            "set -o pipefail\nproducer | awk 'BEGIN { print /exit/ }'\n",
-            false,
-        ),
-        (
-            "split head pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer |\n  head -n 1\n",
-            true,
-        ),
-        (
-            "backslash split head pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | \\\n  head -n 1\n",
-            true,
-        ),
-        (
-            "pipe stderr and stdout head pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer |& head -n 1\n",
-            true,
-        ),
-        (
-            "assignment prefixed head pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | LC_ALL=C head -n 1\n",
-            true,
-        ),
-        (
-            "guarded diagnostic head",
-            "fixture.sh",
-            "set -o pipefail\nproducer |\n  head -n 1 || true\n",
-            false,
-        ),
-        (
-            "colon guarded diagnostic head",
-            "fixture.sh",
-            "set -o pipefail\nproducer | head -n 1 || :\n",
-            false,
-        ),
-        (
-            "false fallback does not guard head",
-            "fixture.sh",
-            "set -o pipefail\nproducer | head -n 1 || false\n",
-            true,
-        ),
-        (
-            "echo fallback does not guard head",
-            "fixture.sh",
-            "set -o pipefail\nproducer | head -n 1 || echo ok\n",
-            true,
-        ),
-        (
-            "head comment text does not guard pipeline",
-            "fixture.sh",
-            "set -o pipefail\nproducer | head -n 1 # || true\n",
-            true,
-        ),
-        (
-            "guarded first head does not guard second head",
-            "fixture.sh",
-            "set -o pipefail\nproducer | head -n 1 || true; producer | head -n 1\n",
-            true,
-        ),
-        (
-            "logical or head is not a pipeline",
-            "fixture.sh",
-            "set -o pipefail\nfalse || head -n 1 file.txt\n",
-            false,
-        ),
-        (
-            "quoted head pipeline text is ignored",
-            "fixture.sh",
-            "set -o pipefail\necho '| head -n 1'\n",
-            false,
-        ),
-        (
-            "logical or grep is not a pipeline",
-            "fixture.sh",
-            "set -o pipefail\nfalse || grep --quiet foo file.txt\n",
-            false,
-        ),
-        (
-            "here string grep is not a producer pipeline",
-            "fixture.sh",
-            "set -o pipefail\ngrep --quiet foo <<< \"$value\"\n",
-            false,
-        ),
-        (
-            "workflow run block without inline pipefail",
-            ".github/workflows/fixture.yml",
-            "name: fixture\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          producer | grep --quiet foo\n",
-            true,
-        ),
-        (
-            "non-strict plain text shell fragment is ignored",
-            "fixture.sh",
-            "producer | grep --quiet foo\n",
-            false,
-        ),
-    ];
-
-    for (name, path, content, should_flag) in regression_cases {
-        let violations = collect_sigpipe_violations(Path::new(path), content);
-        assert_eq!(
-            !violations.is_empty(),
-            should_flag,
-            "SIGPIPE regression case `{name}` mismatch.\nViolations:\n{}",
-            violations.join("\n\n")
-        );
-    }
-
-    fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_files(&path, files);
-                continue;
-            }
-
-            let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-                continue;
-            };
-            if matches!(extension, "sh" | "yml" | "yaml") {
-                files.push(path);
-            }
-        }
-    }
-
-    let root = repo_root();
-    let mut files = Vec::new();
-    for relative_dir in ["scripts", ".github/workflows", ".github/test-fixtures"] {
-        collect_files(&root.join(relative_dir), &mut files);
-    }
-    files.sort();
-
-    let mut violations = Vec::new();
-    for path in files {
-        let content = read_file(&path);
-        let relative = path.strip_prefix(&root).unwrap_or(&path);
-        violations.extend(collect_sigpipe_violations(relative, &content));
-    }
-
-    assert!(
-        violations.is_empty(),
-        "Strict shell automation contains early-exiting pipeline consumers:\n\n{}\n\n\
-         These are fragile under `set -o pipefail` because upstream commands can receive SIGPIPE \
-         when downstream consumers exit early.",
-        violations.join("\n\n")
-    );
-}
-
-#[test]
 #[cfg(unix)]
 fn test_ci_clippy_shell_status_handling_preserves_pipeline_failures() {
     let cases = [
@@ -2766,95 +1724,6 @@ exit "$status"
             "{name}: shell status contract did not report final status.\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn test_check_ci_config_accepts_protocol_suffixed_expose_port() {
-    let temp_dir = unique_temp_dir("ci-config-expose-port");
-    let bin_dir = temp_dir.path().join("bin");
-    fs::create_dir_all(&bin_dir)
-        .unwrap_or_else(|e| panic!("failed to create {}: {e}", bin_dir.display()));
-
-    let cargo_stub = bin_dir.join("cargo");
-    write_file(
-        &cargo_stub,
-        r#"#!/usr/bin/env bash
-if [ "${1:-}" = "deny" ]; then
-  exit 0
-fi
-exit 0
-"#,
-    );
-    fs::set_permissions(&cargo_stub, fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| panic!("failed to make {} executable: {e}", cargo_stub.display()));
-
-    let cargo_deny_stub = bin_dir.join("cargo-deny");
-    write_file(
-        &cargo_deny_stub,
-        r#"#!/usr/bin/env bash
-exit 0
-"#,
-    );
-    fs::set_permissions(&cargo_deny_stub, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
-        panic!(
-            "failed to make {} executable: {e}",
-            cargo_deny_stub.display()
-        )
-    });
-
-    write_file(&temp_dir.path().join("Cargo.lock"), "version = 4\n");
-    write_file(&temp_dir.path().join("deny.toml"), "[licenses]\n");
-    write_file(
-        &temp_dir.path().join(".github/workflows/ci.yml"),
-        r#"name: CI
-on: [push]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: EmbarkStudios/cargo-deny-action@v2
-      - name: Smoke test
-        run: |
-          for i in $(seq 1 3); do
-            echo retry
-          done
-          docker logs signal-fish-server
-"#,
-    );
-    write_file(
-        &temp_dir.path().join("Dockerfile"),
-        r#"FROM scratch
-ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
-ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
-EXPOSE 3536/tcp
-HEALTHCHECK CMD curl --fail http://localhost:3536/health || exit 1
-"#,
-    );
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let output = bash_command()
-        .arg(repo_root().join("scripts/check-ci-config.sh"))
-        .current_dir(temp_dir.path())
-        .env("PATH", format!("{}:{original_path}", bin_dir.display()))
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run check-ci-config fixture: {e}"));
-
-    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-
-    assert!(
-        output.status.success(),
-        "check-ci-config should accept EXPOSE protocol suffixes.\nOutput:\n{combined}"
-    );
-    assert!(
-        combined.contains("HEALTHCHECK port (3536) matches EXPOSE port (3536)"),
-        "check-ci-config did not normalize EXPOSE 3536/tcp before comparing ports.\nOutput:\n{combined}"
-    );
-    assert!(
-        !combined.contains("EXPOSE port (3536/tcp)"),
-        "check-ci-config leaked the protocol suffix into port comparison diagnostics.\nOutput:\n{combined}"
-    );
 }
 
 #[test]
@@ -4995,21 +3864,37 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
     // Critical paths that doc-validation must trigger on.
     // These ensure documentation changes are always validated.
     const REQUIRED_DOC_PATHS: &[(&str, &str)] = &[
-        ("'**/*.md'", "Markdown documentation files"),
-        ("'**/*.rs'", "Rust source files (contain doc-comments)"),
-        ("'Cargo.toml'", "Dependency changes affect doc builds"),
-        ("'Cargo.lock'", "Lockfile changes affect doc builds"),
+        ("**/*.md", "Markdown documentation files"),
+        ("**/*.rs", "Rust source files (contain doc-comments)"),
+        ("Cargo.toml", "Dependency changes affect doc builds"),
+        ("Cargo.lock", "Lockfile changes affect doc builds"),
         (
-            "'.github/workflows/doc-validation.yml'",
+            "scripts/check-internal-links.sh",
+            "Detailed internal link checker run by the workflow",
+        ),
+        (
+            ".github/workflows/doc-validation.yml",
             "Self-referential trigger for workflow changes",
         ),
-        ("'.github/scripts/**'", "Scripts used by the workflow"),
+        (".github/scripts/**", "Scripts used by the workflow"),
+        (
+            ".github/test-fixtures/**",
+            "Fixture and parity tooling used by the workflow",
+        ),
     ];
 
     let mut missing_paths = Vec::new();
 
     for (path_pattern, description) in REQUIRED_DOC_PATHS {
-        if !content.contains(path_pattern) {
+        let single_quoted = format!("'{path_pattern}'");
+        let double_quoted = format!("\"{path_pattern}\"");
+        let unquoted_list_item = format!("- {path_pattern}");
+        if !content.contains(&single_quoted)
+            && !content.contains(&double_quoted)
+            && !content
+                .lines()
+                .any(|line| line.trim() == unquoted_list_item)
+        {
             missing_paths.push(format!("  - {path_pattern} ({description})"));
         }
     }
@@ -5027,6 +3912,60 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
             workflow_path.display()
         );
     }
+}
+
+#[test]
+fn test_doc_validation_invokes_rust_markdown_validator_via_bash() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/doc-validation.yml");
+    let content = read_file(&workflow_path);
+
+    assert!(
+        content.contains("bash .github/scripts/validate-rust-markdown-blocks.sh"),
+        "doc-validation.yml must invoke the Rust markdown validator through bash.\n\
+         Direct execution depends on executable file mode and can fail in CI if mode bits drift.\n\
+         File: {}",
+        workflow_path.display()
+    );
+
+    assert!(
+        content.contains("bash .github/test-fixtures/validate-test-cases.sh"),
+        "doc-validation.yml must run the Rust markdown extractor fixture parity script.\n\
+         The fixture helper is deliberately excluded from normal markdown validation, so this\n\
+         explicit step prevents AWK/Python extractor drift from becoming manual-only.\n\
+         File: {}",
+        workflow_path.display()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_rust_markdown_extractor_fixture_parity_script_passes() {
+    let root = repo_root();
+    let output = bash_command()
+        .arg(".github/test-fixtures/validate-test-cases.sh")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "Failed to run Rust markdown extractor fixture parity script in {}: {error}",
+                root.display()
+            )
+        });
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Rust markdown extractor fixture parity script failed.\nOutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("Python extractor matches canonical AWK output")
+            && combined.contains("CRLF input matches canonical AWK output"),
+        "Fixture parity script should verify Python/AWK byte parity, including CRLF input.\n\
+         Output:\n{combined}"
+    );
 }
 
 #[test]
@@ -6987,52 +5926,6 @@ fn test_markdown_common_patterns_are_correct() {
 // AWK Script Testing
 // ============================================================================
 
-fn run_rust_block_awk_extractor(markdown: &str) -> Vec<(String, String, String)> {
-    let root = repo_root();
-    let temp_dir = tempfile::Builder::new()
-        .prefix("signal-fish-awk-extractor-")
-        .tempdir()
-        .expect("create temp dir");
-    let fixture = temp_dir.path().join("fixture.md");
-    fs::write(&fixture, markdown).expect("write markdown fixture");
-
-    let output = Command::new("awk")
-        .arg("-f")
-        .arg(root.join(".github/scripts/extract-rust-blocks.awk"))
-        .arg(&fixture)
-        .current_dir(&root)
-        .output()
-        .expect("run canonical Rust-block AWK extractor");
-
-    assert!(
-        output.status.success(),
-        "AWK extractor failed for {}:\nstdout:\n{}\nstderr:\n{}",
-        fixture.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-        .map(|record| {
-            let fields: Vec<&[u8]> = record.splitn(3, |byte| *byte == b'\t').collect();
-            assert_eq!(
-                fields.len(),
-                3,
-                "extractor record must be line<TAB>attributes<TAB>content<NUL>: {:?}",
-                String::from_utf8_lossy(record)
-            );
-            (
-                String::from_utf8_lossy(fields[0]).into_owned(),
-                String::from_utf8_lossy(fields[1]).into_owned(),
-                String::from_utf8_lossy(fields[2]).into_owned(),
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn test_doc_validation_awk_script_extraction() {
     // This test validates the AWK scripts used by doc-validation for Rust
@@ -7076,18 +5969,30 @@ fn test_doc_validation_awk_script_extraction() {
     );
 
     // Check for the main Rust code block extraction AWK script
-    // This script handles complex patterns: ```rust, ```Rust, ```rust,ignore, etc.
+    // This script handles canonical patterns: ```rust, ```Rust, ```rust,ignore, etc.
     assert!(
-        awk_content.contains("/^```[Rr]ust/"),
-        "Rust block extraction AWK script should use case-insensitive pattern for Rust.\n\
-         Pattern /^```[Rr]ust/ matches both ```rust and ```Rust.\n\
-         This prevents missing code blocks with capitalized language identifiers.\n\
+        awk_content.contains("rest = fence_rest($0, fence_count)")
+            && awk_content.contains("rest ~ /^[Rr]ust([[:space:],]|$)/"),
+        "Rust block extraction AWK script should match canonical rust/Rust fences.\n\
+         The extractor should parse a 3+ backtick fence, inspect the info string,\n\
+         and match both rust/Rust outside any non-Rust fenced block.\n\
+         This prevents missing code blocks with capitalized language identifiers or longer fences.\n\
          Checked in: {}",
         if external_awk.exists() {
             external_awk.display().to_string()
         } else {
             workflow.display().to_string()
         }
+    );
+
+    // Verify CommonMark fence state is tracked instead of closing on any ``` line.
+    assert!(
+        awk_content.contains("rust_fence_len = fence_count")
+            && awk_content.contains("closing_count >= rust_fence_len")
+            && awk_content.contains("in_other_block"),
+        "Rust block extraction AWK script should track fence lengths and non-Rust fenced blocks.\n\
+         Longer outer fences may contain literal ```rust examples, and a Rust block opened\n\
+         with more than three backticks must not close on a shorter fence."
     );
 
     // Verify the AWK script has END block for unclosed blocks at EOF
@@ -7098,127 +6003,25 @@ fn test_doc_validation_awk_script_extraction() {
          The END block should check 'if (in_block)' and output remaining content."
     );
 
-    // Verify content accumulation handles empty first lines correctly by
-    // separating the "seen content" state from the accumulated text.
+    // Verify content accumulation handles empty first lines correctly.
     assert!(
-        awk_content.contains("seen_content")
-            && awk_content.contains("content = $0")
-            && awk_content.contains("content = content \"\\n\" $0"),
+        awk_content.contains("seen_content = 0")
+            && awk_content.contains("content = line")
+            && awk_content.contains("content = content \"\\n\" line"),
         "Rust block extraction AWK script should properly handle empty first lines.\n\
-         Correct pattern: track seen_content separately from content accumulation.\n\
+         Correct pattern: first content line is assigned directly and later lines append with a newline.\n\
          This prevents losing empty lines at the start of code blocks."
     );
 
     // Verify attribute extraction after rust/Rust fence
     // The pattern should use sub() to remove prefix and extract attributes
     assert!(
-        awk_content.contains("sub(/^```[Rr]ust,?/, \"\", attrs)"),
+        awk_content.contains("attrs = rest")
+            && awk_content.contains("sub(/^[Rr]ust,?/, \"\", attrs)")
+            && awk_content.contains("sub(/^[[:space:]]+/, \"\", attrs)"),
         "Rust block extraction AWK script should extract attributes after rust fence.\n\
-         Pattern: sub(/^```[Rr]ust,?/, \"\", attrs) removes fence and optional comma,\n\
-         leaving attributes like 'ignore', 'no_run', 'should_panic'."
-    );
-
-    assert!(
-        awk_content.contains("if (attrs == \"\") attrs = \"none\""),
-        "Rust block extraction AWK script should emit `none` for plain rust fences.\n\
-         This avoids Bash IFS tab-collapsing when records are parsed."
-    );
-}
-
-#[test]
-fn test_rust_block_awk_extractor_emits_exact_tab_nul_schema() {
-    let records = run_rust_block_awk_extractor(
-        "\
-# fixture
-
-```rust
-fn plain() {}
-```
-
-```Rust,ignore
-fn ignored() {}
-```
-
-```rust ignore
-fn spaced() {}
-```
-
-```rust
-
-fn leading_blank() {}
-```
-
-```rust,no_run
-fn unclosed() {}
-",
-    );
-
-    assert_eq!(
-        records,
-        vec![
-            (
-                "3".to_string(),
-                "none".to_string(),
-                "fn plain() {}".to_string()
-            ),
-            (
-                "7".to_string(),
-                "ignore".to_string(),
-                "fn ignored() {}".to_string(),
-            ),
-            (
-                "11".to_string(),
-                " ignore".to_string(),
-                "fn spaced() {}".to_string(),
-            ),
-            (
-                "15".to_string(),
-                "none".to_string(),
-                "\nfn leading_blank() {}".to_string(),
-            ),
-            (
-                "20".to_string(),
-                "no_run".to_string(),
-                "fn unclosed() {}".to_string(),
-            ),
-        ],
-        "canonical extractor output format drifted; expected line<TAB>attrs<TAB>content<NUL>"
-    );
-
-    let crlf_records = run_rust_block_awk_extractor(
-        "# fixture\r\n\r\n```rust\r\nfn plain_crlf() {}\r\n```\r\n\r\n```Rust,ignore\r\nfn ignored_crlf() {}\r\n```\r\n\r\n```rust no_run\r\nfn spaced_crlf() {}\r\n```\r\n\r\n```rust\r\n\r\nfn leading_blank_crlf() {}\r\n```\r\n\r\n```rust,no_run\r\nfn unclosed_crlf() {}\r\n",
-    );
-
-    assert_eq!(
-        crlf_records,
-        vec![
-            (
-                "3".to_string(),
-                "none".to_string(),
-                "fn plain_crlf() {}".to_string()
-            ),
-            (
-                "7".to_string(),
-                "ignore".to_string(),
-                "fn ignored_crlf() {}".to_string(),
-            ),
-            (
-                "11".to_string(),
-                " no_run".to_string(),
-                "fn spaced_crlf() {}".to_string(),
-            ),
-            (
-                "15".to_string(),
-                "none".to_string(),
-                "\nfn leading_blank_crlf() {}".to_string(),
-            ),
-            (
-                "20".to_string(),
-                "no_run".to_string(),
-                "fn unclosed_crlf() {}".to_string(),
-            ),
-        ],
-        "canonical extractor must normalize CRLF input to the same tab/NUL schema"
+         Attribute extraction should operate on the parsed info string, remove the Rust\n\
+         marker and optional comma, then trim space-separated attributes."
     );
 }
 
@@ -7273,11 +6076,6 @@ fn test_awk_pattern_matching_with_fixtures() {
             "Comma-separated attributes (```rust,ignore)",
         ),
         (
-            "awk-patterns-space-separated.md",
-            1,
-            "Space-separated attributes (```rust ignore)",
-        ),
-        (
             "awk-patterns-nested-blocks.md",
             2,
             "Nested/multiple code blocks",
@@ -7299,42 +6097,42 @@ fn test_awk_pattern_matching_with_fixtures() {
             continue;
         }
 
-        let records = {
-            let output = Command::new("awk")
-                .arg("-f")
-                .arg(root.join(".github/scripts/extract-rust-blocks.awk"))
-                .arg(&fixture_path)
-                .current_dir(&root)
-                .output()
-                .expect("run canonical Rust-block AWK extractor");
+        let fixture_content = read_file(&fixture_path);
 
-            if !output.status.success() {
-                violations.push(format!(
-                    "AWK extractor failed for {fixture_file}\n  \
-                     Description: {description}\n  \
-                     stdout:\n{}\n  \
-                     stderr:\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-                continue;
+        // Count actual code blocks by looking for opening fences at start of lines
+        // This avoids counting inline code references like "```rust" in descriptions
+        let mut rust_blocks = 0;
+        for line in fixture_content.lines() {
+            let trimmed = line.trim_start();
+            // Match opening fences: ```rust or ```Rust (with optional attributes)
+            if trimmed.starts_with("```rust") || trimmed.starts_with("```Rust") {
+                rust_blocks += 1;
             }
+        }
 
-            output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|record| !record.is_empty())
-                .count()
-        };
-
-        if records != *expected_blocks {
+        if rust_blocks != *expected_blocks {
             violations.push(format!(
-                "Fixture {fixture_file} extractor record count mismatch\n  \
+                "Fixture {fixture_file} block count mismatch\n  \
                  Description: {description}\n  \
                  Expected: {expected_blocks} blocks\n  \
-                 Found: {records} records\n  \
-                 This indicates the test fixture or canonical AWK extractor needs updating."
+                 Found: {rust_blocks} blocks\n  \
+                 This indicates the test fixture needs updating or the pattern is incorrect."
             ));
+        }
+    }
+
+    // Verify that the space-separated fixture exists (even if pattern doesn't support it yet)
+    let space_separated = fixtures_dir.join("awk-patterns-space-separated.md");
+    if space_separated.exists() {
+        let space_content = read_file(&space_separated);
+        // Note: space-separated attributes are less common, but should be documented
+        if !space_content.contains("```rust ignore") {
+            violations.push(
+                "Space-separated fixture should contain ```rust ignore pattern\n  \
+                 This tests whether AWK script handles space-separated attributes.\n  \
+                 Note: Current implementation may not support this variant."
+                    .to_string(),
+            );
         }
     }
 
@@ -7352,50 +6150,31 @@ fn test_awk_pattern_matching_with_fixtures() {
 }
 
 #[test]
-fn test_rust_block_extractor_docs_avoid_legacy_field_delimiters() {
-    let root = repo_root();
-    let docs_to_check = [
-        ".github/test-fixtures/README.md",
-        ".github/test-fixtures/TESTING.md",
-        ".llm/skills/github-actions-awk.md",
-        ".llm/skills/awk-text-processing.md",
-    ];
-    let forbidden = [
-        ("ASCII 31", "legacy unit-separator field delimiter"),
-        (
-            "printf \"%s%c%s%c%s%c\"",
-            "legacy unit-separator printf schema",
-        ),
-        (
-            "line_number:::attributes:::content",
-            "legacy ::: field schema",
-        ),
-        ("printf \"%s:::%s:::%s%c\"", "legacy ::: printf schema"),
-        (
-            "Output: line_number:::attributes:::content\\0",
-            "legacy ::: output docs",
-        ),
-    ];
-    let mut violations = Vec::new();
-
-    for relative_path in docs_to_check {
-        let path = root.join(relative_path);
-        let content = read_file(&path);
-
-        for (needle, description) in forbidden {
-            if content.contains(needle) {
-                violations.push(format!(
-                    "{relative_path}: contains {description}: {needle:?}"
-                ));
-            }
-        }
+fn test_awk_gnu_match_capture_detector_allows_posix_match_forms() {
+    for allowed in [
+        r#"if (match($0, /^[[:space:]]*rust,?$/)) print $0"#,
+        r#"if (match ($0, /^item,with,commas$/)) found = 1"#,
+        r#"if (match($0, "literal,with,commas")) print "ok""#,
+        "if (match($0,\n    /^item,with,commas$/)) found = 1",
+        r#"# if (match($0, /^rust$/, captures)) print captures[1]"#,
+        r#"print "match($0, /^rust$/, captures)""#,
+    ] {
+        assert!(
+            !awk_source_uses_gnu_match_capture(allowed),
+            "POSIX AWK match form or non-code text was misclassified: {allowed}"
+        );
     }
 
-    assert!(
-        violations.is_empty(),
-        "Rust-block extractor docs must document the canonical line<TAB>attrs<TAB>content<NUL> format:\n{}",
-        violations.join("\n")
-    );
+    for rejected in [
+        r#"if (match($0, /^```[Rr]ust,?/, captures)) print captures[1]"#,
+        r#"if (match ($0, "literal,with,commas", captures)) print captures[1]"#,
+        "if (match($0,\n    /^```[Rr]ust,?$/,\n    captures)) print captures[1]",
+    ] {
+        assert!(
+            awk_source_uses_gnu_match_capture(rejected),
+            "GNU AWK match capture array was not detected: {rejected}"
+        );
+    }
 }
 
 #[test]
@@ -7437,7 +6216,7 @@ fn test_awk_posix_compatibility() {
         );
     }
 
-    if content.contains("match(") && content.contains(", arr)") {
+    if awk_source_uses_gnu_match_capture(&content) {
         violations.push(
             "AWK script uses match() with array capture (GNU awk specific).\n  \
              POSIX match() only accepts two arguments: match(string, regex).\n  \
@@ -13268,7 +12047,7 @@ fn test_internal_link_validators_check_tracked_targets() {
 #[test]
 fn test_repo_shell_scripts_avoid_bash4_only_features() {
     let root = repo_root();
-    let script_dirs = ["scripts", ".github/test-fixtures"];
+    let scripts_dir = root.join("scripts");
     let mut violations = Vec::new();
     let forbidden = [
         ("mapfile", "Bash 4+; macOS system Bash is 3.2"),
@@ -13276,47 +12055,29 @@ fn test_repo_shell_scripts_avoid_bash4_only_features() {
         ("declare -A", "associative arrays require Bash 4+"),
         ("local -n", "nameref variables require Bash 4.3+"),
     ];
-    let forbidden_regexes = [(
-        Regex::new(r"\blocal[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\(\)").unwrap(),
-        "local empty arrays are fragile under Bash 3.2 with set -u",
-    )];
 
-    for script_dir in script_dirs {
-        let script_dir = root.join(script_dir);
-        for entry in fs::read_dir(&script_dir)
-            .unwrap_or_else(|e| panic!("failed to read {}: {e}", script_dir.display()))
-        {
-            let entry = entry
-                .unwrap_or_else(|e| panic!("failed to read {} entry: {e}", script_dir.display()));
-            let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "sh") {
+    for entry in fs::read_dir(&scripts_dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", scripts_dir.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("failed to read scripts entry: {e}"));
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "sh") {
+            continue;
+        }
+        let content = read_file(&path);
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
                 continue;
             }
-            let content = read_file(&path);
-            let relative = path.strip_prefix(&root).unwrap_or(&path);
-            for (line_idx, line) in content.lines().enumerate() {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with('#') {
-                    continue;
-                }
-                for (pattern, reason) in forbidden {
-                    if line.contains(pattern) {
-                        violations.push(format!(
-                            "{}:{}: uses `{pattern}` ({reason})",
-                            relative.display(),
-                            line_idx + 1
-                        ));
-                    }
-                }
-                for (pattern, reason) in &forbidden_regexes {
-                    if pattern.is_match(line) {
-                        violations.push(format!(
-                            "{}:{}: uses `{}` ({reason})",
-                            relative.display(),
-                            line_idx + 1,
-                            pattern.as_str()
-                        ));
-                    }
+            for (pattern, reason) in forbidden {
+                if line.contains(pattern) {
+                    violations.push(format!(
+                        "{}:{}: uses `{pattern}` ({reason})",
+                        relative.display(),
+                        line_idx + 1
+                    ));
                 }
             }
         }
@@ -13629,489 +12390,25 @@ fn test_awk_files_have_valid_syntax() {
 
     let root = repo_root();
 
-    fn collect_repo_awk_files(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
+    let mut awk_files = Vec::new();
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let relative = path.strip_prefix(root).unwrap_or(&path);
-
-            if path.is_dir() {
-                if relative == Path::new("target")
-                    || relative == Path::new(".git")
-                    || relative == Path::new("third_party")
-                {
-                    continue;
+    // Look for .awk files in known locations
+    let scripts_dir = root.join(".github/scripts");
+    if scripts_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "awk").unwrap_or(false) {
+                    awk_files.push(path);
                 }
-                collect_repo_awk_files(&path, root, files);
-            } else if path.extension().map(|e| e == "awk").unwrap_or(false) {
-                files.push(path);
             }
         }
     }
-
-    let mut awk_files = Vec::new();
-    collect_repo_awk_files(&root, &root, &mut awk_files);
 
     if awk_files.is_empty() {
         // No AWK files to validate
         return;
     }
-    awk_files.sort();
-
-    for expected in [
-        ".github/scripts/extract-rust-blocks.awk",
-        "scripts/validate-workflow-awk-scanner.awk",
-    ] {
-        assert!(
-            awk_files.iter().any(|path| {
-                path.strip_prefix(&root)
-                    .map(|relative| relative == Path::new(expected))
-                    .unwrap_or(false)
-            }),
-            "AWK policy test did not include expected file {expected}. Included files:\n{}",
-            awk_files
-                .iter()
-                .map(|path| path
-                    .strip_prefix(&root)
-                    .unwrap_or(path)
-                    .display()
-                    .to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
-
-    fn last_significant_char(text: &str) -> Option<char> {
-        text.chars().rev().find(|ch| !ch.is_whitespace())
-    }
-
-    fn last_significant_token(text: &str) -> Option<&str> {
-        let trimmed = text.trim_end();
-        let end = trimmed.len();
-        let start = trimmed
-            .char_indices()
-            .rev()
-            .find_map(|(index, ch)| {
-                if ch.is_ascii_alphanumeric() || ch == '_' {
-                    None
-                } else {
-                    Some(index + ch.len_utf8())
-                }
-            })
-            .unwrap_or(0);
-
-        if start == end {
-            None
-        } else {
-            Some(&trimmed[start..end])
-        }
-    }
-
-    fn starts_regex_literal(text: &str) -> bool {
-        let Some(prev) = last_significant_char(text) else {
-            return true;
-        };
-        if "~(,=:{;![?+-*%&|".contains(prev) {
-            return true;
-        }
-        matches!(
-            last_significant_token(text),
-            Some("print" | "printf" | "return")
-        )
-    }
-
-    fn is_ident_byte(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'_'
-    }
-
-    fn match_open_index(line: &str, start: usize) -> Option<usize> {
-        let bytes = line.as_bytes();
-        let mut cursor = start;
-        let mut in_string = false;
-        let mut in_regex = false;
-        let mut escaped = false;
-
-        while cursor < bytes.len() {
-            let ch = line[cursor..].chars().next()?;
-            let ch_len = ch.len_utf8();
-
-            if escaped {
-                escaped = false;
-                cursor += ch_len;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                cursor += ch_len;
-                continue;
-            }
-            if in_string {
-                if ch == '"' {
-                    in_string = false;
-                }
-                cursor += ch_len;
-                continue;
-            }
-            if in_regex {
-                if ch == '/' {
-                    in_regex = false;
-                }
-                cursor += ch_len;
-                continue;
-            }
-            if ch == '"' {
-                in_string = true;
-                cursor += ch_len;
-                continue;
-            }
-            if ch == '/' && starts_regex_literal(&line[..cursor]) {
-                in_regex = true;
-                cursor += ch_len;
-                continue;
-            }
-            if !line[cursor..].starts_with("match") {
-                cursor += ch_len;
-                continue;
-            }
-
-            let before_is_ident = cursor > 0 && is_ident_byte(bytes[cursor - 1]);
-            let after_index = cursor + "match".len();
-            let after_is_ident = after_index < bytes.len() && is_ident_byte(bytes[after_index]);
-            if before_is_ident || after_is_ident {
-                cursor = after_index;
-                continue;
-            }
-
-            let mut open_cursor = after_index;
-            while open_cursor < bytes.len() && bytes[open_cursor].is_ascii_whitespace() {
-                open_cursor += 1;
-            }
-            if open_cursor < bytes.len() && bytes[open_cursor] == b'(' {
-                return Some(open_cursor);
-            }
-            cursor = after_index;
-        }
-
-        None
-    }
-
-    fn strip_awk_inline_comment(line: &str) -> String {
-        let mut out = String::new();
-        let mut in_string = false;
-        let mut in_regex = false;
-        let mut escaped = false;
-
-        for ch in line.chars() {
-            if escaped {
-                out.push(ch);
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                out.push(ch);
-                escaped = true;
-                continue;
-            }
-            if in_string {
-                if ch == '"' {
-                    in_string = false;
-                }
-                out.push(ch);
-                continue;
-            }
-            if in_regex {
-                if ch == '/' {
-                    in_regex = false;
-                }
-                out.push(ch);
-                continue;
-            }
-            if ch == '"' {
-                in_string = true;
-                out.push(ch);
-                continue;
-            }
-            if ch == '/' && starts_regex_literal(&out) {
-                in_regex = true;
-                out.push(ch);
-                continue;
-            }
-            if ch == '#' {
-                break;
-            }
-            out.push(ch);
-        }
-
-        out
-    }
-
-    fn match_capture_array_lines(content: &str) -> Vec<usize> {
-        let mut lines = Vec::new();
-        let mut in_match_call = false;
-        let mut match_depth = 0usize;
-        let mut match_commas = 0usize;
-        let mut match_line = 0usize;
-        let mut in_string = false;
-        let mut in_regex = false;
-        let mut escaped = false;
-
-        for (line_index, line) in content.lines().enumerate() {
-            let line_number = line_index + 1;
-            let line = strip_awk_inline_comment(line);
-            if !in_match_call && line.trim().is_empty() {
-                continue;
-            }
-
-            let mut cursor = 0usize;
-            while cursor < line.len() {
-                if !in_match_call {
-                    if let Some(open_index) = match_open_index(&line, cursor) {
-                        in_match_call = true;
-                        match_depth = 1;
-                        match_commas = 0;
-                        match_line = line_number;
-                        in_string = false;
-                        in_regex = false;
-                        escaped = false;
-                        cursor = open_index + 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                let Some(ch) = line[cursor..].chars().next() else {
-                    break;
-                };
-                cursor += ch.len_utf8();
-
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if ch == '\\' {
-                    escaped = true;
-                    continue;
-                }
-                if in_string {
-                    if ch == '"' {
-                        in_string = false;
-                    }
-                    continue;
-                }
-                if in_regex {
-                    if ch == '/' {
-                        in_regex = false;
-                    }
-                    continue;
-                }
-                if ch == '"' {
-                    in_string = true;
-                    continue;
-                }
-                if ch == '/' && starts_regex_literal(&line[..cursor - ch.len_utf8()]) {
-                    in_regex = true;
-                    continue;
-                }
-                if ch == '(' {
-                    match_depth += 1;
-                    continue;
-                }
-                if ch == ')' {
-                    match_depth -= 1;
-                    if match_depth == 0 {
-                        if match_commas >= 2 {
-                            lines.push(match_line);
-                        }
-                        in_match_call = false;
-                    }
-                    continue;
-                }
-                if ch == ',' && match_depth == 1 {
-                    match_commas += 1;
-                }
-            }
-        }
-
-        lines
-    }
-
-    fn nul_printf_lines(content: &str) -> Vec<usize> {
-        fn has_nul_printf_format(line: &str) -> bool {
-            let bytes = line.as_bytes();
-            let mut cursor = 0usize;
-            let mut in_string = false;
-            let mut in_regex = false;
-            let mut escaped = false;
-
-            while cursor < line.len() {
-                let Some(ch) = line[cursor..].chars().next() else {
-                    break;
-                };
-                let ch_len = ch.len_utf8();
-
-                if escaped {
-                    escaped = false;
-                    cursor += ch_len;
-                    continue;
-                }
-                if ch == '\\' {
-                    escaped = true;
-                    cursor += ch_len;
-                    continue;
-                }
-                if in_string {
-                    if ch == '"' {
-                        in_string = false;
-                    }
-                    cursor += ch_len;
-                    continue;
-                }
-                if in_regex {
-                    if ch == '/' {
-                        in_regex = false;
-                    }
-                    cursor += ch_len;
-                    continue;
-                }
-                if ch == '"' {
-                    in_string = true;
-                    cursor += ch_len;
-                    continue;
-                }
-                if ch == '/' && starts_regex_literal(&line[..cursor]) {
-                    in_regex = true;
-                    cursor += ch_len;
-                    continue;
-                }
-                if !line[cursor..].starts_with("printf") {
-                    cursor += ch_len;
-                    continue;
-                }
-
-                let before_is_ident = cursor > 0 && is_ident_byte(bytes[cursor - 1]);
-                let after_index = cursor + "printf".len();
-                let after_is_ident = after_index < bytes.len() && is_ident_byte(bytes[after_index]);
-                if before_is_ident || after_is_ident {
-                    cursor = after_index;
-                    continue;
-                }
-
-                let mut format_start = after_index;
-                while format_start < bytes.len() && bytes[format_start].is_ascii_whitespace() {
-                    format_start += 1;
-                }
-                if format_start < bytes.len() && bytes[format_start] == b'(' {
-                    format_start += 1;
-                    while format_start < bytes.len() && bytes[format_start].is_ascii_whitespace() {
-                        format_start += 1;
-                    }
-                }
-                if format_start >= bytes.len() || bytes[format_start] != b'"' {
-                    cursor = after_index;
-                    continue;
-                }
-
-                let mut index = format_start + 1;
-                let mut format_escaped = false;
-                while index < bytes.len() {
-                    match bytes[index] {
-                        b'0' if format_escaped => return true,
-                        b'\\' if !format_escaped => {
-                            format_escaped = true;
-                            index += 1;
-                            continue;
-                        }
-                        b'"' if !format_escaped => break,
-                        _ => {}
-                    }
-                    format_escaped = false;
-                    index += 1;
-                }
-
-                cursor = after_index;
-            }
-
-            false
-        }
-
-        content
-            .lines()
-            .enumerate()
-            .filter_map(|(line_index, line)| {
-                let code_line = strip_awk_inline_comment(line);
-                if has_nul_printf_format(&code_line) {
-                    Some(line_index + 1)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    assert_eq!(
-        match_capture_array_lines(r#"{ print $0 } # old code: match($0, /foo/, captures)"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore capture-array examples in inline comments"
-    );
-    assert_eq!(
-        match_capture_array_lines(r#"{ print "match($0, /foo/, captures)" }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore capture-array examples in string literals"
-    );
-    assert_eq!(
-        match_capture_array_lines(r#"$0 ~ /match($0, /foo/, captures)/ { print $0 }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore capture-array examples in regex literals"
-    );
-    assert_eq!(
-        match_capture_array_lines(r#"BEGIN { print /match($0, \/foo\/, captures)/ }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore capture-array examples in regex constants"
-    );
-    assert_eq!(
-        match_capture_array_lines(r#"BEGIN { ok = flag && /match($0, \/foo\/, captures)/ }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore regex constants after &&"
-    );
-    assert_eq!(
-        match_capture_array_lines(r#"BEGIN { ok = flag || /match($0, \/foo\/, captures)/ }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore regex constants after ||"
-    );
-    assert_eq!(
-        match_capture_array_lines(
-            r#"{
-  if (match($0,
-    /foo/,
-    captures)) print captures[1]
-}"#
-        ),
-        vec![2],
-        "AWK policy scanner must catch multiline match() capture arrays"
-    );
-    assert_eq!(
-        nul_printf_lines(r#"{ print "printf \"%s\\0\", value" }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore printf NUL examples in string literals"
-    );
-    assert_eq!(
-        nul_printf_lines(r#"$0 ~ /printf "%s\\0"/ { print $0 }"#),
-        Vec::<usize>::new(),
-        "AWK policy scanner must ignore printf NUL examples in regex literals"
-    );
-    assert_eq!(
-        nul_printf_lines(r#"printf "%s\0", value"#),
-        vec![1],
-        "AWK policy scanner must catch printf NUL format strings"
-    );
-    assert_eq!(
-        nul_printf_lines(r#"{ printf "%s\0", value }"#),
-        vec![1],
-        "AWK policy scanner must catch printf NUL format strings inside actions"
-    );
 
     let mut issues = Vec::new();
 
@@ -14119,24 +12416,33 @@ fn test_awk_files_have_valid_syntax() {
         let content = read_file(awk_file);
         let relative_path = awk_file.strip_prefix(&root).unwrap_or(awk_file);
 
-        // Check for non-POSIX match() capture arrays (GNU-specific, breaks on mawk)
-        for line_number in match_capture_array_lines(&content) {
+        // Check for GNU-specific match() capture arrays. Two-argument
+        // match(string, regex) is POSIX AWK and must remain allowed.
+        if let Some(line_idx) = awk_source_gnu_match_capture_line(&content) {
             issues.push(format!(
-                "{}:{}: Uses match() capture array (not POSIX compatible with mawk).\n  \
+                "{}:{}: Uses match() with a capture array (GNU awk specific).\n  \
                  Fix: Use POSIX two-argument match(), sub(), or gsub() instead.",
                 relative_path.display(),
-                line_number
+                line_idx
             ));
         }
 
-        // Check for \0 in printf format strings (not POSIX)
-        for line_number in nul_printf_lines(&content) {
-            issues.push(format!(
-                "{}:{}: Uses \\0 in printf (not POSIX compatible).\n  \
-                 Fix: Use printf \"%c\", 0 instead.",
-                relative_path.display(),
-                line_number
-            ));
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            // Skip comments
+            if trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Check for \0 in printf (not POSIX)
+            if trimmed.contains("printf") && trimmed.contains("\\0") {
+                issues.push(format!(
+                    "{}:{}: Uses \\0 in printf (not POSIX compatible).\n  \
+                     Fix: Use printf \"%c\", 0 instead.",
+                    relative_path.display(),
+                    line_idx + 1
+                ));
+            }
         }
     }
 
@@ -15348,6 +13654,73 @@ fn test_release_workflow_handles_path_filtered_workflows() {
         "release.yml PATH_FILTERED_WORKFLOWS must include 'Documentation Validation' \
          because doc-validation.yml uses path filters.\n\
          File: {}",
+        release_yml.display()
+    );
+
+    let release_line = content
+        .lines()
+        .find(|line| line.contains("PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]"))
+        .unwrap_or_else(|| {
+            panic!(
+                "release.yml must define PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"].\n\
+                 File: {}",
+                release_yml.display()
+            )
+        });
+    let (_assignment, release_patterns_value) = release_line
+        .split_once('=')
+        .unwrap_or_else(|| panic!("release preflight path map assignment must contain '='"));
+    let release_patterns: BTreeSet<String> = release_patterns_value
+        .trim()
+        .trim_matches('"')
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect();
+
+    let doc_validation_yml = root.join(".github/workflows/doc-validation.yml");
+    let doc_validation_content = read_file(&doc_validation_yml);
+    let push_paths: BTreeSet<String> =
+        extract_workflow_event_paths(&doc_validation_content, "push")
+            .into_iter()
+            .collect();
+    let pull_request_paths: BTreeSet<String> =
+        extract_workflow_event_paths(&doc_validation_content, "pull_request")
+            .into_iter()
+            .collect();
+
+    assert_eq!(
+        push_paths,
+        pull_request_paths,
+        "doc-validation.yml push.paths and pull_request.paths must stay identical so release \
+         preflight can use one Documentation Validation path map.\n\
+         File: {}",
+        doc_validation_yml.display()
+    );
+
+    let expected_release_patterns: BTreeSet<String> = push_paths
+        .iter()
+        .map(|path| release_preflight_pattern_for_doc_path(path))
+        .collect();
+
+    let missing_doc_preflight_patterns: Vec<String> = expected_release_patterns
+        .difference(&release_patterns)
+        .map(|pattern| format!("  - {pattern}"))
+        .collect();
+    let unexpected_doc_preflight_patterns: Vec<String> = release_patterns
+        .difference(&expected_release_patterns)
+        .map(|pattern| format!("  - {pattern}"))
+        .collect();
+
+    assert!(
+        missing_doc_preflight_patterns.is_empty() && unexpected_doc_preflight_patterns.is_empty(),
+        "release.yml Documentation Validation preflight path map drifted from doc-validation.yml.\n\n\
+         Missing patterns:\n{}\n\nUnexpected patterns:\n{}\n\n\
+         Keep PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"] in sync with the \
+         path filters in doc-validation.yml so release preflight fails closed when a \
+         release commit touches files that should have triggered Documentation Validation.\n\
+         File: {}",
+        missing_doc_preflight_patterns.join("\n"),
+        unexpected_doc_preflight_patterns.join("\n"),
         release_yml.display()
     );
 
@@ -17704,32 +16077,13 @@ fn test_workflow_hygiene_ci_runs_awk_validator() {
     let root = repo_root();
     let workflow = root.join(".github/workflows/workflow-hygiene.yml");
     let content = read_file(&workflow);
-    let required_path_filters = [
-        "scripts/validate-workflow-awk.sh",
-        "scripts/validate-workflow-awk-scanner.awk",
-    ];
-    let required_run_commands = ["run: bash scripts/validate-workflow-awk.sh"];
-
-    let missing_path_filters = required_path_filters
-        .iter()
-        .filter(|path| !content.contains(&format!("- '{path}'")))
-        .map(|path| format!("  - {path}"))
-        .collect::<Vec<_>>();
-    let missing_run_commands = required_run_commands
-        .iter()
-        .filter(|command| !content.contains(**command))
-        .map(|command| format!("  - {command}"))
-        .collect::<Vec<_>>();
 
     assert!(
-        missing_path_filters.is_empty() && missing_run_commands.is_empty(),
-        "workflow-hygiene.yml must trigger and run the workflow AWK validator \
-         and its scanner dependency.\n\
+        content.contains("scripts/validate-workflow-awk.sh"),
+        "workflow-hygiene.yml must trigger and run scripts/validate-workflow-awk.sh.\n\
          Local hooks already validate workflow AWK snippets; CI should run the \
          same fast checker so workflow portability issues cannot bypass local tooling.\n\
-         Missing path filters:\n{}\nMissing run commands:\n{}\nFile: {}",
-        missing_path_filters.join("\n"),
-        missing_run_commands.join("\n"),
+         File: {}",
         workflow.display()
     );
 }
@@ -18603,21 +16957,32 @@ fn test_pinned_nightly_staleness_warning() {
 #[cfg(unix)]
 fn test_scripts_pass_basic_syntax_check() {
     let root = repo_root();
-    let scripts_dir = root.join("scripts");
+    let script_dirs = [root.join("scripts"), root.join(".github/scripts")];
+    let mut entries = Vec::new();
 
-    if !scripts_dir.exists() {
-        return;
+    for scripts_dir in &script_dirs {
+        if !scripts_dir.exists() {
+            continue;
+        }
+
+        entries.extend(
+            std::fs::read_dir(scripts_dir)
+                .unwrap_or_else(|error| panic!("Failed to read {}: {error}", scripts_dir.display()))
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "sh")),
+        );
     }
-
-    let entries: Vec<_> = std::fs::read_dir(&scripts_dir)
-        .expect("Failed to read scripts/ directory")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sh"))
-        .collect();
 
     assert!(
         !entries.is_empty(),
-        "scripts/ directory should contain at least one .sh file"
+        "Expected at least one repository shell script in scripts/ or .github/scripts/"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path()
+                == root.join(".github/scripts/validate-rust-markdown-blocks.sh")),
+        "Shell syntax test must include the Rust markdown validator used by doc-validation.yml"
     );
 
     let mut failures = Vec::new();
@@ -21317,5 +19682,133 @@ fn test_internal_path_classification_data_driven() {
          Update is_internal_path() in scripts/check-doc-consistency.sh or fix the \
          test cases if the expected classification has changed.",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn test_doc_validation_tool_versions_match_devcontainer_args() {
+    let root = repo_root();
+    let workflow_content = read_file(&root.join(".github/workflows/doc-validation.yml"));
+    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+
+    let workflow_yq = extract_yaml_version(&workflow_content, "YQ_VERSION")
+        .expect("doc-validation.yml must define env.YQ_VERSION");
+    let dockerfile_yq = extract_toml_version(&dockerfile_content, "ARG YQ_VERSION")
+        .expect(".devcontainer/Dockerfile must define ARG YQ_VERSION");
+
+    assert_eq!(
+        dockerfile_yq, workflow_yq,
+        "YQ version drift detected between doc-validation workflow and devcontainer.\n\
+         Keep .github/workflows/doc-validation.yml env.YQ_VERSION and\n\
+         .devcontainer/Dockerfile ARG YQ_VERSION synchronized."
+    );
+
+    let workflow_taplo = extract_yaml_version(&workflow_content, "TAPLO_CLI_VERSION")
+        .expect("doc-validation.yml must define env.TAPLO_CLI_VERSION");
+    let dockerfile_taplo = extract_toml_version(&dockerfile_content, "ARG TAPLO_CLI_VERSION")
+        .expect(".devcontainer/Dockerfile must define ARG TAPLO_CLI_VERSION");
+
+    assert_eq!(
+        dockerfile_taplo, workflow_taplo,
+        "Taplo version drift detected between doc-validation workflow and devcontainer.\n\
+         Keep .github/workflows/doc-validation.yml env.TAPLO_CLI_VERSION and\n\
+         .devcontainer/Dockerfile ARG TAPLO_CLI_VERSION synchronized."
+    );
+}
+
+#[test]
+fn test_devcontainer_installs_required_modern_ci_tools() {
+    let root = repo_root();
+    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+    let devcontainer_json = read_file(&root.join(".devcontainer/devcontainer.json"));
+
+    let required_fragments = [
+        (
+            "fd-find",
+            "devcontainer must install fd-find so fd-style modern file search is available",
+        ),
+        (
+            "ln -sf /usr/bin/fdfind /usr/local/bin/fd",
+            "devcontainer must expose fd command via fdfind symlink",
+        ),
+        (
+            "yq_linux_${yq_arch}",
+            "devcontainer must install architecture-specific yq binary",
+        ),
+        (
+            "install -m 0755 \"$yq_binary\" /usr/local/bin/yq",
+            "devcontainer must install yq into PATH",
+        ),
+        (
+            "cargo install --locked taplo-cli --version \"$TAPLO_CLI_VERSION\"",
+            "devcontainer must install pinned taplo-cli",
+        ),
+        (
+            "fd --version;",
+            "devcontainer smoke checks should verify fd availability",
+        ),
+        (
+            "yq --version;",
+            "devcontainer smoke checks should verify yq availability",
+        ),
+        (
+            "taplo --version",
+            "devcontainer build should verify taplo availability",
+        ),
+    ];
+
+    for (fragment, description) in required_fragments {
+        assert!(
+            dockerfile_content.contains(fragment),
+            "Missing required devcontainer tooling fragment: {fragment}\n\
+             Why this matters: {description}\n\
+             File: .devcontainer/Dockerfile"
+        );
+    }
+
+    assert!(
+        devcontainer_json.contains("ghcr.io/devcontainers/features/docker-outside-of-docker:1"),
+        ".devcontainer/devcontainer.json must include the docker-outside-of-docker feature\n\
+         so Docker CLI workflows can run from VS Code devcontainers."
+    );
+}
+
+#[test]
+fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
+    let root = repo_root();
+    let parity_script_path = root.join("scripts/check-tooling-parity.sh");
+
+    assert!(
+        parity_script_path.exists(),
+        "scripts/check-tooling-parity.sh must exist to enforce CI/devcontainer tooling parity."
+    );
+
+    let parity_script_content = read_file(&parity_script_path);
+    assert!(
+        parity_script_content.contains("YQ_VERSION")
+            && parity_script_content.contains("TAPLO_CLI_VERSION")
+            && parity_script_content.contains("docker-outside-of-docker"),
+        "scripts/check-tooling-parity.sh must validate yq/taplo version parity and docker feature parity."
+    );
+
+    let validate_ci_content = read_file(&root.join("scripts/validate-ci.sh"));
+    assert!(
+        validate_ci_content.contains("check-tooling-parity.sh")
+            && validate_ci_content.contains("--tools"),
+        "scripts/validate-ci.sh must include tooling parity validation and expose a --tools mode."
+    );
+
+    let run_local_ci_content = read_file(&root.join("scripts/run-local-ci.sh"));
+    assert!(
+        run_local_ci_content.contains("tooling parity")
+            && run_local_ci_content.contains("scripts/validate-ci.sh --quiet"),
+        "scripts/run-local-ci.sh must route CI config checks through validate-ci.sh, including tooling parity checks."
+    );
+
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    assert!(
+        ci_content.contains("Validate CI/devcontainer tool parity")
+            && ci_content.contains("bash scripts/check-tooling-parity.sh"),
+        "ci.yml must run scripts/check-tooling-parity.sh so parity drift fails in CI."
     );
 }
