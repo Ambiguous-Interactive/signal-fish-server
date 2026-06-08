@@ -143,6 +143,7 @@ scripts/check-llm-file-sizes.sh
 scripts/check-llm-example-files.sh
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 
 # 3. Hook/local-policy test suites (run before handoff; hooks stay fast)
 cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
@@ -162,9 +163,9 @@ that validate script output, internal path classifications, and CI config
 consistency. A change that passes broad Rust tests alone may still fail hook or
 policy guards if script output or policy configuration changed. Always verify
 the full chain. Git hooks themselves stay sub-second and inspect the staged Git
-index; the `-Worktree` preflight lets agents run the same cheap checks on
-unstaged work before handoff. Agents and local CI are responsible for catching
-semantic failures before the hook is ever reached.
+index or pushed commits; the `-Worktree` preflights let agents run the same cheap
+checks on unstaged workflow/hook policy work before handoff. Agents and local CI
+are responsible for catching semantic failures before the hook is ever reached.
 
 ---
 

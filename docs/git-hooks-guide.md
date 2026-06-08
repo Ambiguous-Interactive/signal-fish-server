@@ -94,13 +94,14 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
 
 `scripts/run-local-ci.sh` owns slower policy checks including hook readiness,
-worktree hook preflight, LLM file-size/example policies, markdownlint, workflow
-hygiene, doc/changelog consistency, doc policy tests, Dockerfile portability,
-advisory checks, and README badge checks.
+worktree hook preflights, LLM file-size/example policies, markdownlint,
+workflow hygiene, doc/changelog consistency, doc policy tests, Dockerfile
+portability, advisory checks, and README badge checks.
 
 ## Markdownlint
 

@@ -49,8 +49,9 @@ performance, debugging hook failures, or validating hook permissions in CI.
   `#[cfg(test)]` or direct test-function ranges.
 - Production `.expect()` / `.unwrap()` policy belongs in `scripts/check-no-panics.sh`,
   local CI, and CI. Do not put it in pre-commit.
-- Agents must run `scripts/hooks/pre-commit.ps1 -Worktree` before handoff; the
-  actual Git hook remains staged-index only.
+- Agents must run `scripts/hooks/pre-commit.ps1 -Worktree` and
+  `scripts/hooks/pre-push.ps1 -Worktree` before handoff; the actual Git hooks
+  remain staged-index and pushed-commit scoped.
 - When production Rust files are staged, run only the code-path last-resort
   guards and stop; metadata guards run for non-production-Rust commits so mixed
   code/docs changes stay under budget.
@@ -94,6 +95,7 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
 

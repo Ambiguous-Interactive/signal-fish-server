@@ -32,7 +32,7 @@ or when reviewing own work for correctness.
 ## TL;DR
 
 - Run cargo check → clippy → test → fmt after every change
-- Run worktree hook preflight before handoff; do not rely on staged-hook dry runs
+- Run worktree hook preflights before handoff; do not rely on staged/push hook dry runs
 - Use Deep Review checklist for significant changes
 - Walk the "Am I Done?" decision tree before committing
 - Never modify test expectations to make tests pass
@@ -117,6 +117,9 @@ For changes in `.github/workflows/` or CI configuration:
 - [ ] **Hash files exist**: Files in `hashFiles()` exist (Cargo.lock for Rust, not requirements.txt)
 - [ ] **Pinned versions recent**: Action SHAs <1 year old, nightly toolchains <6 months old
 - [ ] **Documentation complete**: Workflow has header comment, pinned versions have update criteria
+- [ ] **Local scripts use interpreters**: Workflow `run:` commands use `bash`,
+  `pwsh -File`, `awk -f`, or `node` for repo scripts, never direct
+  `scripts/foo.sh` / `./scripts/foo.sh` execution
 - [ ] **MSRV consistency**: If Rust version changed, updated in ALL files (`Cargo.toml`, `rust-toolchain.toml`,
 
   clippy.toml, Dockerfile)
@@ -194,8 +197,10 @@ New tests for new behavior? ─── NO ──► Add tests
 Policy scripts pass? ─── NO ──► Fix doc-consistency / workflow-hygiene / LLM issues
     │ YES
     ▼
-Worktree hook preflight pass? ─── NO ──► Run: pwsh -NoLogo -NoProfile -NonInteractive
-    │ YES                                  -File scripts/hooks/pre-commit.ps1 -Worktree
+Worktree hook preflights pass? ─── NO ──► Run: pwsh -NoLogo -NoProfile -NonInteractive
+    │ YES                                   -File scripts/hooks/pre-commit.ps1 -Worktree
+    │                                       pwsh -NoLogo -NoProfile -NonInteractive
+    │                                       -File scripts/hooks/pre-push.ps1 -Worktree
     ▼
 Hook test suites pass? ─── NO ──► Run: cargo test --locked --test doc_consistency_*
     │ YES                          --test ci_config_tests

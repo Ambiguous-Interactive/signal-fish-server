@@ -2208,7 +2208,7 @@ fn test_docs_deploy_requirements_file_exists() {
 }
 
 #[test]
-fn test_scripts_are_executable() {
+fn test_workflow_run_steps_invoke_local_scripts_through_interpreters() {
     // Workflow scripts must be invoked through an interpreter instead of
     // relying on executable-bit metadata. This keeps CI robust across local
     // filesystems, checkout modes, and Windows/macOS/Linux contributors.
@@ -15379,6 +15379,78 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_availab
 }
 
 #[test]
+fn test_pre_push_workflow_direct_script_detector_matches_assignment_edge_cases_when_pwsh_available()
+{
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r##"
+                . ./scripts/hooks/pre-push.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+                function Get-Violations([string]$content) {
+                    $violations = [System.Collections.Generic.List[string]]::new()
+                    Test-WorkflowContentForDirectScripts -File "fixture.yml" -Content $content -Violations $violations
+                    return @($violations)
+                }
+
+                $assignmentOnly = @'
+jobs:
+  preflight:
+    steps:
+      - run: |
+          PATH_FILTERED_WORKFLOWS["Documentation Validation"]="*.md *.rs scripts/check-internal-links.sh .github/workflows/doc-validation.yml"
+'@
+                Assert (@(Get-Violations $assignmentOnly).Count -eq 0) "assignment-only workflow lines are data and must not be treated as direct script invocations"
+
+                $directScript = @'
+jobs:
+  test:
+    steps:
+      - run: scripts/check-internal-links.sh --all
+'@
+                Assert (@(Get-Violations $directScript).Count -eq 1) "direct local script execution should be rejected"
+
+                $interpreterScript = @'
+jobs:
+  test:
+    steps:
+      - run: bash scripts/check-internal-links.sh --all
+'@
+                Assert (@(Get-Violations $interpreterScript).Count -eq 0) "interpreter-invoked local scripts should be accepted"
+
+                $commandStringScript = @'
+jobs:
+  test:
+    steps:
+      - run: bash -c './scripts/check-internal-links.sh --all'
+'@
+                Assert (@(Get-Violations $commandStringScript).Count -eq 1) "bash -c still relies on the script executable bit and should be rejected"
+            "##,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell pre-push detector test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "PowerShell pre-push workflow detector should match Rust detector edge cases.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -15464,6 +15536,8 @@ fn after_lifetime_helper() {
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("prod cfg not")'))) "cfg(not(test)) should not be test code"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("any test or feature prod")'))) "cfg(any(test, feature)) can compile in production and should not be test-only"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("not any test or feature prod")'))) "cfg(not(any(test, feature))) can compile in production and should not be test-only"
+                Assert (Test-RustCfgExpressionRequiresTest -Expression 'any(test, test)') "cfg(any(test, test)) should be test-only"
+                Assert (Test-RustCfgExpressionRequiresTest -Expression 'any(all(test, feature = "x"), all(test, feature = "y"))') "nested any/all expressions that all require test should be test-only"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("commented attr prod")'))) "commented cfg(test) text should not mark production as test code"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("after lifetime prod")'))) "lifetimes in cfg(test) items should not leak test range to following production items"
 
@@ -15924,7 +15998,7 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
     assert!(
         content.contains("[switch]$Worktree")
             && content.contains("Get-WorktreeChangedFiles")
-            && content.contains("\"ls-files\", \"--others\", \"--exclude-standard\", \"-z\"")
+            && content.contains("\"status\", \"--porcelain=v1\", \"-z\"")
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
             && content.contains("HookPolicyChangedFiles")
             && content.contains("Hook speed policy")
@@ -16029,7 +16103,9 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
             && content.contains("Test-CommandTextForDirectScript")
             && content.contains("Normalize-CommandText")
             && content.contains("Normalize-LocalScriptToken")
+            && content.contains("Test-ShellAssignmentOnly")
             && content.contains("Test-InterpreterToken")
+            && content.contains("HookBudgetMs")
             && content.contains("runBlockIndent"),
         "pre-push runner must keep a workflow direct-script invocation guard that \
          reads pushed commit content, scans only run commands, and permits local \
@@ -16122,10 +16198,14 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
             && runner.contains("--remotes=$RemoteName")
             && runner.contains("\"rev-list\", \"$RemoteSha..$LocalSha\"")
             && runner.contains("Add-ChangedFilesFromCommits")
+            && runner.contains("[switch]$Worktree")
+            && runner.contains("Get-ChangedFilesForWorktreePreflight")
             && runner.contains("Test-WorkflowDirectScriptInvocations"),
         "pre-push runner must inspect all introduced commits for existing refs, \
          scope new-branch discovery to the push target remote, and run fast \
-         workflow policy checks without invoking cargo tests."
+         workflow policy checks without invoking cargo tests. It must also expose \
+         a worktree preflight mode so agents/local CI catch push-policy failures \
+         before Git hooks are the last resort."
     );
 }
 
@@ -16153,6 +16233,28 @@ fn test_pre_push_hook_is_executable() {
          Fix: chmod +x .githooks/pre-push && git update-index --chmod=+x .githooks/pre-push",
         hook_path.display()
     );
+}
+
+#[test]
+fn test_hook_and_script_line_endings_are_repository_enforced() {
+    let root = repo_root();
+    let attributes_path = root.join(".gitattributes");
+    assert!(
+        attributes_path.exists(),
+        ".gitattributes must enforce hook and script line endings across native platforms."
+    );
+
+    let content = read_file(&attributes_path);
+    for expected in [
+        ".githooks/* text eol=lf",
+        "*.sh text eol=lf",
+        "*.ps1 text eol=lf",
+    ] {
+        assert!(
+            content.contains(expected),
+            ".gitattributes must contain `{expected}` so Git hook wrappers and scripts keep LF endings."
+        );
+    }
 }
 
 #[test]
@@ -16392,10 +16494,15 @@ fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
     assert!(
         content.contains("check-hook-readiness.ps1")
             && content.contains("scripts/hooks/pre-commit.ps1 -Worktree")
+            && content.contains("scripts/hooks/pre-push.ps1 -Worktree")
+            && content.contains("grep -qE")
+            && content.contains("WARN:")
             && content.contains("hook-readiness")
-            && content.contains("pre-commit-preflight"),
-        "run-local-ci.sh must run hook readiness and a worktree-scoped pre-commit \
-         preflight so agents catch cheap hook failures before staging or committing."
+            && content.contains("pre-commit-preflight")
+            && content.contains("pre-push-preflight"),
+        "run-local-ci.sh must run hook readiness plus worktree-scoped pre-commit \
+         and pre-push preflights so agents catch cheap hook failures before \
+         staging, committing, or pushing."
     );
 
     assert!(

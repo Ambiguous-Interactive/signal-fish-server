@@ -173,7 +173,7 @@ sub(/pattern/, "", var)       # Use sub() instead of match() for extraction
 
 | Scenario                       | Pattern Type | Example                | Rationale                      |
 |--------------------------------|--------------|------------------------|--------------------------------|
-| Code fence detection           | Token boundary | `/^```+[Rr]ust([[:space:],]|$)/` | Flexible attribute handling without overmatching |
+| Code fence detection           | Token boundary | `/^```+[Rr]ust([[:space:],]\|$)/` | Flexible attribute handling without overmatching |
 | Closing fence                  | Exact        | `/^```$/`              | Must match exactly (no prefix) |
 | Language detection (no attrs)  | Exact        | `/^```Rust$/`          | Only plain code blocks         |
 | Strict validation              | Exact        | `/^```Rust,ignore$/`   | Enforce specific format        |

@@ -100,7 +100,7 @@ run_check() {
         echo -e "${RED}✗ FAIL${NC}: $name"
         FAILED_CHECKS+=("$name")
         echo ""
-        return 1
+        return 0
     fi
 }
 
@@ -116,6 +116,9 @@ run_check_quiet() {
     local output
     if output=$("${cmd[@]}" 2>&1); then
         echo -e "${GREEN}✓ PASS${NC}: $name"
+        if grep -qE '(^|\]) WARN(:|])|WARN:' <<< "$output"; then
+            echo "$output"
+        fi
         PASSED_CHECKS+=("$name")
         echo ""
         return 0
@@ -124,7 +127,7 @@ run_check_quiet() {
         echo "$output"
         FAILED_CHECKS+=("$name")
         echo ""
-        return 1
+        return 0
     fi
 }
 
@@ -202,6 +205,9 @@ if command -v pwsh > /dev/null 2>&1; then
 
     run_check_quiet "pre-commit-preflight" "Running fast worktree-scoped pre-commit policies" \
         pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+
+    run_check_quiet "pre-push-preflight" "Running fast worktree-scoped pre-push policies" \
+        pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 else
     echo -e "${RED}✗ FAIL${NC}: hook-readiness (PowerShell 7+ 'pwsh' not found)"
     echo ""

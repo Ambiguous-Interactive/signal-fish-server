@@ -135,7 +135,7 @@ sub(/^prefix/, "", attrs)        # Remove prefix, keep rest
 
 | Scenario | Pattern Type | Example |
 |----------|--------------|---------|
-| Code fence detection | Token boundary | `/^```+[Rr]ust([[:space:],]|$)/` |
+| Code fence detection | Token boundary | `/^```+[Rr]ust([[:space:],]\|$)/` |
 | Closing fence | Exact | `/^```$/` |
 | Strict validation | Exact | `/^```Rust,ignore$/` |
 

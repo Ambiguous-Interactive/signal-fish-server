@@ -61,6 +61,7 @@ if git config --local core.hooksPath "$DESIRED" 2>/dev/null; then
     log "  cargo clippy --locked --all-targets --all-features -- -D warnings"
     log "  cargo test --locked --all-features"
     log "  pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree"
+    log "  pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree"
     log "  ./scripts/run-local-ci.sh"
     log ""
     log "Verify or repair hook setup:"

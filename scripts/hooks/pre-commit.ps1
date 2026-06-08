@@ -1,7 +1,8 @@
 #requires -Version 7.0
 param(
     [switch]$SourceOnly,
-    [switch]$Worktree
+    [switch]$Worktree,
+    [switch]$EnforceBudget
 )
 
 Set-StrictMode -Version Latest
@@ -130,15 +131,29 @@ function Get-WorktreeChangedFiles {
 
     $orderedPaths = [System.Collections.Generic.List[string]]::new()
     $seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $statusArgs = @("status", "--porcelain=v1", "-z", "--") + $Pathspecs
+    $result = Invoke-Git -Arguments $statusArgs
+    if ([string]::IsNullOrEmpty($result.Stdout)) {
+        return @()
+    }
 
-    $cachedArgs = @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $Pathspecs
-    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $cachedArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
+    $records = @($result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries))
+    for ($index = 0; $index -lt $records.Count; $index++) {
+        $record = $records[$index]
+        if ($record.Length -lt 4) {
+            continue
+        }
 
-    $worktreeArgs = @("diff", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $Pathspecs
-    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $worktreeArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
+        $status = $record.Substring(0, 2)
+        $path = $record.Substring(3)
+        if ($seenPaths.Add($path)) {
+            [void]$orderedPaths.Add($path)
+        }
 
-    $untrackedArgs = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
-    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $untrackedArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths
+        if ($status[0] -in @([char]"R", [char]"C") -or $status[1] -in @([char]"R", [char]"C")) {
+            $index++
+        }
+    }
 
     foreach ($path in $orderedPaths) {
         $path
@@ -646,7 +661,7 @@ function Split-RustCfgArguments {
         [void]$arguments.Add($tail)
     }
 
-    Write-Output -NoEnumerate $arguments
+    $arguments.ToArray()
 }
 
 function Test-RustCfgExpressionRequiresTest {
@@ -1918,24 +1933,29 @@ function New-WorktreeSkillsIndexContent {
     }
 
     $paths = [string[]]@(
-        Get-ChildItem -LiteralPath $skillsRoot -Filter "*.md" -File |
-            Where-Object { $_.Name -ne "index.md" } |
-            ForEach-Object { ConvertTo-GitRelativePath -Path $_.FullName }
+        [System.IO.Directory]::EnumerateFiles($skillsRoot, "*.md", [System.IO.SearchOption]::TopDirectoryOnly) |
+            ForEach-Object {
+                $fileName = [System.IO.Path]::GetFileName($_)
+                if ($fileName -ne "index.md") {
+                    ".llm/skills/$fileName"
+                }
+            }
     )
     [array]::Sort($paths, [System.StringComparer]::Ordinal)
 
     foreach ($path in $paths) {
         $fileName = Get-GitPathFileName -Path $path
         $title = ""
-        $content = Get-WorktreeText -Path $path
-        if ($null -eq $content) {
-            continue
-        }
-        foreach ($line in $content -split "`r?`n") {
-            if ($line.StartsWith("# Skill:")) {
-                $title = $line.Substring("# Skill:".Length).Trim()
-                break
+        $absolutePath = Join-Path $script:RepoRoot $path
+        try {
+            foreach ($line in [System.IO.File]::ReadLines($absolutePath)) {
+                if ($line.StartsWith("# Skill:")) {
+                    $title = $line.Substring("# Skill:".Length).Trim()
+                    break
+                }
             }
+        } catch {
+            continue
         }
         if ([string]::IsNullOrWhiteSpace($title)) {
             [void]$lines.Add("- [$fileName](./$fileName)")
@@ -1947,7 +1967,83 @@ function New-WorktreeSkillsIndexContent {
     ($lines -join "`n") + "`n"
 }
 
+function Test-WorktreeSkillsIndexDefinitelyFresh {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedSkillFiles)
+
+    if ($ChangedSkillFiles.Count -eq 0) {
+        return $false
+    }
+
+    if ($ChangedSkillFiles -contains ".llm/skills/index.md") {
+        return $false
+    }
+
+    $trackedFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($file in (Get-IndexFiles -Pathspecs $ChangedSkillFiles)) {
+        [void]$trackedFiles.Add($file)
+    }
+    foreach ($file in $ChangedSkillFiles) {
+        if (-not $trackedFiles.Contains($file)) {
+            return $false
+        }
+    }
+
+    $fileListChanges = Invoke-Native -FileName "git" -Arguments (@("diff", "--name-only", "--diff-filter=ACDRTUXB", "HEAD", "--") + $ChangedSkillFiles)
+    if ($fileListChanges.ExitCode -ne 0) {
+        if ($fileListChanges.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+            return $false
+        }
+        throw "git diff skill file-list check failed:`n$($fileListChanges.Output)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($fileListChanges.Stdout)) {
+        return $false
+    }
+
+    $headTitles = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+    $headTitleResult = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", "^# Skill:", "HEAD", "--") + $ChangedSkillFiles)
+    if ($headTitleResult.ExitCode -eq 1) {
+        return $false
+    }
+    if ($headTitleResult.ExitCode -ne 0) {
+        if ($headTitleResult.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+            return $false
+        }
+        throw "git grep skill title check failed:`n$($headTitleResult.Output)"
+    }
+
+    foreach ($rawLine in $headTitleResult.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $line = $rawLine.TrimEnd("`r")
+        $match = [regex]::Match($line, "^HEAD:(?<file>.+?):\d+:# Skill:\s*(?<title>.*)$")
+        if ($match.Success) {
+            $headTitles[$match.Groups["file"].Value] = $match.Groups["title"].Value.Trim()
+        }
+    }
+
+    foreach ($file in $ChangedSkillFiles) {
+        if (-not $headTitles.ContainsKey($file)) {
+            return $false
+        }
+
+        $worktreeTitle = ""
+        $absolutePath = Join-Path $script:RepoRoot $file
+        foreach ($line in [System.IO.File]::ReadLines($absolutePath)) {
+            if ($line.StartsWith("# Skill:")) {
+                $worktreeTitle = $line.Substring("# Skill:".Length).Trim()
+                break
+            }
+        }
+        if (-not [System.StringComparer]::Ordinal.Equals($headTitles[$file], $worktreeTitle)) {
+            return $false
+        }
+    }
+
+    $true
+}
+
 function Repair-SkillsIndexIfNeeded {
+    $changedSkillFiles = [string[]]@($script:StagedFiles | Where-Object {
+            $_.StartsWith(".llm/skills/") -and $_.EndsWith(".md")
+        })
     $triggered = @($script:StagedFiles | Where-Object {
             $_ -eq "scripts/generate-skills-index.sh" -or
             ($_.StartsWith(".llm/skills/") -and $_.EndsWith(".md"))
@@ -1958,6 +2054,14 @@ function Repair-SkillsIndexIfNeeded {
     }
 
     if ($script:InspectWorktree) {
+        if (
+            ($script:StagedFiles -notcontains "scripts/generate-skills-index.sh") -and
+            (Test-WorktreeSkillsIndexDefinitelyFresh -ChangedSkillFiles $changedSkillFiles)
+        ) {
+            Pass "Skills index freshness"
+            return
+        }
+
         try {
             $expected = New-WorktreeSkillsIndexContent
         } catch {
@@ -2088,6 +2192,9 @@ function Complete-PreCommit {
         } else {
             Write-Host "[pre-commit] WARN: runtime $($script:PreCommitTimer.ElapsedMilliseconds)ms exceeded ${script:HookBudgetMs}ms target."
         }
+        if ($EnforceBudget) {
+            Fail "Hook runtime budget" "Runtime $($script:PreCommitTimer.ElapsedMilliseconds)ms exceeded ${script:HookBudgetMs}ms target."
+        }
     }
 
     if ($script:Failed -gt 0) {
@@ -2107,17 +2214,19 @@ function Complete-PreCommit {
 $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
 Set-Location $script:RepoRoot
 $script:InspectWorktree = [bool]$Worktree
-$productionRustPathspecs = @("src/**/*.rs", "src/*.rs")
-$script:HookPolicyChangedFiles = [string[]]@(if ($script:InspectWorktree) {
-    Get-WorktreeChangedFiles -Pathspecs $script:HookPolicyFiles
-} else {
-    Get-StagedFiles -Pathspecs $script:HookPolicyFiles
-})
-$script:StagedFiles = if ($script:InspectWorktree) {
-    @(Get-WorktreeChangedFiles -Pathspecs $productionRustPathspecs)
-} else {
-    @(Get-StagedFiles -Pathspecs $productionRustPathspecs)
-}
+$worktreePolicyPathspecs = @(
+    "src",
+    ".llm",
+    "README.md",
+    "scripts/generate-skills-index.sh"
+) + $script:HookPolicyFiles
+$allChangedFiles = [string[]]@(if ($script:InspectWorktree) {
+        Get-WorktreeChangedFiles -Pathspecs $worktreePolicyPathspecs
+    } else {
+        Get-StagedFiles
+    })
+$script:HookPolicyChangedFiles = [string[]]@($allChangedFiles | Where-Object { $script:HookPolicyFiles -contains $_ })
+$script:StagedFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
 
 if ($script:InspectWorktree) {
     Write-Step "Running fast worktree preflight checks..."
@@ -2133,7 +2242,7 @@ if ($hasProductionRust) {
     Complete-PreCommit
 }
 
-$script:StagedFiles = if ($script:InspectWorktree) { @(Get-WorktreeChangedFiles) } else { @(Get-StagedFiles) }
+$script:StagedFiles = $allChangedFiles
 if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
 if (-not (Invoke-Check "Rust panic patterns" { Test-RustAddedPanicPatterns })) { Complete-PreCommit }
 

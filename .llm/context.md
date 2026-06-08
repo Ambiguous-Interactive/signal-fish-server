@@ -93,6 +93,7 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 - If you touch hook files or hook-adjacent policy code, run:
   - `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1`
   - `SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree`
+  - `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree`
 - Runtime target: full pre-commit suite under 1000ms on normal local workloads.
   Any slower run must be investigated and optimized before handoff.
 - PowerShell collection safety (strict mode):

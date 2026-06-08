@@ -554,6 +554,7 @@ typos
 
 # Fast hook-equivalent policy checks over unstaged work
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 
 # Canonical local preflight, including hook readiness, LLM policy checks, markdown,
 # workflow hygiene, docs/changelog consistency, and policy test suites.
