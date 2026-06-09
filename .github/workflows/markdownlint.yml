@@ -55,7 +55,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Install pinned markdownlint-cli2
         run: npm ci --no-audit --no-fund
       - name: Run markdown checks

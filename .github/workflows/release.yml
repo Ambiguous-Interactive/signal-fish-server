@@ -242,7 +242,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -365,7 +365,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.81.1
+        uses: taiki-e/install-action@v2.81.8
         with:
           tool: cargo-sbom
 
