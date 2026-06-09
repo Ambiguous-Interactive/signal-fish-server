@@ -136,7 +136,7 @@ else:
     print("OK")
 PYEOF
     MISSING_LIMIT=$(python3 "$_TMPPY" "$FILE")
-    if echo "$MISSING_LIMIT" | grep -q "^MISSING_LIMIT"; then
+    if grep -q "^MISSING_LIMIT" <<< "$MISSING_LIMIT"; then
         error "The following update entries are missing open-pull-requests-limit:"
         echo "$MISSING_LIMIT" | grep -v "^MISSING_LIMIT" | grep -v "^OK" || true
         echo -e "${YELLOW}  Fix:${NC} Add 'open-pull-requests-limit: <N>' to each listed entry."
@@ -272,7 +272,7 @@ else:
     print("OK")
 PYEOF
     MISMATCH_RESULT=$(python3 "$_TMPPY" "$FILE")
-    if echo "$MISMATCH_RESULT" | grep -q "^MISMATCH"; then
+    if grep -q "^MISMATCH" <<< "$MISMATCH_RESULT"; then
         error "PR limit numbers in comments do not match configured open-pull-requests-limit:"
         echo "$MISMATCH_RESULT" | grep -v "^MISMATCH" | grep -v "^OK" || true
         echo -e "${YELLOW}  Fix:${NC} Update the comment to match the configured value, or update"

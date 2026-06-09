@@ -108,7 +108,7 @@ can force a different version inside the container.
 - name: Extract MSRV
   id: deny-msrv
   run: |
-    MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+    MSRV=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package)
     echo "version=$MSRV" >> "$GITHUB_OUTPUT"
 
 - name: Run cargo-deny

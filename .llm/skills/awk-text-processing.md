@@ -30,7 +30,7 @@ or ensuring AWK portability across gawk (local) and mawk (Ubuntu CI).
 - Ubuntu CI uses `mawk` (not `gawk`) — test portability locally
 - Use `printf "%c", 0` for NUL bytes (not `"\0"` — mawk incompatible)
 - Use POSIX `sub()` instead of gawk's `match()` with capture groups
-- Use prefix patterns (`/^```rust/`) for flexibility over exact matches
+- Use token-boundary patterns (`/^[Rr]ust([[:space:],]|$)/`) for language info strings
 - Use NUL byte delimiters (`\0`) to preserve multi-line blocks through pipelines
 
 ---
@@ -41,8 +41,8 @@ or ensuring AWK portability across gawk (local) and mawk (Ubuntu CI).
 
 ```bash
 # WRONG: Each line becomes a separate record
-awk '/^```rust/ {in_block=1; next}
-     /^```$/ && in_block {print content; content=""; in_block=0; next}
+awk '/^```+[Rr]ust([[:space:],]|$)/ {in_block=1; next}
+     /^```+$/ && in_block {print content; content=""; in_block=0; next}
      in_block {content = content "\n" $0}' file.md | while read -r block; do
   validate "$block"  # Only gets first line!
 done
@@ -55,20 +55,20 @@ done
 ```bash
 # CORRECT: Entire block arrives as one record
 awk '
-  /^```rust/ {
+  /^```+[Rr]ust([[:space:],]|$)/ {
     in_block = 1
     content = ""
     next
   }
-  /^```$/ && in_block {
+  /^```+$/ && in_block {
     # CRITICAL: Use printf "%c", 0 (POSIX compatible)
     printf "%s%c", content, 0
     in_block = 0
     next
   }
   in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
   }
   END {
     # CRITICAL: Handle unclosed blocks at EOF
@@ -85,7 +85,7 @@ Key patterns:
 
 1. **NUL byte output**: `printf "%s%c", content, 0` (POSIX compatible)
 2. **NUL byte input**: `while IFS= read -r -d '' block`
-3. **Empty first line**: Check `if (content == "")` before appending
+3. **Empty first line**: Track `seen_content` separately before appending
 4. **EOF handling**: `END` block handles unclosed blocks
 
 ---
@@ -118,23 +118,24 @@ sub(/^prefix/, "", attrs)        # Remove prefix, keep rest
 
 ## AWK Pattern Design
 
-### Prefix vs Exact Matching
+### Token-Boundary vs Exact Matching
 
 ```awk
 # FRAGILE: Only matches specific formats
-/^```[Rr]ust(,.*)?$/ { ... }
-# Fails on: ```rust ignore (space), ```rust,no_run ignore (multiple attrs)
+/^```rust$/ { ... }
+# Fails on: ```Rust, ```rust,ignore, ```rust ignore
 
-# ROBUST: Matches any fence format
-/^```[Rr]ust/ {
+# ROBUST: Matches rust/Rust with attributes without overmatching rust-like words
+/^```+[Rr]ust([[:space:],]|$)/ {
   attrs = $0
-  sub(/^```[Rr]ust,?/, "", attrs)  # Extract attributes using POSIX sub()
+  sub(/^```+[Rr]ust,?/, "", attrs)  # Extract attributes using POSIX sub()
+  sub(/^[[:space:]]+/, "", attrs)
 }
 ```
 
 | Scenario | Pattern Type | Example |
 |----------|--------------|---------|
-| Code fence detection | Prefix | `/^```[Rr]ust/` |
+| Code fence detection | Token boundary | `/^```+[Rr]ust([[:space:],]\|$)/` |
 | Closing fence | Exact | `/^```$/` |
 | Strict validation | Exact | `/^```Rust,ignore$/` |
 
@@ -159,23 +160,25 @@ If Rust uses `char::is_whitespace()`, AWK should normally use `[[:space:]]` for 
 
 ```awk
 awk '
-  /^```rust/ {
-    in_block = 1; block_start = NR; content = ""
+  /^```+[Rr]ust([[:space:],]|$)/ {
+    in_block = 1; block_start = NR; content = ""; seen_content = 0
     attrs = $0
-    sub(/^```[Rr]ust,?/, "", attrs)
+    sub(/^```+[Rr]ust,?/, "", attrs)
+    sub(/^[[:space:]]+/, "", attrs)
+    if (attrs == "") attrs = "none"
     next
   }
   /^```$/ && in_block {
-    # Custom separator (:::) unlikely to appear in content
-    printf "%s:::%s:::%s%c", block_start, attrs, content, 0
+    # Canonical field separator is TAB; records end with NUL.
+    printf "%s\t%s\t%s%c", block_start, attrs, content, 0
     in_block = 0; next
   }
   in_block {
-    if (content == "") content = $0
-    else content = content "\n" $0
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
   }
   END {
-    if (in_block) { printf "%s:::%s:::%s%c", block_start, attrs, content, 0 }
+    if (in_block) { printf "%s\t%s\t%s%c", block_start, attrs, content, 0 }
   }
 ' file.md | while IFS=$'\t' read -r -d '' record; do
   # NOTE: IFS is a character set, not a string — use single-char delimiter
@@ -184,7 +187,7 @@ done
 ```
 
 **Important**: `IFS=':::'` does NOT split on `:::` — bash `IFS` treats each character
-independently (`IFS=':'`). Use `IFS=$'\t'` (tab) or another single character.
+independently (`IFS=':'`). Use the canonical `IFS=$'\t'` tab separator or another single character.
 
 ---
 
@@ -199,13 +202,14 @@ awk '
 ' file.md
 
 # Test pattern matching interactively
-echo '```rust ignore' | awk '/^```[Rr]ust/ {print "MATCH"}'
+echo '```rust ignore' | awk '/^```+[Rr]ust([[:space:],]|$)/ {print "MATCH"}'
 
 # Test attribute extraction
 echo '```rust,ignore no_run' | awk '
-  /^```[Rr]ust/ {
+  /^```+[Rr]ust([[:space:],]|$)/ {
     attrs = $0
-    sub(/^```[Rr]ust,?/, "", attrs)
+    sub(/^```+[Rr]ust,?/, "", attrs)
+    sub(/^[[:space:]]+/, "", attrs)
     print "Attributes: [" attrs "]"
   }
 '
@@ -235,10 +239,10 @@ END { if (in_block) printf "%s%c", content, 0 }
 # WRONG: First line becomes leading newline
 in_block { content = content "\n" $0 }
 
-# CORRECT: Check if content is empty
+# CORRECT: Track seen content separately from accumulated text
 in_block {
-  if (content == "") content = $0
-  else content = content "\n" $0
+  if (seen_content) content = content "\n" $0
+  else { content = $0; seen_content = 1 }
 }
 ```
 
@@ -259,8 +263,11 @@ pattern, clear it on the end, and process lines only when the flag is set.
 
 ### Pitfall 5: Prefix Pattern Over-Matching
 
-`/^```[Rr]ust/` also matches `` ```rustic `` or `` ```rusty ``. For stricter detection,
-anchor the end: `/^```[Rr]ust(,.*| .*)?$/`.
+`/^```[Rr]ust/` also matches `` ```rustic `` or `` ```rusty ``. Match a token
+boundary instead: strip the backticks and test the info string with
+`/^[Rr]ust([[:space:],]|$)/`, or use `/^```+[Rr]ust([[:space:],]|$)/` for
+simple backtick-prefix cases. For full CommonMark behavior, including 0-3 leading
+spaces and long fences, use the canonical extractor script.
 
 ---
 

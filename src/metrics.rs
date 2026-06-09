@@ -111,6 +111,32 @@ pub struct ServerMetrics {
     pub relay_client_id_reuse_events: AtomicU64,
     pub relay_client_id_exhaustion_events: AtomicU64,
     pub relay_session_timeouts: AtomicU64,
+
+    // Transport / session-plan metrics (Protocol v3, PLAN §P5)
+    /// Non-relay `SessionPlan`s actually emitted (one per finalized non-relay room).
+    pub session_plans_emitted: AtomicU64,
+    /// Finalized rooms whose chosen topology was `mesh`.
+    pub topology_mesh_selected: AtomicU64,
+    /// Finalized rooms whose chosen topology was `host`.
+    pub topology_host_selected: AtomicU64,
+    /// Finalized rooms whose chosen topology was `relay` (the floor).
+    pub topology_relay_selected: AtomicU64,
+    /// Finalized rooms whose chosen data-path transport was `webrtc`.
+    pub transport_webrtc_selected: AtomicU64,
+    /// Finalized rooms whose chosen data-path transport was `direct`.
+    pub transport_direct_selected: AtomicU64,
+    /// Finalized rooms whose chosen data-path transport was `relay` (the floor).
+    pub transport_relay_selected: AtomicU64,
+    /// First reports or P2P data-path state transitions a client reported as
+    /// established (`TransportStatus` with a P2P transport and `connected: true`).
+    pub p2p_established: AtomicU64,
+    /// First reports or relay-fallback state transitions a client reported
+    /// (`TransportStatus` with `connected: false`).
+    pub relay_fallback: AtomicU64,
+    /// Opaque WebRTC `Signal` messages accepted for best-effort dispatch to a peer.
+    pub signals_relayed: AtomicU64,
+    /// TURN `IceServer` credentials minted into `SessionPlan`s.
+    pub turn_credentials_issued: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +180,7 @@ pub struct MetricsSnapshot {
     pub reconnection: ReconnectionMetrics,
     pub distributed_lock: DistributedLockMetrics,
     pub relay_health: RelayHealthMetrics,
+    pub transport: TransportMetrics,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -282,6 +309,29 @@ pub struct RelayHealthMetrics {
     pub session_timeouts: u64,
 }
 
+/// Protocol v3 transport / session-plan observability (PLAN §P5).
+///
+/// Exposes the per-finalized-room topology/transport selection ratios, the
+/// P2P-established-vs-relay-fallback first-report/transition split (reported by
+/// clients via `TransportStatus`), the count of opaque WebRTC signals accepted
+/// for best-effort dispatch, and the number of TURN credentials minted — so
+/// dashboards can see how often the relay floor is actually upgraded to a
+/// peer-to-peer path.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TransportMetrics {
+    pub session_plans_emitted: u64,
+    pub topology_mesh_selected: u64,
+    pub topology_host_selected: u64,
+    pub topology_relay_selected: u64,
+    pub transport_webrtc_selected: u64,
+    pub transport_direct_selected: u64,
+    pub transport_relay_selected: u64,
+    pub p2p_established: u64,
+    pub relay_fallback: u64,
+    pub signals_relayed: u64,
+    pub turn_credentials_issued: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ErrorMetrics {
     pub validation_errors: u64,
@@ -381,6 +431,17 @@ impl ServerMetrics {
             relay_client_id_reuse_events: AtomicU64::new(0),
             relay_client_id_exhaustion_events: AtomicU64::new(0),
             relay_session_timeouts: AtomicU64::new(0),
+            session_plans_emitted: AtomicU64::new(0),
+            topology_mesh_selected: AtomicU64::new(0),
+            topology_host_selected: AtomicU64::new(0),
+            topology_relay_selected: AtomicU64::new(0),
+            transport_webrtc_selected: AtomicU64::new(0),
+            transport_direct_selected: AtomicU64::new(0),
+            transport_relay_selected: AtomicU64::new(0),
+            p2p_established: AtomicU64::new(0),
+            relay_fallback: AtomicU64::new(0),
+            signals_relayed: AtomicU64::new(0),
+            turn_credentials_issued: AtomicU64::new(0),
         }
     }
 
@@ -798,6 +859,63 @@ impl ServerMetrics {
             .fetch_add(count, Ordering::Relaxed);
     }
 
+    // Transport / session-plan metrics (Protocol v3, PLAN §P5)
+
+    /// Record the topology chosen for one finalized room. Called once per
+    /// finalize (in `emit_session_plan`), including the relay-resolved floor, so
+    /// the three topology counters together total the finalized-room count.
+    pub fn record_topology_selected(&self, topology: crate::protocol::Topology) {
+        let counter = match topology {
+            crate::protocol::Topology::Mesh => &self.topology_mesh_selected,
+            crate::protocol::Topology::Host => &self.topology_host_selected,
+            crate::protocol::Topology::Relay => &self.topology_relay_selected,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the data-path transport chosen for one finalized room. Called once
+    /// per finalize (in `emit_session_plan`), including the relay-resolved floor.
+    pub fn record_transport_selected(&self, transport: crate::protocol::Transport) {
+        let counter = match transport {
+            crate::protocol::Transport::WebRtc => &self.transport_webrtc_selected,
+            crate::protocol::Transport::Direct => &self.transport_direct_selected,
+            crate::protocol::Transport::Relay => &self.transport_relay_selected,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one non-relay `SessionPlan` actually emitted (one per finalized
+    /// non-relay room).
+    pub fn increment_session_plans_emitted(&self) {
+        self.session_plans_emitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that a client reported an established P2P data path for the first
+    /// time or as a state transition (`TransportStatus` with a P2P transport and
+    /// `connected: true`).
+    pub fn record_p2p_established(&self) {
+        self.p2p_established.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that a client reported the relay floor for the first time or as a
+    /// state transition (`TransportStatus` with `connected: false`).
+    pub fn record_relay_fallback(&self) {
+        self.relay_fallback.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one opaque WebRTC `Signal` accepted for best-effort dispatch to a peer.
+    pub fn increment_signals_relayed(&self) {
+        self.signals_relayed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record `count` TURN `IceServer` credentials minted into `SessionPlan`s.
+    pub fn add_turn_credentials_issued(&self, count: u64) {
+        if count > 0 {
+            self.turn_credentials_issued
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
     // Snapshot generation
     pub async fn snapshot(&self) -> MetricsSnapshot {
         let tracker = self.average_response_times.read().await;
@@ -957,6 +1075,19 @@ impl ServerMetrics {
                     .relay_client_id_exhaustion_events
                     .load(Ordering::Relaxed),
                 session_timeouts: self.relay_session_timeouts.load(Ordering::Relaxed),
+            },
+            transport: TransportMetrics {
+                session_plans_emitted: self.session_plans_emitted.load(Ordering::Relaxed),
+                topology_mesh_selected: self.topology_mesh_selected.load(Ordering::Relaxed),
+                topology_host_selected: self.topology_host_selected.load(Ordering::Relaxed),
+                topology_relay_selected: self.topology_relay_selected.load(Ordering::Relaxed),
+                transport_webrtc_selected: self.transport_webrtc_selected.load(Ordering::Relaxed),
+                transport_direct_selected: self.transport_direct_selected.load(Ordering::Relaxed),
+                transport_relay_selected: self.transport_relay_selected.load(Ordering::Relaxed),
+                p2p_established: self.p2p_established.load(Ordering::Relaxed),
+                relay_fallback: self.relay_fallback.load(Ordering::Relaxed),
+                signals_relayed: self.signals_relayed.load(Ordering::Relaxed),
+                turn_credentials_issued: self.turn_credentials_issued.load(Ordering::Relaxed),
             },
         }
     }

@@ -55,6 +55,9 @@ fn mesh_session_config() -> SessionConfig {
     }
 }
 
+/// Start a server with the given `SessionConfig` and the **default** `[turn]`
+/// block (TURN disabled, but the default public STUN advertised), exercising the
+/// production default ICE wiring end to end.
 async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAddr {
     let mut server_config: ServerConfig = test_server_config();
     server_config.auth_enabled = true;
@@ -67,6 +70,7 @@ async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAd
         protocol_config,
         signal_fish_server::config::RelayTypeConfig::default(),
         session,
+        signal_fish_server::config::TurnConfig::default(),
         signal_fish_server::database::DatabaseConfig::InMemory,
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::AuthMaintenanceConfig::default(),
@@ -329,10 +333,17 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
             1,
             "two-player mesh lists exactly one peer"
         );
+        // Two ICE entries: the operator's static `session.ice_servers` STUN
+        // (preserved verbatim, first) followed by the default `[turn]` block's
+        // public STUN (TURN is disabled by default, so no credentials are minted).
         assert_eq!(
             plan.ice_servers.len(),
-            1,
-            "webrtc plan carries the STUN server"
+            2,
+            "webrtc plan carries the static STUN plus the default TURN-block STUN"
+        );
+        assert!(
+            plan.ice_servers.iter().all(|s| s.username.is_none()),
+            "no TURN credentials are minted when the [turn] block is disabled"
         );
     }
 

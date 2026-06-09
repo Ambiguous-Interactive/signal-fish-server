@@ -35,16 +35,20 @@ NESTED_CARGO_ENV_VARS=(
 )
 
 run_nested_cargo() {
-    local inherited=()
+    local inherited=""
     local var
     for var in "${NESTED_CARGO_ENV_VARS[@]}"; do
         if [ -n "${!var+x}" ]; then
-            inherited+=("$var")
+            if [ -n "$inherited" ]; then
+                inherited="$inherited $var"
+            else
+                inherited="$var"
+            fi
         fi
     done
 
-    if [ "${#inherited[@]}" -gt 0 ]; then
-        log "Scrubbing inherited Cargo instrumentation env for nested Cargo: ${inherited[*]}"
+    if [ -n "$inherited" ]; then
+        log "Scrubbing inherited Cargo instrumentation env for nested Cargo: $inherited"
     fi
     log "Nested Cargo command: cargo $*"
     log "Nested Cargo target dir: $NESTED_CARGO_TARGET_DIR"

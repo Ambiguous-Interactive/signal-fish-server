@@ -51,6 +51,20 @@ pub(crate) struct ClientConnection {
     pub app_info: Option<AppInfo>,
     /// Protocol version + transport/topology capabilities negotiated at auth.
     pub protocol: NegotiatedProtocol,
+    /// Last data-path transport state this client reported via
+    /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus)
+    /// (v3 only). `None` until the client reports — the relay floor is the implicit
+    /// default and never closes regardless of what is (or is not) reported.
+    pub transport_status: Option<(Transport, bool)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportStatusUpdate {
+    Changed,
+    Duplicate,
+    MissingConnection,
+    UnsupportedProtocolVersion,
+    UnsupportedTransport,
 }
 
 pub(crate) struct ConnectionManager {
@@ -106,6 +120,7 @@ impl ConnectionManager {
             game_data_format: GameDataEncoding::Json,
             app_info: None,
             protocol: NegotiatedProtocol::default(),
+            transport_status: None,
         };
 
         self.clients.insert(player_id, connection);
@@ -138,6 +153,7 @@ impl ConnectionManager {
             game_data_format: GameDataEncoding::Json,
             app_info: None,
             protocol: NegotiatedProtocol::default(),
+            transport_status: None,
         };
 
         self.increment_ip_slot_unbounded(client_addr.ip());
@@ -203,6 +219,49 @@ impl ConnectionManager {
             .get(player_id)
             .map(|conn| conn.protocol.clone())
             .unwrap_or_default()
+    }
+
+    /// Record the last-reported data-path transport state for a connection
+    /// (mirrors [`Self::set_protocol`]). Driven by
+    /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus).
+    /// Returns whether the persisted state changed. Duplicate reports leave
+    /// state untouched so event counters are not inflated.
+    pub fn set_transport_status(
+        &self,
+        player_id: &PlayerId,
+        transport: Transport,
+        connected: bool,
+    ) -> TransportStatusUpdate {
+        if let Some(mut connection) = self.clients.get_mut(player_id) {
+            if connection.protocol.version < 3 {
+                return TransportStatusUpdate::UnsupportedProtocolVersion;
+            }
+
+            if !connection.protocol.transports.contains(&transport) {
+                return TransportStatusUpdate::UnsupportedTransport;
+            }
+
+            let new_status = Some((transport, connected));
+            if connection.transport_status == new_status {
+                return TransportStatusUpdate::Duplicate;
+            }
+
+            connection.transport_status = new_status;
+            return TransportStatusUpdate::Changed;
+        }
+
+        TransportStatusUpdate::MissingConnection
+    }
+
+    /// Read the last-reported data-path transport state for a connection.
+    /// `None` until the client reports one (the relay floor is the implicit
+    /// default). Mirrors [`Self::protocol`]. Consumed by tests and the future
+    /// targeted-relay path (PLAN §P5 notes); not yet read in production.
+    #[allow(dead_code)]
+    pub fn transport_status(&self, player_id: &PlayerId) -> Option<(Transport, bool)> {
+        self.clients
+            .get(player_id)
+            .and_then(|conn| conn.transport_status)
     }
 
     pub fn supports_v3(&self, player_id: &PlayerId) -> bool {
@@ -308,6 +367,11 @@ impl ConnectionManager {
                 game_data_format: old_connection.game_data_format,
                 app_info: old_connection.app_info,
                 protocol: old_connection.protocol,
+                // The negotiated protocol survives a reconnect, but the reported
+                // data-path transport state does not: a reconnecting client must
+                // re-establish (and re-report) its P2P path, so the stale status is
+                // cleared rather than carried over.
+                transport_status: None,
             };
 
             // IP slot is already reserved from the old entry -- no need to

@@ -19,7 +19,8 @@ or `cargo test` multi-filter syntax errors.
 ## TL;DR
 
 - **Missing `--locked`**: Add to all Cargo commands that resolve dependencies
-- **AWK patterns**: Use prefix matching (`/^```rust/`) for flexibility, not exact patterns
+- **AWK Rust fences**: Use the canonical extractor or token-boundary checks
+  such as `^[Rr]ust([[:space:],]|$)`; never use bare fence prefixes
 - **Miri wall-clock/entropy**: No annotation needed — the Miri job runs with `-Zmiri-disable-isolation`
 - **Miri + proptest**: Keep `#[cfg_attr(miri, ignore)]` on tests inside `proptest!` blocks (too slow under Miri)
 - **Bash code blocks**: Tag non-bash content as `text` (not `bash`) so shellcheck passes

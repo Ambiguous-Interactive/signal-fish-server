@@ -7,10 +7,14 @@
 pub mod crypto;
 pub mod tls;
 pub mod token_binding; // Always include tls module (ClientCertificateFingerprint is always needed)
+pub mod turn_credentials;
 
 pub use crypto::EnvelopeEncryptor;
 pub use token_binding::{
     derive_session_secret, ActiveTokenBinding, TokenBindingError, TokenBindingProof,
+};
+pub use turn_credentials::{
+    build_ice_servers, mint_turn_credentials, turn_expiry_unix, TurnCredentials,
 };
 
 // ClientCertificateFingerprint and CLIENT_FINGERPRINT_HEADER_CANDIDATES are always available

@@ -100,7 +100,7 @@ run_check() {
         echo -e "${RED}✗ FAIL${NC}: $name"
         FAILED_CHECKS+=("$name")
         echo ""
-        return 1
+        return 0
     fi
 }
 
@@ -116,6 +116,9 @@ run_check_quiet() {
     local output
     if output=$("${cmd[@]}" 2>&1); then
         echo -e "${GREEN}✓ PASS${NC}: $name"
+        if grep -qE '(^|\]) WARN(:|])|WARN:' <<< "$output"; then
+            echo "$output"
+        fi
         PASSED_CHECKS+=("$name")
         echo ""
         return 0
@@ -124,7 +127,7 @@ run_check_quiet() {
         echo "$output"
         FAILED_CHECKS+=("$name")
         echo ""
-        return 1
+        return 0
     fi
 }
 
@@ -192,16 +195,32 @@ fi
 # Check 9: No Panic Patterns
 if [ "$FAST_MODE" = false ] && [ -f scripts/check-no-panics.sh ]; then
     run_check_quiet "no-panics" "Checking for panic-prone patterns" \
-        scripts/check-no-panics.sh patterns
+        scripts/check-no-panics.sh
 fi
 
-# Check 10: CI Configuration Validation (AWK, shell, markdown links)
+# Check 10: Hook readiness and worktree preflight
+if command -v pwsh > /dev/null 2>&1; then
+    run_check_quiet "hook-readiness" "Checking git hook readiness" \
+        pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
+
+    run_check_quiet "pre-commit-preflight" "Running fast worktree-scoped pre-commit policies" \
+        pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+
+    run_check_quiet "pre-push-preflight" "Running fast worktree-scoped pre-push policies" \
+        pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
+else
+    echo -e "${RED}✗ FAIL${NC}: hook-readiness (PowerShell 7+ 'pwsh' not found)"
+    echo ""
+    FAILED_CHECKS+=("hook-readiness")
+fi
+
+# Check 11: CI Configuration Validation (AWK, shell, markdown links, tooling parity)
 if [ -f scripts/validate-ci.sh ]; then
-    run_check_quiet "ci-validation" "Validating CI configuration (AWK, shell, links)" \
+    run_check_quiet "ci-validation" "Validating CI configuration (AWK, shell, links, tooling parity)" \
         scripts/validate-ci.sh --quiet
 fi
 
-# Check 11: GitHub Actions syntax validation
+# Check 12: GitHub Actions syntax validation
 if command -v actionlint > /dev/null 2>&1; then
     ACTIONLINT_WORKFLOWS=()
     for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
@@ -215,7 +234,7 @@ else
     echo ""
 fi
 
-# Check 12: Markdown Linting
+# Check 13: Markdown Linting
 if [ -f scripts/check-markdown.sh ]; then
     if [ "$FIX_MODE" = true ]; then
         echo -e "${BOLD}${BLUE}[markdown]${NC} Fixing markdown files"
@@ -249,19 +268,38 @@ else
     FAILED_CHECKS+=("markdown")
 fi
 
-# Check 13: README Badge Style Consistency
+# Check 14: LLM context and skill policy
+if [ -f scripts/check-llm-file-sizes.sh ]; then
+    run_check_quiet "llm-file-sizes" "Checking LLM context file sizes" \
+        scripts/check-llm-file-sizes.sh
+else
+    echo -e "${RED}✗ FAIL${NC}: llm-file-sizes (scripts/check-llm-file-sizes.sh not found)"
+    echo ""
+    FAILED_CHECKS+=("llm-file-sizes")
+fi
+
+if [ -f scripts/check-llm-example-files.sh ]; then
+    run_check_quiet "llm-example-files" "Checking extracted LLM skill examples" \
+        scripts/check-llm-example-files.sh
+else
+    echo -e "${RED}✗ FAIL${NC}: llm-example-files (scripts/check-llm-example-files.sh not found)"
+    echo ""
+    FAILED_CHECKS+=("llm-example-files")
+fi
+
+# Check 15: README Badge Style Consistency
 if [ -f scripts/check-readme-badges.sh ]; then
     run_check_quiet "readme-badges" "Checking Shields badge style consistency in README" \
         scripts/check-readme-badges.sh README.md
 fi
 
-# Check 14: Dockerfile shell portability
+# Check 16: Dockerfile shell portability
 if [ -f scripts/check-dockerfile-portability.sh ]; then
     run_check_quiet "dockerfile-portability" "Checking Dockerfile shell portability" \
         scripts/check-dockerfile-portability.sh --quiet
 fi
 
-# Check 15: Dependency Advisory Check
+# Check 17: Dependency Advisory Check
 if [ -f scripts/check-advisories.sh ]; then
     run_check_quiet "advisories" "Checking for RUSTSEC dependency advisories" \
         scripts/check-advisories.sh
@@ -270,7 +308,7 @@ else
     echo ""
 fi
 
-# Check 16: Documentation + changelog consistency
+# Check 18: Documentation + changelog consistency
 if [ -f scripts/check-doc-consistency.sh ]; then
     run_check_quiet "doc-consistency" "Checking docs/changelog/version consistency" \
         scripts/check-doc-consistency.sh
@@ -280,7 +318,7 @@ else
     FAILED_CHECKS+=("doc-consistency")
 fi
 
-# Check 17: Documentation consistency policy tests
+# Check 19: Documentation consistency policy tests
 if [ "$FAST_MODE" = false ]; then
     run_check "doc-policy-tests" "Running docs/changelog policy tests" \
         cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests

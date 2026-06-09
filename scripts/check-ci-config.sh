@@ -99,11 +99,9 @@ if [[ -f Dockerfile ]]; then
         error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false — server will crash without auth config."
     fi
 
-    # Verify HEALTHCHECK port matches EXPOSE port
-    # NOTE: grep -oP requires GNU grep (not portable to macOS/BSD grep)
-    EXPOSE_PORT=$(grep -oP 'EXPOSE \K[0-9]+' Dockerfile | head -1 || true)
-    # NOTE: grep -oP requires GNU grep (not portable to macOS/BSD grep)
-    HEALTH_PORT=$(grep -oP 'HEALTHCHECK.*localhost:\K[0-9]+' Dockerfile | head -1 || true)
+    # Verify HEALTHCHECK port matches EXPOSE port using portable awk/sed parsing.
+    EXPOSE_PORT=$(awk '/^EXPOSE[[:space:]]+[0-9]+/ { port = $2; sub(/\/.*/, "", port); print port; exit }' Dockerfile)
+    HEALTH_PORT=$(sed -nE '/HEALTHCHECK.*localhost:/ { s/.*localhost:([0-9]+).*/\1/; p; q; }' Dockerfile)
     if [[ -n "$HEALTH_PORT" && -n "$EXPOSE_PORT" ]]; then
         if [[ "$HEALTH_PORT" == "$EXPOSE_PORT" ]]; then
             success "HEALTHCHECK port ($HEALTH_PORT) matches EXPOSE port ($EXPOSE_PORT)."

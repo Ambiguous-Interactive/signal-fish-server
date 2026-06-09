@@ -77,7 +77,7 @@ async fn health_check(
     }
 }
 
-/// Start the server with both the new WebSocket protocol and legacy matchbox relay support
+/// Start the server with both the WebSocket protocol and legacy relay support.
 #[allow(dead_code)]
 pub async fn run_server(
     addr: std::net::SocketAddr,
@@ -92,6 +92,7 @@ pub async fn run_server(
         crate::config::ProtocolConfig::default(),
         crate::config::RelayTypeConfig::default(),
         crate::config::SessionConfig::default(),
+        crate::config::TurnConfig::default(),
         database_config,
         crate::config::MetricsConfig::default(),
         crate::config::AuthMaintenanceConfig::default(),

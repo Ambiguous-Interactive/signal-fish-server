@@ -129,8 +129,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 
     # Check for Python caching on non-Python projects
     if [ "$IS_PYTHON_PROJECT" = "false" ]; then
-        if grep -q "cache: 'pip'" "$workflow" 2>/dev/null || \
-           grep -q "cache: pip" "$workflow" 2>/dev/null; then
+        if grep -Eq "^[[:space:]]*cache[[:space:]]*:[[:space:]]*['\"]?pip['\"]?([[:space:]]*(#.*)?)?$" "$workflow" 2>/dev/null; then
             error "$(basename "$workflow"): Uses Python pip cache but no Python project files found"
             error "  Remove 'cache: pip' or add comment explaining why it's needed"
         fi
@@ -138,9 +137,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 
     # Check for Node caching on non-Node projects
     if [ "$IS_NODE_PROJECT" = "false" ]; then
-        if grep -q "cache: 'npm'" "$workflow" 2>/dev/null || \
-           grep -q "cache: npm" "$workflow" 2>/dev/null || \
-           grep -q "cache: 'yarn'" "$workflow" 2>/dev/null; then
+        if grep -Eq "^[[:space:]]*cache[[:space:]]*:[[:space:]]*['\"]?(npm|yarn)['\"]?([[:space:]]*(#.*)?)?$" "$workflow" 2>/dev/null; then
             error "$(basename "$workflow"): Uses Node cache but no package.json found"
             error "  Remove cache configuration or add comment explaining why it's needed"
         fi
@@ -210,7 +207,13 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
         # Check if there's documentation about the nightly version
         # Look for: Nightly Version, Last Updated, Update Criteria, or substantial header comment
         # Use case-insensitive search and look within 50 lines before toolchain declaration
-        if head -n 80 "$workflow" | grep -qi "nightly.*version\|last updated\|update criteria\|nightly toolchain strategy" 2>/dev/null; then
+        if awk '
+            NR > 80 { exit }
+            /[Nn]ightly.*[Vv]ersion|[Ll]ast [Uu]pdated|[Uu]pdate [Cc]riteria|[Nn]ightly [Tt]oolchain [Ss]trategy/ {
+                found = 1
+            }
+            END { exit found ? 0 : 1 }
+        ' "$workflow"; then
             success "$WORKFLOW_NAME: Nightly toolchain is documented"
         else
             warn "$WORKFLOW_NAME: Uses nightly toolchain but lacks documentation"
@@ -690,27 +693,27 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                     CARGO_SUBCMD="${BASH_REMATCH[3]}"
 
                     # Known incompatible command/flag combinations (real CI regressions).
-                    if [ "$CARGO_SUBCMD" = "sbom" ] && echo "$statement" | grep -q -- "--locked"; then
+                    if [ "$CARGO_SUBCMD" = "sbom" ] && grep -q -- "--locked" <<< "$statement"; then
                         error "$WORKFLOW_NAME:$RUN_START_LINE: cargo sbom does not support --locked"
                         error "  Command: $statement"
                         continue
                     fi
                     if [ "$CARGO_SUBCMD" = "llvm-cov" ] &&
-                       echo "$statement" | grep -q "llvm-cov[[:space:]]\+report" &&
-                       echo "$statement" | grep -qE -- "--all-features|--workspace"; then
+                       grep -q "llvm-cov[[:space:]]\+report" <<< "$statement" &&
+                       grep -qE -- "--all-features|--workspace" <<< "$statement"; then
                         error "$WORKFLOW_NAME:$RUN_START_LINE: cargo llvm-cov report does not accept --all-features/--workspace"
                         error "  Command: $statement"
                         continue
                     fi
 
                     # Skip exempt commands
-                    if echo "$CARGO_SUBCMD" | grep -qE "^($LOCKED_EXEMPT_PATTERNS)$"; then
+                    if grep -qE "^($LOCKED_EXEMPT_PATTERNS)$" <<< "$CARGO_SUBCMD"; then
                         continue
                     fi
 
                     # cargo miri setup is exempt (tool setup, not a project build),
                     # but cargo miri test should use --locked like any test command.
-                    if [ "$CARGO_SUBCMD" = "miri" ] && echo "$statement" | grep -q "miri[[:space:]]\+setup"; then
+                    if [ "$CARGO_SUBCMD" = "miri" ] && grep -q "miri[[:space:]]\+setup" <<< "$statement"; then
                         continue
                     fi
 
@@ -719,7 +722,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                         continue
                     fi
 
-                    if ! echo "$statement" | grep -q -- "--locked"; then
+                    if ! grep -q -- "--locked" <<< "$statement"; then
                         warn "$WORKFLOW_NAME:$RUN_START_LINE: 'cargo $CARGO_SUBCMD' missing --locked flag"
                         warn "  Command: $statement"
                         MISSING_LOCKED=$((MISSING_LOCKED + 1))
@@ -757,7 +760,14 @@ for candidate in scripts/*.sh .githooks/* .github/workflows/*.yml .github/workfl
     while IFS= read -r match; do
         line_no=${match%%:*}
         line_body=${match#*:}
-        image_ref=$(echo "$line_body" | grep -oE '[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+:[Ll][Aa][Tt][Ee][Ss][Tt]' | head -n1 | sed -E 's/:[Ll][Aa][Tt][Ee][Ss][Tt]$//')
+        image_ref=$(awk '
+            match($0, /[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+:[Ll][Aa][Tt][Ee][Ss][Tt]/) {
+                image = substr($0, RSTART, RLENGTH)
+                sub(/:[Ll][Aa][Tt][Ee][Ss][Tt]$/, "", image)
+                print image
+                exit
+            }
+        ' <<< "$line_body")
         [ -n "$image_ref" ] || continue
 
         if is_allowed_first_party_latest_image "$image_ref"; then

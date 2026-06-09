@@ -10,6 +10,14 @@ Canonical sample: [v2-client-messages.jsonl](code-samples/protocol/v2-client-mes
 
 Canonical sample: [v2-server-messages.jsonl](code-samples/protocol/v2-server-messages.jsonl)
 
+### v3 Client Messages (additive over v2)
+
+Canonical sample: [v3-client-messages.jsonl](code-samples/protocol/v3-client-messages.jsonl)
+
+### v3 Server Messages (additive over v2)
+
+Canonical sample: [v3-server-messages.jsonl](code-samples/protocol/v3-server-messages.jsonl)
+
 ## Common Scenarios
 
 ### Adding a New Protocol Message

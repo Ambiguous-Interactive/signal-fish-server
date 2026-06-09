@@ -91,6 +91,7 @@ ws://localhost:3536/v2/ws
 | Path               | Method    | Description                                |
 | ------------------ | --------- | ------------------------------------------ |
 | `/v2/ws`           | WebSocket | Signaling WebSocket endpoint               |
+| `/v3/ws`           | WebSocket | Protocol v3 WebSocket alias                |
 | `/v2/health`       | GET       | Health check (returns 200 OK)              |
 | `/metrics`         | GET       | JSON server metrics                        |
 | `/v1/metrics`      | GET       | JSON server metrics (alias)                |
@@ -214,7 +215,7 @@ complete reference.
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`    | `5`       | Max room creations per player per window            |
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`           | `60`      | Rate limit window in seconds                        |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`     | `20`      | Max join attempts per player per window             |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max valid WebRTC signals per player per window      |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max validated WebRTC Signal dispatch attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS`      | `rate_limit.max_signal_errors`     | `60`      | Max rejected WebRTC signals per player per window   |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`    | `64`      | Max characters in a game name                       |
 | `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Length of generated room codes                      |
@@ -262,6 +263,7 @@ is also supported for game data when `enable_message_pack_game_data` is enabled.
 ### Client Messages
 
 Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/code-samples/protocol/v2-client-messages.jsonl)
+(v3 additions: [.llm/code-samples/protocol/v3-client-messages.jsonl](.llm/code-samples/protocol/v3-client-messages.jsonl))
 
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
@@ -270,7 +272,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 | `GameData`         | Send arbitrary game data to other players in the room                            |
 | `AuthorityRequest` | Request or release game authority                                                |
 | `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
-| `ProvideConnectionInfo` | Share peer connection information for P2P establishment                     |
+| `ProvideConnectionInfo` | Share legacy self-declared metadata for v2/back-compat; not v3 capability proof |
 | `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`        |
 | `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
 | `LeaveSpectator`   | Leave spectator mode                                                             |
@@ -303,6 +305,7 @@ existing room, current members also receive `PlayerJoined`.
 ### Server Messages
 
 Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/code-samples/protocol/v2-server-messages.jsonl)
+(v3 additions: [.llm/code-samples/protocol/v3-server-messages.jsonl](.llm/code-samples/protocol/v3-server-messages.jsonl))
 
 | Message              | Description                                              |
 | -------------------- | -------------------------------------------------------- |

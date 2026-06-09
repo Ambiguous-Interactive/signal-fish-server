@@ -16,7 +16,7 @@ A comprehensive markdown file containing 30+ test cases covering:
 
 1. **Multi-line code blocks** - Basic extraction and validation
 2. **Empty first lines** - Bug fix for content accumulation
-3. **Case variations** - `rust` vs `Rust` (case-insensitive matching)
+3. **Canonical Rust fences** - `rust` and `Rust`; non-canonical variants are ignored consistently
 4. **Attributes** - `ignore`, `no_run`, `should_panic`
 5. **Edge cases** - Empty blocks, unclosed blocks, nested blocks
 6. **Placeholders** - `todo!()`, ellipsis, documentation markers
@@ -32,32 +32,33 @@ Each test case documents:
 
 **`extract-rust-blocks.py`**
 
-Python script that extracts Rust code blocks from markdown files using the same logic as the AWK
-script in the GitHub Actions workflow. Outputs tab-separated records (line number, attributes, content)
-delimited by NUL bytes.
+Python helper that extracts Rust code blocks from markdown files with byte-compatible output to
+the canonical AWK extractor in `.github/scripts/extract-rust-blocks.awk`. Outputs tab-separated
+records (line number, attributes, content) delimited by NUL bytes.
 
 Output format: `line_number\tattributes\tcontent\0`
 
 **`validate-test-cases.sh`** (Recommended)
 
-Simple, reliable test script that validates the core bug fixes. Runs 5 focused tests:
+Canonical test script that validates the core bug fixes and AWK/Python extractor parity.
+Runs focused checks for:
 
 1. **Block extraction** - Verifies blocks are extracted from test fixture
 2. **Empty first line** - Bug Fix #1
 3. **Unclosed EOF** - Bug Fix #2
-4. **Case-insensitive** - Bug Fix #3 (rust/Rust)
+4. **Canonical Rust fences** - Bug Fix #3 (`rust` and `Rust` only)
 5. **Attributes** - Verifies ignore, no_run extraction
+6. **Extractor parity** - Verifies the Python helper matches canonical AWK output, including CRLF input
 
 Usage: `./validate-test-cases.sh`
 
-**`test-markdown-validation.sh`** (Advanced)
+**`test-markdown-validation.sh`**
 
-Comprehensive test script with 8 tests including AWK compatibility checks.
-More complex and may have shell-specific issues.
+Compatibility wrapper for `validate-test-cases.sh`.
 
 **`simple-test.sh`**
 
-Intermediate test script using the Python extractor with detailed validation.
+Compatibility wrapper for `validate-test-cases.sh`.
 
 ## Bug Fixes Covered
 
@@ -66,14 +67,16 @@ Intermediate test script using the Python extractor with detailed validation.
 **Problem:** AWK script was incorrectly handling code blocks with empty first lines,
 causing content to be lost.
 
-**Fix:** Improved content accumulation logic in AWK script:
+**Fix:** Track whether content has been seen separately from the accumulated text, preserving
+leading blank lines without confusing an empty first line for "no content yet":
 
 ```awk
 in_block {
-  if (content == "") {
-    content = $0
-  } else {
+  if (seen_content) {
     content = content "\n" $0
+  } else {
+    content = $0
+    seen_content = 1
   }
 }
 ```
@@ -91,7 +94,7 @@ in_block {
 ```awk
 END {
   if (in_block) {
-    printf "%s:::%s:::%s\0", block_start, attrs, content
+    printf "%s\t%s\t%s%c", block_start, attrs, content, 0
   }
 }
 ```
@@ -100,15 +103,20 @@ END {
 
 ---
 
-### Bug Fix #3: Case-Insensitive Regex for Rust/Rust
+### Bug Fix #3: Canonical Rust Fence Matching
 
 **Problem:** Only lowercase `rust` fence markers were matched; uppercase `Rust` was ignored.
+Bare prefix patterns also matched non-canonical languages such as `rustic` and `rusty`.
 
-**Fix:** Updated regex to use `[Rr]ust`:
+**Fix:** Use the canonical extractor in `.github/scripts/extract-rust-blocks.awk`. It parses the
+fence separately, then applies a token-boundary info-string check so both case variants and
+attribute styles share one extractor path without matching longer language names:
 
 ```awk
-/^```[Rr]ust(,.*)?$/ {
-  # Match both rust and Rust
+if (rest ~ /^[Rr]ust([[:space:],]|$)/) {
+  attrs = rest
+  sub(/^[Rr]ust,?/, "", attrs)
+  if (attrs == "") attrs = "none"
 }
 ```
 
@@ -147,16 +155,14 @@ read -r total validated skipped failed < "$COUNTER_FILE"
 # Run the recommended test script (fast and reliable)
 .github/test-fixtures/validate-test-cases.sh
 
-# Or run the comprehensive test suite
+# Compatibility wrappers delegate to the same canonical script
 .github/test-fixtures/test-markdown-validation.sh
-
-# Or run the intermediate version
 .github/test-fixtures/simple-test.sh
 ```
 
 ### Running via GitHub Actions
 
-The test fixture is automatically validated by the `doc-validation.yml` workflow whenever markdown files or the workflow itself is modified.
+The `doc-validation.yml` workflow runs `validate-test-cases.sh` in its `Validate Rust markdown extractor fixtures` step. The workflow triggers on `.github/test-fixtures/**` changes, but the fixture markdown files remain excluded from normal repository markdown validation because they intentionally contain malformed examples.
 
 ```bash
 # Trigger manually (requires act or GitHub Actions)
@@ -179,8 +185,8 @@ INFO: Testing empty first line handling...
 PASS: Empty first line handled correctly
 INFO: Testing unclosed block at EOF...
 PASS: Unclosed EOF handled correctly
-INFO: Testing case-insensitive rust/Rust...
-PASS: Case-insensitive matching works
+INFO: Testing canonical rust/Rust matching...
+PASS: Canonical rust/Rust matching works
 INFO: Testing attribute extraction...
 PASS: Attribute extraction works
 INFO: Testing multiple consecutive blocks...
@@ -192,9 +198,10 @@ INFO: Summary:
   - Extracted 25 blocks from test fixture
   - Empty first line handling: OK
   - Unclosed EOF handling: OK
-  - Case-insensitive matching: OK
+  - Canonical rust/Rust matching: OK
   - Attribute extraction: OK
   - Multiple blocks: OK
+  - Python extractor parity: OK
 ```
 
 ## Adding New Test Cases
@@ -241,7 +248,7 @@ fn your_test_code() {
 
 Before committing changes to the validation workflow or test fixtures:
 
-- [ ] Run `test-markdown-validation.sh` locally
+- [ ] Run `validate-test-cases.sh` locally
 - [ ] Verify all test cases in `markdown-validation-test-cases.md` are documented
 - [ ] Update this README if adding new bug fixes or test categories
 - [ ] Ensure CI workflow passes with the new changes

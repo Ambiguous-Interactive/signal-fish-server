@@ -132,6 +132,12 @@ impl EnhancedGameServer {
             return;
         }
 
+        // Count the signal as relayed here, at dispatch — after every same-room +
+        // transport + rate-limit check has passed — matching the best-effort
+        // "relayed = dispatched" semantics of the send below (a rejected
+        // cross-room / rate-limited signal returns earlier and is never counted).
+        self.metrics.increment_signals_relayed();
+
         // Best-effort delivery: `send_to_player` returns `Ok(())` even if the
         // target's channel is full or closed, so a backpressured peer may
         // silently drop this signal. That is acceptable for trickle-ICE (the

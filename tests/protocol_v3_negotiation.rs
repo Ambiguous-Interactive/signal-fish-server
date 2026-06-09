@@ -268,6 +268,60 @@ fn client_signal_round_trips_json_and_msgpack() {
 }
 
 #[test]
+fn client_transport_status_round_trips_json_and_msgpack() {
+    // Exact wire form (Appendix A): {"type":"TransportStatus",
+    // "data":{"transport":"webrtc","connected":true}}. Cover all three transport
+    // tokens and both `connected` values.
+    let cases = [
+        (Transport::WebRtc, "webrtc", true),
+        (Transport::Direct, "direct", false),
+        (Transport::Relay, "relay", true),
+        (Transport::WebRtc, "webrtc", false),
+    ];
+
+    for (transport, token, connected) in cases {
+        let msg = ClientMessage::TransportStatus {
+            transport,
+            connected,
+        };
+
+        // Exact tag, field names, and transport token.
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["type"], json!("TransportStatus"));
+        assert_eq!(value["data"]["transport"], json!(token));
+        assert_eq!(value["data"]["connected"], json!(connected));
+
+        // JSON round-trip.
+        let parsed: ClientMessage =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        match parsed {
+            ClientMessage::TransportStatus {
+                transport: rt_transport,
+                connected: rt_connected,
+            } => {
+                assert_eq!(rt_transport, transport);
+                assert_eq!(rt_connected, connected);
+            }
+            other => panic!("expected TransportStatus, got {other:?}"),
+        }
+
+        // MessagePack round-trip (named fields).
+        let mp = rmp_serde::to_vec_named(&msg).unwrap();
+        let parsed_mp: ClientMessage = rmp_serde::from_slice(&mp).unwrap();
+        match parsed_mp {
+            ClientMessage::TransportStatus {
+                transport: rt_transport,
+                connected: rt_connected,
+            } => {
+                assert_eq!(rt_transport, transport);
+                assert_eq!(rt_connected, connected);
+            }
+            other => panic!("expected TransportStatus, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn server_signal_round_trips_json_and_msgpack() {
     let from = PlayerId::new_v4();
     let msg = ServerMessage::Signal {

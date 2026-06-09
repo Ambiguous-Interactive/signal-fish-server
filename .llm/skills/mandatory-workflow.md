@@ -30,7 +30,7 @@
 
 1. **Read the code** before modifying it — NEVER modify code you haven't read.
 2. **Run the appropriate linters** after every change (see table below).
-3. **Zero warnings, zero errors** — all linters enforce strict compliance.
+3. **Zero warnings, zero errors, zero production panic macros** — all linters and policy checks enforce strict compliance.
 4. **For user-visible changes**: run changelog flow
    [Classify User Visible Changes](./classify-user-visible-changes.md) ->
    [Update Changelog Keep A Changelog](./update-changelog-keep-a-changelog.md) ->
@@ -139,21 +139,33 @@ cargo test --locked --all-features
 # 2. Script-level policy checks
 scripts/check-doc-consistency.sh --staged   # or --changed-files <files>
 scripts/check-workflow-hygiene.sh
+scripts/check-llm-file-sizes.sh
+scripts/check-llm-example-files.sh
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
-pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 
 # 3. Hook/local-policy test suites (run before handoff; hooks stay fast)
 cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
 cargo test --locked --test ci_config_tests
 ```
 
+If hook files or hook-adjacent policy code changed, rerun pre-commit with profiling enabled and keep it sub-second:
+
+```bash
+SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+```
+
+Any run above 1000ms must be investigated and optimized before handoff.
+
 **Why this matters**: The agent workflow runs hook/local-policy test suites
 that validate script output, internal path classifications, and CI config
 consistency. A change that passes broad Rust tests alone may still fail hook or
 policy guards if script output or policy configuration changed. Always verify
-the full chain. Git hooks themselves stay sub-second and do not run
-clippy/tests/docs; agents and local CI are responsible for catching those
-failures before the hook is ever reached.
+the full chain. Git hooks themselves stay sub-second and inspect the staged Git
+index or pushed commits; the `-Worktree` preflights let agents run the same cheap
+checks on unstaged workflow/hook policy work before handoff. Agents and local CI
+are responsible for catching semantic failures before the hook is ever reached.
 
 ---
 
@@ -179,7 +191,8 @@ failures before the hook is ever reached.
 ## Security Checklist (Pre-Merge)
 
 - [ ] No `.unwrap()` on user input (see [Defensive Programming](./defensive-programming.md))
-- [ ] All `.expect()` have `// SAFETY:` comments
+- [ ] Production `.expect()` / `.unwrap()` additions have both a nearby `// SAFETY:` rationale
+      and a matching `#[allow(clippy::expect_used)]` / `#[allow(clippy::unwrap_used)]`
 - [ ] Rate limiting in place for public endpoints
 - [ ] Auth tokens validated before privileged operations
 - [ ] No secrets logged (check tracing fields)

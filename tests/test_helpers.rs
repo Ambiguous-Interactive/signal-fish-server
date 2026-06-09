@@ -38,6 +38,7 @@ async fn build_test_server(
         protocol_config,
         relay_type_config,
         signal_fish_server::config::SessionConfig::default(),
+        signal_fish_server::config::TurnConfig::default(),
         database_config,
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::AuthMaintenanceConfig::default(),

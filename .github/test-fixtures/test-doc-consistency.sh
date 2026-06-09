@@ -64,7 +64,7 @@ assert_gate_fails() {
         echo -e "${RED}[FAIL]${NC} $test_name: expected failure but checker exited 0"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     else
-        if echo "$output" | grep -qiE "$expected_pattern"; then
+        if grep -qiE "$expected_pattern" <<< "$output"; then
             echo -e "${GREEN}[PASS]${NC} $test_name"
             TESTS_PASSED=$((TESTS_PASSED + 1))
         else
@@ -83,7 +83,7 @@ assert_skip_passes() {
     shift
     local output
     if output=$("$CHECKER" --skip-changelog-gate --changed-files "$@" 2>&1); then
-        if echo "$output" | grep -qiE "changelog gate skipped"; then
+        if grep -qiE "changelog gate skipped" <<< "$output"; then
             echo -e "${GREEN}[PASS]${NC} $test_name"
             TESTS_PASSED=$((TESTS_PASSED + 1))
         else

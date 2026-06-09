@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[cfg(unix)]
 use common::bash_command;
@@ -279,6 +280,151 @@ fn strip_unquoted_shell_comment(text: &str) -> &str {
     text
 }
 
+fn is_awk_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn skip_ascii_whitespace(text: &str, mut byte_idx: usize) -> usize {
+    while let Some(ch) = text[byte_idx..].chars().next() {
+        if !ch.is_ascii_whitespace() {
+            break;
+        }
+        byte_idx += ch.len_utf8();
+    }
+    byte_idx
+}
+
+fn awk_match_arguments_use_capture_array(text: &str, open_paren_byte: usize) -> bool {
+    let mut depth = 1usize;
+    let mut comma_count = 0usize;
+    let mut in_string = false;
+    let mut in_regex = false;
+    let mut escaped = false;
+    let mut previous_significant = Some('(');
+
+    for ch in text[open_paren_byte + 1..].chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if in_regex {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '/' {
+                in_regex = false;
+                previous_significant = Some('/');
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '/' if matches!(previous_significant, Some('(' | ',' | '~' | '!')) => {
+                in_regex = true;
+            }
+            '(' => {
+                depth += 1;
+                previous_significant = Some('(');
+            }
+            ')' => {
+                if depth == 1 {
+                    return comma_count >= 2;
+                }
+                depth -= 1;
+                previous_significant = Some(')');
+            }
+            ',' if depth == 1 => {
+                comma_count += 1;
+                previous_significant = Some(',');
+            }
+            '#' => return false,
+            _ if ch.is_whitespace() => {}
+            _ => previous_significant = Some(ch),
+        }
+    }
+
+    false
+}
+
+fn awk_source_uses_gnu_match_capture(source: &str) -> bool {
+    awk_source_gnu_match_capture_line(source).is_some()
+}
+
+fn awk_source_gnu_match_capture_line(source: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    for (byte_idx, ch) in source.char_indices() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '#' => in_comment = true,
+            'm' if source[byte_idx..].starts_with("match") => {
+                let before_is_identifier = source[..byte_idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_awk_identifier_char);
+                let after_match = byte_idx + "match".len();
+                let after_is_identifier = source[after_match..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_awk_identifier_char);
+
+                if before_is_identifier || after_is_identifier {
+                    continue;
+                }
+
+                let open_paren = skip_ascii_whitespace(source, after_match);
+                if source[open_paren..].starts_with('(')
+                    && awk_match_arguments_use_capture_array(source, open_paren)
+                {
+                    return Some(
+                        source[..byte_idx]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count()
+                            + 1,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn normalize_github_workspace_expression(command: &str) -> String {
     command
         .replace("${{ github.workspace }}", "$GITHUB_WORKSPACE")
@@ -347,6 +493,9 @@ fn workflow_direct_script_violations_for_content(
         if command.is_empty() {
             continue;
         }
+        if is_shell_assignment_only(command) {
+            continue;
+        }
         let command = normalize_github_workspace_expression(command);
         let mut token_text = command.replace("&&", " ").replace("||", " ");
         for separator in [';', '&', '|', '(', ')'] {
@@ -380,6 +529,47 @@ fn workflow_direct_script_violations_for_content(
     violations
 }
 
+fn is_shell_assignment_only(command: &str) -> bool {
+    let command = command.trim();
+    static ASSIGNMENT_RE: OnceLock<Regex> = OnceLock::new();
+    let assignment = ASSIGNMENT_RE.get_or_init(|| {
+        Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]+\])?="#)
+            .expect("shell assignment regex should compile")
+    });
+    let Some(assignment_match) = assignment.find(command) else {
+        return false;
+    };
+
+    shell_assignment_value_consumes_rest(&command[assignment_match.end()..])
+}
+
+fn shell_assignment_value_consumes_rest(value: &str) -> bool {
+    let value = value.trim_start();
+    let Some(first_char) = value.chars().next() else {
+        return true;
+    };
+
+    if first_char != '"' && first_char != '\'' {
+        return !value.chars().any(char::is_whitespace);
+    }
+
+    let mut escaped = false;
+    for (idx, ch) in value.char_indices().skip(1) {
+        if first_char == '"' && ch == '\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+
+        if ch == first_char && !escaped {
+            return value[idx + ch.len_utf8()..].trim().is_empty();
+        }
+
+        escaped = false;
+    }
+
+    false
+}
+
 #[test]
 fn test_workflow_direct_script_detector_edge_cases() {
     let cases = [
@@ -406,6 +596,11 @@ fn test_workflow_direct_script_detector_edge_cases() {
         (
             "source does not require executable bit",
             "jobs:\n  test:\n    steps:\n      - run: source scripts/foo.sh\n",
+            false,
+        ),
+        (
+            "assignment-only line may contain script path data",
+            "jobs:\n  test:\n    steps:\n      - run: |\n          PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]=\"*.md scripts/check-internal-links.sh\"\n",
             false,
         ),
     ];
@@ -702,6 +897,28 @@ fn extract_yaml_field_values(block: &str, field: &str) -> Vec<String> {
     }
 
     values
+}
+
+fn extract_workflow_event_paths(workflow_content: &str, event: &str) -> Vec<String> {
+    let on_block = extract_yaml_mapping_block(workflow_content, "on", 0)
+        .unwrap_or_else(|| panic!("workflow must define top-level on block"));
+    let on_child_indent = yaml_first_child_indent(&on_block)
+        .unwrap_or_else(|| panic!("workflow on block must define events"));
+    let event_block = extract_yaml_mapping_block(&on_block, event, on_child_indent)
+        .unwrap_or_else(|| panic!("workflow must define {event} event block"));
+
+    extract_yaml_field_values(&event_block, "paths")
+}
+
+fn release_preflight_pattern_for_doc_path(path: &str) -> String {
+    match path {
+        "**/*.md" => "*.md".to_string(),
+        "**/*.rs" => "*.rs".to_string(),
+        directory_glob if directory_glob.ends_with("/**") => {
+            format!("{}/", directory_glob.trim_end_matches("/**"))
+        }
+        exact_path => exact_path.to_string(),
+    }
 }
 
 #[test]
@@ -1887,6 +2104,12 @@ fn test_no_language_specific_cache_mismatch() {
         || root.join("pyproject.toml").exists()
         || has_any_requirements_txt;
     let is_node_project = root.join("package.json").exists();
+    let pip_cache_re =
+        Regex::new(r#"(?m)^[ \t]*cache[ \t]*:[ \t]*['"]?pip['"]?(?:[ \t]*(?:#.*)?)?$"#)
+            .expect("valid pip cache regex");
+    let node_cache_re =
+        Regex::new(r#"(?m)^[ \t]*cache[ \t]*:[ \t]*['"]?(?:npm|yarn)['"]?(?:[ \t]*(?:#.*)?)?$"#)
+            .expect("valid node cache regex");
 
     for entry in collect_workflow_files(&workflows_dir) {
         let path = entry.path();
@@ -1894,10 +2117,7 @@ fn test_no_language_specific_cache_mismatch() {
         let filename = path.file_name().unwrap().to_string_lossy();
 
         // Check for Python caching on non-Python projects
-        if !is_python_project
-            && is_rust_project
-            && (content.contains("cache: 'pip'") || content.contains("cache: pip"))
-        {
+        if !is_python_project && is_rust_project && pip_cache_re.is_match(&content) {
             // Allow if there's an explicit comment explaining why
             let has_explanation = content.contains("Pip caching disabled")
                 || content.contains("no requirements.txt")
@@ -1905,10 +2125,7 @@ fn test_no_language_specific_cache_mismatch() {
 
             let cache_line = content
                 .lines()
-                .find(|line| {
-                    let trimmed = line.trim();
-                    trimmed.starts_with("cache:") && trimmed.contains("pip")
-                })
+                .find(|line| pip_cache_re.is_match(line))
                 .unwrap_or("<not found>")
                 .trim();
 
@@ -1933,9 +2150,7 @@ fn test_no_language_specific_cache_mismatch() {
         // Check for Node caching on non-Node projects
         if !is_node_project && is_rust_project {
             assert!(
-                !(content.contains("cache: 'npm'")
-                    || content.contains("cache: npm")
-                    || content.contains("cache: 'yarn'")),
+                !node_cache_re.is_match(&content),
                 "{filename}: Uses Node cache but no package.json found.\n\
                  This is a Rust project (Cargo.toml exists).\n\
                  Remove cache configuration or add comment explaining why it's needed."
@@ -1991,7 +2206,7 @@ fn test_docs_deploy_requirements_file_exists() {
 }
 
 #[test]
-fn test_scripts_are_executable() {
+fn test_workflow_run_steps_invoke_local_scripts_through_interpreters() {
     // Workflow scripts must be invoked through an interpreter instead of
     // relying on executable-bit metadata. This keeps CI robust across local
     // filesystems, checkout modes, and Windows/macOS/Linux contributors.
@@ -2841,6 +3056,43 @@ fn test_check_markdown_script_common_issue_guidance_is_data_driven() {
 }
 
 #[test]
+fn test_check_markdown_script_md013_diagnostics_are_data_driven() {
+    struct DiagnosticCase {
+        expected_fragment: &'static str,
+        purpose: &'static str,
+    }
+
+    let root = repo_root();
+    let script = root.join("scripts/check-markdown.sh");
+    let content = read_file(&script);
+
+    let cases = [
+        DiagnosticCase {
+            expected_fragment: "MD013 diagnostics (source lines):",
+            purpose: "prints a dedicated MD013 diagnostics heading",
+        },
+        DiagnosticCase {
+            expected_fragment: "grep \"MD013/line-length\"",
+            purpose: "extracts MD013 failures from markdownlint output",
+        },
+        DiagnosticCase {
+            expected_fragment: "sed -n \"${line_number}p\"",
+            purpose: "prints the offending source line for faster debugging",
+        },
+    ];
+
+    for case in cases {
+        assert!(
+            content.contains(case.expected_fragment),
+            "check-markdown.sh is missing MD013 diagnostic behavior: {}.\nExpected fragment: {}\nFile: {}",
+            case.purpose,
+            case.expected_fragment,
+            script.display()
+        );
+    }
+}
+
+#[test]
 fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
@@ -3610,21 +3862,37 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
     // Critical paths that doc-validation must trigger on.
     // These ensure documentation changes are always validated.
     const REQUIRED_DOC_PATHS: &[(&str, &str)] = &[
-        ("'**/*.md'", "Markdown documentation files"),
-        ("'**/*.rs'", "Rust source files (contain doc-comments)"),
-        ("'Cargo.toml'", "Dependency changes affect doc builds"),
-        ("'Cargo.lock'", "Lockfile changes affect doc builds"),
+        ("**/*.md", "Markdown documentation files"),
+        ("**/*.rs", "Rust source files (contain doc-comments)"),
+        ("Cargo.toml", "Dependency changes affect doc builds"),
+        ("Cargo.lock", "Lockfile changes affect doc builds"),
         (
-            "'.github/workflows/doc-validation.yml'",
+            "scripts/check-internal-links.sh",
+            "Detailed internal link checker run by the workflow",
+        ),
+        (
+            ".github/workflows/doc-validation.yml",
             "Self-referential trigger for workflow changes",
         ),
-        ("'.github/scripts/**'", "Scripts used by the workflow"),
+        (".github/scripts/**", "Scripts used by the workflow"),
+        (
+            ".github/test-fixtures/**",
+            "Fixture and parity tooling used by the workflow",
+        ),
     ];
 
     let mut missing_paths = Vec::new();
 
     for (path_pattern, description) in REQUIRED_DOC_PATHS {
-        if !content.contains(path_pattern) {
+        let single_quoted = format!("'{path_pattern}'");
+        let double_quoted = format!("\"{path_pattern}\"");
+        let unquoted_list_item = format!("- {path_pattern}");
+        if !content.contains(&single_quoted)
+            && !content.contains(&double_quoted)
+            && !content
+                .lines()
+                .any(|line| line.trim() == unquoted_list_item)
+        {
             missing_paths.push(format!("  - {path_pattern} ({description})"));
         }
     }
@@ -3642,6 +3910,60 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
             workflow_path.display()
         );
     }
+}
+
+#[test]
+fn test_doc_validation_invokes_rust_markdown_validator_via_bash() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/doc-validation.yml");
+    let content = read_file(&workflow_path);
+
+    assert!(
+        content.contains("bash .github/scripts/validate-rust-markdown-blocks.sh"),
+        "doc-validation.yml must invoke the Rust markdown validator through bash.\n\
+         Direct execution depends on executable file mode and can fail in CI if mode bits drift.\n\
+         File: {}",
+        workflow_path.display()
+    );
+
+    assert!(
+        content.contains("bash .github/test-fixtures/validate-test-cases.sh"),
+        "doc-validation.yml must run the Rust markdown extractor fixture parity script.\n\
+         The fixture helper is deliberately excluded from normal markdown validation, so this\n\
+         explicit step prevents AWK/Python extractor drift from becoming manual-only.\n\
+         File: {}",
+        workflow_path.display()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_rust_markdown_extractor_fixture_parity_script_passes() {
+    let root = repo_root();
+    let output = bash_command()
+        .arg(".github/test-fixtures/validate-test-cases.sh")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "Failed to run Rust markdown extractor fixture parity script in {}: {error}",
+                root.display()
+            )
+        });
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Rust markdown extractor fixture parity script failed.\nOutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("Python extractor matches canonical AWK output")
+            && combined.contains("CRLF input matches canonical AWK output"),
+        "Fixture parity script should verify Python/AWK byte parity, including CRLF input.\n\
+         Output:\n{combined}"
+    );
 }
 
 #[test]
@@ -5645,18 +5967,30 @@ fn test_doc_validation_awk_script_extraction() {
     );
 
     // Check for the main Rust code block extraction AWK script
-    // This script handles complex patterns: ```rust, ```Rust, ```rust,ignore, etc.
+    // This script handles canonical patterns: ```rust, ```Rust, ```rust,ignore, etc.
     assert!(
-        awk_content.contains("/^```[Rr]ust/"),
-        "Rust block extraction AWK script should use case-insensitive pattern for Rust.\n\
-         Pattern /^```[Rr]ust/ matches both ```rust and ```Rust.\n\
-         This prevents missing code blocks with capitalized language identifiers.\n\
+        awk_content.contains("rest = fence_rest($0, fence_count)")
+            && awk_content.contains("rest ~ /^[Rr]ust([[:space:],]|$)/"),
+        "Rust block extraction AWK script should match canonical rust/Rust fences.\n\
+         The extractor should parse a 3+ backtick fence, inspect the info string,\n\
+         and match both rust/Rust outside any non-Rust fenced block.\n\
+         This prevents missing code blocks with capitalized language identifiers or longer fences.\n\
          Checked in: {}",
         if external_awk.exists() {
             external_awk.display().to_string()
         } else {
             workflow.display().to_string()
         }
+    );
+
+    // Verify CommonMark fence state is tracked instead of closing on any ``` line.
+    assert!(
+        awk_content.contains("rust_fence_len = fence_count")
+            && awk_content.contains("closing_count >= rust_fence_len")
+            && awk_content.contains("in_other_block"),
+        "Rust block extraction AWK script should track fence lengths and non-Rust fenced blocks.\n\
+         Longer outer fences may contain literal ```rust examples, and a Rust block opened\n\
+         with more than three backticks must not close on a shorter fence."
     );
 
     // Verify the AWK script has END block for unclosed blocks at EOF
@@ -5667,23 +6001,25 @@ fn test_doc_validation_awk_script_extraction() {
          The END block should check 'if (in_block)' and output remaining content."
     );
 
-    // Verify content accumulation handles empty first lines correctly
-    // The fix uses: if (content == "") { content = $0 } else { content = content "\n" $0 }
+    // Verify content accumulation handles empty first lines correctly.
     assert!(
-        awk_content.contains("content = $0")
-            && awk_content.contains("content = content \"\\n\" $0"),
+        awk_content.contains("seen_content = 0")
+            && awk_content.contains("content = line")
+            && awk_content.contains("content = content \"\\n\" line"),
         "Rust block extraction AWK script should properly handle empty first lines.\n\
-         Correct pattern: if (content == \"\") {{ content = $0 }} else {{ content = content \"\\n\" $0 }}\n\
+         Correct pattern: first content line is assigned directly and later lines append with a newline.\n\
          This prevents losing empty lines at the start of code blocks."
     );
 
     // Verify attribute extraction after rust/Rust fence
     // The pattern should use sub() to remove prefix and extract attributes
     assert!(
-        awk_content.contains("sub(/^```[Rr]ust,?/, \"\", attrs)"),
+        awk_content.contains("attrs = rest")
+            && awk_content.contains("sub(/^[Rr]ust,?/, \"\", attrs)")
+            && awk_content.contains("sub(/^[[:space:]]+/, \"\", attrs)"),
         "Rust block extraction AWK script should extract attributes after rust fence.\n\
-         Pattern: sub(/^```[Rr]ust,?/, \"\", attrs) removes fence and optional comma,\n\
-         leaving attributes like 'ignore', 'no_run', 'should_panic'."
+         Attribute extraction should operate on the parsed info string, remove the Rust\n\
+         marker and optional comma, then trim space-separated attributes."
     );
 }
 
@@ -5812,6 +6148,34 @@ fn test_awk_pattern_matching_with_fixtures() {
 }
 
 #[test]
+fn test_awk_gnu_match_capture_detector_allows_posix_match_forms() {
+    for allowed in [
+        r#"if (match($0, /^[[:space:]]*rust,?$/)) print $0"#,
+        r#"if (match ($0, /^item,with,commas$/)) found = 1"#,
+        r#"if (match($0, "literal,with,commas")) print "ok""#,
+        "if (match($0,\n    /^item,with,commas$/)) found = 1",
+        r#"# if (match($0, /^rust$/, captures)) print captures[1]"#,
+        r#"print "match($0, /^rust$/, captures)""#,
+    ] {
+        assert!(
+            !awk_source_uses_gnu_match_capture(allowed),
+            "POSIX AWK match form or non-code text was misclassified: {allowed}"
+        );
+    }
+
+    for rejected in [
+        r#"if (match($0, /^```[Rr]ust,?/, captures)) print captures[1]"#,
+        r#"if (match ($0, "literal,with,commas", captures)) print captures[1]"#,
+        "if (match($0,\n    /^```[Rr]ust,?$/,\n    captures)) print captures[1]",
+    ] {
+        assert!(
+            awk_source_uses_gnu_match_capture(rejected),
+            "GNU AWK match capture array was not detected: {rejected}"
+        );
+    }
+}
+
+#[test]
 fn test_awk_posix_compatibility() {
     // This test verifies that AWK scripts use POSIX-compatible syntax
     // Prevents issues with different AWK implementations (gawk vs mawk)
@@ -5850,7 +6214,7 @@ fn test_awk_posix_compatibility() {
         );
     }
 
-    if content.contains("match(") && content.contains(", arr)") {
+    if awk_source_uses_gnu_match_capture(&content) {
         violations.push(
             "AWK script uses match() with array capture (GNU awk specific).\n  \
              POSIX match() only accepts two arguments: match(string, regex).\n  \
@@ -12050,21 +12414,22 @@ fn test_awk_files_have_valid_syntax() {
         let content = read_file(awk_file);
         let relative_path = awk_file.strip_prefix(&root).unwrap_or(awk_file);
 
-        // Check for non-POSIX match() function (GNU-specific, breaks on mawk)
+        // Check for GNU-specific match() capture arrays. Two-argument
+        // match(string, regex) is POSIX AWK and must remain allowed.
+        if let Some(line_idx) = awk_source_gnu_match_capture_line(&content) {
+            issues.push(format!(
+                "{}:{}: Uses match() with a capture array (GNU awk specific).\n  \
+                 Fix: Use POSIX two-argument match(), sub(), or gsub() instead.",
+                relative_path.display(),
+                line_idx
+            ));
+        }
+
         for (line_idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             // Skip comments
             if trimmed.starts_with('#') {
                 continue;
-            }
-
-            if trimmed.contains("match(") {
-                issues.push(format!(
-                    "{}:{}: Uses match() function (not POSIX compatible with mawk).\n  \
-                     Fix: Use sub() or gsub() instead.",
-                    relative_path.display(),
-                    line_idx + 1
-                ));
             }
 
             // Check for \0 in printf (not POSIX)
@@ -12085,7 +12450,7 @@ fn test_awk_files_have_valid_syntax() {
              Why this matters:\n\
              - GitHub Actions runners may use mawk (not gawk)\n\
              - Non-POSIX AWK features cause silent failures in CI\n\
-             - match() and \\0 are common portability problems\n\n\
+             - match() capture arrays and \\0 are common portability problems\n\n\
              Verify: ./scripts/validate-ci.sh --awk",
             issues.join("\n\n")
         );
@@ -12169,7 +12534,7 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
         ("deny-msrv step id", "id: deny-msrv"),
         (
             "MSRV extraction from Cargo.toml",
-            "MSRV=$(grep '^rust-version = ' Cargo.toml",
+            "read-toml-string.sh Cargo.toml rust-version package",
         ),
         (
             "deny-msrv output export",
@@ -12207,6 +12572,52 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
          and deterministic toolchain selection inside the action container.\n\
          File: {}",
         ci_workflow.display()
+    );
+}
+
+#[test]
+fn test_workflows_and_scripts_avoid_exact_space_config_parsers() {
+    // Valid TOML/YAML permits flexible whitespace around assignment delimiters.
+    // Workflow/script diagnostics must not depend on a checked-in formatting style.
+    let root = repo_root();
+    let mut files: Vec<PathBuf> = collect_workflow_files(&root.join(".github/workflows"))
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect();
+    for script in [
+        "scripts/check-msrv-consistency.sh",
+        "scripts/validate-lychee-config.sh",
+        "scripts/check-workflow-hygiene.sh",
+        "scripts/check-ci-config.sh",
+        "scripts/read-toml-string.sh",
+    ] {
+        files.push(root.join(script));
+    }
+
+    let forbidden_fragments = [
+        "grep '^channel = '",
+        "grep '^rust-version = '",
+        "grep '^msrv = '",
+        "awk -F ' = '",
+        "awk -F '\"' '$1 == \"version = \"",
+    ];
+
+    let mut violations = Vec::new();
+    for path in files {
+        let content = read_file(&path);
+        for fragment in forbidden_fragments {
+            if content.contains(fragment) {
+                violations.push(format!("{} contains `{fragment}`", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Config readers must be whitespace-tolerant and exact-key anchored:\n\n{}\n\n\
+         Prefer a parser; otherwise use anchored helpers with `[[:space:]]*=[[:space:]]*` \
+         and section-aware matching where needed.",
+        violations.join("\n")
     );
 }
 
@@ -13287,6 +13698,73 @@ fn test_release_workflow_handles_path_filtered_workflows() {
         "release.yml PATH_FILTERED_WORKFLOWS must include 'Documentation Validation' \
          because doc-validation.yml uses path filters.\n\
          File: {}",
+        release_yml.display()
+    );
+
+    let release_line = content
+        .lines()
+        .find(|line| line.contains("PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]"))
+        .unwrap_or_else(|| {
+            panic!(
+                "release.yml must define PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"].\n\
+                 File: {}",
+                release_yml.display()
+            )
+        });
+    let (_assignment, release_patterns_value) = release_line
+        .split_once('=')
+        .unwrap_or_else(|| panic!("release preflight path map assignment must contain '='"));
+    let release_patterns: BTreeSet<String> = release_patterns_value
+        .trim()
+        .trim_matches('"')
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect();
+
+    let doc_validation_yml = root.join(".github/workflows/doc-validation.yml");
+    let doc_validation_content = read_file(&doc_validation_yml);
+    let push_paths: BTreeSet<String> =
+        extract_workflow_event_paths(&doc_validation_content, "push")
+            .into_iter()
+            .collect();
+    let pull_request_paths: BTreeSet<String> =
+        extract_workflow_event_paths(&doc_validation_content, "pull_request")
+            .into_iter()
+            .collect();
+
+    assert_eq!(
+        push_paths,
+        pull_request_paths,
+        "doc-validation.yml push.paths and pull_request.paths must stay identical so release \
+         preflight can use one Documentation Validation path map.\n\
+         File: {}",
+        doc_validation_yml.display()
+    );
+
+    let expected_release_patterns: BTreeSet<String> = push_paths
+        .iter()
+        .map(|path| release_preflight_pattern_for_doc_path(path))
+        .collect();
+
+    let missing_doc_preflight_patterns: Vec<String> = expected_release_patterns
+        .difference(&release_patterns)
+        .map(|pattern| format!("  - {pattern}"))
+        .collect();
+    let unexpected_doc_preflight_patterns: Vec<String> = release_patterns
+        .difference(&expected_release_patterns)
+        .map(|pattern| format!("  - {pattern}"))
+        .collect();
+
+    assert!(
+        missing_doc_preflight_patterns.is_empty() && unexpected_doc_preflight_patterns.is_empty(),
+        "release.yml Documentation Validation preflight path map drifted from doc-validation.yml.\n\n\
+         Missing patterns:\n{}\n\nUnexpected patterns:\n{}\n\n\
+         Keep PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"] in sync with the \
+         path filters in doc-validation.yml so release preflight fails closed when a \
+         release commit touches files that should have triggered Documentation Validation.\n\
+         File: {}",
+        missing_doc_preflight_patterns.join("\n"),
+        unexpected_doc_preflight_patterns.join("\n"),
         release_yml.display()
     );
 
@@ -14945,6 +15423,78 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_availab
 }
 
 #[test]
+fn test_pre_push_workflow_direct_script_detector_matches_assignment_edge_cases_when_pwsh_available()
+{
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r##"
+                . ./scripts/hooks/pre-push.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+                function Get-Violations([string]$content) {
+                    $violations = [System.Collections.Generic.List[string]]::new()
+                    Test-WorkflowContentForDirectScripts -File "fixture.yml" -Content $content -Violations $violations
+                    return @($violations)
+                }
+
+                $assignmentOnly = @'
+jobs:
+  preflight:
+    steps:
+      - run: |
+          PATH_FILTERED_WORKFLOWS["Documentation Validation"]="*.md *.rs scripts/check-internal-links.sh .github/workflows/doc-validation.yml"
+'@
+                Assert (@(Get-Violations $assignmentOnly).Count -eq 0) "assignment-only workflow lines are data and must not be treated as direct script invocations"
+
+                $directScript = @'
+jobs:
+  test:
+    steps:
+      - run: scripts/check-internal-links.sh --all
+'@
+                Assert (@(Get-Violations $directScript).Count -eq 1) "direct local script execution should be rejected"
+
+                $interpreterScript = @'
+jobs:
+  test:
+    steps:
+      - run: bash scripts/check-internal-links.sh --all
+'@
+                Assert (@(Get-Violations $interpreterScript).Count -eq 0) "interpreter-invoked local scripts should be accepted"
+
+                $commandStringScript = @'
+jobs:
+  test:
+    steps:
+      - run: bash -c './scripts/check-internal-links.sh --all'
+'@
+                Assert (@(Get-Violations $commandStringScript).Count -eq 1) "bash -c still relies on the script executable bit and should be rejected"
+            "##,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell pre-push detector test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "PowerShell pre-push workflow detector should match Rust detector edge cases.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -14957,6 +15507,13 @@ fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_availab
                 . ./scripts/hooks/pre-commit.ps1 -SourceOnly
                 function Assert($condition, $message) {
                     if (-not $condition) { throw $message }
+                }
+                function Find-Line([string]$content, [string]$needle) {
+                    $lines = [string[]]($content -split "`r?`n")
+                    for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index].Contains($needle)) { return $index + 1 }
+                    }
+                    throw "Missing line containing: $needle"
                 }
                 function Find-Line([string[]]$lines, [string]$needle) {
                     for ($index = 0; $index -lt $lines.Count; $index++) {
@@ -15023,6 +15580,8 @@ fn after_lifetime_helper() {
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("prod cfg not")'))) "cfg(not(test)) should not be test code"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("any test or feature prod")'))) "cfg(any(test, feature)) can compile in production and should not be test-only"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("not any test or feature prod")'))) "cfg(not(any(test, feature))) can compile in production and should not be test-only"
+                Assert (Test-RustCfgExpressionRequiresTest -Expression 'any(test, test)') "cfg(any(test, test)) should be test-only"
+                Assert (Test-RustCfgExpressionRequiresTest -Expression 'any(all(test, feature = "x"), all(test, feature = "y"))') "nested any/all expressions that all require test should be test-only"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("commented attr prod")'))) "commented cfg(test) text should not mark production as test code"
                 Assert (-not $testLines.Contains((Find-Line $lines 'panic!("after lifetime prod")'))) "lifetimes in cfg(test) items should not leak test range to following production items"
 
@@ -15066,10 +15625,51 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
                     $script:Failed = 0
                     $script:Skipped = 0
                     $script:IndexTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+                    $script:WorktreeTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
                     $script:PreloadError = $null
+                    $script:InspectWorktree = $false
+                    $script:FixtureHeadTextByPath = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+                    $script:FixtureContextMarkersChanged = $false
+                    $script:FixturePanicMacroDiffChanged = $true
                 }
                 function Assert($condition, $message) {
                     if (-not $condition) { throw $message }
+                }
+                function Find-Line([string]$content, [string]$needle) {
+                    $lines = [string[]]($content -split "`r?`n")
+                    for ($index = 0; $index -lt $lines.Count; $index++) {
+                        if ($lines[$index].Contains($needle)) { return $index + 1 }
+                    }
+                    throw "Missing line containing: $needle"
+                }
+                function Candidate([string]$file, [int]$line, [string]$text) {
+                    [pscustomobject]@{
+                        File = $file
+                        Line = $line
+                        Text = $text.TrimStart()
+                    }
+                }
+                function Set-Candidates([object[]]$staged, [object[]]$head = @()) {
+                    $script:FixtureStagedCandidates = [object[]]$staged
+                    $script:FixtureHeadCandidates = [object[]]$head
+                }
+                function Get-StagedRustPanicMacroCandidates {
+                    return [object[]]$script:FixtureStagedCandidates
+                }
+                function Get-HeadRustPanicMacroCandidates {
+                    return [object[]]$script:FixtureHeadCandidates
+                }
+                function Get-HeadText([string]$Path) {
+                    if ($script:FixtureHeadTextByPath.ContainsKey($Path)) {
+                        return $script:FixtureHeadTextByPath[$Path]
+                    }
+                    return $null
+                }
+                function Test-RustTestContextMarkersChanged {
+                    return $script:FixtureContextMarkersChanged
+                }
+                function Test-RustPanicMacroDiffChanged {
+                    return $script:FixturePanicMacroDiffChanged
                 }
 
                 $productionContent = @'
@@ -15080,7 +15680,7 @@ pub fn production() {
                 $testContent = @'
 #[cfg(test)]
 fn helper() {
-    let _ = result.expect("test helper");
+    panic!("test helper");
 }
 '@
                 $testFileContent = @'
@@ -15097,7 +15697,7 @@ pub fn production() {
                 $lifetimeContent = @'
 #[cfg(test)]
 fn lifetime_helper<'a>(input: &'a str) -> &'a str {
-    let _ = result.expect("test lifetime");
+    panic!("test lifetime");
     input
 }
 
@@ -15116,10 +15716,54 @@ pub fn not_any_test_or_feature() {
     panic!("not any test or feature prod");
 }
 '@
+                $singleResultContent = @'
+pub fn production_only() {
+    panic!("single prod panic");
+}
+
+#[cfg(test)]
+pub fn test_only_helper() {
+    panic!("single test panic");
+}
+'@
+                $headTestContextContent = @'
+#[cfg(test)]
+pub fn helper() {
+    panic!("same text and line");
+}
+'@
+                $currentProductionContextContent = @'
+#[cfg(not(test))]
+pub fn helper() {
+    panic!("same text and line");
+}
+'@
+                $copiedPanicContent = @'
+pub fn production() {
+    panic!("copied from test");
+}
+
+#[cfg(test)]
+mod tests {
+    pub fn helper() {
+        panic!("copied from test");
+    }
+}
+'@
+                $headCopiedPanicContent = @'
+#[cfg(test)]
+mod tests {
+    pub fn helper() {
+        panic!("copied from test");
+    }
+}
+'@
                 $bypassSyntaxContent = @'
 pub fn production(result: Result<(), String>) {
     panic ! ("spaced macro");
     panic /*comment*/ ! ("commented macro");
+    todo! ["bracket macro"];
+    unimplemented! {"brace macro"};
     let _ = result.unwrap /*comment*/ ();
 }
 '@
@@ -15127,17 +15771,7 @@ pub fn production(result: Result<(), String>) {
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $productionContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,3 @@
-+pub fn production() {
-+    panic!("boom");
-+}
-'@
-                }
+                Set-Candidates -staged @((Candidate "src/lib.rs" 2 'panic!("boom");'))
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "production panic addition should fail"
 
@@ -15145,109 +15779,141 @@ diff --git a/src/lib.rs b/src/lib.rs
                 $script:StagedFiles = @("src/lib.rs", "src/foo/tests.rs")
                 $script:IndexTextCache["src/lib.rs"] = $testContent
                 $script:IndexTextCache["src/foo/tests.rs"] = $testFileContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,4 @@
-+#[cfg(test)]
-+fn helper() {
-+    let _ = result.expect("test helper");
-+}
-'@
-                }
+                Set-Candidates -staged @((Candidate "src/lib.rs" 3 'panic!("test helper");'))
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 0) "cfg(test) panic addition should not fail"
                 Assert ($script:Passed -eq 1) "cfg(test) panic addition should pass the check"
 
                 Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $productionContent
+                $existing = Candidate "src/lib.rs" 2 'panic!("boom");'
+                Set-Candidates -staged @($existing) -head @($existing)
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 0) "unchanged staged panic macros already present in HEAD should not fail"
+                Assert ($script:Passed -eq 1) "unchanged staged panic macros should pass without context scanning"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = @'
+pub fn production(result: Result<(), String>) {
+    let _ = result.expect("local CI enforces expect policy");
+}
+'@
+                Set-Candidates -staged @()
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 0) "pre-commit should not scan .expect(); local CI owns that policy"
+                Assert ($script:Passed -eq 1) "no explicit panic macros should pass"
+
+                Reset-State
                 $script:StagedFiles = @("src/foo/tests.rs")
+                Set-Candidates -staged @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Skipped -eq 1) "test-only files should skip production panic scan"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $commentedAttributeContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,4 @@
-+// #[cfg(test)] appears in documentation, not as an attribute.
-+pub fn production() {
-+    panic!("commented attr prod");
-+}
-'@
-                }
+                Set-Candidates -staged @((Candidate "src/lib.rs" 3 'panic!("commented attr prod");'))
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "commented cfg(test) text must not hide production panic additions"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $lifetimeContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,8 @@
-+#[cfg(test)]
-+fn lifetime_helper<'a>(input: &'a str) -> &'a str {
-+    let _ = result.expect("test lifetime");
-+    input
-+}
-+
-+pub fn after_lifetime_helper() {
-+    panic!("after lifetime prod");
-+}
-'@
-                }
-                Test-RustAddedPanicPatterns
-                Assert ($script:Failed -eq 1) "lifetimes in cfg(test) items must not hide following production panic additions"
+                $lifetimeCandidates = @(
+                    (Candidate "src/lib.rs" (Find-Line $lifetimeContent 'panic!("test lifetime")') 'panic!("test lifetime");'),
+                    (Candidate "src/lib.rs" (Find-Line $lifetimeContent 'panic!("after lifetime prod")') 'panic!("after lifetime prod");')
+                )
+                $lifetimeTestLines = Get-RustCandidateTestLineSet -Content $lifetimeContent -CandidateLines ([int[]]@($lifetimeCandidates | ForEach-Object { $_.Line }))
+                Assert ($lifetimeTestLines.Contains($lifetimeCandidates[0].Line)) "lifetimes in cfg(test) items should be classified as test code"
+                Assert (-not $lifetimeTestLines.Contains($lifetimeCandidates[1].Line)) "lifetimes in cfg(test) items must not hide following production code"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $mixedCfgContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,9 @@
-+#[cfg(any(test, feature = "x"))]
-+pub fn any_test_or_feature() {
-+    panic!("any test or feature prod");
-+}
-+
-+#[cfg(not(any(test, feature = "x")))]
-+pub fn not_any_test_or_feature() {
-+    panic!("not any test or feature prod");
-+}
-'@
-                }
+                $mixedCfgCandidates = @(
+                    (Candidate "src/lib.rs" 3 'panic!("any test or feature prod");'),
+                    (Candidate "src/lib.rs" 8 'panic!("not any test or feature prod");')
+                )
+                Set-Candidates -staged $mixedCfgCandidates -head @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "mixed cfg(test, production) expressions must not hide production panic additions"
 
                 Reset-State
                 $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $singleResultContent
+                $script:FixtureContextMarkersChanged = $true
+                $singleResultCandidates = @(
+                    (Candidate "src/lib.rs" (Find-Line $singleResultContent 'panic!("single prod panic")') 'panic!("single prod panic");'),
+                    (Candidate "src/lib.rs" (Find-Line $singleResultContent 'panic!("single test panic")') 'panic!("single test panic");')
+                )
+                Set-Candidates -staged $singleResultCandidates -head @()
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "single production candidate selection must fail cleanly without scalar Count errors"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $currentProductionContextContent
+                $script:FixtureHeadTextByPath["src/lib.rs"] = $headTestContextContent
+                $script:FixtureContextMarkersChanged = $true
+                $sameTextCandidate = Candidate "src/lib.rs" 3 'panic!("same text and line");'
+                Set-Candidates -staged @($sameTextCandidate) -head @($sameTextCandidate)
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "removing cfg(test) around an existing panic macro should fail even when line text is unchanged"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
+                $script:IndexTextCache["src/lib.rs"] = $copiedPanicContent
+                $script:FixtureHeadTextByPath["src/lib.rs"] = $headCopiedPanicContent
+                $copiedCandidates = @(
+                    (Candidate "src/lib.rs" 2 'panic!("copied from test");'),
+                    (Candidate "src/lib.rs" 8 'panic!("copied from test");')
+                )
+                $copiedHeadCandidates = @((Candidate "src/lib.rs" 4 'panic!("copied from test");'))
+                Set-Candidates -staged $copiedCandidates -head $copiedHeadCandidates
+                Test-RustAddedPanicPatterns
+                Assert ($script:Failed -eq 1) "copying same-text panic from unchanged test code into production should fail"
+
+                Reset-State
+                $script:StagedFiles = @("src/lib.rs")
                 $script:IndexTextCache["src/lib.rs"] = $bypassSyntaxContent
-                function Get-StagedAddedLines {
-                    @'
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -0,0 +1,5 @@
-+pub fn production(result: Result<(), String>) {
-+    panic ! ("spaced macro");
-+    panic /*comment*/ ! ("commented macro");
-+    let _ = result.unwrap /*comment*/ ();
-+}
-'@
-                }
+                $syntaxCandidates = @(
+                    (Candidate "src/lib.rs" 2 'panic ! ("spaced macro");'),
+                    (Candidate "src/lib.rs" 3 'panic /*comment*/ ! ("commented macro");'),
+                    (Candidate "src/lib.rs" 4 'todo! ["bracket macro"];'),
+                    (Candidate "src/lib.rs" 5 'unimplemented! {"brace macro"};')
+                )
+                Set-Candidates -staged $syntaxCandidates -head @()
                 Test-RustAddedPanicPatterns
                 Assert ($script:Failed -eq 1) "Rust whitespace/comment syntax must not bypass production panic detection"
+                Assert (Test-RustPanicMacroLine -Line 'panic ! ("spaced macro");') "spaced macro syntax should be detected"
+                Assert (Test-RustPanicMacroLine -Line 'panic /*comment*/ ! ("commented macro");') "commented macro syntax should be detected"
+                Assert (Test-RustPanicMacroLine -Line 'todo! ["bracket macro"];') "bracket macro syntax should be detected"
+                Assert (Test-RustPanicMacroLine -Line 'unimplemented! {"brace macro"};') "brace macro syntax should be detected"
+                Assert (-not (Test-RustPanicMacroLine -Line 'let _ = result.unwrap /*comment*/ ();')) ".unwrap() should stay out of the fast hook"
+                Assert (-not (Test-RustPanicMacroLine -Line '// panic!("commented");')) "line comments should not be candidates"
+                Assert (-not (Test-RustPanicMacroLine -Line '/* panic!("doc") */')) "block comments should not be candidates"
+                Assert (-not (Test-RustPanicMacroLine -Line 'let text = "panic!(not code)";')) "string literals should not be candidates"
+                Assert (-not (Test-RustPanicMacroLine -Line ('let text = r#' + '"panic!(not code)"' + '#;'))) "raw string literals should not be candidates"
+                $multiLineComment = @'
+pub fn docs() {
+    /*
+    panic!("not code");
+    */
+}
+'@
+                $commentLines = Get-RustExecutablePanicMacroLineSet -Content $multiLineComment -CandidateLines ([int[]]@(3))
+                Assert (-not $commentLines.Contains(3)) "multi-line block comments should not be executable candidates"
+                $quote = [char]34
+                $hash = [char]35
+                $multiLineRawString = "pub fn docs() {`n" +
+                    "    let text = r$hash$quote`n" +
+                    '    panic!("not code");' + "`n" +
+                    "    $quote$hash;`n" +
+                    "}`n"
+                $rawLines = Get-RustExecutablePanicMacroLineSet -Content $multiLineRawString -CandidateLines ([int[]]@(3))
+                Assert (-not $rawLines.Contains(3)) "multi-line raw strings should not be executable candidates"
             "#,
         ])
         .current_dir(&root)
@@ -15337,25 +16003,55 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
             && content.contains("Split-RustCfgArguments")
             && content.contains("Get-RustItemEndLine")
             && content.contains("Get-RustTestLineSet")
-            && content.contains("maxCandidateLineByFile")
-            && content.contains("testLinesByFile")
-            && content.contains("-MaxLine $maxCandidateLineByFile[$candidate.File]")
+            && content.contains("Test-RustPanicMacroLine")
+            && content.contains("Get-StagedRustPanicMacroCandidates")
+            && content.contains("Get-HeadRustPanicMacroCandidates")
+            && content.contains("Get-NewRustPanicMacroCandidates")
+            && content.contains("Get-WorktreeRustPanicMacroCandidates")
+            && content.contains("Get-RustExecutablePanicMacroLineSet")
+            && content.contains("Test-RustTestContextMarkersChanged")
+            && content.contains("Test-RustPanicMacroDiffChanged")
+            && content.contains("Get-RustCandidateTestLineSet")
+            && content.contains("Select-ProductionRustPanicMacroCandidates")
             && content.contains("Sort-Object -Property File, Line")
-            && content.contains(
-                "$pickaxePattern = \"unwrap|expect|panic|todo|unimplemented|unreachable\""
-            )
-            && content.contains("-PickaxePattern $pickaxePattern")
-            && content.contains("\\.(?:unwrap|expect)\\b")
-            && content.contains("$rustWhitespace!")
-            && content.contains("\"--no-ext-diff\", \"--no-textconv\"")
+            && content.contains("Get-PolicyText")
+            && content.contains("\"grep\", \"--cached\", \"-n\", \"-E\"")
+            && content.contains("\"grep\", \"-n\", \"-E\", $grepPattern, \"HEAD\"")
+            && content.contains("panic|todo|unimplemented|unreachable")
+            && content.contains("Full .expect/.unwrap policy runs in local CI and CI")
+            && content.contains("$($candidate.File):$($candidate.Line):")
             && content.contains("Add-IndexTextCache -Pathspecs $candidateFiles")
             && content.contains("$candidateFiles.Count -gt 2")
-            && content.contains("^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@")
+            && content.contains("Get-RustPanicCandidateKey -Candidate $candidate -IncludeLine")
+            && content.contains("Test-RustTestContextMarkersChanged")
+            && content.contains("$productionCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $Candidates)")
+            && content.contains("-TestContextMarkersChanged:$testContextMarkersChanged")
             && content.contains("Contains($candidate.Line)"),
-        "pre-commit panic-pattern scans must be line-number aware and scoped to \
-         production Rust additions only. Test-only files and #[cfg(test)]/#[test] \
-         blocks must not fail the last-resort hook; small candidate sets may use \
-         direct index reads while larger sets must be batched to avoid git show fanout."
+        "pre-commit panic-pattern scans must stay line-number aware, production \
+         scoped, and candidate-first. The hook may block explicit panic macros, \
+         but .expect/.unwrap policy belongs in local CI/CI so the commit path \
+         remains sub-second."
+    );
+}
+
+#[test]
+fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
+    let root = repo_root();
+    let content = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+
+    assert!(
+        content.contains("[switch]$Worktree")
+            && content.contains("Get-WorktreeChangedFiles")
+            && content.contains("\"status\", \"--porcelain=v1\", \"-z\"")
+            && content.contains("Get-WorktreeRustPanicMacroCandidates")
+            && content.contains("HookPolicyChangedFiles")
+            && content.contains("Hook speed policy")
+            && content.contains("New-WorktreeSkillsIndexContent")
+            && content.contains("WriteAllText($indexPath, $expected")
+            && content.contains("Running fast worktree preflight checks"),
+        "pre-commit runner must expose a worktree preflight mode so agents can run \
+         the same cheap policies before handoff without staging files. The actual \
+         git hook remains staged-index based."
     );
 }
 
@@ -15451,7 +16147,9 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
             && content.contains("Test-CommandTextForDirectScript")
             && content.contains("Normalize-CommandText")
             && content.contains("Normalize-LocalScriptToken")
+            && content.contains("Test-ShellAssignmentOnly")
             && content.contains("Test-InterpreterToken")
+            && content.contains("HookBudgetMs")
             && content.contains("runBlockIndent"),
         "pre-push runner must keep a workflow direct-script invocation guard that \
          reads pushed commit content, scans only run commands, and permits local \
@@ -15544,10 +16242,14 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
             && runner.contains("--remotes=$RemoteName")
             && runner.contains("\"rev-list\", \"$RemoteSha..$LocalSha\"")
             && runner.contains("Add-ChangedFilesFromCommits")
+            && runner.contains("[switch]$Worktree")
+            && runner.contains("Get-ChangedFilesForWorktreePreflight")
             && runner.contains("Test-WorkflowDirectScriptInvocations"),
         "pre-push runner must inspect all introduced commits for existing refs, \
          scope new-branch discovery to the push target remote, and run fast \
-         workflow policy checks without invoking cargo tests."
+         workflow policy checks without invoking cargo tests. It must also expose \
+         a worktree preflight mode so agents/local CI catch push-policy failures \
+         before Git hooks are the last resort."
     );
 }
 
@@ -15575,6 +16277,28 @@ fn test_pre_push_hook_is_executable() {
          Fix: chmod +x .githooks/pre-push && git update-index --chmod=+x .githooks/pre-push",
         hook_path.display()
     );
+}
+
+#[test]
+fn test_hook_and_script_line_endings_are_repository_enforced() {
+    let root = repo_root();
+    let attributes_path = root.join(".gitattributes");
+    assert!(
+        attributes_path.exists(),
+        ".gitattributes must enforce hook and script line endings across native platforms."
+    );
+
+    let content = read_file(&attributes_path);
+    for expected in [
+        ".githooks/* text eol=lf",
+        "*.sh text eol=lf",
+        "*.ps1 text eol=lf",
+    ] {
+        assert!(
+            content.contains(expected),
+            ".gitattributes must contain `{expected}` so Git hook wrappers and scripts keep LF endings."
+        );
+    }
 }
 
 #[test]
@@ -15802,6 +16526,44 @@ fn test_run_local_ci_includes_readme_badge_style_check() {
     assert!(
         content.contains("scripts/check-readme-badges.sh"),
         "run-local-ci.sh should invoke scripts/check-readme-badges.sh."
+    );
+}
+
+#[test]
+fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
+    let root = repo_root();
+    let script_path = root.join("scripts/run-local-ci.sh");
+    let content = read_file(&script_path);
+
+    assert!(
+        content.contains("check-hook-readiness.ps1")
+            && content.contains("scripts/hooks/pre-commit.ps1 -Worktree")
+            && content.contains("scripts/hooks/pre-push.ps1 -Worktree")
+            && content.contains("grep -qE")
+            && content.contains("WARN:")
+            && content.contains("hook-readiness")
+            && content.contains("pre-commit-preflight")
+            && content.contains("pre-push-preflight"),
+        "run-local-ci.sh must run hook readiness plus worktree-scoped pre-commit \
+         and pre-push preflights so agents catch cheap hook failures before \
+         staging, committing, or pushing."
+    );
+
+    assert!(
+        content.contains("scripts/check-llm-file-sizes.sh")
+            && content.contains("scripts/check-llm-example-files.sh")
+            && content.contains("llm-file-sizes")
+            && content.contains("llm-example-files"),
+        "run-local-ci.sh must include the LLM policies that CI already runs; \
+         they stay out of git hooks but must not first fail in GitHub CI."
+    );
+
+    assert!(
+        content.contains("scripts/check-no-panics.sh")
+            && !content.contains("scripts/check-no-panics.sh patterns"),
+        "run-local-ci.sh must run the full panic policy, including clippy \
+         .expect/.unwrap enforcement. The git hook only keeps the sub-second \
+         explicit panic-macro guard."
     );
 }
 
@@ -16346,21 +17108,32 @@ fn test_pinned_nightly_staleness_warning() {
 #[cfg(unix)]
 fn test_scripts_pass_basic_syntax_check() {
     let root = repo_root();
-    let scripts_dir = root.join("scripts");
+    let script_dirs = [root.join("scripts"), root.join(".github/scripts")];
+    let mut entries = Vec::new();
 
-    if !scripts_dir.exists() {
-        return;
+    for scripts_dir in &script_dirs {
+        if !scripts_dir.exists() {
+            continue;
+        }
+
+        entries.extend(
+            std::fs::read_dir(scripts_dir)
+                .unwrap_or_else(|error| panic!("Failed to read {}: {error}", scripts_dir.display()))
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "sh")),
+        );
     }
-
-    let entries: Vec<_> = std::fs::read_dir(&scripts_dir)
-        .expect("Failed to read scripts/ directory")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sh"))
-        .collect();
 
     assert!(
         !entries.is_empty(),
-        "scripts/ directory should contain at least one .sh file"
+        "Expected at least one repository shell script in scripts/ or .github/scripts/"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path()
+                == root.join(".github/scripts/validate-rust-markdown-blocks.sh")),
+        "Shell syntax test must include the Rust markdown validator used by doc-validation.yml"
     );
 
     let mut failures = Vec::new();
@@ -19060,5 +19833,133 @@ fn test_internal_path_classification_data_driven() {
          Update is_internal_path() in scripts/check-doc-consistency.sh or fix the \
          test cases if the expected classification has changed.",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn test_doc_validation_tool_versions_match_devcontainer_args() {
+    let root = repo_root();
+    let workflow_content = read_file(&root.join(".github/workflows/doc-validation.yml"));
+    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+
+    let workflow_yq = extract_yaml_version(&workflow_content, "YQ_VERSION")
+        .expect("doc-validation.yml must define env.YQ_VERSION");
+    let dockerfile_yq = extract_toml_version(&dockerfile_content, "ARG YQ_VERSION")
+        .expect(".devcontainer/Dockerfile must define ARG YQ_VERSION");
+
+    assert_eq!(
+        dockerfile_yq, workflow_yq,
+        "YQ version drift detected between doc-validation workflow and devcontainer.\n\
+         Keep .github/workflows/doc-validation.yml env.YQ_VERSION and\n\
+         .devcontainer/Dockerfile ARG YQ_VERSION synchronized."
+    );
+
+    let workflow_taplo = extract_yaml_version(&workflow_content, "TAPLO_CLI_VERSION")
+        .expect("doc-validation.yml must define env.TAPLO_CLI_VERSION");
+    let dockerfile_taplo = extract_toml_version(&dockerfile_content, "ARG TAPLO_CLI_VERSION")
+        .expect(".devcontainer/Dockerfile must define ARG TAPLO_CLI_VERSION");
+
+    assert_eq!(
+        dockerfile_taplo, workflow_taplo,
+        "Taplo version drift detected between doc-validation workflow and devcontainer.\n\
+         Keep .github/workflows/doc-validation.yml env.TAPLO_CLI_VERSION and\n\
+         .devcontainer/Dockerfile ARG TAPLO_CLI_VERSION synchronized."
+    );
+}
+
+#[test]
+fn test_devcontainer_installs_required_modern_ci_tools() {
+    let root = repo_root();
+    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+    let devcontainer_json = read_file(&root.join(".devcontainer/devcontainer.json"));
+
+    let required_fragments = [
+        (
+            "fd-find",
+            "devcontainer must install fd-find so fd-style modern file search is available",
+        ),
+        (
+            "ln -sf /usr/bin/fdfind /usr/local/bin/fd",
+            "devcontainer must expose fd command via fdfind symlink",
+        ),
+        (
+            "yq_linux_${yq_arch}",
+            "devcontainer must install architecture-specific yq binary",
+        ),
+        (
+            "install -m 0755 \"$yq_binary\" /usr/local/bin/yq",
+            "devcontainer must install yq into PATH",
+        ),
+        (
+            "cargo install --locked taplo-cli --version \"$TAPLO_CLI_VERSION\"",
+            "devcontainer must install pinned taplo-cli",
+        ),
+        (
+            "fd --version;",
+            "devcontainer smoke checks should verify fd availability",
+        ),
+        (
+            "yq --version;",
+            "devcontainer smoke checks should verify yq availability",
+        ),
+        (
+            "taplo --version",
+            "devcontainer build should verify taplo availability",
+        ),
+    ];
+
+    for (fragment, description) in required_fragments {
+        assert!(
+            dockerfile_content.contains(fragment),
+            "Missing required devcontainer tooling fragment: {fragment}\n\
+             Why this matters: {description}\n\
+             File: .devcontainer/Dockerfile"
+        );
+    }
+
+    assert!(
+        devcontainer_json.contains("ghcr.io/devcontainers/features/docker-outside-of-docker:1"),
+        ".devcontainer/devcontainer.json must include the docker-outside-of-docker feature\n\
+         so Docker CLI workflows can run from VS Code devcontainers."
+    );
+}
+
+#[test]
+fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
+    let root = repo_root();
+    let parity_script_path = root.join("scripts/check-tooling-parity.sh");
+
+    assert!(
+        parity_script_path.exists(),
+        "scripts/check-tooling-parity.sh must exist to enforce CI/devcontainer tooling parity."
+    );
+
+    let parity_script_content = read_file(&parity_script_path);
+    assert!(
+        parity_script_content.contains("YQ_VERSION")
+            && parity_script_content.contains("TAPLO_CLI_VERSION")
+            && parity_script_content.contains("docker-outside-of-docker"),
+        "scripts/check-tooling-parity.sh must validate yq/taplo version parity and docker feature parity."
+    );
+
+    let validate_ci_content = read_file(&root.join("scripts/validate-ci.sh"));
+    assert!(
+        validate_ci_content.contains("check-tooling-parity.sh")
+            && validate_ci_content.contains("--tools"),
+        "scripts/validate-ci.sh must include tooling parity validation and expose a --tools mode."
+    );
+
+    let run_local_ci_content = read_file(&root.join("scripts/run-local-ci.sh"));
+    assert!(
+        run_local_ci_content.contains("tooling parity")
+            && run_local_ci_content.contains("scripts/validate-ci.sh --quiet"),
+        "scripts/run-local-ci.sh must route CI config checks through validate-ci.sh, including tooling parity checks."
+    );
+
+    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    assert!(
+        ci_content.contains("Validate CI/devcontainer tool parity")
+            && ci_content.contains("bash scripts/check-tooling-parity.sh"),
+        "ci.yml must run scripts/check-tooling-parity.sh so parity drift fails in CI."
     );
 }

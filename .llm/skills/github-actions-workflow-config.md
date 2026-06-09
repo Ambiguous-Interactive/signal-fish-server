@@ -33,6 +33,8 @@
 - Default permissions to `contents: read`; grant only what is needed
 - For GHCR publishing, derive `images:` from repository owner/name; do not hard-code org names
 - Always include the workflow file itself in `paths:` triggers
+- Invoke local scripts through interpreters (`bash`, `pwsh -File`, `awk -f`,
+  `node`); never use direct `run: scripts/foo.sh` execution
 
 ---
 
@@ -227,7 +229,7 @@ toolchain before executing:
 - name: Extract MSRV
   id: deny-msrv
   run: |
-    MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+    MSRV=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package)
     echo "version=$MSRV" >> "$GITHUB_OUTPUT"
 
 - name: Run cargo-deny
@@ -286,8 +288,7 @@ jobs:
 ```
 
 The hook also recognizes per-job comments: `# runs-on-schedule`, `# schedule`,
-`# security`, `# audit`, `# daily` — jobs with these are treated as
-schedule-intended and do not need an `if:` guard.
+`# security`, `# audit`, `# daily`; those jobs do not need an `if:` guard.
 
 ---
 
@@ -297,4 +298,3 @@ schedule-intended and do not need an `if:` guard.
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck, Bash best practices
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, monitoring
 - [GitHub Actions Release](./github-actions-release.md) — Release gating, preflight hardening
-- [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

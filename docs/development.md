@@ -7,6 +7,31 @@ Guide for building, testing, and contributing to Signal Fish Server.
 - Rust 1.88.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
+### CI Tooling Parity
+
+The devcontainer is expected to include the same core CLI tooling used by CI,
+pre-commit support scripts, and local test workflows, including:
+
+- `yq` (YAML code-block validation)
+- `taplo` (TOML code-block validation)
+- `rg` / ripgrep (search tooling)
+- `fd` (modern file discovery)
+- Docker CLI support in VS Code devcontainers
+
+Validate parity at any time with:
+
+```bash
+bash scripts/check-tooling-parity.sh
+
+```
+
+Run full CI configuration validation (including tooling parity) with:
+
+```bash
+bash scripts/validate-ci.sh
+
+```
+
 ## Building
 
 ### Debug Build
@@ -527,9 +552,17 @@ typos
 # MSRV consistency
 ./scripts/check-msrv-consistency.sh
 
+# Fast hook-equivalent policy checks over unstaged work
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
+
+# Canonical local preflight, including hook readiness, LLM policy checks, markdown,
+# workflow hygiene, docs/changelog consistency, and policy test suites.
+./scripts/run-local-ci.sh
+
 ```
 
-Or use the pre-commit hook to run checks automatically:
+Enable git hooks as a final last-resort guard:
 
 ```bash
 

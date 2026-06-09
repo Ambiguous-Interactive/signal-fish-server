@@ -16,6 +16,11 @@ ARG LYCHEE_AARCH64_SHA256=91a7bd65685da41b90ccb9bc867a3d649a7818042dae04ff405e55
 ARG POWERSHELL_VERSION=7.6.2
 ARG POWERSHELL_X64_SHA256=6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292
 ARG POWERSHELL_ARM64_SHA256=a8d4e386dfafda385d0604045eed03ce6f3a843d45fc8f0b9588b836ca17cdb8
+# Keep YQ/TAPLO versions in sync with .github/workflows/doc-validation.yml.
+ARG YQ_VERSION=v4.53.2
+ARG YQ_AMD64_SHA256=d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b
+ARG YQ_ARM64_SHA256=03061b2a50c7a498de2bbb92d7cb078ce433011f085a4994117c2726be4106ea
+ARG TAPLO_CLI_VERSION=0.10.0
 
 # System dependencies for building with mold linker, TLS, validation tooling,
 # and the native libraries required by the PowerShell/.NET runtime on Debian 12.
@@ -33,11 +38,13 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     libicu72 \
     libssl3 \
     libstdc++6 \
+    fd-find \
     ripgrep \
     shellcheck \
     tzdata \
     yamllint \
     zlib1g \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && apt-get autoremove -y && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
@@ -52,6 +59,8 @@ RUN set -eux; \
     lychee_sha256="$LYCHEE_X86_64_SHA256"; \
     powershell_arch="x64"; \
     powershell_sha256="$POWERSHELL_X64_SHA256"; \
+    yq_arch="amd64"; \
+    yq_sha256="$YQ_AMD64_SHA256"; \
     ;; \
     arm64) \
     actionlint_arch="arm64"; \
@@ -60,6 +69,8 @@ RUN set -eux; \
     lychee_sha256="$LYCHEE_AARCH64_SHA256"; \
     powershell_arch="arm64"; \
     powershell_sha256="$POWERSHELL_ARM64_SHA256"; \
+    yq_arch="arm64"; \
+    yq_sha256="$YQ_ARM64_SHA256"; \
     ;; \
     *) \
     echo "Unsupported target architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; \
@@ -79,6 +90,10 @@ RUN set -eux; \
     echo "${lychee_sha256}  ${lychee_archive}" | sha256sum -c -; \
     tar -xzf "$lychee_archive" "${lychee_dir}/lychee"; \
     install -m 0755 "${lychee_dir}/lychee" /usr/local/bin/lychee; \
+    yq_binary="yq_linux_${yq_arch}"; \
+    curl -fsSL -o "$yq_binary" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq_binary}"; \
+    echo "${yq_sha256}  ${yq_binary}" | sha256sum -c -; \
+    install -m 0755 "$yq_binary" /usr/local/bin/yq; \
     powershell_archive="powershell-${POWERSHELL_VERSION}-linux-${powershell_arch}.tar.gz"; \
     curl -fsSL -o "$powershell_archive" "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershell_archive}"; \
     echo "${powershell_sha256}  ${powershell_archive}" | sha256sum -c -; \
@@ -91,10 +106,12 @@ RUN set -eux; \
 
 # Build-time smoke checks for developer tooling expected by hooks and scripts.
 RUN set -eux; \
+    fd --version; \
     rg --version; \
     shellcheck --version; \
     actionlint -version; \
     lychee --version; \
+    yq --version; \
     yamllint --version; \
     gawk --version; \
     awk 'BEGIN { print "awk ok" }'; \
@@ -115,6 +132,8 @@ RUN cargo install --locked \
     cargo-expand \
     cargo-llvm-cov \
     cargo-nextest \
+    && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \
+    && taplo --version \
     && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
 
 # Fix ownership so the non-root "vscode" user (set via remoteUser in

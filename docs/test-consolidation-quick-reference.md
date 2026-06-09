@@ -90,7 +90,7 @@ panic!(
 
 ## Helper Functions
 
-```rust
+```rust,ignore
 // File operations
 fn read_file_or_panic(path: &Path, context: &str) -> String;
 fn find_files(root: &Path, ext: &[&str], exclude: &[&str]) -> Vec<PathBuf>;

@@ -41,7 +41,7 @@ fn lowercase_rust() {
 ```
 
 **Expected behavior:** Should validate and compile successfully.
-**Tests:** Case-insensitive regex matching for `rust` fence.
+**Tests:** Canonical lowercase `rust` fence matching.
 
 ---
 
@@ -55,7 +55,7 @@ fn uppercase_rust() {
 ```
 
 **Expected behavior:** Should validate and compile successfully.
-**Tests:** Bug fix #3 - Case-insensitive regex for Rust/rust.
+**Tests:** Bug fix #3 - canonical `Rust`/`rust` fence matching.
 **Bug context:** AWK script was not matching uppercase `Rust` fence markers.
 
 ---
@@ -355,7 +355,7 @@ fn mixed_case_with_attribute() {
 ```
 
 **Expected behavior:** Should compile but not run.
-**Tests:** Combination of case-insensitive fence and attribute handling.
+**Tests:** Combination of canonical capitalized fence and attribute handling.
 
 ---
 
@@ -375,9 +375,9 @@ fn very_long_function() {
     let line9 = "Line 9";
     let line10 = "Line 10";
 
-    println!("{} {} {} {} {} {} {} {} {} {}",
-        line1, line2, line3, line4, line5,
-        line6, line7, line8, line9, line10
+    println!(
+        "{} {} {} {} {} {} {} {} {} {}",
+        line1, line2, line3, line4, line5, line6, line7, line8, line9, line10
     );
 }
 ```
@@ -406,10 +406,7 @@ fn no_gap_after_header() {
 
 ```rust
 fn with_empty_lines() {
-
-
     println!("Has multiple empty lines above");
-
 
     println!("And multiple empty lines between");
 }
@@ -507,8 +504,11 @@ These test cases are automatically validated by the GitHub Actions workflow:
 To run locally:
 
 ```bash
-# Extract Rust blocks (from the workflow)
-.github/workflows/doc-validation.yml  # markdown-code-samples job
+# Validate the canonical extractor and fixture expectations
+.github/test-fixtures/validate-test-cases.sh
+
+# Inspect canonical Rust-block extraction output directly
+awk -f .github/scripts/extract-rust-blocks.awk .github/test-fixtures/markdown-validation-test-cases.md
 
 # Or run the full workflow locally with act:
 act -j markdown-code-samples

@@ -2,8 +2,8 @@
 
 Rooms are the core coordination unit in Signal Fish Server. A room
 groups players together for a single game session, manages a lobby where
-everyone signals readiness, and distributes peer connection information
-when the game starts.
+everyone signals readiness, and distributes legacy peer metadata when the game
+starts.
 
 ## Creating a Room
 
@@ -197,8 +197,10 @@ coordinate readiness.
 All players in the lobby are ready. The server finalizes the game:
 
 - Records a finalization timestamp.
-- Sends a `GameStarting` message to every player with peer connection
-  information so clients can establish direct connections.
+- Sends a `GameStarting` message to every player with legacy peer metadata.
+- For negotiated v3 non-relay rooms, follows with per-recipient `SessionPlan`
+  messages that describe topology, transport, peers, relay fallback, and ICE
+  only when the selected transport is WebRTC.
 
 ```json
 {
@@ -249,14 +251,14 @@ Alice (Client)             Server              Bob (Client)
      |   (all_ready: true)    |   (all_ready: true)   |
      |                        |                       |
      |<-- GameStarting -------|--- GameStarting ----->|
-     |   (peer connections)   |   (peer connections)  |
+     |   (legacy metadata)    |   (legacy metadata)   |
 ```
 
 ## Single-Player Rooms
 
 If `max_players` is set to `1`, the room does **not** enter the Lobby
-state. The single player receives connection information immediately
-without needing to go through the ready-up flow.
+state. The single player receives legacy `GameStarting` peer metadata
+immediately without needing to go through the ready-up flow.
 
 ## Configuration
 

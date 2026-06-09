@@ -1,7 +1,10 @@
 #requires -Version 7.0
 param(
     [string]$RemoteName = "",
-    [string]$RemoteUrl = ""
+    [string]$RemoteUrl = "",
+    [switch]$Worktree,
+    [switch]$SourceOnly,
+    [switch]$EnforceBudget
 )
 
 Set-StrictMode -Version Latest
@@ -10,6 +13,8 @@ $ErrorActionPreference = "Stop"
 $script:Passed = 0
 $script:Failed = 0
 $script:Skipped = 0
+$script:WorktreePseudoCommit = "__WORKTREE__"
+$script:HookBudgetMs = 1000
 
 . (Join-Path $PSScriptRoot "native-process.ps1")
 
@@ -178,11 +183,50 @@ function Get-ChangedFilesForPush {
     $files
 }
 
+function Add-UniqueWorktreeFiles {
+    param(
+        [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
+        [AllowEmptyString()][string]$NulDelimitedPaths
+    )
+
+    if ([string]::IsNullOrEmpty($NulDelimitedPaths)) {
+        return
+    }
+
+    foreach ($file in $NulDelimitedPaths.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        Add-ChangedFile -Map $Map -Commit $script:WorktreePseudoCommit -File $file
+    }
+}
+
+function Get-ChangedFilesForWorktreePreflight {
+    $files = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new([System.StringComparer]::Ordinal)
+    $pathspecs = @(".github/workflows", ".githooks", "scripts/hooks")
+
+    $cachedArgs = @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $pathspecs
+    Add-UniqueWorktreeFiles -Map $files -NulDelimitedPaths (Invoke-Git -Arguments $cachedArgs).Stdout
+
+    $worktreeArgs = @("diff", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $pathspecs
+    Add-UniqueWorktreeFiles -Map $files -NulDelimitedPaths (Invoke-Git -Arguments $worktreeArgs).Stdout
+
+    $untrackedArgs = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $pathspecs
+    Add-UniqueWorktreeFiles -Map $files -NulDelimitedPaths (Invoke-Git -Arguments $untrackedArgs).Stdout
+
+    $files
+}
+
 function Get-CommitBlobText {
     param(
         [Parameter(Mandatory = $true)][string]$Commit,
         [Parameter(Mandatory = $true)][string]$File
     )
+
+    if ($Commit -eq $script:WorktreePseudoCommit) {
+        $path = Join-Path $script:RepoRoot $File
+        if (-not (Test-Path -LiteralPath $path)) {
+            return $null
+        }
+        return [System.IO.File]::ReadAllText($path)
+    }
 
     $result = Invoke-Native -FileName "git" -Arguments @("show", "${Commit}:$File")
     if ($result.ExitCode -ne 0) {
@@ -292,6 +336,49 @@ function Test-ShellCommandStringOption {
     $clean.StartsWith("-") -and -not $clean.StartsWith("--") -and $clean.Contains("c")
 }
 
+function Test-ShellAssignmentValueConsumesRest {
+    param([string]$Value)
+
+    $valueText = $Value.TrimStart()
+    if ($valueText.Length -eq 0) {
+        return $true
+    }
+
+    $firstChar = $valueText[0]
+    if ($firstChar -ne '"' -and $firstChar -ne "'") {
+        return -not ($valueText -match "\s")
+    }
+
+    $escaped = $false
+    for ($index = 1; $index -lt $valueText.Length; $index++) {
+        $char = $valueText[$index]
+        if ($firstChar -eq '"' -and $char -eq "\" -and -not $escaped) {
+            $escaped = $true
+            continue
+        }
+
+        if ($char -eq $firstChar -and -not $escaped) {
+            return $valueText.Substring($index + 1).Trim().Length -eq 0
+        }
+
+        $escaped = $false
+    }
+
+    $false
+}
+
+function Test-ShellAssignmentOnly {
+    param([string]$CommandText)
+
+    $trimmed = $CommandText.Trim()
+    $match = [regex]::Match($trimmed, "^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]+\])?=")
+    if (-not $match.Success) {
+        return $false
+    }
+
+    Test-ShellAssignmentValueConsumesRest -Value $trimmed.Substring($match.Length)
+}
+
 function Remove-UnquotedShellComment {
     param([string]$Text)
 
@@ -345,6 +432,9 @@ function Test-CommandTextForDirectScript {
 
     $trimmed = Normalize-CommandText -Text ((Remove-UnquotedShellComment -Text $CommandText).Trim())
     if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+        return
+    }
+    if (Test-ShellAssignmentOnly -CommandText $trimmed) {
         return
     }
 
@@ -450,12 +540,21 @@ function Test-WorkflowDirectScriptInvocations {
     }
 }
 
+if ($SourceOnly) {
+    return
+}
+
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
 $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
 Set-Location $script:RepoRoot
 
-Write-Host "[pre-push] Running fast push checks..."
-$changedFiles = Get-ChangedFilesForPush
+if ($Worktree) {
+    Write-Host "[pre-push] Running fast worktree push-policy preflight checks..."
+    $changedFiles = Get-ChangedFilesForWorktreePreflight
+} else {
+    Write-Host "[pre-push] Running fast push checks..."
+    $changedFiles = Get-ChangedFilesForPush
+}
 
 if ($changedFiles.Count -eq 0) {
     Skip "Changed file discovery" "no pushed file changes detected"
@@ -468,6 +567,12 @@ Test-WorkflowDirectScriptInvocations -ChangedFiles $changedFiles
 
 $timer.Stop()
 Write-Host "[pre-push] Completed in $($timer.ElapsedMilliseconds)ms"
+if ($timer.ElapsedMilliseconds -gt $script:HookBudgetMs) {
+    Write-Host "[pre-push] WARN: runtime $($timer.ElapsedMilliseconds)ms exceeded ${script:HookBudgetMs}ms target."
+    if ($EnforceBudget) {
+        Fail "Hook runtime budget" "Runtime $($timer.ElapsedMilliseconds)ms exceeded ${script:HookBudgetMs}ms target."
+    }
+}
 
 if ($script:Failed -gt 0) {
     Write-Host "[pre-push] $script:Failed failed, $script:Passed passed, $script:Skipped skipped."

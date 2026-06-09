@@ -230,7 +230,7 @@ FROM rust:1.88.0-bookworm    # Error: manifest unknown
 
 ```bash
 DOCKERFILE_VERSION=$(grep '^FROM rust:' Dockerfile | head -1 | sed -E 's/FROM rust:([0-9]+\.[0-9]+).*/\1/')
-CARGO_VERSION=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "([0-9]+\.[0-9]+).*/\1/')
+CARGO_VERSION=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package | cut -d. -f1,2)
 
 if [ "$DOCKERFILE_VERSION" != "$CARGO_VERSION" ]; then
   echo "ERROR: Dockerfile ($DOCKERFILE_VERSION) doesn't match Cargo.toml ($CARGO_VERSION)"

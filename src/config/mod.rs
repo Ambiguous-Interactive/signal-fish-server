@@ -14,6 +14,7 @@
 //! - [`crate::config::security`]: Security and authentication settings
 //! - [`crate::config::relay`]: Relay type configuration
 //! - [`crate::config::session`]: Session topology / transport selection (protocol v3)
+//! - [`crate::config::turn`]: TURN / STUN ICE-server configuration (protocol v3)
 //! - [`crate::config::logging`]: Logging configuration
 //! - [`crate::config::coordination`]: Cross-instance coordination settings
 //! - [`crate::config::metrics`]: Metrics configuration
@@ -33,6 +34,7 @@ pub mod relay;
 pub mod security;
 pub mod server;
 pub mod session;
+pub mod turn;
 pub mod types;
 pub mod validation;
 pub mod websocket;
@@ -63,6 +65,8 @@ pub use security::{
 pub use server::{RateLimitConfig, ServerConfig};
 
 pub use session::SessionConfig;
+
+pub use turn::{TurnConfig, TurnMode};
 
 pub use types::Config;
 

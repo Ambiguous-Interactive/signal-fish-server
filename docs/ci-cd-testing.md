@@ -243,17 +243,15 @@ workflow, `scripts/run-local-ci.sh`, and CI.
 
 For production Rust commits:
 
-1. **Panic-prone production Rust additions** in staged `src/**/*.rs` files,
-   excluding test-only files and staged test-code ranges
-2. **Staged whitespace errors** (`git diff --cached --check`)
+1. **Explicit panic-macro additions** in staged `src/**/*.rs` files, excluding
+   test-only files and staged test-code ranges
 
 For commits without production Rust files staged:
 
 1. **Hook speed policy** for hook runner source files
-2. **Staged whitespace errors** (`git diff --cached --check`)
-3. **Generated skills index freshness** with deterministic index auto-repair
-4. **Staged `.llm/*.md` file size policy**
-5. **README badge style policy**
+2. **Generated skills index freshness** with deterministic index auto-repair
+3. **Staged `.llm/*.md` file size policy**
+4. **README badge style policy**
 
 ### Installation
 
@@ -398,8 +396,9 @@ Validate and auto-fix markdown files.
 ### 4. Panic Policy Checking: `scripts/check-no-panics.sh`
 
 Enforce zero-panic production code by detecting panic-prone patterns.
-Git hooks run only a staged addition guard for production Rust. This script is
-the slower full panic-policy checker used by agent workflow, local CI, and CI.
+Git hooks run only a staged explicit panic-macro guard for production Rust.
+This script is the slower full panic-policy checker used by agent workflow,
+local CI, and CI.
 
 **Usage:**
 
@@ -577,17 +576,20 @@ awk: line 1: syntax error at or near /
 
 **Solution:**
 
-Use POSIX-compatible AWK patterns:
+Use POSIX-compatible AWK patterns with an explicit Rust language-token boundary:
 
 ```bash
-# Before (GNU awk only)
-awk '/^```[Rr]ust(,.*)?$/ { ... }'
+# Before (too strict and misses space-separated attributes)
+awk '/^```rust$/ { ... }'
 
 # After (POSIX compatible)
-awk '/^```[Rr]ust/ { ... }'
+awk '/^```+[Rr]ust([[:space:],]|$)/ { ... }'
 ```
 
-**Why it happens:** Different AWK implementations (gawk vs mawk).
+**Why it happens:** Different AWK implementations (gawk vs mawk), plus CommonMark
+fences can have attributes separated by commas or spaces. Bare prefixes such as
+`/^```[Rr]ust/` are also unsafe because they match non-canonical languages like
+`rustic` and `rusty`.
 
 **Test that prevents this:** `test_doc_validation_workflow_has_shellcheck`
 

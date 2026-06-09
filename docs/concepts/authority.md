@@ -161,7 +161,7 @@ claim authority or by pausing the game until someone does.
 - The **first player** to join becomes authority by default.
 - Authority **transfers** are explicit via `AuthorityRequest`.
 - **Disconnection clears** authority with no auto-reassignment.
-- Authority status is included in the `GameStarting` peer connection data
+- Authority status is included in the legacy `GameStarting` peer metadata
   so clients know who the authority is at game start.
 
 ## Use Cases

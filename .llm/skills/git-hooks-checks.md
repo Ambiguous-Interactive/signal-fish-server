@@ -45,8 +45,13 @@ performance, debugging hook failures, or validating hook permissions in CI.
   and `git cat-file --batch`; cap aggregate bytes and avoid per-file `git show`
   loops in hooks
 - Staged Rust panic checks must be production-only and line-number aware: exclude
-  `*_test.rs`/`*_tests.rs` and skip additions inside staged `#[cfg(test)]` or
-  direct test-function ranges.
+  `*_test.rs`/`*_tests.rs` and skip explicit panic-macro additions inside staged
+  `#[cfg(test)]` or direct test-function ranges.
+- Production `.expect()` / `.unwrap()` policy belongs in `scripts/check-no-panics.sh`,
+  local CI, and CI. Do not put it in pre-commit.
+- Agents must run `scripts/hooks/pre-commit.ps1 -Worktree` and
+  `scripts/hooks/pre-push.ps1 -Worktree` before handoff; the actual Git hooks
+  remain staged-index and pushed-commit scoped.
 - When production Rust files are staged, run only the code-path last-resort
   guards and stop; metadata guards run for non-production-Rust commits so mixed
   code/docs changes stay under budget.
@@ -89,13 +94,17 @@ Run before handoff:
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
 
-The pre-commit failure in `pre-commit.txt` is the reference incident: `cargo
-clippy --fix` took 20.99s on Windows and still could not repair a cfg-specific
-unused variable. That category must be caught by agent verification and CI, not
-by a slow git hook.
+The current pre-commit failure in `pre-commit.txt` is a 484 ms policy mismatch:
+the hook rejected a documented production `.expect(...)` invariant that belonged
+to full panic-policy validation. The slow-hook reference incident is separate:
+`cargo clippy --fix` took 20.99s on Windows and still could not repair a
+cfg-specific unused variable. Slow semantic categories must be caught by agent
+verification and CI, not by git hooks.
 
 ---
 
@@ -135,6 +144,7 @@ See full context:
 
 ```bash
 ./.githooks/pre-commit && echo "PASS" || echo "FAIL"   # Direct execution
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 git commit --dry-run                                   # Through git path
 git commit --no-verify -m "Bypass test"               # Verify bypass behavior
 ls -la .githooks/pre-commit                            # Expect executable bit

@@ -126,7 +126,7 @@ jobs:
       - name: Extract MSRV from Cargo.toml
         id: msrv
         run: |
-          MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+          MSRV=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package)
           echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Install Rust at MSRV
         uses: dtolnay/rust-toolchain@...
@@ -146,7 +146,7 @@ jobs:
 
 ```bash
 # 1. Check current MSRV
-grep '^rust-version = ' Cargo.toml
+bash scripts/read-toml-string.sh Cargo.toml rust-version package
 
 # 2. Determine minimum required version
 cargo update -p "$DEPENDENCY"
@@ -173,15 +173,8 @@ Checklist for MSRV update from `1.87.0` to `1.88.0`:
 ### Verification
 
 ```bash
-# Use the dedicated script
+# Use the dedicated script; avoid copying exact-space TOML greps into ad hoc checks.
 ./scripts/check-msrv-consistency.sh
-
-# Or manually:
-MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
-grep "channel = \"$MSRV\"" rust-toolchain.toml || echo "FAIL: rust-toolchain.toml"
-grep "msrv = \"$MSRV\"" clippy.toml || echo "FAIL: clippy.toml"
-MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
-grep "FROM rust:$MSRV_SHORT" Dockerfile || echo "FAIL: Dockerfile"
 ```
 
 ---

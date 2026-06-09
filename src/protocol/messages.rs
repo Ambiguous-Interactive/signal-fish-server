@@ -33,10 +33,16 @@ pub enum ClientMessage {
         /// `/v3/ws` => v3), then clamped by server protocol configuration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_version: Option<u16>,
-        /// Data-path transports the client supports. Absent ⇒ relay-only (v2).
+        /// Data-path transports the client supports.
+        ///
+        /// Absent means a relay-only capability set, even if `/v3/ws` defaulted
+        /// the omitted `protocol_version` to v3.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_transports: Option<Vec<Transport>>,
-        /// Session topologies the client supports. Absent ⇒ relay-only (v2).
+        /// Session topologies the client supports.
+        ///
+        /// Absent means a relay-only capability set, even if `/v3/ws` defaulted
+        /// the omitted `protocol_version` to v3.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_topologies: Option<Vec<Topology>>,
     },
@@ -69,7 +75,10 @@ pub enum ClientMessage {
     AuthorityRequest { become_authority: bool },
     /// Signal readiness to start the game in lobby
     PlayerReady,
-    /// Provide connection info for P2P establishment
+    /// Provide legacy, self-declared v2/back-compat connection metadata.
+    ///
+    /// Stored for `GameStarting.peer_connections[*].connection_info`; not used
+    /// to negotiate v3 transport capability and not proof of P2P reachability.
     ProvideConnectionInfo { connection_info: ConnectionInfo },
     /// Heartbeat to maintain connection
     Ping,
@@ -88,6 +97,14 @@ pub enum ClientMessage {
     },
     /// Leave spectator mode
     LeaveSpectator,
+    /// Report this client's current data-path transport state to the server (v3 only).
+    /// Lets the server distinguish P2P-connected peers from relay-fallback peers
+    /// (drives metrics and, in future, targeted relay for stuck peers). Purely
+    /// informational — the relay floor never closes regardless of what is reported.
+    TransportStatus {
+        transport: Transport,
+        connected: bool,
+    },
 }
 
 /// Payload for the RoomJoined server message.
@@ -219,7 +236,11 @@ pub enum ServerMessage {
         ready_players: Vec<PlayerId>,
         all_ready: bool,
     },
-    /// Game is starting with peer connection information
+    /// Game is starting with legacy peer metadata.
+    ///
+    /// `peer_connections` may include self-declared `ConnectionInfo` from
+    /// `ProvideConnectionInfo`. v3 topology/transport/ICE/fallback directives
+    /// are carried by [`ServerMessage::SessionPlan`], not this message.
     GameStarting {
         peer_connections: Vec<PeerConnectionInfo>,
     },
@@ -233,7 +254,7 @@ pub enum ServerMessage {
         from: PlayerId,
         signal: serde_json::Value,
     },
-    /// A new peer is available for a direct (WebRTC) connection (v3 only).
+    /// A new peer is available for a WebRTC peer connection (v3 only).
     ///
     /// `you_initiate` designates exactly one side of each pair as the offerer,
     /// avoiding glare. In `mesh` topology the recipient initiates iff its id is

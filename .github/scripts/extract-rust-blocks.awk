@@ -3,63 +3,143 @@
 # Extracts Rust code blocks from markdown files for validation.
 # Outputs NUL-delimited records in the format: line_number<TAB>attributes<TAB>content
 #
-# AWK state variables (uninitialized variables start at 0/""):
-#   in_block     - 1 if currently parsing inside a code block, 0 otherwise
-#   block_start  - line number (NR) where the current block started
-#   content      - accumulated content of the current code block
-#   attrs        - extracted attributes from fence (e.g., "ignore", "no_run"); "none" if no attributes
+# AWK state variables:
+#   in_block        - 1 if currently parsing inside a Rust code block, 0 otherwise
+#   in_other_block  - 1 if currently parsing inside a non-Rust code block, 0 otherwise
+#   block_start     - line number (NR) where the current Rust block started
+#   rust_fence_len  - opening backtick count for the current Rust block
+#   other_fence_len - opening backtick count for the current non-Rust block
+#   content         - accumulated content of the current Rust code block
+#   attrs           - extracted attributes from fence (e.g., "ignore", "no_run"); "none" if no attributes
 
-# Initialize state variables explicitly to silence AWK --lint warnings
-# about uninitialized variables (particularly in_block used in the END block)
-BEGIN { in_block = 0 }
+BEGIN {
+  in_block = 0
+  in_other_block = 0
+  cr = sprintf("%c", 13)
+}
 
-# Match opening fence with optional attributes (case-insensitive)
-/^```[Rr]ust/ {
-  in_block = 1          # Enter code block state
-  block_start = NR      # Record starting line number
-  content = ""          # Reset content accumulator
-  attributes = $0       # Save full fence line for reference
-  # POSIX-compatible: use sub() instead of match() for mawk compatibility
-  # Extract attributes after rust (case-insensitive)
-  # Uses prefix match pattern instead of exact match to handle multiple fence formats:
-  # - ```rust           (plain)
-  # - ```rust,ignore    (with attribute)
-  # - ```Rust           (capitalized)
-  # Prefix match /^```[Rr]ust/ catches all these variants, then sub() strips the prefix
-  attrs = $0
-  sub(/^```[Rr]ust,?/, "", attrs)  # Remove ```rust or ```Rust and optional comma
-  if (attrs == "") attrs = "none"  # Sentinel value prevents bash IFS tab-collapsing
-  next                  # Skip to next line (do not include fence in content)
+# Normalize CRLF markdown input so fixture helpers and CI parse the same
+# logical fence/content lines on Windows-created files.
+{ sub(cr "$", "") }
+
+function fence_start(line,   pos) {
+  pos = 1
+  while (pos <= 4 && substr(line, pos, 1) == " ") {
+    pos++
+  }
+
+  # CommonMark permits at most three leading spaces before a fenced code block.
+  if (pos > 4 || substr(line, pos, 1) != "`") {
+    return 0
+  }
+
+  return pos
 }
-# Match closing fence only if in a block
-/^```$/ && in_block {
-  # Output with NUL byte separator to preserve multi-line content
-  # Format: line_number<TAB>attributes<TAB>content<NUL>
-  # Tab is used as field separator, NUL as record separator (matches JSON/YAML/TOML/Bash validators)
-  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
-  # (mawk does not support "\0" in printf format strings, but does support %c with value 0)
-  printf "%s\t%s\t%s%c", block_start, attrs, content, 0
-  in_block = 0          # Exit code block state
-  next                  # Skip to next line
+
+function fence_backtick_count(line, start,   count) {
+  count = 0
+  while (substr(line, start + count, 1) == "`") {
+    count++
+  }
+  return count
 }
-# Accumulate content while in block
-# Always append lines with newline separator, handling empty first lines
-in_block {
-  if (content == "") {
-    content = $0        # First line: no leading newline
+
+function opening_fence_count(line,   start, count) {
+  start = fence_start(line)
+  if (!start) {
+    return 0
+  }
+
+  count = fence_backtick_count(line, start)
+  if (count < 3) {
+    return 0
+  }
+
+  return count
+}
+
+function bare_closing_fence_count(line,   start, count, rest) {
+  count = opening_fence_count(line)
+  if (!count) {
+    return 0
+  }
+
+  start = fence_start(line)
+  rest = substr(line, start + count)
+  if (rest ~ /^[[:space:]]*$/) {
+    return count
+  }
+
+  return 0
+}
+
+function fence_rest(line, count,   start) {
+  start = fence_start(line)
+  return substr(line, start + count)
+}
+
+function append_content(line) {
+  if (seen_content) {
+    content = content "\n" line
   } else {
-    content = content "\n" $0  # Subsequent lines: add newline separator
+    content = line
+    seen_content = 1
   }
 }
-# Reset if we hit another opening fence while already in a block (nested/malformed)
-/^```/ && in_block {
-  in_block = 0          # Reset state on malformed/nested blocks
+
+function emit_block() {
+  # Format: line_number<TAB>attributes<TAB>content<NUL>
+  # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility.
+  printf "%s\t%s\t%s%c", block_start, attrs, content, 0
 }
-# Handle unclosed blocks at end of file
+
+{
+  fence_count = opening_fence_count($0)
+  closing_count = bare_closing_fence_count($0)
+
+  if (in_other_block) {
+    if (closing_count >= other_fence_len) {
+      in_other_block = 0
+    }
+    next
+  }
+
+  if (in_block) {
+    if (closing_count >= rust_fence_len) {
+      emit_block()
+      in_block = 0
+      next
+    }
+
+    append_content($0)
+    next
+  }
+
+  if (fence_count >= 3) {
+    rest = fence_rest($0, fence_count)
+
+    if (rest ~ /^[Rr]ust([[:space:],]|$)/) {
+      in_block = 1
+      block_start = NR
+      rust_fence_len = fence_count
+      content = ""
+      seen_content = 0
+      attrs = rest
+      sub(/^[Rr]ust,?/, "", attrs)
+      sub(/^[[:space:]]+/, "", attrs)
+      if (attrs == "") attrs = "none"
+      next
+    }
+
+    in_other_block = 1
+    other_fence_len = fence_count
+    next
+  }
+}
+
 END {
   if (in_block) {
-    # Output whatever we accumulated, even if block was not closed
-    # POSIX-compatible: Use printf "%c", 0 instead of "\0" for mawk compatibility
-    printf "%s\t%s\t%s%c", block_start, attrs, content, 0
+    # Output whatever we accumulated, even if the Rust block was not closed.
+    emit_block()
   }
 }

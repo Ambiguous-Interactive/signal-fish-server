@@ -100,7 +100,7 @@ let result = database.query(&guard.key).await;  // .await while holding guard!
 
 // ✅ Copy data out, drop the guard, then await
 let key = {
-    let guard = self.state.lock().expect("SAFETY: lock should not be poisoned");
+    let guard = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.key.clone()
 };  // guard dropped here
 let result = database.query(&key).await;

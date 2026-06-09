@@ -57,12 +57,14 @@ impl SessionMember {
 /// The room-wide selection result (not yet specialized per recipient).
 ///
 /// Carries the canonical member list so [`SessionPlanDecision::plan_for`] can
-/// build each recipient's tailored peer list.
+/// build each recipient's tailored peer list. The ICE servers are intentionally
+/// **not** stored here: they are per-recipient (each WebRTC member receives its
+/// own freshly minted TURN credentials), so the emit site builds them and passes
+/// them into [`SessionPlanDecision::plan_for`].
 pub(crate) struct SessionPlanDecision {
     pub topology: Topology,
     pub transport: Transport,
     pub host: Option<PlayerId>,
-    pub ice_servers: Vec<IceServer>,
     pub members: Vec<SessionMember>,
 }
 
@@ -196,17 +198,10 @@ pub(crate) fn choose_session_plan(
         None
     };
 
-    let ice_servers = if transport == Transport::WebRtc {
-        cfg.ice_servers.clone()
-    } else {
-        Vec::new()
-    };
-
     SessionPlanDecision {
         topology,
         transport,
         host,
-        ice_servers,
         members,
     }
 }
@@ -268,6 +263,11 @@ impl SessionPlanDecision {
 
     /// Build the per-recipient [`SessionPlanPayload`] for `recipient` (Appendix E).
     ///
+    /// `ice_servers` is the recipient's already-prepared ICE list (the operator's
+    /// static `session.ice_servers` plus this recipient's freshly minted
+    /// TURN-derived entries), built at the emit site because TURN credentials embed
+    /// the recipient's id. It is empty for non-WebRTC plans (Host+Direct, Relay).
+    ///
     /// The `fallback` is always [`Transport::Relay`] (the floor). The peer list
     /// always excludes the recipient itself and is shaped by topology:
     ///
@@ -279,7 +279,11 @@ impl SessionPlanDecision {
     /// - **Relay:** never emitted (the relay floor sends no plan), but returns an
     ///   empty peer list defensively.
     #[must_use]
-    pub(crate) fn plan_for(&self, recipient: PlayerId) -> SessionPlanPayload {
+    pub(crate) fn plan_for(
+        &self,
+        recipient: PlayerId,
+        ice_servers: Vec<IceServer>,
+    ) -> SessionPlanPayload {
         let peers = match self.topology {
             Topology::Mesh => self
                 .members
@@ -301,7 +305,7 @@ impl SessionPlanDecision {
             transport: self.transport,
             host: self.host,
             peers,
-            ice_servers: self.ice_servers.clone(),
+            ice_servers,
             fallback: Transport::Relay,
         }
     }
@@ -394,6 +398,15 @@ impl EnhancedGameServer {
             &self.session_config,
         );
 
+        // Record the per-finalized-room topology/transport selection here — once
+        // per finalize, and *before* the relay-floor early-return so a
+        // relay-resolved room is counted too (it picks Relay/Relay). This is the
+        // sole counting site for selection: `choose_session_plan` is also called
+        // from `handle_webrtc_late_join`, which must NOT count (it would
+        // double-count an already-finalized room on every late join / reconnect).
+        self.metrics.record_topology_selected(decision.topology);
+        self.metrics.record_transport_selected(decision.transport);
+
         // Relay floor: no SessionPlan is sent. v3 clients fall back to relaying
         // game data exactly like v2 (the floor never closes).
         if decision.is_relay() {
@@ -411,6 +424,24 @@ impl EnhancedGameServer {
             "Computed v3 session plan"
         );
 
+        // Capture `now` once so every member finalized together shares one TURN
+        // credential expiry (deterministic and testable). Evaluated only for
+        // WebRTC plans, where ICE is built per recipient; Host+Direct (and the
+        // never-emitted Relay) carry an empty list and never read it.
+        let webrtc = decision.uses_webrtc_signaling();
+        let now_unix = webrtc.then(|| chrono::Utc::now().timestamp());
+
+        // One non-relay SessionPlan finalize event: count once per finalized
+        // non-relay room (the relay floor returned above and is never counted
+        // here). The per-recipient sends below are the delivery of this single
+        // logical event, not separate plans.
+        self.metrics.increment_session_plans_emitted();
+
+        // Tally the TURN credentials this finalize actually mints across all
+        // recipients, incrementing the metric once at the end (one event per
+        // finalize) rather than per recipient.
+        let mut turn_credentials_issued: u64 = 0;
+
         for member in &decision.members {
             // Defense-in-depth gate: in a non-relay plan all members are v3 by
             // construction (`all_support` requires v3), but mirror signaling.rs's
@@ -419,7 +450,29 @@ impl EnhancedGameServer {
                 continue;
             }
 
-            let plan = decision.plan_for(member.player_id);
+            let ice_servers = if let Some(now_unix) = now_unix {
+                // Operator's static ICE list first (preserved verbatim for
+                // back-compat), then this recipient's TURN-derived entries.
+                let mut ice = self.session_config.ice_servers.clone();
+                let turn_derived = crate::security::build_ice_servers(
+                    &self.turn_config,
+                    member.player_id,
+                    now_unix,
+                );
+                // A minted TURN entry is the one carrying credentials (a `username`);
+                // credential-less STUN entries are not counted. This is the exact
+                // "credential issued" event (per recipient).
+                turn_credentials_issued += turn_derived
+                    .iter()
+                    .filter(|server| server.username.is_some())
+                    .count() as u64;
+                ice.extend(turn_derived);
+                ice
+            } else {
+                Vec::new()
+            };
+
+            let plan = decision.plan_for(member.player_id, ice_servers);
             // Best-effort delivery: `send_to_player` returns `Ok(())` even when a
             // peer's channel is full/closed, so a backpressured client may miss
             // the plan. That is acceptable — the relay floor remains the fallback
@@ -433,5 +486,8 @@ impl EnhancedGameServer {
                 )
                 .await;
         }
+
+        self.metrics
+            .add_turn_credentials_issued(turn_credentials_issued);
     }
 }

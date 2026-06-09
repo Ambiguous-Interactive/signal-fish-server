@@ -9,6 +9,7 @@ use super::relay::RelayTypeConfig;
 use super::security::{AuthMaintenanceConfig, SecurityConfig};
 use super::server::{RateLimitConfig, ServerConfig};
 use super::session::SessionConfig;
+use super::turn::TurnConfig;
 use super::websocket::WebSocketConfig;
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +39,8 @@ pub struct Config {
     #[serde(default)]
     pub session: SessionConfig,
     #[serde(default)]
+    pub turn: TurnConfig,
+    #[serde(default)]
     pub websocket: WebSocketConfig,
 }
 
@@ -55,6 +58,7 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             relay_types: RelayTypeConfig::default(),
             session: SessionConfig::default(),
+            turn: TurnConfig::default(),
             websocket: WebSocketConfig::default(),
         }
     }

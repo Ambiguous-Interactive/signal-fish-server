@@ -28,6 +28,42 @@ use super::session_policy::{
     RELAY_FLOOR, UPGRADE_LADDER,
 };
 
+/// A fully-inert `[turn]` block (disabled, *no* STUN urls) for the P3 selection /
+/// `plan_for` tests that isolate the operator's static `session.ice_servers`: with
+/// it, `build_ice_servers` contributes nothing, so a recipient's ICE list equals
+/// `session.ice_servers` and the original P3 expectations hold unchanged.
+fn turn_off() -> crate::config::TurnConfig {
+    crate::config::TurnConfig {
+        enabled: false,
+        stun_urls: Vec::new(),
+        ..crate::config::TurnConfig::default()
+    }
+}
+
+/// Build the recipient's ICE list exactly as `emit_session_plan` does — the
+/// operator's static `session.ice_servers` followed by the per-recipient
+/// TURN-derived entries — but only for a WebRTC plan (Host+Direct / Relay carry an
+/// empty list). Mirrors the emit site so the pure-logic tests can assert on the
+/// ICE a recipient would actually receive now that `SessionPlanDecision` no longer
+/// carries an `ice_servers` field.
+fn ice_for(
+    decision: &SessionPlanDecision,
+    recipient: PlayerId,
+    session: &SessionConfig,
+    turn: &crate::config::TurnConfig,
+    now_unix: i64,
+) -> Vec<IceServer> {
+    if decision.uses_webrtc_signaling() {
+        let mut ice = session.ice_servers.clone();
+        ice.extend(crate::security::build_ice_servers(
+            turn, recipient, now_unix,
+        ));
+        ice
+    } else {
+        Vec::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pure-logic fixtures.
 // ---------------------------------------------------------------------------
@@ -418,6 +454,8 @@ fn selection_table_resolves_each_rung_and_downgrade() {
                 )
             })
             .collect();
+        let members: Vec<SessionMember> = members;
+        let recipient = members.first().map(|m| m.player_id);
         let decision = choose_session_plan(case.game, None, members, &case.config);
 
         assert_eq!(
@@ -436,12 +474,21 @@ fn selection_table_resolves_each_rung_and_downgrade() {
             "host presence [{}]",
             case.name
         );
-        assert_eq!(
-            !decision.ice_servers.is_empty(),
-            case.expect.has_ice,
-            "ice presence [{}]",
-            case.name
-        );
+        // ICE now flows through the emit site, not the decision: a recipient's
+        // plan carries ICE iff the plan is WebRTC (the test configs all set a
+        // static STUN list). TURN is disabled here, so ICE presence == WebRTC.
+        if let Some(recipient) = recipient {
+            let ice = ice_for(&decision, recipient, &case.config, &turn_off(), 0);
+            assert_eq!(
+                !ice.is_empty(),
+                case.expect.has_ice,
+                "ice presence [{}]",
+                case.name
+            );
+        } else {
+            // Empty room ⇒ relay ⇒ no recipient and no ICE.
+            assert!(!case.expect.has_ice, "ice presence [{}]", case.name);
+        }
     }
 }
 
@@ -494,7 +541,7 @@ fn selection_only_ever_yields_a_legal_pair() {
                         }],
                         ..SessionConfig::default()
                     };
-                    let members = set
+                    let members: Vec<SessionMember> = set
                         .iter()
                         .enumerate()
                         .map(|(i, s)| {
@@ -507,6 +554,7 @@ fn selection_only_ever_yields_a_legal_pair() {
                             )
                         })
                         .collect();
+                    let recipient = members.first().map(|m| m.player_id);
                     let decision = choose_session_plan("game", None, members, &config);
                     let label = format!(
                         "desired={desired:?} webrtc={enable_webrtc} direct={enable_direct} \
@@ -530,10 +578,13 @@ fn selection_only_ever_yields_a_legal_pair() {
                         decision.host.is_some(),
                         "a host is elected exactly when the topology is host [{label}]",
                     );
-                    assert!(
-                        decision.ice_servers.is_empty() || decision.transport == Transport::WebRtc,
-                        "ICE servers must accompany only a WebRTC transport [{label}]",
-                    );
+                    if let Some(recipient) = recipient {
+                        let ice = ice_for(&decision, recipient, &config, &turn_off(), 0);
+                        assert!(
+                            ice.is_empty() || decision.transport == Transport::WebRtc,
+                            "ICE servers must accompany only a WebRTC transport [{label}]",
+                        );
+                    }
                     // The chosen topology never exceeds the `desired` ceiling.
                     let within_ceiling = match desired {
                         Topology::Relay => decision.topology == Topology::Relay,
@@ -606,7 +657,6 @@ fn emission_gates_track_relay_topology_and_webrtc_transport() {
             topology,
             transport,
             host: None,
-            ice_servers: Vec::new(),
             members: Vec::new(),
         };
 
@@ -774,12 +824,15 @@ fn plan_for_mesh_excludes_self_and_has_antisymmetric_initiate() {
     let members = vec![v3_full(a, "A"), v3_full(b, "B"), v3_full(c, "C")];
     let decision = choose_session_plan("game", None, members, &mesh_config());
 
+    let cfg = mesh_config();
+    let turn = turn_off();
     for &recipient in &[a, b, c] {
-        let plan = decision.plan_for(recipient);
+        let ice = ice_for(&decision, recipient, &cfg, &turn, 0);
+        let plan = decision.plan_for(recipient, ice);
         assert_eq!(plan.topology, Topology::Mesh);
         assert_eq!(plan.transport, Transport::WebRtc);
         assert_eq!(plan.fallback, Transport::Relay);
-        // ICE servers present for webrtc.
+        // ICE servers present for webrtc (the static STUN from `mesh_config`).
         assert_eq!(plan.ice_servers.len(), 1);
         // No self in the peer list.
         assert!(plan.peers.iter().all(|p| p.player_id != recipient));
@@ -790,7 +843,7 @@ fn plan_for_mesh_excludes_self_and_has_antisymmetric_initiate() {
     // Antisymmetry: for each unordered pair, exactly one side initiates.
     let initiates = |from: PlayerId, to: PlayerId| {
         decision
-            .plan_for(from)
+            .plan_for(from, Vec::new())
             .peers
             .iter()
             .find(|p| p.player_id == to)
@@ -817,9 +870,11 @@ fn plan_for_mesh_has_no_ice_servers_when_config_has_none() {
         ..SessionConfig::default()
     };
     let decision = choose_session_plan("game", None, members, &cfg);
-    // Still a webrtc mesh plan, but ice_servers is empty (config supplied none).
+    // Still a webrtc mesh plan, but ice_servers is empty (config supplied none and
+    // TURN is disabled, so `ice_for` produces nothing).
     assert_eq!(decision.transport, Transport::WebRtc);
-    let plan = decision.plan_for(a);
+    let ice = ice_for(&decision, a, &cfg, &turn_off(), 0);
+    let plan = decision.plan_for(a, ice);
     assert!(plan.ice_servers.is_empty());
 }
 
@@ -843,7 +898,7 @@ fn plan_for_host_non_host_recipient_targets_only_host() {
     let decision = choose_session_plan("game", Some(host_id), members, &host_config());
     assert_eq!(decision.host, Some(host_id));
 
-    let plan = decision.plan_for(client_a);
+    let plan = decision.plan_for(client_a, Vec::new());
     assert_eq!(plan.topology, Topology::Host);
     assert_eq!(plan.host, Some(host_id));
     assert_eq!(plan.peers.len(), 1);
@@ -868,7 +923,7 @@ fn plan_for_host_host_recipient_targets_all_clients() {
     ];
     let decision = choose_session_plan("game", Some(host_id), members, &host_config());
 
-    let plan = decision.plan_for(host_id);
+    let plan = decision.plan_for(host_id, Vec::new());
     assert_eq!(plan.peers.len(), 2, "host sees every client");
     assert!(
         plan.peers.iter().all(|p| !p.initiate),
@@ -909,10 +964,20 @@ fn ice_servers_empty_when_transport_not_webrtc() {
             vec![Topology::Relay, Topology::Host],
         ),
     ];
-    let decision = choose_session_plan("game", None, members, &host_config());
+    let cfg = host_config();
+    let decision = choose_session_plan("game", None, members, &cfg);
     assert_eq!(decision.transport, Transport::Direct);
-    assert!(decision.ice_servers.is_empty());
-    let plan = decision.plan_for(members_first_id(&decision));
+    // A non-WebRTC plan carries no ICE even though the config supplies a STUN list.
+    let recipient = members_first_id(&decision);
+    let ice = ice_for(
+        &decision,
+        recipient,
+        &cfg,
+        &crate::config::TurnConfig::default(),
+        0,
+    );
+    assert!(ice.is_empty());
+    let plan = decision.plan_for(recipient, ice);
     assert!(plan.ice_servers.is_empty());
 }
 
@@ -936,10 +1001,20 @@ fn next_addr() -> SocketAddr {
     format!("127.0.0.1:{port}").parse().expect("valid addr")
 }
 
-/// Build a server with the given session config (mirrors signaling_tests's
-/// harness but threads a chosen `SessionConfig` so emission can pick non-relay
-/// plans).
+/// Build a server with the given session config and a fully-inert TURN config
+/// ([`turn_off`]: disabled, no STUN), so the P3 emission tests continue to observe
+/// ICE coming *only* from `session.ice_servers`. The P4 ICE-emission tests use
+/// [`create_server_with_session_and_turn`] to supply an active `[turn]` block.
 async fn create_server_with_session(session: SessionConfig) -> Arc<EnhancedGameServer> {
+    create_server_with_session_and_turn(session, turn_off()).await
+}
+
+/// Build a server with the given session **and** TURN config, so the P4 ICE-
+/// emission tests can exercise minted TURN credentials end to end.
+async fn create_server_with_session_and_turn(
+    session: SessionConfig,
+    turn: crate::config::TurnConfig,
+) -> Arc<EnhancedGameServer> {
     let config = ServerConfig {
         rate_limit_config: RateLimitConfig::default(),
         ..ServerConfig::default()
@@ -949,6 +1024,7 @@ async fn create_server_with_session(session: SessionConfig) -> Arc<EnhancedGameS
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
         session,
+        turn,
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),
@@ -1172,4 +1248,491 @@ async fn emit_default_relay_config_sends_no_plan_even_for_v3_room() {
 
     assert_silent(&mut alice_rx).await;
     assert_silent(&mut bob_rx).await;
+}
+
+// ---------------------------------------------------------------------------
+// P4 ICE / TURN emission.
+// ---------------------------------------------------------------------------
+
+/// A `mesh` `SessionConfig` with *no* static `ice_servers`, so every ICE entry a
+/// recipient receives comes purely from the `[turn]` block (clean assertions).
+fn mesh_config_no_static_ice() -> SessionConfig {
+    SessionConfig {
+        default_topology: Topology::Mesh,
+        ice_servers: Vec::new(),
+        ..SessionConfig::default()
+    }
+}
+
+/// An enabled static-secret `[turn]` block with a STUN url and a TURN url.
+fn enabled_turn() -> crate::config::TurnConfig {
+    crate::config::TurnConfig {
+        enabled: true,
+        mode: crate::config::TurnMode::StaticSecret,
+        static_auth_secret: "super-secret".to_string(),
+        urls: vec!["turn:turn.example.com:3478".to_string()],
+        stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        credential_ttl_secs: 3600,
+        managed_provider: None,
+        managed_api_token: None,
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() {
+    // Acceptance (a): with `[turn]` enabled, each recipient's SessionPlan carries
+    // the public STUN entry plus a TURN entry whose username embeds *that*
+    // recipient's id — distinct, time-limited credentials per player.
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    server.emit_session_plan(&room_id, &finalized).await;
+
+    let alice_plan = match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("alice expected SessionPlan, got {other:?}"),
+    };
+    let bob_plan = match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("bob expected SessionPlan, got {other:?}"),
+    };
+
+    // Each plan: STUN entry (credential-less) followed by a TURN entry (with creds).
+    for plan in [&alice_plan, &bob_plan] {
+        assert_eq!(plan.ice_servers.len(), 2, "STUN + TURN");
+        assert_eq!(
+            plan.ice_servers[0].urls,
+            vec!["stun:stun.l.google.com:19302"]
+        );
+        assert!(plan.ice_servers[0].username.is_none());
+        assert_eq!(plan.ice_servers[1].urls, vec!["turn:turn.example.com:3478"]);
+        assert!(plan.ice_servers[1].username.is_some());
+        assert!(plan.ice_servers[1].credential.is_some());
+    }
+
+    let alice_user = alice_plan.ice_servers[1].username.clone().unwrap();
+    let bob_user = bob_plan.ice_servers[1].username.clone().unwrap();
+    // Each username embeds the recipient's own id.
+    assert!(alice_user.ends_with(&alice.to_string()));
+    assert!(bob_user.ends_with(&bob.to_string()));
+    // Distinct usernames and credentials per recipient...
+    assert_ne!(alice_user, bob_user);
+    assert_ne!(
+        alice_plan.ice_servers[1].credential,
+        bob_plan.ice_servers[1].credential
+    );
+    // ...but a shared expiry (one `now` captured per finalize): the `{expiry}:`
+    // prefix is identical.
+    let alice_expiry = alice_user.split(':').next().unwrap();
+    let bob_expiry = bob_user.split(':').next().unwrap();
+    assert_eq!(alice_expiry, bob_expiry, "all members share one expiry");
+    // Expiry is in the future (now + ttl), not a wrapped/past value.
+    let expiry: i64 = alice_expiry.parse().expect("expiry is an integer");
+    assert!(expiry > chrono::Utc::now().timestamp());
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
+    // Acceptance (b): with `[turn]` disabled but `stun_urls` set, each plan carries
+    // only the public STUN entry — no credentials.
+    let turn = crate::config::TurnConfig {
+        enabled: false,
+        ..enabled_turn()
+    };
+    let server = create_server_with_session_and_turn(mesh_config_no_static_ice(), turn).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    server.emit_session_plan(&room_id, &finalized).await;
+
+    for rx in [&mut alice_rx, &mut bob_rx] {
+        let plan = match recv(rx).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => plan.clone(),
+            other => panic!("expected SessionPlan, got {other:?}"),
+        };
+        assert_eq!(plan.ice_servers.len(), 1, "STUN only when TURN disabled");
+        assert_eq!(
+            plan.ice_servers[0].urls,
+            vec!["stun:stun.l.google.com:19302"]
+        );
+        assert!(plan.ice_servers[0].username.is_none());
+        assert!(plan.ice_servers[0].credential.is_none());
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_webrtc_room_prepends_static_ice_then_turn() {
+    // The operator's static `session.ice_servers` are preserved verbatim and come
+    // first; the TURN-derived STUN + TURN entries follow.
+    let server = create_server_with_session_and_turn(mesh_config(), enabled_turn()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    // Bob is registered (so the mesh has two v3 members and resolves to webrtc) but
+    // his plan is not asserted on here.
+    let (bob, _bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    server.emit_session_plan(&room_id, &finalized).await;
+
+    let alice_plan = match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("alice expected SessionPlan, got {other:?}"),
+    };
+    // Static STUN (from mesh_config), then TURN STUN, then TURN creds: 3 entries.
+    assert_eq!(alice_plan.ice_servers.len(), 3);
+    // The operator's static entry is first and untouched.
+    assert_eq!(
+        alice_plan.ice_servers[0].urls,
+        vec!["stun:stun.l.google.com:19302"]
+    );
+    assert!(alice_plan.ice_servers[0].username.is_none());
+    // The last entry is the minted TURN credential.
+    assert_eq!(
+        alice_plan.ice_servers[2].urls,
+        vec!["turn:turn.example.com:3478"]
+    );
+    assert!(alice_plan.ice_servers[2].username.is_some());
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
+    // Host+Direct is non-WebRTC: it must carry an empty ICE list regardless of the
+    // `[turn]` block (ICE is only meaningful for WebRTC).
+    let cfg = SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ice_servers: Vec::new(),
+        ..SessionConfig::default()
+    };
+    let server = create_server_with_session_and_turn(cfg, enabled_turn()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (client, mut client_rx) = register_client(&server).await;
+    // Direct-capable (no WebRTC) v3 members so the room resolves to Host+Direct.
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    server.set_client_protocol(&host, direct.clone());
+    server.set_client_protocol(&client, direct);
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "host-game",
+        vec![
+            player_info(host, "Host", true),
+            player_info(client, "Client", false),
+        ],
+        Some(host),
+    );
+
+    server.emit_session_plan(&room_id, &finalized).await;
+
+    for rx in [&mut host_rx, &mut client_rx] {
+        let plan = match recv(rx).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => plan.clone(),
+            other => panic!("expected SessionPlan, got {other:?}"),
+        };
+        assert_eq!(plan.transport, Transport::Direct);
+        assert!(
+            plan.ice_servers.is_empty(),
+            "a non-WebRTC plan carries no ICE even with TURN enabled"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_webrtc_room_managed_turn_is_stun_only() {
+    // Managed mode is a P4 stub: each plan carries only the public STUN entry, no
+    // minted TURN credentials.
+    let turn = crate::config::TurnConfig {
+        enabled: true,
+        mode: crate::config::TurnMode::Managed,
+        managed_provider: Some("cloudflare".to_string()),
+        managed_api_token: Some("token".to_string()),
+        ..enabled_turn()
+    };
+    let server = create_server_with_session_and_turn(mesh_config_no_static_ice(), turn).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    server.emit_session_plan(&room_id, &finalized).await;
+
+    for rx in [&mut alice_rx, &mut bob_rx] {
+        let plan = match recv(rx).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => plan.clone(),
+            other => panic!("expected SessionPlan, got {other:?}"),
+        };
+        assert_eq!(plan.ice_servers.len(), 1, "managed mode is STUN-only in P4");
+        assert!(plan.ice_servers[0].username.is_none());
+        assert!(plan.ice_servers[0].credential.is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P5 metric increments at finalize (emit_session_plan).
+// ---------------------------------------------------------------------------
+
+/// Snapshot of the P5 selection counters for compact before/after assertions.
+#[derive(Debug, PartialEq, Eq)]
+struct SelectionCounters {
+    session_plans_emitted: u64,
+    topology_mesh: u64,
+    topology_host: u64,
+    topology_relay: u64,
+    transport_webrtc: u64,
+    transport_direct: u64,
+    transport_relay: u64,
+    turn_credentials_issued: u64,
+}
+
+fn selection_counters(server: &EnhancedGameServer) -> SelectionCounters {
+    let m = &server.metrics;
+    SelectionCounters {
+        session_plans_emitted: m.session_plans_emitted.load(Ordering::Relaxed),
+        topology_mesh: m.topology_mesh_selected.load(Ordering::Relaxed),
+        topology_host: m.topology_host_selected.load(Ordering::Relaxed),
+        topology_relay: m.topology_relay_selected.load(Ordering::Relaxed),
+        transport_webrtc: m.transport_webrtc_selected.load(Ordering::Relaxed),
+        transport_direct: m.transport_direct_selected.load(Ordering::Relaxed),
+        transport_relay: m.transport_relay_selected.load(Ordering::Relaxed),
+        turn_credentials_issued: m.turn_credentials_issued.load(Ordering::Relaxed),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_mesh_webrtc_finalize_increments_topology_transport_and_session_plans() {
+    let server = create_server_with_session(mesh_config()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    let before = selection_counters(&server);
+    server.emit_session_plan(&room_id, &finalized).await;
+    // Drain the two plans so the receivers stay alive for the duration.
+    let _ = recv(&mut alice_rx).await;
+    let _ = recv(&mut bob_rx).await;
+    let after = selection_counters(&server);
+
+    assert_eq!(after.topology_mesh, before.topology_mesh + 1);
+    assert_eq!(after.transport_webrtc, before.transport_webrtc + 1);
+    assert_eq!(
+        after.session_plans_emitted,
+        before.session_plans_emitted + 1,
+        "exactly one non-relay SessionPlan finalize event"
+    );
+    // No TURN block configured (mesh_config + turn_off) => no credentials minted.
+    assert_eq!(
+        after.turn_credentials_issued, before.turn_credentials_issued,
+        "no TURN credentials when the [turn] block is inert"
+    );
+    // Untouched counters stay put.
+    assert_eq!(after.topology_host, before.topology_host);
+    assert_eq!(after.topology_relay, before.topology_relay);
+    assert_eq!(after.transport_relay, before.transport_relay);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_mesh_webrtc_with_turn_counts_one_credential_per_recipient() {
+    // Two webrtc recipients with an enabled static-secret TURN block => one minted
+    // TURN entry per recipient => turn_credentials_issued += 2 for this finalize.
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    let before = selection_counters(&server);
+    server.emit_session_plan(&room_id, &finalized).await;
+    let _ = recv(&mut alice_rx).await;
+    let _ = recv(&mut bob_rx).await;
+    let after = selection_counters(&server);
+
+    assert_eq!(
+        after.turn_credentials_issued,
+        before.turn_credentials_issued + 2,
+        "one TURN credential minted per WebRTC recipient (two members)"
+    );
+    assert_eq!(after.topology_mesh, before.topology_mesh + 1);
+    assert_eq!(after.transport_webrtc, before.transport_webrtc + 1);
+    assert_eq!(
+        after.session_plans_emitted,
+        before.session_plans_emitted + 1
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_relay_resolved_finalize_counts_relay_but_not_session_plan() {
+    // One v3 + one default v2 (relay-only) member => relay floor.
+    let server = create_server_with_session(mesh_config()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (legacy, mut legacy_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    // legacy stays v2 / relay-only.
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(legacy, "Legacy", false),
+        ],
+        None,
+    );
+
+    let before = selection_counters(&server);
+    server.emit_session_plan(&room_id, &finalized).await;
+    // No plan is sent on the relay floor.
+    assert_silent(&mut alice_rx).await;
+    assert_silent(&mut legacy_rx).await;
+    let after = selection_counters(&server);
+
+    assert_eq!(
+        after.topology_relay,
+        before.topology_relay + 1,
+        "a relay-resolved finalize counts the relay topology"
+    );
+    assert_eq!(
+        after.transport_relay,
+        before.transport_relay + 1,
+        "a relay-resolved finalize counts the relay transport"
+    );
+    assert_eq!(
+        after.session_plans_emitted, before.session_plans_emitted,
+        "a relay-resolved room emits NO SessionPlan => session_plans_emitted unchanged"
+    );
+    assert_eq!(after.topology_mesh, before.topology_mesh);
+    assert_eq!(after.transport_webrtc, before.transport_webrtc);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_does_not_double_count_selection_metrics() {
+    // emit_session_plan counts once; a subsequent late-join (which also calls
+    // choose_session_plan) must NOT bump any selection counter.
+    let server = create_server_with_session(mesh_config()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let members = vec![
+        player_info(alice, "Alice", false),
+        player_info(bob, "Bob", false),
+    ];
+    let finalized = finalized("mesh-game", members.clone(), None);
+
+    server.emit_session_plan(&room_id, &finalized).await;
+    let _ = recv(&mut alice_rx).await;
+    let _ = recv(&mut bob_rx).await;
+    let after_finalize = selection_counters(&server);
+
+    // A late join into the already-finalized room recomputes the plan but must not
+    // count it again.
+    let mut room = crate::protocol::Room::new(
+        "mesh-game".to_string(),
+        "ROOMAB".to_string(),
+        4,
+        false,
+        "matchbox".to_string(),
+    );
+    room.lobby_state = crate::protocol::LobbyState::Finalized;
+    server.handle_webrtc_late_join(&room, &bob, &members).await;
+    // The late join pairs the two mesh members, so each receives exactly one
+    // `NewPeer`. Consume (and verify) them so the receivers stay drained — this
+    // also proves the late-join path ran (the double-count guard is non-vacuous).
+    for rx in [&mut alice_rx, &mut bob_rx] {
+        match recv(rx).await.as_ref() {
+            ServerMessage::NewPeer { .. } => {}
+            other => panic!("expected NewPeer from late-join pairing, got {other:?}"),
+        }
+    }
+    assert_silent(&mut alice_rx).await;
+    assert_silent(&mut bob_rx).await;
+
+    let after_late_join = selection_counters(&server);
+    assert_eq!(
+        after_finalize, after_late_join,
+        "late-join must not double-count any selection metric"
+    );
 }

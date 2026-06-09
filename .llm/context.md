@@ -87,6 +87,33 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance.
 
+### Hook Reliability Rules (Required)
+
+- Git hooks are last-resort guards and must stay cross-platform (`pwsh` + `git` only) and sub-second.
+- If you touch hook files or hook-adjacent policy code, run:
+  - `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1`
+  - `SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree`
+  - `pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree`
+- Runtime target: full pre-commit suite under 1000ms on normal local workloads.
+  Any slower run must be investigated and optimized before handoff.
+- PowerShell collection safety (strict mode):
+  - Always wrap function outputs with `@(...)` before using `.Count`.
+  - Example: `if ((Get-Items).Count -eq 0) {}` can fail in strict mode when output
+    collapses to a scalar; `if (@(Get-Items).Count -eq 0) {}` is safe.
+  - When returning a collection that must stay a collection, use `Write-Output -NoEnumerate` or a unary array return.
+  - Prefer typed array boundaries (`[string[]]@(...)`, `[int[]]@(...)`) for helper function inputs.
+- Do not add `cargo`, `npm`, `npx`, or installer/bootstrap commands to git hooks.
+
+### Tooling Parity Rules (Required)
+
+- Keep CI and devcontainer tool pins synchronized.
+- If you change `YQ_VERSION` or `TAPLO_CLI_VERSION` in
+  `.github/workflows/doc-validation.yml`, update matching ARG values in
+  `.devcontainer/Dockerfile` in the same PR.
+- Keep Docker CLI support enabled in `.devcontainer/devcontainer.json` for local
+  Docker CI parity.
+- Run `bash scripts/check-tooling-parity.sh` after tooling changes.
+
 ---
 
 ## Core Reference Map
@@ -109,6 +136,8 @@ Canonical protocol samples:
 
 - [v2 client messages](code-samples/protocol/v2-client-messages.jsonl)
 - [v2 server messages](code-samples/protocol/v2-server-messages.jsonl)
+- [v3 client messages](code-samples/protocol/v3-client-messages.jsonl)
+- [v3 server messages](code-samples/protocol/v3-server-messages.jsonl)
 
 ---
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
-    /// Handle connection info from client for P2P establishment.
+    /// Store legacy, self-declared peer metadata for the `GameStarting` handoff.
     pub async fn handle_provide_connection_info(
         &self,
         player_id: &PlayerId,
@@ -25,20 +25,20 @@ impl EnhancedGameServer {
             return;
         };
 
-        tracing::info!(%player_id, %room_id, "Player provided connection info for P2P establishment");
+        tracing::info!(%player_id, %room_id, "Player provided legacy peer connection metadata");
 
         if let Err(e) = self
             .database
             .update_player_connection_info(&room_id, player_id, connection_info)
             .await
         {
-            tracing::error!(%player_id, "Failed to store connection info: {}", e);
+            tracing::error!(%player_id, "Failed to store legacy peer metadata: {}", e);
             let _ = self
                 .message_coordinator
                 .send_to_player(
                     player_id,
                     Arc::new(ServerMessage::Error {
-                        message: "Failed to store connection info".to_string(),
+                        message: "Failed to store legacy peer metadata".to_string(),
                         error_code: Some(ErrorCode::InternalError),
                     }),
                 )

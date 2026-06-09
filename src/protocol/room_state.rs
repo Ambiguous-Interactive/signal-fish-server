@@ -53,12 +53,12 @@ use super::types::{
 //
 // ### 3. Finalized State
 //
-// - **Description**: All players ready, game starting. Peer connection
-//   information is exchanged.
+// - **Description**: All players ready, game starting. Legacy, self-declared
+//   peer metadata is exchanged.
 // - **Characteristics**:
 //   - All players have marked ready
 //   - `game_finalized_at` timestamp recorded
-//   - `GameStarting` message sent with peer connections
+//   - `GameStarting` message sent with legacy peer metadata
 //   - Room typically cleaned up shortly after
 //   - No further state transitions possible
 //
@@ -79,7 +79,7 @@ use super::types::{
 // - **Trigger**: All players in lobby mark themselves ready
 // - **Condition**: `all_players_ready()` returns true
 // - **Action**: Calls `finalize_game()`, sets `game_finalized_at` timestamp
-// - **Message**: Broadcasts `GameStarting` with `PeerConnectionInfo` for all players
+// - **Message**: Broadcasts `GameStarting` with legacy peer metadata for all players
 //
 // ## Protocol Message Flow Example (2 Players)
 //
@@ -112,12 +112,12 @@ use super::types::{
 // - `PlayerJoined`: Notify others when a player joins
 // - `PlayerLeft`: Notify others when a player leaves
 // - `LobbyStateChanged`: Notify lobby state changes (waiting/lobby) and ready status
-// - `GameStarting`: Notify game finalization with peer connection info
+// - `GameStarting`: Notify game finalization with legacy peer metadata
 //
 // ## Edge Cases
 //
 // - **Single Player Rooms** (`max_players = 1`): Room does NOT enter Lobby
-//   state per `should_enter_lobby()`. Player immediately receives connection info.
+//   state per `should_enter_lobby()`. Player immediately receives legacy peer metadata.
 //
 // - **Player Disconnection in Lobby**: If player disconnects and room drops
 //   below `max_players`, room reverts to Waiting state and all ready states
@@ -379,7 +379,7 @@ impl Room {
         self.ready_players.len() == self.players.len() && !self.players.is_empty()
     }
 
-    /// Finalize the game and prepare for peer connections
+    /// Finalize the game and prepare legacy peer metadata.
     #[allow(dead_code)]
     pub fn finalize_game(&mut self) -> bool {
         if self.lobby_state == LobbyState::Lobby && self.all_players_ready() {
@@ -391,7 +391,7 @@ impl Room {
         }
     }
 
-    /// Get peer connection information for all players
+    /// Get legacy `GameStarting` peer metadata for all players.
     #[allow(dead_code)]
     pub fn get_peer_connections(&self) -> Vec<PeerConnectionInfo> {
         PeerConnectionInfo::from_players(self.players.values(), &self.relay_type)
