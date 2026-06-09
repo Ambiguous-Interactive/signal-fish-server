@@ -130,13 +130,14 @@ fn test_no_language_specific_cache_mismatch() {
         || root.join("Pipfile").exists()
         || root.join("pyproject.toml").exists()
         || has_any_requirements_txt;
+    let pip_cache_re = regex::Regex::new(
+        r#"(?m)^[ \t]*cache[ \t]*:[ \t]*['"]?pip['"]?(?:[ \t]*(?:#.*)?)?$"#,
+    )
+    .expect("valid pip cache regex");
 
     for workflow_file in workflow_files {
         let content = read_file(&workflow_file);
-        if !is_python_project
-            && is_rust_project
-            && (content.contains("cache: 'pip'") || content.contains("cache: pip"))
-        {
+        if !is_python_project && is_rust_project && pip_cache_re.is_match(&content) {
             panic!("Python pip cache found in Rust project workflow: {}", workflow_file);
         }
     }

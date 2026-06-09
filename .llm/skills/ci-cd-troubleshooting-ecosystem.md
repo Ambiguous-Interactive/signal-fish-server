@@ -271,8 +271,7 @@ Extract the channel from `rust-toolchain.toml` and pass it dynamically:
 - name: Read Rust toolchain
   id: toolchain
   run: |
-    CHANNEL=$(grep '^channel = ' rust-toolchain.toml \
-      | sed -E 's/channel = "(.+)"/\1/')
+    CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)
     echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 - uses: dtolnay/rust-toolchain@v1
   with:

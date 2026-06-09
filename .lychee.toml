@@ -76,6 +76,7 @@ exclude_path = [
     ".github/test-fixtures/",  # Intentional test fixtures with example/placeholder content
     "test-fixtures/",           # Root test fixtures directory
     "tests/",                   # Test files contain intentional placeholder/example URLs
+    "node_modules/",            # Node tooling dependencies
     "\\.lychee\\.toml$",        # Defense-in-depth: CLI --exclude-path in link-check.yml is the primary mechanism
                                 # (TOML exclude_path may not apply to glob-expanded paths; see link-check.yml comments)
     "site/",                    # MkDocs build output

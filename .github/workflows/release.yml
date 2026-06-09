@@ -247,7 +247,11 @@ jobs:
         id: toolchain
         shell: bash
         run: |
-          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
@@ -292,7 +296,11 @@ jobs:
 
       - name: Verify version consistency
         run: |
-          CARGO_VERSION=$(awk -F '"' '$1 == "version = " { print $2; exit }' Cargo.toml)
+          CARGO_VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
+            exit 1
+          fi
           echo "Cargo.toml version: $CARGO_VERSION"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -330,7 +338,11 @@ jobs:
       - name: Create and push git tag
         if: github.event_name == 'workflow_dispatch'
         run: |
-          CARGO_VERSION=$(awk -F '"' '$1 == "version = " { print $2; exit }' Cargo.toml)
+          CARGO_VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
+            exit 1
+          fi
           TAG_NAME="v${CARGO_VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -341,7 +353,11 @@ jobs:
         id: get_version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=$(awk -F '"' '$1 == "version = " { print $2; exit }' Cargo.toml)
+            VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
+              exit 1
+            fi
           else
             VERSION=${GITHUB_REF#refs/tags/v}
           fi

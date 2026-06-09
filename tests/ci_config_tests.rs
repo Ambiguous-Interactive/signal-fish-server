@@ -2104,6 +2104,12 @@ fn test_no_language_specific_cache_mismatch() {
         || root.join("pyproject.toml").exists()
         || has_any_requirements_txt;
     let is_node_project = root.join("package.json").exists();
+    let pip_cache_re =
+        Regex::new(r#"(?m)^[ \t]*cache[ \t]*:[ \t]*['"]?pip['"]?(?:[ \t]*(?:#.*)?)?$"#)
+            .expect("valid pip cache regex");
+    let node_cache_re =
+        Regex::new(r#"(?m)^[ \t]*cache[ \t]*:[ \t]*['"]?(?:npm|yarn)['"]?(?:[ \t]*(?:#.*)?)?$"#)
+            .expect("valid node cache regex");
 
     for entry in collect_workflow_files(&workflows_dir) {
         let path = entry.path();
@@ -2111,10 +2117,7 @@ fn test_no_language_specific_cache_mismatch() {
         let filename = path.file_name().unwrap().to_string_lossy();
 
         // Check for Python caching on non-Python projects
-        if !is_python_project
-            && is_rust_project
-            && (content.contains("cache: 'pip'") || content.contains("cache: pip"))
-        {
+        if !is_python_project && is_rust_project && pip_cache_re.is_match(&content) {
             // Allow if there's an explicit comment explaining why
             let has_explanation = content.contains("Pip caching disabled")
                 || content.contains("no requirements.txt")
@@ -2122,10 +2125,7 @@ fn test_no_language_specific_cache_mismatch() {
 
             let cache_line = content
                 .lines()
-                .find(|line| {
-                    let trimmed = line.trim();
-                    trimmed.starts_with("cache:") && trimmed.contains("pip")
-                })
+                .find(|line| pip_cache_re.is_match(line))
                 .unwrap_or("<not found>")
                 .trim();
 
@@ -2150,9 +2150,7 @@ fn test_no_language_specific_cache_mismatch() {
         // Check for Node caching on non-Node projects
         if !is_node_project && is_rust_project {
             assert!(
-                !(content.contains("cache: 'npm'")
-                    || content.contains("cache: npm")
-                    || content.contains("cache: 'yarn'")),
+                !node_cache_re.is_match(&content),
                 "{filename}: Uses Node cache but no package.json found.\n\
                  This is a Rust project (Cargo.toml exists).\n\
                  Remove cache configuration or add comment explaining why it's needed."
@@ -12536,7 +12534,7 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
         ("deny-msrv step id", "id: deny-msrv"),
         (
             "MSRV extraction from Cargo.toml",
-            "MSRV=$(grep '^rust-version = ' Cargo.toml",
+            "read-toml-string.sh Cargo.toml rust-version package",
         ),
         (
             "deny-msrv output export",
@@ -12574,6 +12572,52 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
          and deterministic toolchain selection inside the action container.\n\
          File: {}",
         ci_workflow.display()
+    );
+}
+
+#[test]
+fn test_workflows_and_scripts_avoid_exact_space_config_parsers() {
+    // Valid TOML/YAML permits flexible whitespace around assignment delimiters.
+    // Workflow/script diagnostics must not depend on a checked-in formatting style.
+    let root = repo_root();
+    let mut files: Vec<PathBuf> = collect_workflow_files(&root.join(".github/workflows"))
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect();
+    for script in [
+        "scripts/check-msrv-consistency.sh",
+        "scripts/validate-lychee-config.sh",
+        "scripts/check-workflow-hygiene.sh",
+        "scripts/check-ci-config.sh",
+        "scripts/read-toml-string.sh",
+    ] {
+        files.push(root.join(script));
+    }
+
+    let forbidden_fragments = [
+        "grep '^channel = '",
+        "grep '^rust-version = '",
+        "grep '^msrv = '",
+        "awk -F ' = '",
+        "awk -F '\"' '$1 == \"version = \"",
+    ];
+
+    let mut violations = Vec::new();
+    for path in files {
+        let content = read_file(&path);
+        for fragment in forbidden_fragments {
+            if content.contains(fragment) {
+                violations.push(format!("{} contains `{fragment}`", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Config readers must be whitespace-tolerant and exact-key anchored:\n\n{}\n\n\
+         Prefer a parser; otherwise use anchored helpers with `[[:space:]]*=[[:space:]]*` \
+         and section-aware matching where needed.",
+        violations.join("\n")
     );
 }
 

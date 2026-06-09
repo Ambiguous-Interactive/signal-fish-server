@@ -23,6 +23,10 @@ Config and binary wire-format drift rules:
 - **Lychee self-scans `.toml` files** -- use `--exclude-path .lychee.toml` or add exclusions.
 - **TOML/JSON/YAML "before/after" examples need separate blocks** -- duplicate table headers
   (e.g., two `[dependencies]`) in one block is invalid and will fail CI validation.
+- **Config readers must not depend on exact delimiter spacing** -- TOML/YAML allow
+  `key=value`, `key = value`, leading whitespace, and tabs. Prefer a parser; otherwise
+  use exact-key, anchored, whitespace-tolerant, section-aware helpers such as
+  `scripts/read-toml-string.sh` instead of `grep '^key = '` or `awk -F ' = '`.
 - **PowerShell fixtures/scripts cannot overload functions** -- PowerShell silently
   replaces earlier functions with later functions of the same name in a command
   block or script file. Use one helper per name and distinct names for distinct

@@ -132,7 +132,11 @@ jobs:
         id: toolchain
         shell: bash
         run: |
-          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@v1
         with:
@@ -158,7 +162,11 @@ jobs:
         id: toolchain
         shell: bash
         run: |
-          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@v1
         with:
@@ -184,7 +192,11 @@ jobs:
         id: toolchain
         shell: bash
         run: |
-          CHANNEL=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@v1
         with:
@@ -631,6 +643,7 @@ jobs:
             --max-retries 3
             --exclude-path './target/*'
             --exclude-path './third_party/*'
+            --exclude-path './node_modules/*'
             --exclude-path './.git/*'
             --exclude-path './.github/test-fixtures/*'
             --exclude-path './test-fixtures/*'

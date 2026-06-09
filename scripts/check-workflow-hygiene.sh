@@ -129,8 +129,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 
     # Check for Python caching on non-Python projects
     if [ "$IS_PYTHON_PROJECT" = "false" ]; then
-        if grep -q "cache: 'pip'" "$workflow" 2>/dev/null || \
-           grep -q "cache: pip" "$workflow" 2>/dev/null; then
+        if grep -Eq "^[[:space:]]*cache[[:space:]]*:[[:space:]]*['\"]?pip['\"]?([[:space:]]*(#.*)?)?$" "$workflow" 2>/dev/null; then
             error "$(basename "$workflow"): Uses Python pip cache but no Python project files found"
             error "  Remove 'cache: pip' or add comment explaining why it's needed"
         fi
@@ -138,9 +137,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 
     # Check for Node caching on non-Node projects
     if [ "$IS_NODE_PROJECT" = "false" ]; then
-        if grep -q "cache: 'npm'" "$workflow" 2>/dev/null || \
-           grep -q "cache: npm" "$workflow" 2>/dev/null || \
-           grep -q "cache: 'yarn'" "$workflow" 2>/dev/null; then
+        if grep -Eq "^[[:space:]]*cache[[:space:]]*:[[:space:]]*['\"]?(npm|yarn)['\"]?([[:space:]]*(#.*)?)?$" "$workflow" 2>/dev/null; then
             error "$(basename "$workflow"): Uses Node cache but no package.json found"
             error "  Remove cache configuration or add comment explaining why it's needed"
         fi

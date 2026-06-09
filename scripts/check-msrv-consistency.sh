@@ -46,11 +46,11 @@ if [ ! -f Cargo.toml ]; then
     exit 2
 fi
 
-MSRV=$(grep '^rust-version = ' Cargo.toml | sed -E 's/rust-version = "(.+)"/\1/')
+MSRV=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package || true)
 
 if [ -z "$MSRV" ]; then
     echo -e "${RED}ERROR: Could not extract rust-version from Cargo.toml${NC}"
-    echo "Expected format: rust-version = \"1.88.0\""
+    echo "Expected a TOML assignment like: rust-version = \"1.88.0\""
     exit 2
 fi
 
@@ -90,7 +90,7 @@ check_missing() {
 
 # Check 1: rust-toolchain.toml
 if [ -f rust-toolchain.toml ]; then
-    TOOLCHAIN_VERSION=$(grep '^channel = ' rust-toolchain.toml | sed -E 's/channel = "(.+)"/\1/')
+    TOOLCHAIN_VERSION=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
     check_file "rust-toolchain.toml" "$MSRV" "$TOOLCHAIN_VERSION" "channel"
 else
     check_missing "rust-toolchain.toml"
@@ -99,7 +99,7 @@ fi
 
 # Check 2: clippy.toml
 if [ -f clippy.toml ]; then
-    CLIPPY_MSRV=$(grep '^msrv = ' clippy.toml | sed -E 's/msrv = "(.+)"/\1/')
+    CLIPPY_MSRV=$(bash scripts/read-toml-string.sh clippy.toml msrv || true)
     check_file "clippy.toml" "$MSRV" "$CLIPPY_MSRV" "msrv"
 else
     check_missing "clippy.toml"
