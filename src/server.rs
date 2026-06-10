@@ -93,6 +93,10 @@ pub struct EnhancedGameServer {
     pub(crate) auth_middleware: Arc<crate::auth::AuthMiddleware>,
     /// Mapping from room IDs to owning application IDs (for relay policies)
     room_applications: Arc<DashMap<RoomId, Uuid>>,
+    /// Sticky per-room session decision recorded at finalize (protocol v3):
+    /// consulted by late-join/reconnect pairing and departure re-planning
+    /// instead of re-running the selection ladder (see `session_policy.rs`).
+    active_session_plans: DashMap<RoomId, session_policy::ActiveSessionPlan>,
     /// Spectator lifecycle manager
     spectator_service: SpectatorService,
     /// Transport-level security options (TLS, token binding, etc.)
@@ -282,6 +286,7 @@ impl EnhancedGameServer {
             reconnection_manager,
             auth_middleware,
             room_applications,
+            active_session_plans: DashMap::new(),
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),

@@ -1,0 +1,1210 @@
+//! End-to-end protocol v3 multi-peer (N >= 3) signaling conformance tests
+//! through the real WebSocket stack (PLAN P7: in-repo signaling conformance,
+//! extended past the existing two-peer suites).
+//!
+//! Each test boots an in-process axum server on `127.0.0.1:0` (the harness from
+//! `tests/v3_replan_e2e.rs`), drives N real `tokio-tungstenite` clients through
+//! the full v3 flow (Authenticate -> JoinRoom -> paced PlayerReady ->
+//! GameStarting -> SessionPlan), and pins the exact payload contracts:
+//!
+//! 1. `mesh_n3_full_glare_matrix_and_pairwise_signaling` — 3-peer mesh plans
+//!    carry the full antisymmetric glare matrix (smaller UUID offers) and every
+//!    ordered pair can relay a distinct opaque signal byte-identically.
+//! 2. `mesh_n4_glare_matrix` — the same matrix property at N=4 (6 unordered
+//!    pairs, exactly one offerer each).
+//! 3. `host_n4_star_property` — a 4-peer host room is a strict star: the host
+//!    answers all 3 clients, each client offers only to the host, clients never
+//!    appear in each other's plans.
+//! 4. `mixed_v2_v3_n3_relay_floor_no_v3_leakage` — one v2 member floors the
+//!    room to relay: everyone gets `GameStarting`, NOBODY gets
+//!    `SessionPlan`/`NewPeer`, and the v2 client sees only known v2 variants.
+//! 5. `host_n4_failover_full_matrix` — the host socket dying re-elects the
+//!    earliest-joined remaining member and re-issues exactly one fresh
+//!    star-correct plan to each survivor.
+//! 6. `mesh_n3_seat_fill_late_join` — a seat-filling joiner of a live mesh
+//!    session gets `RoomJoined(finalized)` + a tailored plan (never `NewPeer`),
+//!    existing members get `PlayerJoined` + exactly one glare-correct `NewPeer`.
+//! 7. `mesh_n3_reconnect_full_flow` — a dropped member reconnects over a fresh
+//!    socket (wire `Reconnect` flow): `Reconnected` + fresh plan for the
+//!    reconnector, `PlayerReconnected` + `NewPeer` for the survivors, and
+//!    post-reconnect signals run under the restored player id.
+//! 8. `host_n4_cascade_failover` — two consecutive host deaths: each wave
+//!    re-elects the earliest-joined survivor and re-issues exactly one fresh
+//!    star-correct plan per survivor, and the star stays live through the
+//!    third host.
+
+mod test_helpers;
+mod v3_conformance_helpers;
+mod websocket_test_helpers;
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use serde_json::json;
+use signal_fish_server::config::{AppAuthEntry, SessionConfig};
+use signal_fish_server::protocol::{
+    ClientMessage, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage,
+    SessionPlanPayload, Topology, Transport,
+};
+use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
+use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use test_helpers::{test_protocol_config, test_server_config};
+use tokio::net::TcpListener;
+use tokio_tungstenite::connect_async;
+use v3_conformance_helpers::{
+    assert_full_mesh_glare_matrix, await_ready_count, expect_finalize_plan,
+    expect_session_plan_strict, expect_signal, ordered_pairs, ready, relay_one_signal, send,
+    SERVER_MESSAGE_TIMEOUT,
+};
+use websocket_test_helpers::{
+    expect_no_server_message_within, next_matching_server_message_within, WsStream,
+};
+
+const APP_ID: &str = "v3-multipeer-app";
+/// Window in which a forbidden message would have arrived if it were going to.
+const SILENCE_WINDOW: tokio::time::Duration = tokio::time::Duration::from_secs(2);
+
+fn app_entry() -> AppAuthEntry {
+    AppAuthEntry {
+        app_id: APP_ID.to_string(),
+        app_secret: "secret".to_string(),
+        app_name: "V3 Multipeer App".to_string(),
+        max_rooms: Some(10),
+        max_players_per_room: Some(8),
+        rate_limit_per_minute: Some(600),
+    }
+}
+
+fn session_config_with_topology(default_topology: Topology) -> SessionConfig {
+    SessionConfig {
+        default_topology,
+        ice_servers: vec![IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            username: None,
+            credential: None,
+        }],
+        ..SessionConfig::default()
+    }
+}
+
+fn mesh_session_config() -> SessionConfig {
+    session_config_with_topology(Topology::Mesh)
+}
+
+fn host_session_config() -> SessionConfig {
+    session_config_with_topology(Topology::Host)
+}
+
+/// Boot the production router (`/v2` nest + `/v3/ws` alias) around a server
+/// built with the given `SessionConfig`, returning the bound address and the
+/// server handle (the reconnect test needs the handle to mint a token, exactly
+/// like `tests/v3_signaling_e2e.rs` — the token never crosses the wire).
+async fn start_server_with_session(
+    session: SessionConfig,
+) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+    use axum::routing::get;
+
+    let mut server_config: ServerConfig = test_server_config();
+    server_config.auth_enabled = true;
+
+    let mut protocol_config = test_protocol_config();
+    protocol_config.sdk_compatibility.enforce = false;
+
+    let game_server = EnhancedGameServer::new(
+        server_config,
+        protocol_config,
+        signal_fish_server::config::RelayTypeConfig::default(),
+        session,
+        signal_fish_server::config::TurnConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::AuthMaintenanceConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        vec![app_entry()],
+    )
+    .await
+    .expect("server builds");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
+    let combined_router = axum::Router::new()
+        .nest("/v2", enhanced_router)
+        .route("/v3/ws", get(websocket_handler_v3))
+        .fallback(|| async { "Use /v2/ws or /v3/ws" })
+        .with_state(game_server.clone());
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // No startup sleep: the listener is already bound above, so connections
+    // issued immediately are accepted by the kernel and served once the
+    // spawned `axum::serve` task polls them.
+    (addr, game_server)
+}
+
+async fn connect(addr: std::net::SocketAddr) -> WsStream {
+    let url = format!("ws://{addr}/v3/ws");
+    let (ws, _) = tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
+        .await
+        .expect("connect timeout")
+        .expect("connect");
+    ws
+}
+
+/// Authenticate, advertising the given protocol version + capabilities, and
+/// assert the negotiated version advertised in `ProtocolInfo`.
+async fn authenticate(
+    ws: &mut WsStream,
+    protocol_version: Option<u16>,
+    transports: Option<Vec<Transport>>,
+    topologies: Option<Vec<Topology>>,
+    expected_version: Option<u16>,
+) {
+    send(
+        ws,
+        &ClientMessage::Authenticate {
+            app_id: APP_ID.to_string(),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version,
+            supported_transports: transports,
+            supported_topologies: topologies,
+        },
+    )
+    .await;
+
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "Authenticated", |message| {
+        matches!(message, ServerMessage::Authenticated { .. }).then_some(())
+    })
+    .await;
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "ProtocolInfo", |message| {
+        match message {
+            ServerMessage::ProtocolInfo(info) => {
+                assert_eq!(info.protocol_version, expected_version);
+                Some(())
+            }
+            _ => None,
+        }
+    })
+    .await;
+}
+
+/// Authenticate as a v3 client supporting webrtc + every topology.
+async fn authenticate_v3_full(ws: &mut WsStream) {
+    authenticate(
+        ws,
+        Some(3),
+        Some(vec![Transport::Relay, Transport::WebRtc]),
+        Some(vec![Topology::Relay, Topology::Host, Topology::Mesh]),
+        Some(3),
+    )
+    .await;
+}
+
+/// Authenticate as a pure v2 client on the v3 endpoint (relay-only).
+async fn authenticate_v2(ws: &mut WsStream) {
+    authenticate(ws, Some(2), None, None, None).await;
+}
+
+/// Join (or create) a room for `game_name`, returning the full payload.
+async fn join_room(
+    ws: &mut WsStream,
+    game_name: &str,
+    room_code: Option<String>,
+    player_name: &str,
+    max_players: u8,
+) -> Box<RoomJoinedPayload> {
+    send(
+        ws,
+        &ClientMessage::JoinRoom {
+            game_name: game_name.to_string(),
+            room_code,
+            player_name: player_name.to_string(),
+            max_players: Some(max_players),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await;
+
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "room join response",
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some(payload),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("room join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await
+}
+
+/// Drive the paced all-ready handshake: every ready is observed by every
+/// member before the next fires, then the final ready triggers finalization.
+async fn finalize_room(sockets: &mut [WsStream]) {
+    let member_count = sockets.len();
+    for ready_index in 0..member_count - 1 {
+        ready(&mut sockets[ready_index]).await;
+        for socket in sockets.iter_mut() {
+            await_ready_count(socket, ready_index + 1).await;
+        }
+    }
+    ready(&mut sockets[member_count - 1]).await;
+}
+
+/// Assert the exact next message is `PlayerLeft(left)`.
+async fn expect_player_left(ws: &mut WsStream, left: PlayerId, who: &str) {
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "PlayerLeft", |message| {
+        match message {
+            ServerMessage::PlayerLeft { player_id } => {
+                assert_eq!(player_id, left, "{who} saw the wrong player leave");
+                Some(())
+            }
+            other => panic!("{who} expected PlayerLeft, got {other:?}"),
+        }
+    })
+    .await;
+}
+
+/// Assert the exact next message is `PlayerJoined(joined)`.
+async fn expect_player_joined(ws: &mut WsStream, joined: PlayerId, who: &str) {
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "PlayerJoined", |message| {
+        match message {
+            ServerMessage::PlayerJoined { player } => {
+                assert_eq!(player.id, joined, "{who} saw the wrong player join");
+                Some(())
+            }
+            other => panic!("{who} expected PlayerJoined, got {other:?}"),
+        }
+    })
+    .await;
+}
+
+/// Assert the strict star property of a host-topology plan set: the host
+/// answers every client (`initiate: false`, peers not authority), every client
+/// lists EXACTLY the host (`initiate: true`, `is_authority: true`), and every
+/// plan names the same elected host.
+fn assert_host_star_plans(
+    host_id: PlayerId,
+    host_plan: &SessionPlanPayload,
+    client_plans: &[(PlayerId, &SessionPlanPayload)],
+) {
+    let client_ids: BTreeSet<PlayerId> = client_plans.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        client_ids.len(),
+        client_plans.len(),
+        "duplicate client ids in plans"
+    );
+
+    assert_eq!(host_plan.topology, Topology::Host);
+    assert_eq!(host_plan.transport, Transport::WebRtc);
+    assert_eq!(host_plan.fallback, Transport::Relay);
+    assert_eq!(
+        host_plan.host,
+        Some(host_id),
+        "the host's own plan must name it as the elected host"
+    );
+    assert!(!host_plan.ice_servers.is_empty());
+    let host_peer_ids: BTreeSet<PlayerId> =
+        host_plan.peers.iter().map(|peer| peer.player_id).collect();
+    assert_eq!(
+        host_peer_ids, client_ids,
+        "the host's plan must list exactly the clients"
+    );
+    assert_eq!(
+        host_plan.peers.len(),
+        client_ids.len(),
+        "the host's plan must not repeat clients"
+    );
+    for peer in &host_plan.peers {
+        assert!(
+            !peer.initiate,
+            "the host initiates to none — clients offer to it"
+        );
+        assert!(
+            !peer.is_authority,
+            "the host's peers are plain clients, never the authority"
+        );
+    }
+
+    for (client_id, plan) in client_plans {
+        assert_eq!(plan.topology, Topology::Host);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.fallback, Transport::Relay);
+        assert_eq!(
+            plan.host,
+            Some(host_id),
+            "client {client_id} plan must name the elected host"
+        );
+        assert!(!plan.ice_servers.is_empty());
+        assert_eq!(
+            plan.peers.len(),
+            1,
+            "client {client_id} must list exactly the host — clients never appear in each other's plans"
+        );
+        let host_peer = &plan.peers[0];
+        assert_eq!(host_peer.player_id, host_id);
+        assert!(
+            host_peer.initiate,
+            "client {client_id} offers to the host (fixed star direction)"
+        );
+        assert!(
+            host_peer.is_authority,
+            "the host peer is the session authority in a star"
+        );
+    }
+}
+
+/// Panic if a message a v2 client received is a v3-only variant.
+fn forbid_v3_leakage(message: &ServerMessage, who: &str) {
+    if matches!(
+        message,
+        ServerMessage::Signal { .. }
+            | ServerMessage::NewPeer { .. }
+            | ServerMessage::SessionPlan(_)
+    ) {
+        panic!("{who}: a v2 client must never observe v3-only traffic, got {message:?}");
+    }
+}
+
+/// `next_matching_server_message_within`, with every read message checked
+/// against the v2-only variant set first (for pure-v2 clients).
+async fn next_matching_v2_only<T>(
+    ws: &mut WsStream,
+    context: &str,
+    who: &str,
+    mut pick: impl FnMut(ServerMessage) -> Option<T>,
+) -> T {
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, context, move |message| {
+        forbid_v3_leakage(&message, who);
+        pick(message)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_n3_full_glare_matrix_and_pairwise_signaling() {
+    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-mesh3";
+
+    // Three v3+webrtc clients fill a 3-seat mesh room.
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let (room_code, id_a) = (joined_a.room_code, joined_a.player_id);
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    let id_b = join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3)
+        .await
+        .player_id;
+
+    let mut peer_c = connect(addr).await;
+    authenticate_v3_full(&mut peer_c).await;
+    let id_c = join_room(&mut peer_c, game, Some(room_code), "PeerC", 3)
+        .await
+        .player_id;
+
+    let ids = [id_a, id_b, id_c];
+    let mut sockets = [peer_a, peer_b, peer_c];
+    finalize_room(&mut sockets).await;
+
+    // Everyone receives GameStarting then a SessionPlan with exactly 2 peers.
+    let mut plans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        let plan = expect_finalize_plan(socket, &format!("member {}", ids[index])).await;
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.fallback, Transport::Relay);
+        assert!(plan.host.is_none(), "mesh plans elect no host");
+        assert_eq!(plan.peers.len(), 2, "3-peer mesh lists exactly 2 peers");
+        assert!(!plan.ice_servers.is_empty(), "webrtc plans carry ICE");
+        plans.push(plan);
+    }
+    let plan_refs: Vec<(PlayerId, &SessionPlanPayload)> = ids
+        .iter()
+        .copied()
+        .zip(plans.iter().map(|plan| &**plan))
+        .collect();
+    assert_full_mesh_glare_matrix(&plan_refs);
+
+    // Relay a distinct opaque signal across EVERY ordered pair (6 sends).
+    for (from_idx, to_idx) in ordered_pairs(3) {
+        relay_one_signal(&mut sockets, &ids, from_idx, to_idx).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_n4_glare_matrix() {
+    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-mesh4";
+
+    let mut creator = connect(addr).await;
+    authenticate_v3_full(&mut creator).await;
+    let joined = join_room(&mut creator, game, None, "Peer1", 4).await;
+    let room_code = joined.room_code;
+
+    let mut ids = vec![joined.player_id];
+    let mut sockets = vec![creator];
+    for name in ["Peer2", "Peer3", "Peer4"] {
+        let mut socket = connect(addr).await;
+        authenticate_v3_full(&mut socket).await;
+        ids.push(
+            join_room(&mut socket, game, Some(room_code.clone()), name, 4)
+                .await
+                .player_id,
+        );
+        sockets.push(socket);
+    }
+
+    finalize_room(&mut sockets).await;
+
+    // 4 plans x 3 peers; 6 unordered pairs, each with exactly one offerer
+    // (the smaller UUID).
+    let mut plans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        let plan = expect_finalize_plan(socket, &format!("member {}", ids[index])).await;
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.peers.len(), 3, "4-peer mesh lists exactly 3 peers");
+        plans.push(plan);
+    }
+    let plan_refs: Vec<(PlayerId, &SessionPlanPayload)> = ids
+        .iter()
+        .copied()
+        .zip(plans.iter().map(|plan| &**plan))
+        .collect();
+    assert_full_mesh_glare_matrix(&plan_refs);
+
+    // One spot-check pair proves the pairing is live end to end.
+    relay_one_signal(&mut sockets, &ids, 0, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_n4_star_property() {
+    let (addr, _server) = start_server_with_session(host_session_config()).await;
+    let game = "multipeer-host4";
+
+    // First joiner (room creator; the room has no designated authority) wins
+    // the host election at finalize.
+    let mut creator = connect(addr).await;
+    authenticate_v3_full(&mut creator).await;
+    let joined = join_room(&mut creator, game, None, "Host", 4).await;
+    let (room_code, host_id) = (joined.room_code, joined.player_id);
+
+    let mut ids = vec![host_id];
+    let mut sockets = vec![creator];
+    for name in ["ClientA", "ClientB", "ClientC"] {
+        let mut socket = connect(addr).await;
+        authenticate_v3_full(&mut socket).await;
+        ids.push(
+            join_room(&mut socket, game, Some(room_code.clone()), name, 4)
+                .await
+                .player_id,
+        );
+        sockets.push(socket);
+    }
+
+    finalize_room(&mut sockets).await;
+
+    let mut plans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        plans.push(expect_finalize_plan(socket, &format!("member {}", ids[index])).await);
+    }
+    let client_plans: Vec<(PlayerId, &SessionPlanPayload)> = ids
+        .iter()
+        .copied()
+        .zip(plans.iter().map(|plan| &**plan))
+        .skip(1)
+        .collect();
+    assert_host_star_plans(host_id, &plans[0], &client_plans);
+
+    // Spot-check signaling along both star directions: client -> host and
+    // host -> client.
+    relay_one_signal(&mut sockets, &ids, 1, 0).await;
+    relay_one_signal(&mut sockets, &ids, 0, 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_v2_v3_n3_relay_floor_no_v3_leakage() {
+    // A mesh-preferring server, but one pure-v2 member floors the whole room
+    // to relay: everyone receives GameStarting and NOBODY receives a
+    // SessionPlan or NewPeer (Appendix K).
+    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-mixed3";
+    let legacy_who = "legacy (v2)";
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let room_code = joined_a.room_code;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    let _id_b = join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3)
+        .await
+        .player_id;
+
+    // The v2 client: every message it reads from here on is checked against
+    // the known-v2 variant set.
+    let mut legacy = connect(addr).await;
+    authenticate_v2(&mut legacy).await;
+    send(
+        &mut legacy,
+        &ClientMessage::JoinRoom {
+            game_name: game.to_string(),
+            room_code: Some(room_code),
+            player_name: "Legacy".to_string(),
+            max_players: Some(3),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await;
+    next_matching_v2_only(
+        &mut legacy,
+        "v2 room join response",
+        legacy_who,
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some(payload),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("v2 room join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await;
+
+    // Paced readies; the v2 client's lobby updates run through the v2-only
+    // guard as well.
+    ready(&mut peer_a).await;
+    await_ready_count(&mut peer_a, 1).await;
+    await_ready_count(&mut peer_b, 1).await;
+    next_matching_v2_only(
+        &mut legacy,
+        "v2 lobby ready count 1",
+        legacy_who,
+        |message| match message {
+            ServerMessage::LobbyStateChanged { ready_players, .. } if ready_players.len() == 1 => {
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    ready(&mut peer_b).await;
+    await_ready_count(&mut peer_a, 2).await;
+    await_ready_count(&mut peer_b, 2).await;
+    next_matching_v2_only(
+        &mut legacy,
+        "v2 lobby ready count 2",
+        legacy_who,
+        |message| match message {
+            ServerMessage::LobbyStateChanged { ready_players, .. } if ready_players.len() == 2 => {
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    ready(&mut legacy).await;
+
+    // Everyone gets GameStarting; the v3 members must see no plan/pairing.
+    for (ws, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
+        next_matching_server_message_within(
+            ws,
+            SERVER_MESSAGE_TIMEOUT,
+            "relay-floor GameStarting",
+            |message| match message {
+                ServerMessage::GameStarting { .. } => Some(()),
+                ServerMessage::SessionPlan(_) => {
+                    panic!("{who} must not receive a SessionPlan in a relay-floor room")
+                }
+                ServerMessage::NewPeer { .. } => {
+                    panic!("{who} must not receive NewPeer in a relay-floor room")
+                }
+                _ => None,
+            },
+        )
+        .await;
+    }
+    next_matching_v2_only(&mut legacy, "v2 GameStarting", legacy_who, |message| {
+        matches!(message, ServerMessage::GameStarting { .. }).then_some(())
+    })
+    .await;
+
+    // Strict no-message windows: no SessionPlan/NewPeer (nor anything else)
+    // for anyone after finalization.
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after relay floor").await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after relay floor").await;
+    expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 client after relay floor")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_n4_failover_full_matrix() {
+    let (addr, _server) = start_server_with_session(host_session_config()).await;
+    let game = "multipeer-failover4";
+
+    let mut creator = connect(addr).await;
+    authenticate_v3_full(&mut creator).await;
+    let joined = join_room(&mut creator, game, None, "Host", 4).await;
+    let (room_code, host_id) = (joined.room_code, joined.player_id);
+
+    let mut ids = vec![host_id];
+    let mut sockets = vec![creator];
+    for name in ["ClientA", "ClientB", "ClientC"] {
+        let mut socket = connect(addr).await;
+        authenticate_v3_full(&mut socket).await;
+        ids.push(
+            join_room(&mut socket, game, Some(room_code.clone()), name, 4)
+                .await
+                .player_id,
+        );
+        sockets.push(socket);
+    }
+
+    finalize_room(&mut sockets).await;
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        let plan = expect_finalize_plan(socket, &format!("member {}", ids[index])).await;
+        assert_eq!(plan.host, Some(host_id), "initial plans name the creator");
+    }
+
+    // The HOST socket closes abruptly (no WebSocket close frame): drop the
+    // stream so only the TCP teardown reaches the server.
+    let host_socket = sockets.remove(0);
+    drop(host_socket);
+    let remaining_ids = [ids[1], ids[2], ids[3]];
+    let new_host_id = remaining_ids[0]; // earliest-joined remaining member
+
+    // Each remaining client receives PlayerLeft(host) AND exactly one fresh
+    // SessionPlan naming the re-elected host.
+    let mut replans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        let who = format!("survivor {}", remaining_ids[index]);
+        expect_player_left(socket, host_id, &who).await;
+        replans.push(expect_session_plan_strict(socket, &who).await);
+    }
+
+    let client_replans: Vec<(PlayerId, &SessionPlanPayload)> = remaining_ids
+        .iter()
+        .copied()
+        .zip(replans.iter().map(|plan| &**plan))
+        .skip(1)
+        .collect();
+    assert_host_star_plans(new_host_id, &replans[0], &client_replans);
+
+    // Exactly one re-plan each: strict silence afterwards.
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        expect_no_server_message_within(
+            socket,
+            SILENCE_WINDOW,
+            &format!(
+                "survivor {} after the failover re-plan",
+                remaining_ids[index]
+            ),
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_n4_cascade_failover() {
+    // Two consecutive host deaths in one running session: each wave must
+    // re-elect the earliest-joined survivor and re-issue exactly one fresh
+    // star-correct plan per survivor. The second wave exercises failover from
+    // the post-failover session state (host-1 long gone, host-2 elected at
+    // wave 1) rather than the finalize-time election. Note the stored-host
+    // *rewrite* itself is discriminated at the unit layer
+    // (`non_host_departure_heals_already_missing_host`); end-to-end, a
+    // re-plan that re-elected without rewriting the stored host would also
+    // pass this test, since the dead host stays absent either way.
+    let (addr, _server) = start_server_with_session(host_session_config()).await;
+    let game = "multipeer-cascade4";
+
+    let mut creator = connect(addr).await;
+    authenticate_v3_full(&mut creator).await;
+    let joined = join_room(&mut creator, game, None, "Host1", 4).await;
+    let (room_code, host1_id) = (joined.room_code, joined.player_id);
+
+    let mut ids = vec![host1_id];
+    let mut sockets = vec![creator];
+    for name in ["ClientA", "ClientB", "ClientC"] {
+        let mut socket = connect(addr).await;
+        authenticate_v3_full(&mut socket).await;
+        ids.push(
+            join_room(&mut socket, game, Some(room_code.clone()), name, 4)
+                .await
+                .player_id,
+        );
+        sockets.push(socket);
+    }
+
+    // Finalize and assert the initial 4-member star around host-1.
+    finalize_room(&mut sockets).await;
+    let mut plans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        plans.push(expect_finalize_plan(socket, &format!("member {}", ids[index])).await);
+    }
+    let client_plans: Vec<(PlayerId, &SessionPlanPayload)> = ids
+        .iter()
+        .copied()
+        .zip(plans.iter().map(|plan| &**plan))
+        .skip(1)
+        .collect();
+    assert_host_star_plans(host1_id, &plans[0], &client_plans);
+
+    // WAVE 1: HOST-1's socket drops abruptly (no close frame).
+    drop(sockets.remove(0));
+    let wave1_ids = [ids[1], ids[2], ids[3]];
+    let host2_id = wave1_ids[0]; // earliest-joined survivor
+
+    // Each survivor receives PlayerLeft(host-1) AND exactly one fresh plan
+    // naming host-2; the 3-member star matrix must hold in full.
+    let mut wave1_plans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        let who = format!("wave-1 survivor {}", wave1_ids[index]);
+        expect_player_left(socket, host1_id, &who).await;
+        wave1_plans.push(expect_session_plan_strict(socket, &who).await);
+    }
+    let wave1_client_plans: Vec<(PlayerId, &SessionPlanPayload)> = wave1_ids
+        .iter()
+        .copied()
+        .zip(wave1_plans.iter().map(|plan| &**plan))
+        .skip(1)
+        .collect();
+    assert_host_star_plans(host2_id, &wave1_plans[0], &wave1_client_plans);
+
+    // Exactly one re-plan each: strict silence after wave 1.
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        expect_no_server_message_within(
+            socket,
+            SILENCE_WINDOW,
+            &format!(
+                "wave-1 survivor {} after the first re-plan",
+                wave1_ids[index]
+            ),
+        )
+        .await;
+    }
+
+    // WAVE 2: HOST-2 (the freshly re-elected host) drops too.
+    drop(sockets.remove(0));
+    let wave2_ids = [wave1_ids[1], wave1_ids[2]];
+    let host3_id = wave2_ids[0]; // earliest-joined of the final pair
+
+    // The remaining 2 receive PlayerLeft(host-2) AND a SECOND fresh plan
+    // naming host-3; the 2-member star matrix must hold in full.
+    let mut wave2_plans = Vec::new();
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        let who = format!("wave-2 survivor {}", wave2_ids[index]);
+        expect_player_left(socket, host2_id, &who).await;
+        wave2_plans.push(expect_session_plan_strict(socket, &who).await);
+    }
+    let wave2_client_plans: Vec<(PlayerId, &SessionPlanPayload)> = wave2_ids
+        .iter()
+        .copied()
+        .zip(wave2_plans.iter().map(|plan| &**plan))
+        .skip(1)
+        .collect();
+    assert_host_star_plans(host3_id, &wave2_plans[0], &wave2_client_plans);
+
+    // Exactly one re-plan each: strict silence after wave 2 (no duplicate or
+    // stale plans from the first failover may trail in).
+    for (index, socket) in sockets.iter_mut().enumerate() {
+        expect_no_server_message_within(
+            socket,
+            SILENCE_WINDOW,
+            &format!(
+                "wave-2 survivor {} after the second re-plan",
+                wave2_ids[index]
+            ),
+        )
+        .await;
+    }
+
+    // Spot-check the surviving star edge both ways: client -> host-3 and
+    // host-3 -> client.
+    relay_one_signal(&mut sockets, &wave2_ids, 1, 0).await;
+    relay_one_signal(&mut sockets, &wave2_ids, 0, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_n3_seat_fill_late_join() {
+    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-seatfill3";
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let (room_code, id_a) = (joined_a.room_code, joined_a.player_id);
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    let id_b = join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3)
+        .await
+        .player_id;
+
+    let mut leaver = connect(addr).await;
+    authenticate_v3_full(&mut leaver).await;
+    let leaver_id = join_room(&mut leaver, game, Some(room_code.clone()), "Leaver", 3)
+        .await
+        .player_id;
+
+    {
+        let mut sockets = [peer_a, peer_b, leaver];
+        finalize_room(&mut sockets).await;
+        for (socket, who) in sockets.iter_mut().zip(["peer_a", "peer_b", "leaver"]) {
+            let plan = expect_finalize_plan(socket, who).await;
+            assert_eq!(plan.topology, Topology::Mesh);
+        }
+        [peer_a, peer_b, leaver] = sockets;
+    }
+
+    // One member leaves the live session explicitly (RoomLeft); a mesh
+    // departure re-plans nothing for the survivors.
+    send(&mut leaver, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut leaver,
+        SERVER_MESSAGE_TIMEOUT,
+        "RoomLeft",
+        |message| match message {
+            ServerMessage::RoomLeft => Some(()),
+            other => panic!("leaver expected RoomLeft, got {other:?}"),
+        },
+    )
+    .await;
+    expect_player_left(&mut peer_a, leaver_id, "peer_a").await;
+    expect_player_left(&mut peer_b, leaver_id, "peer_b").await;
+
+    // A NEW v3 client fills the seat in the still-finalized room.
+    let mut joiner = connect(addr).await;
+    authenticate_v3_full(&mut joiner).await;
+    let joiner_joined = join_room(&mut joiner, game, Some(room_code), "Joiner", 3).await;
+    let joiner_id = joiner_joined.player_id;
+    assert_eq!(
+        joiner_joined.lobby_state,
+        LobbyState::Finalized,
+        "a seat-filling joiner of a finalized room must see lobby_state: finalized"
+    );
+
+    // The joiner's very next message is its tailored SessionPlan — never a
+    // NewPeer — listing the 2 remaining peers with glare-correct flags.
+    let joiner_plan = next_matching_server_message_within(
+        &mut joiner,
+        SERVER_MESSAGE_TIMEOUT,
+        "joiner late-join SessionPlan",
+        |message| match message {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            ServerMessage::NewPeer { .. } => {
+                panic!("the joiner must receive its pairing via SessionPlan, not NewPeer")
+            }
+            other => panic!("joiner expected SessionPlan, got {other:?}"),
+        },
+    )
+    .await;
+    assert_eq!(joiner_plan.topology, Topology::Mesh);
+    assert_eq!(joiner_plan.transport, Transport::WebRtc);
+    assert!(!joiner_plan.ice_servers.is_empty());
+    let joiner_peer_ids: BTreeSet<PlayerId> = joiner_plan
+        .peers
+        .iter()
+        .map(|peer| peer.player_id)
+        .collect();
+    assert_eq!(
+        joiner_peer_ids,
+        BTreeSet::from([id_a, id_b]),
+        "the joiner's plan lists exactly the 2 remaining members"
+    );
+    assert_eq!(joiner_plan.peers.len(), 2);
+    for peer in &joiner_plan.peers {
+        assert_eq!(
+            peer.initiate,
+            joiner_id < peer.player_id,
+            "the joiner's initiate flag toward {} follows the UUID glare rule",
+            peer.player_id
+        );
+    }
+
+    // Each existing member receives PlayerJoined AND exactly one NewPeer with
+    // the antisymmetric glare flag.
+    for (socket, member_id, who) in [(&mut peer_a, id_a, "peer_a"), (&mut peer_b, id_b, "peer_b")] {
+        expect_player_joined(socket, joiner_id, who).await;
+        next_matching_server_message_within(
+            socket,
+            SERVER_MESSAGE_TIMEOUT,
+            "NewPeer delta",
+            |message| match message {
+                ServerMessage::NewPeer {
+                    peer_id,
+                    you_initiate,
+                } => {
+                    assert_eq!(peer_id, joiner_id, "{who} must be paired with the joiner");
+                    assert_eq!(
+                        you_initiate,
+                        member_id < joiner_id,
+                        "{who} initiate flag must follow the UUID glare rule"
+                    );
+                    Some(())
+                }
+                ServerMessage::SessionPlan(_) => {
+                    panic!("{who} must not receive a plan on a late join")
+                }
+                other => panic!("{who} expected NewPeer, got {other:?}"),
+            },
+        )
+        .await;
+    }
+
+    // Exactly one plan / one NewPeer each: strict silence windows.
+    expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after its plan").await;
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after the NewPeer").await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after the NewPeer").await;
+
+    // Prove the new pairing is live: signal joiner <-> one existing member.
+    let signal_to_a = json!({ "Offer": "v=0\r\no=- seatfill joiner->a\r\n" });
+    send(
+        &mut joiner,
+        &ClientMessage::Signal {
+            to: id_a,
+            signal: signal_to_a.clone(),
+        },
+    )
+    .await;
+    let (from, signal) = expect_signal(&mut peer_a, "peer_a").await;
+    assert_eq!(from, joiner_id);
+    assert_eq!(signal, signal_to_a);
+
+    let answer_to_joiner = json!({ "Answer": "v=0\r\no=- seatfill a->joiner\r\n" });
+    send(
+        &mut peer_a,
+        &ClientMessage::Signal {
+            to: joiner_id,
+            signal: answer_to_joiner.clone(),
+        },
+    )
+    .await;
+    let (from, signal) = expect_signal(&mut joiner, "joiner").await;
+    assert_eq!(from, id_a);
+    assert_eq!(signal, answer_to_joiner);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_n3_reconnect_full_flow() {
+    let (addr, server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-reconnect3";
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let (room_code, id_a) = (joined_a.room_code, joined_a.player_id);
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    let id_b = join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3)
+        .await
+        .player_id;
+
+    let mut dropper = connect(addr).await;
+    authenticate_v3_full(&mut dropper).await;
+    let dropper_joined = join_room(&mut dropper, game, Some(room_code), "Dropper", 3).await;
+    let (dropper_id, room_id) = (dropper_joined.player_id, dropper_joined.room_id);
+
+    {
+        let mut sockets = [peer_a, peer_b, dropper];
+        finalize_room(&mut sockets).await;
+        for (socket, who) in sockets.iter_mut().zip(["peer_a", "peer_b", "dropper"]) {
+            let plan = expect_finalize_plan(socket, who).await;
+            assert_eq!(plan.topology, Topology::Mesh);
+        }
+        [peer_a, peer_b, dropper] = sockets;
+    }
+
+    // Snapshot the member's room info before its socket drops (the reconnect
+    // registration needs it, mirroring `v3_signaling_e2e.rs`).
+    let room = server
+        .database()
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    let dropper_info = room
+        .players
+        .get(&dropper_id)
+        .cloned()
+        .expect("dropper in room before disconnect");
+
+    // The member's socket drops abruptly; the remaining 2 observe PlayerLeft.
+    drop(dropper);
+    expect_player_left(&mut peer_a, dropper_id, "peer_a").await;
+    expect_player_left(&mut peer_b, dropper_id, "peer_b").await;
+
+    // Mint a reconnection token through the server handle. The wire flow never
+    // delivers the token to the client (it is generated at
+    // disconnect-registration time, `src/server/reconnection_service.rs`), so
+    // this is the sanctioned in-process pattern from `v3_signaling_e2e.rs`.
+    // Registering AFTER PlayerLeft was observed guarantees the disconnect
+    // path's own auto-registration already ran, so this record (and token)
+    // deterministically replaces it.
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(dropper_id, room_id, false, Some(dropper_info))
+        .await;
+
+    // Reconnect over a FRESH socket using the real wire flow.
+    let mut reconnector = connect(addr).await;
+    authenticate_v3_full(&mut reconnector).await;
+    send(
+        &mut reconnector,
+        &ClientMessage::Reconnect {
+            player_id: dropper_id,
+            room_id,
+            auth_token: token,
+        },
+    )
+    .await;
+
+    // The reconnector receives Reconnected (restored id, still-finalized room)
+    // then its fresh tailored SessionPlan.
+    next_matching_server_message_within(
+        &mut reconnector,
+        SERVER_MESSAGE_TIMEOUT,
+        "Reconnected",
+        |message| match message {
+            ServerMessage::Reconnected(payload) => {
+                assert_eq!(payload.player_id, dropper_id, "restored player id");
+                assert_eq!(payload.room_id, room_id);
+                assert_eq!(
+                    payload.lobby_state,
+                    LobbyState::Finalized,
+                    "the running session stays finalized across the reconnect"
+                );
+                Some(())
+            }
+            ServerMessage::ReconnectionFailed { reason, error_code } => {
+                panic!("reconnect failed: {reason} ({error_code:?})")
+            }
+            other => panic!("reconnector expected Reconnected, got {other:?}"),
+        },
+    )
+    .await;
+    let reconnect_plan = expect_session_plan_strict(&mut reconnector, "reconnector").await;
+    assert_eq!(reconnect_plan.topology, Topology::Mesh);
+    assert_eq!(reconnect_plan.transport, Transport::WebRtc);
+    let reconnect_peer_ids: BTreeSet<PlayerId> = reconnect_plan
+        .peers
+        .iter()
+        .map(|peer| peer.player_id)
+        .collect();
+    assert_eq!(
+        reconnect_peer_ids,
+        BTreeSet::from([id_a, id_b]),
+        "the fresh plan lists exactly the 2 remaining members"
+    );
+    assert_eq!(reconnect_plan.peers.len(), 2);
+    for peer in &reconnect_plan.peers {
+        assert_eq!(
+            peer.initiate,
+            dropper_id < peer.player_id,
+            "the reconnector's initiate flag toward {} follows the UUID glare rule",
+            peer.player_id
+        );
+    }
+    // Fresh ICE: with the static STUN + default (disabled) [turn] block this
+    // deployment always carries credential-less entries; an ICE-less plan is
+    // only legal when both sources are empty, which this config rules out.
+    assert!(!reconnect_plan.ice_servers.is_empty());
+
+    // Each remaining member receives PlayerReconnected then the NewPeer delta
+    // for the reconnector.
+    for (socket, member_id, who) in [(&mut peer_a, id_a, "peer_a"), (&mut peer_b, id_b, "peer_b")] {
+        next_matching_server_message_within(
+            socket,
+            SERVER_MESSAGE_TIMEOUT,
+            "PlayerReconnected",
+            |message| match message {
+                ServerMessage::PlayerReconnected { player_id } => {
+                    assert_eq!(player_id, dropper_id, "{who} saw the wrong reconnector");
+                    Some(())
+                }
+                other => panic!("{who} expected PlayerReconnected, got {other:?}"),
+            },
+        )
+        .await;
+        next_matching_server_message_within(
+            socket,
+            SERVER_MESSAGE_TIMEOUT,
+            "post-reconnect NewPeer",
+            |message| match message {
+                ServerMessage::NewPeer {
+                    peer_id,
+                    you_initiate,
+                } => {
+                    assert_eq!(peer_id, dropper_id);
+                    assert_eq!(
+                        you_initiate,
+                        member_id < dropper_id,
+                        "{who} initiate flag must follow the UUID glare rule"
+                    );
+                    Some(())
+                }
+                other => panic!("{who} expected NewPeer, got {other:?}"),
+            },
+        )
+        .await;
+    }
+
+    // Exactly one plan / one NewPeer each.
+    expect_no_server_message_within(
+        &mut reconnector,
+        SILENCE_WINDOW,
+        "reconnector after its plan",
+    )
+    .await;
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after the NewPeer").await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after the NewPeer").await;
+
+    // Post-reconnect signaling runs under the RESTORED player id, both ways.
+    let offer = json!({ "Offer": "v=0\r\no=- post-reconnect\r\n" });
+    send(
+        &mut reconnector,
+        &ClientMessage::Signal {
+            to: id_a,
+            signal: offer.clone(),
+        },
+    )
+    .await;
+    let (from, signal) = expect_signal(&mut peer_a, "peer_a").await;
+    assert_eq!(
+        from, dropper_id,
+        "post-reconnect signal must be routed under the restored player id"
+    );
+    assert_eq!(signal, offer);
+
+    let answer = json!({ "Answer": "v=0\r\no=- post-reconnect-answer\r\n" });
+    send(
+        &mut peer_a,
+        &ClientMessage::Signal {
+            to: dropper_id,
+            signal: answer.clone(),
+        },
+    )
+    .await;
+    let (from, signal) = expect_signal(&mut reconnector, "reconnector").await;
+    assert_eq!(from, id_a);
+    assert_eq!(signal, answer);
+}

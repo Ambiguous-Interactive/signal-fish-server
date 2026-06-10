@@ -919,9 +919,9 @@ Server → client (`from` names the originating peer):
 
 #### NewPeer
 
-`NewPeer` is the **late-join** pairing message: it tells an already-running v3 session that a peer is now available
-for a WebRTC peer connection. `you_initiate` designates exactly one side of each pair as the offerer, avoiding
-glare (see the glare rule below).
+`NewPeer` is the **late-join** pairing delta: it tells the _existing_ members of an already-running v3 WebRTC
+session that a peer is now available for a WebRTC peer connection. `you_initiate` designates exactly one side of
+each pair as the offerer, avoiding glare (see the glare rule below).
 
 ```json
 {
@@ -931,16 +931,48 @@ glare (see the glare rule below).
 ```
 
 Initial pairing at finalization is owned by `SessionPlan` (below); `NewPeer` covers a peer joining or reconnecting
-_after_ finalization. See the [late-join decision table](#late-join-decision-table).
+_after_ finalization — and is sent **only to the existing members**, never to the joiner itself. The joiner's
+pairing (the same peers with the mirrored `initiate` flags) arrives in the fresh `SessionPlan` it receives on
+entry, keeping the client contract uniform: on `SessionPlan`, (re)configure the session and connect per
+`peers[].initiate`; on `NewPeer`, additively connect to that one peer. See the
+[late-join decision table](#late-join-decision-table).
 
 #### SessionPlan
 
-`SessionPlan` is the **per-recipient** session directive emitted at lobby finalization. It is sent alongside the
-unchanged `GameStarting` (and only to v3-capable members) when a room negotiates a non-relay plan. A relay-only
+`SessionPlan` is the **per-recipient** session directive first emitted at lobby finalization. It is sent alongside
+the unchanged `GameStarting` (and only to v3-capable members) when a room negotiates a non-relay plan. A relay-only
 room emits **no** `SessionPlan`, so v2 clients never observe it. Each recipient gets its own tailored `peers` list,
 `initiate` flags, and, for WebRTC transports, ICE servers with freshly minted TURN credentials. It carries
 topology, transport, peers, ICE servers, and relay fallback; it does not carry legacy `ConnectionInfo` or direct
 host/port endpoint details.
+
+`SessionPlan` can also be **re-issued mid-session** (same message shape, same v3 gating). Two triggers:
+
+- **Host failover.** When the host of a running `host`-topology session is found to be invalid — gone after a
+  departure, self-healed on a late join that finds the stored host missing, or (after a reconnect that downgraded
+  its negotiated capabilities) seated but no longer able to run the session — the server re-elects a host over the
+  remaining members and sends every remaining v3 member a fresh tailored plan — same topology and transport, new
+  `host`, fresh per-recipient ICE for WebRTC. Only members that negotiated v3 plus the session's sticky
+  topology/transport pair are electable (a seat-filling relay-only member is never named host of a session it
+  cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break. If no
+  member qualifies, no plan is re-issued — the session is over and the relay floor carries the room. A host
+  departure itself is still signaled by the unchanged `PlayerLeft`.
+- **Late join / reconnect into an active non-relay session.** Only the **joiner** receives a plan (its full
+  tailored view of the running session: current peers, `initiate` flags, `host`, fresh ICE); existing members
+  receive the additive [`NewPeer`](#newpeer) delta instead. The joiner is never sent `NewPeer` — its pairing is
+  the `peers[].initiate` flags in its plan.
+
+The topology and transport of a session are **sticky for its lifetime**: the selection ladder runs once at
+finalization and is never re-run mid-session, even when departures widen the capability intersection. A re-issued
+plan only ever changes membership-derived fields (`peers`, `host`, `ice_servers`). Re-issued and late-join plan
+peer lists contain only peers that can run the session — that negotiated v3 plus the session's topology **and**
+transport: a v3 member that did not (e.g. a relay-only seat-filler, or one with the `webrtc` transport but not the
+session's topology) still receives its plan, but with an **empty** `peers` list — it has no P2P peers and
+participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
+`peers` (the `NewPeer` gating applies this same predicate). At finalization this filter is vacuous, because a plan
+is only selected when every member supports it. The client contract is uniform:
+**the latest `SessionPlan` wins** — (re)configure the session and connect per `peers[].initiate`; on `NewPeer`,
+additively connect to that one peer.
 
 ```json
 {
@@ -969,8 +1001,12 @@ Fields:
 - `topology` — `relay`, `host`, or `mesh`.
 - `transport` — `relay`, `direct`, or `webrtc`.
 - `host` — the elected host's player id; present only for `host` topology, omitted otherwise.
-- `peers` — the peers _this recipient_ should connect to (always excludes the recipient itself). Each entry carries
-  `player_id`, `player_name`, `is_authority`, and a per-recipient `initiate` flag.
+- `peers` — the peers _this recipient_ should connect to (always excludes the recipient itself, and lists only
+  peers that negotiated the session's topology and transport — empty when the recipient itself did not). Each
+  entry carries `player_id`, `player_name`, `is_authority`, and a per-recipient `initiate` flag. In a `mesh`
+  plan `is_authority` mirrors the room's `authority_player` (so it is `false` for every peer in a room created
+  with `supports_authority: false`); in a `host` plan it marks the elected host (`true` on the host entry in
+  client plans, `false` on the client entries in the host's plan).
 - `ice_servers` — STUN/TURN servers for WebRTC; omitted (empty) for non-WebRTC plans.
 - `fallback` — the universal fallback transport, always `relay` (the floor).
 
@@ -1017,20 +1053,34 @@ This ladder is the single source of truth in `src/server/session_policy.rs` (`UP
 
 ### Late-join decision table
 
-`NewPeer` pairing for a peer joining or reconnecting _after_ finalization is gated on the room's `lobby_state`,
-the resolved WebRTC transport, and the resolved topology:
+A peer joining or reconnecting _after_ finalization is brought up to date from the **stored** plan the room is
+actually running — the decision recorded at finalization (the ladder is _not_ re-run over the current members, so
+a session that finalized to the relay floor stays relay even if every remaining member could now do better). The
+joiner's view arrives as a fresh `SessionPlan`; existing members get the additive `NewPeer` delta:
 
-| `room.lobby_state` | Resolved topology | `NewPeer` behavior |
-|---|---|---|
-| not `Finalized` | any | no `NewPeer` (initial pairing is owned by the finalize-time `SessionPlan`) |
-| `Finalized` | `Relay` | no `NewPeer` (the active session is relay) |
-| `Finalized` | `Mesh` **(webrtc)** | pair the joiner with every other WebRTC member; one offerer per pair |
-| `Finalized` | `Host` **(webrtc)** | star: client ⇄ host only; host joiner ⇄ all clients; never client ⇄ client |
+| `room.lobby_state` | Stored (running) plan | Joiner receives | Existing members receive |
+|---|---|---|---|
+| not `Finalized` | any | nothing (initial pairing is owned by the finalize-time `SessionPlan`) | nothing |
+| `Finalized` | none (relay floor / pre-v3 room) | nothing | nothing |
+| `Finalized` | `mesh + webrtc` | `SessionPlan` (every session-capable current peer, glare `initiate`, fresh ICE) | `NewPeer` to every session-capable member |
+| `Finalized` | `host + webrtc` | `SessionPlan` (star view: client targets the stored host; a rejoining host targets all clients) | `NewPeer` along the star edge only |
+| `Finalized` | `host + direct` | `SessionPlan` (empty `ice_servers`) | nothing (`NewPeer` is WebRTC-only) |
 
-`NewPeer` is emitted only when the resolved **transport** is `webrtc`; a `host + direct` (LAN) finalized room emits
-no `NewPeer` because there is no WebRTC signaling to broker. `SessionPlan` still names the selected
-`host + direct` topology/transport and peers; any address metadata remains the legacy, self-declared
-`GameStarting.peer_connections` / `ProvideConnectionInfo` surface rather than a negotiated v3 transport proof.
+The joiner-directed plan is v3-gated; the `NewPeer` delta additionally requires — of the joiner **and** of every
+announced-to member — the full session predicate: v3 plus the session's topology **and** transport, the same rule
+that filters plan peer lists, so existing members are never told to pair with a peer the plan itself would not
+list. In particular, a v3 joiner that cannot run the session — a relay-only client, or one that negotiated the
+`webrtc` transport but **not** the session's topology (e.g. `topologies: ["relay"]` entering a `mesh + webrtc`
+session) — still receives the (v3-gated) `SessionPlan` describing the running session — with an **empty** `peers`
+list, since every pair with it sits outside the session contract (a relay-only peer would additionally be rejected
+by `Signal` validation); `fallback: "relay"` is its data path — and no `NewPeer` pairing fires for it in either
+direction. Symmetrically, a session-incapable member already seated in the room is omitted from a capable joiner's
+`peers` and receives no `NewPeer` about the joiner. `NewPeer` is emitted only
+when the stored **transport** is `webrtc`; a `host + direct` (LAN) session emits no `NewPeer` because there is no
+WebRTC signaling to broker — its `SessionPlan` still names the `host + direct` topology/transport and peers; any
+address metadata remains the legacy, self-declared `GameStarting.peer_connections` / `ProvideConnectionInfo`
+surface rather than a negotiated v3 transport proof. After a host failover the stored host is the _re-elected_
+one, so an ex-host that reconnects is paired as a client of the new host.
 
 ### Glare / offerer rule
 

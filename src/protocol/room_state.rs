@@ -60,7 +60,13 @@ use super::types::{
 //   - `game_finalized_at` timestamp recorded
 //   - `GameStarting` message sent with legacy peer metadata
 //   - Room typically cleaned up shortly after
-//   - No further state transitions possible
+//   - No further state transitions possible: Finalized is terminal. A player
+//     departure does NOT regress the room (only Lobby → Waiting exists), and
+//     post-finalize `PlayerReady` toggles are rejected with
+//     `INVALID_ROOM_STATE`
+//   - A Finalized room with an open seat (a member departed) still accepts
+//     joins — `add_player_to_room` gates only on fullness — so seat-filling
+//     late joins enter the running session without replaying the lobby cycle
 //
 // ## Key State Transitions and Protocol Messages
 //
@@ -77,8 +83,13 @@ use super::types::{
 //
 // ### Lobby → Finalized
 // - **Trigger**: All players in lobby mark themselves ready
-// - **Condition**: `all_players_ready()` returns true
-// - **Action**: Calls `finalize_game()`, sets `game_finalized_at` timestamp
+// - **Condition**: The room coordinator's `handle_player_ready` (holding the
+//   room-operation lock) observes every member ready in its own ready map
+// - **Action**: The coordinator persists the decision via the storage trait's
+//   `finalize_room_game`, which sets `lobby_state = Finalized`, synchronizes
+//   the per-player ready flags / `ready_players`, and records the
+//   `game_finalized_at` timestamp. (`Room::finalize_game()` is a test-only
+//   convenience and is not on the production path.)
 // - **Message**: Broadcasts `GameStarting` with legacy peer metadata for all players
 //
 // ## Protocol Message Flow Example (2 Players)

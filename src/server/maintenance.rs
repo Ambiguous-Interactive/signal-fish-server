@@ -68,6 +68,12 @@ impl EnhancedGameServer {
 
                         // Process post-cleanup operations with idempotency check
                         for room_id in &deleted_room_ids {
+                            // The stored v3 session decision is per-node in-memory
+                            // state, so it is dropped unconditionally for every
+                            // deleted room — independent of the cross-instance
+                            // idempotency claim below.
+                            self.clear_active_session_plan(room_id);
+
                             // Try to claim the cleanup operation for this room
                             // Only proceed with post-cleanup if we successfully claimed it
                             let should_process = self
@@ -130,6 +136,18 @@ impl EnhancedGameServer {
                 Err(e) => {
                     tracing::error!("Failed to cleanup expired rooms: {}", e);
                 }
+            }
+
+            // Drop stored v3 session decisions for rooms that no longer exist.
+            // `cleanup_expired_rooms` reports only counts (no per-room ids), so
+            // this sweep is the guaranteed reclaim for every removal path.
+            let pruned_session_plans = self.prune_active_session_plans().await;
+            if pruned_session_plans > 0 {
+                tracing::debug!(
+                    count = pruned_session_plans,
+                    instance_id = %self.instance_id,
+                    "Pruned stored session plans for removed rooms"
+                );
             }
 
             // Cleanup expired distributed locks

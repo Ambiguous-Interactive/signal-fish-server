@@ -1,21 +1,45 @@
 //! Targeted WebRTC signal relay (Protocol v3, PLAN §P2/§P3).
 //!
 //! Relays opaque WebRTC signals (offer/answer/trickle-ICE) to a specific peer in
-//! the same room ([`EnhancedGameServer::handle_signal`]) and, when a peer joins
-//! or reconnects into an **already-active** P2P session, designates exactly one
-//! offerer per pair ([`EnhancedGameServer::handle_webrtc_late_join`]).
+//! the same room ([`EnhancedGameServer::handle_signal`]) and brings a peer that
+//! joins or reconnects into an **already-active** session up to date
+//! ([`EnhancedGameServer::handle_active_session_late_join`]).
 //!
 //! Initial pairing for a freshly finalized lobby is delivered by the
-//! per-recipient `SessionPlan` (see `session_policy.rs`); `NewPeer` is reserved
-//! for the late-join / reconnect case. Late-join pairing fires iff the room's
-//! `lobby_state == Finalized` AND its recomputed plan uses the WebRTC transport
-//! (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == WebRtc`) —
-//! so it is finalization-gated and transport-gated, then shaped by topology
-//! (mesh pairs every peer; host pairs clients with the host only). Both the
-//! relay floor *and* a `Host + Direct` (LAN) session emit none — even though
-//! `Host + Direct` is a non-relay *topology* — PLAN Appendix L decision #4,
-//! Appendix E. Every code path is gated on negotiated v3 + WebRTC capability so
-//! v2 clients never observe `Signal`/`NewPeer` (Appendix K).
+//! per-recipient `SessionPlan` (see `session_policy.rs`). The late-join path
+//! consults the room's **stored** `ActiveSessionPlan` — the session the room is
+//! actually running — instead of re-running the selection ladder, because the
+//! live membership can drift from the finalize-time membership and a recompute
+//! could contradict the running session. With a stored (non-relay) plan and a
+//! `Finalized` room:
+//!
+//! - the **joiner** receives a fresh tailored `SessionPlan` (current members,
+//!   sticky topology/transport/host, fresh per-recipient ICE for WebRTC) and is
+//!   deliberately **not** sent `NewPeer` — its pairing arrives in the plan's
+//!   `peers[].initiate` flags. Plan peer lists are capability-filtered on both
+//!   sides (`SessionPlanDecision::plan_for`): a joiner that cannot run the
+//!   session's sticky pair gets an empty `peers` list (the relay floor is its
+//!   data path);
+//! - **existing members** receive only the additive `NewPeer` delta, and only
+//!   when the stored transport is WebRTC (mesh announces the joiner to every
+//!   member; host announces along the star edge only). Both the relay floor
+//!   (which stores no plan) *and* a `Host + Direct` (LAN) session emit no
+//!   `NewPeer` — even though `Host + Direct` is a non-relay *topology* — PLAN
+//!   Appendix L decision #4, Appendix E. Per member, `NewPeer` applies the
+//!   SAME full session predicate the plan peer lists use
+//!   (`SessionPlanDecision::recipient_pairable`: v3 + the session's sticky
+//!   topology AND transport) in both directions, so the server never instructs
+//!   a pair its own plan contract excludes.
+//!
+//! A `host`-topology entry whose stored host is found invalid (missing, or
+//! seated but no longer capable of the session) is self-healed first
+//! (`replan_host_session` in `session_policy.rs`: capability-aware
+//! re-election + a full re-plan to every member, joiner included), replacing the
+//! per-joiner emission for that event.
+//!
+//! Every code path is gated on negotiated v3 (plus the WebRTC transport for
+//! `Signal`, and the full session predicate above for `NewPeer` pairing) so v2
+//! clients never observe `Signal`/`NewPeer`/`SessionPlan` (Appendix K).
 
 use std::sync::Arc;
 
@@ -24,7 +48,7 @@ use crate::protocol::{
     Transport,
 };
 
-use super::session_policy::choose_session_plan;
+use super::session_policy::SessionPlanDecision;
 use super::EnhancedGameServer;
 
 /// Glare-avoidance offerer designation (Appendix E mesh rule).
@@ -94,7 +118,8 @@ impl EnhancedGameServer {
             return;
         }
 
-        // 4. Sender must have negotiated v3 + WebRTC.
+        // 4. Sender must have negotiated v3 + WebRTC. Deliberately
+        //    transport-only (see the step-5 note below).
         if !self.supports_webrtc_signaling(from) {
             self.reject_signal(
                 from,
@@ -111,8 +136,12 @@ impl EnhancedGameServer {
         //    chosen a peer that lacks the WebRTC transport, but enforce
         //    defense-in-depth: a sender that targets a v2 or v3-relay-only peer
         //    is told the target was not found rather than delivering a `Signal`
-        //    the target never opted into. This mirrors the late-join path, which
-        //    likewise requires BOTH v3 AND WebRTC for each peer (Appendix K).
+        //    the target never opted into (Appendix K). Both `handle_signal`
+        //    gates (sender + target) are deliberately TRANSPORT-only, weaker
+        //    than the full session predicate that gates `NewPeer` / plan peer
+        //    lists: `Signal` relay is dumb plumbing between endpoints that both
+        //    negotiated the transport, and it must not second-guess (or
+        //    topology-gate) which pairs the session plan brokered.
         if !self.supports_webrtc_signaling(&to) {
             self.reject_signal(
                 from,
@@ -155,202 +184,270 @@ impl EnhancedGameServer {
             .await;
     }
 
-    /// Pair a joiner/reconnector into an **already-active** P2P session,
-    /// designating exactly one offerer per pair (Appendix E late-join rule).
+    /// Bring a joiner/reconnector into an **already-active** session: send the
+    /// joiner its tailored `SessionPlan` for the session the room is running,
+    /// then announce it to existing members via the `NewPeer` delta (Appendix E
+    /// late-join rule).
     ///
     /// Initial pairing for a freshly finalized lobby is the `SessionPlan`'s job
-    /// (`session_policy.rs`); this path only fires once the room is live, so it is
-    /// gated and topology-aware (PLAN Appendix L decision #4):
+    /// at finalize (`session_policy.rs`); this path only fires once the room is
+    /// live, and it consults the **stored** `ActiveSessionPlan` rather than
+    /// re-running the selection ladder (PLAN Appendix L decision #4):
     ///
-    /// 1. The joiner must have negotiated v3 + WebRTC.
-    /// 2. The room must be `Finalized` — premature lobby-fill pairing is
+    /// 1. The room must be `Finalized` — premature lobby-fill pairing is
     ///    suppressed (the `SessionPlan` delivers initial pairing at finalize).
-    /// 3. The recomputed plan must use the **WebRTC transport**. `NewPeer` is a
-    ///    WebRTC-signaling control message, so a non-WebRTC active session emits
-    ///    none — both the relay floor *and* a `Host + Direct` (LAN) session, even
-    ///    though `Host + Direct` is a non-relay *topology*.
-    /// 4. The plan's **topology** then shapes the WebRTC pairing:
-    ///    - **Mesh** ⇒ pair the joiner with every other WebRTC member (UUID glare
-    ///      rule, exactly one offerer per pair).
-    ///    - **Host** ⇒ star pairing around the elected host: the host pairs with
-    ///      every client; a client pairs with the host only (clients never offer
-    ///      to each other).
+    /// 2. The room must have a stored non-relay decision. A relay-floor (or
+    ///    pre-v3) room stores none and emits nothing — even when a recompute
+    ///    over the *current* members would now fit a richer rung, because the
+    ///    running session is still relay (sticky for the session lifetime).
+    /// 3. **Self-heal:** a `host`-topology decision whose stored host is
+    ///    invalid — missing from the current members, or seated but no longer
+    ///    capable of the session (`ActiveSessionPlan::host_invalid`) — is
+    ///    repaired first, via the same capability-aware re-election + full
+    ///    re-plan a host departure triggers (`replan_host_session`, one
+    ///    `session_replans_emitted` event). The heal re-plan delivers EVERY
+    ///    current member — including the joiner, even one that cannot run the
+    ///    session itself (the heal is about the room; an incapable v3 joiner
+    ///    still gets its plan with empty `peers`) — a fresh plan that already
+    ///    lists any capable joiner with glare-correct `initiate` flags, so the
+    ///    per-joiner plan and `NewPeer` deltas below are skipped as duplicates
+    ///    (and the joiner is counted on the re-plan event, not
+    ///    `session_plans_late_join`). If no member qualifies, the entry is
+    ///    removed and nothing is emitted. A normal late join — stored host
+    ///    present and capable — never re-plans.
+    /// 4. The **joiner**, when v3, receives a fresh `SessionPlan` built from the
+    ///    sticky topology/transport/host over the current member list, with
+    ///    fresh per-recipient ICE when the transport is WebRTC (a reconnector's
+    ///    original TURN credentials may have expired; a seat-filling joiner
+    ///    never had any). Its pairing arrives in `peers[].initiate`, so the
+    ///    joiner is deliberately **not** sent `NewPeer`. This holds for every
+    ///    stored plan, including `Host + Direct` (which received plans at
+    ///    finalize too). The plan's peer list is capability-filtered on both
+    ///    sides (`SessionPlanDecision::plan_for`): a joiner that did not
+    ///    negotiate the session's sticky pair (v3 relay-only, or v3 + WebRTC
+    ///    transport without the session's topology) receives an empty `peers`
+    ///    list and participates via the relay floor.
+    /// 5. **Existing members** receive the additive `NewPeer` delta only when
+    ///    the stored transport is **WebRTC** (`NewPeer` is a WebRTC-signaling
+    ///    control message) and the joiner satisfies the full session predicate
+    ///    (`SessionPlanDecision::recipient_pairable`: v3 + the sticky topology
+    ///    AND transport — the same rule that shapes plan peer lists, so
+    ///    existing members are never told to connect to a peer the plan would
+    ///    not list): mesh announces the joiner to every session-capable member
+    ///    (UUID glare rule); host announces along the star edge only (host
+    ///    learns of a client joiner; clients learn of a host joiner; clients
+    ///    never of each other). Members that cannot run the session are
+    ///    skipped in BOTH directions — neither announced to nor announced.
     ///
-    /// `members` is the room's current player list, already fetched by the caller
-    /// (`handle_join_room` / reconnect), avoiding a redundant `get_room_players`
-    /// round-trip. `room` supplies `lobby_state`, `game_name`, and the explicit
-    /// `authority_player` for host election.
-    pub async fn handle_webrtc_late_join(
+    /// `members` is the room's current player list **including the joiner**,
+    /// already fetched by the caller (`handle_join_room` / reconnect), avoiding
+    /// a redundant `get_room_players` round-trip. `room` supplies `id`,
+    /// `lobby_state`, and `authority_player` (for the self-heal re-election).
+    pub async fn handle_active_session_late_join(
         &self,
         room: &Room,
         joiner: &PlayerId,
         members: &[PlayerInfo],
     ) {
-        // 1. The joiner itself must be v3 + WebRTC.
-        if !self.supports_webrtc_signaling(joiner) {
-            return;
-        }
-
-        // 2. Only pair into an active (finalized) session; the SessionPlan owns
+        // 1. Only into an active (finalized) session; the SessionPlan owns
         //    finalize-time initial pairing, so lobby-fill joins emit nothing.
         if room.lobby_state != LobbyState::Finalized {
             return;
         }
 
-        // 3. Recompute the room's plan over the identical inputs `emit_session_plan`
-        //    uses.
-        let decision = choose_session_plan(
-            &room.game_name,
-            room.authority_player,
-            self.session_members_from(members),
-            &self.session_config,
-        );
+        // 2. The session the room is RUNNING, not a recompute. No stored entry
+        //    (relay floor / pre-v3) ⇒ emit nothing.
+        let Some(stored) = self.active_session_plan(&room.id) else {
+            return;
+        };
 
-        // 4. `NewPeer` is a WebRTC-signaling control message, so only pair when the
-        //    active session actually uses the WebRTC transport. A relay-floor or
-        //    `Host + Direct` (LAN) plan must never push clients into WebRTC
-        //    negotiation — even though `Host + Direct` is a non-relay *topology*.
-        //    This mirrors `emit_session_plan`, which advertises ICE only for a
-        //    WebRTC transport.
-        if !decision.uses_webrtc_signaling() {
+        // 3. Self-heal (host-failover recovery): a `host`-topology entry whose
+        //    stored host is invalid — no longer a member (an
+        //    insert-after-departure race at finalize, concurrent departures, or
+        //    a departure hook skipped by a transient storage error) or seated
+        //    but no longer capable of the session (a capability-downgrading
+        //    reconnect) — is repaired with the SAME capability-aware
+        //    re-election + full re-plan a host departure triggers — so the
+        //    joiner pairs against a live host, and can itself be elected if it
+        //    qualifies. The heal runs regardless of the JOINER's own
+        //    pairability (the heal is about the room, not the joiner: an
+        //    incapable v3 joiner still receives the healed plan with empty
+        //    `peers`, and is never `NewPeer`-announced). The heal re-plan
+        //    already delivered every current member — `members` includes the
+        //    joiner — a fresh plan listing any capable joiner with
+        //    glare-correct `initiate` flags, so the separate joiner plan and
+        //    the `NewPeer` deltas below would be duplicates: return instead.
+        //    (If no member qualifies, the entry was removed and nothing was
+        //    emitted — the session is over and the relay floor carries the
+        //    room.) A normal late join, with the stored host present and
+        //    capable, never re-plans.
+        let session_members = self.session_members_from(members);
+        if stored.host_invalid(&session_members) {
+            self.replan_host_session(&room.id, stored, room.authority_player, session_members)
+                .await;
             return;
         }
 
-        // 5. The transport is WebRTC; the topology shapes the pairing.
+        // 4. Joiner-directed SessionPlan (v3-gated inside `send_session_plan_to`),
+        //    sent BEFORE the NewPeer delta fires for existing members — and sent
+        //    even to a joiner that cannot run the session (it receives its
+        //    truthful empty-`peers` view; only the pairing below is gated on
+        //    the full session predicate).
+        let decision = stored.decision_with(session_members);
+        let now_unix = decision
+            .uses_webrtc_signaling()
+            .then(|| chrono::Utc::now().timestamp());
+        if let Some(minted) = self
+            .send_session_plan_to(&decision, *joiner, now_unix)
+            .await
+        {
+            self.metrics.increment_session_plans_late_join();
+            self.metrics.add_turn_credentials_issued(minted);
+        }
+
+        // 5. `NewPeer` is a WebRTC-signaling control message: only announce when
+        //    the active session actually uses the WebRTC transport (a relay or
+        //    `Host + Direct` (LAN) session must never push clients into WebRTC
+        //    negotiation) AND the joiner satisfies the full session predicate —
+        //    v3 + the sticky topology AND transport, the same rule that filters
+        //    plan peer lists (existing members must never be told to connect to
+        //    a peer the plan itself would not list, e.g. a v3 joiner with the
+        //    WebRTC transport but without the session's topology).
+        if !decision.uses_webrtc_signaling() || !decision.recipient_pairable(*joiner) {
+            return;
+        }
+
         match decision.topology {
             // Unreachable: a WebRTC transport never pairs with a relay topology
             // (`is_valid_pair`). Kept for an exhaustive, future-proof match.
             Topology::Relay => {}
-            // Mesh: every pair establishes exactly one offerer (UUID rule).
-            Topology::Mesh => self.pair_webrtc_peer_with_members(joiner, members).await,
-            // Host: star pairing around the elected host.
+            // Mesh: announce the joiner to every other session-capable member.
+            Topology::Mesh => {
+                self.announce_webrtc_peer_to_members(&decision, joiner)
+                    .await
+            }
+            // Host: announce along the star edge around the STORED host (the
+            // host-failover re-election updates the stored entry, so an ex-host
+            // reconnecting after a failover is announced as a client).
             Topology::Host => {
                 let Some(host) = decision.host else {
-                    // A host plan with no elected host is degenerate; emit nothing
-                    // rather than fabricate pairings.
+                    // Defensive: unreachable after the self-heal gate above (a
+                    // hostless host plan re-planned or was removed). Announce
+                    // nothing rather than fabricate pairings.
                     return;
                 };
-                self.pair_webrtc_peer_with_host(joiner, host, members).await;
+                self.announce_webrtc_peer_in_star(&decision, joiner, host)
+                    .await;
             }
         }
     }
 
-    /// Whether this connection can participate in targeted WebRTC signaling.
+    /// Whether this connection can participate in targeted WebRTC signaling
+    /// (negotiated v3 + the WebRTC transport).
+    ///
+    /// This is `handle_signal`'s transport-level plumbing gate (Appendix K),
+    /// deliberately WEAKER than the full session predicate
+    /// (`SessionPlanDecision::recipient_pairable`: v3 + the session's sticky
+    /// topology AND transport) that gates `NewPeer` pairing and plan peer
+    /// lists — the relay forwards signals between any two transport-capable
+    /// endpoints without second-guessing which pairs the plan brokered.
     pub(crate) fn supports_webrtc_signaling(&self, player_id: &PlayerId) -> bool {
         self.client_supports_v3(player_id)
             && self.client_supports_transport(player_id, Transport::WebRtc)
     }
 
-    /// Pair one WebRTC-capable peer with every WebRTC-capable member in a room.
-    pub(crate) async fn pair_webrtc_peer_with_members(
+    /// Announce a (re)joined peer to every other session-capable member of an
+    /// active mesh session via `NewPeer`.
+    ///
+    /// One-directional by design: only the **existing** members are told about
+    /// the joiner (`you_initiate` per the UUID glare rule, so exactly one side
+    /// of each pair offers). The joiner itself is never sent `NewPeer` — its
+    /// pairing (the same peers with the mirrored `initiate` flags) arrives in
+    /// the tailored `SessionPlan` that
+    /// [`Self::handle_active_session_late_join`] sends first.
+    ///
+    /// Gating is the full session predicate on BOTH sides
+    /// (`SessionPlanDecision::pairable` / `recipient_pairable`: v3 + the
+    /// session's sticky topology and transport — one rule shared with plan
+    /// peer lists and host election), so a member the plan would never list
+    /// (v2, v3 relay-only, or v3 lacking the session's topology) is neither
+    /// announced nor announced to.
+    pub(crate) async fn announce_webrtc_peer_to_members(
         &self,
+        decision: &SessionPlanDecision,
         peer: &PlayerId,
-        members: &[PlayerInfo],
     ) {
-        if !self.supports_webrtc_signaling(peer) {
+        if !decision.recipient_pairable(*peer) {
             return;
         }
 
-        for member in members {
-            let existing = member.id;
+        for member in &decision.members {
+            let existing = member.player_id;
             if existing == *peer {
                 continue;
             }
-            // v2 / relay-only members never participate in signaling (gating).
-            if !self.supports_webrtc_signaling(&existing) {
+            // Members that cannot run this session never participate in
+            // pairing (the same filter `plan_for` applies to peer lists).
+            if !decision.pairable(member) {
                 continue;
             }
 
-            self.send_new_peer_pair(peer, &existing).await;
+            self.send_new_peer(&existing, peer, local_initiates(existing, *peer))
+                .await;
         }
     }
 
-    async fn send_new_peer_pair(&self, peer: &PlayerId, existing: &PlayerId) {
-        // Tell the existing peer about the new/reconnected peer...
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                existing,
-                Arc::new(ServerMessage::NewPeer {
-                    peer_id: *peer,
-                    you_initiate: local_initiates(*existing, *peer),
-                }),
-            )
-            .await;
-        // ...and the peer about the existing peer. Exactly one of the two
-        // `you_initiate` flags is true (local_initiates is antisymmetric).
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                peer,
-                Arc::new(ServerMessage::NewPeer {
-                    peer_id: *existing,
-                    you_initiate: local_initiates(*peer, *existing),
-                }),
-            )
-            .await;
-    }
-
-    /// Star-pair a joiner into an active `host`-topology session.
+    /// Announce a (re)joined peer along the star edge of an active
+    /// `host`-topology session via `NewPeer`.
     ///
-    /// If the joiner IS the host it pairs with every (WebRTC-capable) client;
-    /// otherwise it pairs only with the host. Direction is fixed by the star
-    /// rule (Appendix E host): the client offers, the host answers.
-    pub(crate) async fn pair_webrtc_peer_with_host(
+    /// One-directional by design (the joiner's own pairing arrives in its
+    /// `SessionPlan`), and gated on the full session predicate on BOTH sides
+    /// (see [`Self::announce_webrtc_peer_to_members`]):
+    ///
+    /// - joiner IS the host ⇒ every session-capable client is told to offer to
+    ///   it (`you_initiate: true` — the star rule: clients offer, the host
+    ///   answers);
+    /// - joiner is a client ⇒ only the host (when present and session-capable)
+    ///   is told to answer it (`you_initiate: false`). Clients are never
+    ///   announced to each other in a star.
+    pub(crate) async fn announce_webrtc_peer_in_star(
         &self,
+        decision: &SessionPlanDecision,
         joiner: &PlayerId,
         host: PlayerId,
-        members: &[PlayerInfo],
     ) {
-        if !self.supports_webrtc_signaling(joiner) {
+        if !decision.recipient_pairable(*joiner) {
             return;
         }
 
         if *joiner == host {
-            // The host (re)joined: pair it with every WebRTC-capable client.
-            for member in members {
-                let client = member.id;
-                if client == host || !self.supports_webrtc_signaling(&client) {
+            // The host (re)joined: every session-capable client offers to it.
+            for member in &decision.members {
+                let client = member.player_id;
+                if client == host || !decision.pairable(member) {
                     continue;
                 }
-                self.send_host_peer_pair(&client, &host).await;
+                self.send_new_peer(&client, &host, true).await;
             }
         } else {
-            // A client (re)joined: pair it only with the host (if the host is
-            // present and WebRTC-capable).
-            if members.iter().any(|member| member.id == host)
-                && self.supports_webrtc_signaling(&host)
-            {
-                self.send_host_peer_pair(joiner, &host).await;
+            // A client (re)joined: the host answers it (the joiner's own
+            // "offer to the host" instruction is in its SessionPlan).
+            // `recipient_pairable` covers both host membership and capability.
+            if decision.recipient_pairable(host) {
+                self.send_new_peer(&host, joiner, false).await;
             }
         }
     }
 
-    /// Emit the `NewPeer` pair for a (client, host) edge in a star topology.
-    ///
-    /// Unlike [`Self::send_new_peer_pair`] (mesh, UUID glare rule), the direction
-    /// is fixed: the client offers to the host (`you_initiate: true`) and the host
-    /// answers (`you_initiate: false`).
-    async fn send_host_peer_pair(&self, client: &PlayerId, host: &PlayerId) {
-        // The client offers to the host.
+    /// Best-effort `NewPeer { peer_id, you_initiate }` to one recipient.
+    async fn send_new_peer(&self, to: &PlayerId, peer_id: &PlayerId, you_initiate: bool) {
         let _ = self
             .message_coordinator
             .send_to_player(
-                client,
+                to,
                 Arc::new(ServerMessage::NewPeer {
-                    peer_id: *host,
-                    you_initiate: true,
-                }),
-            )
-            .await;
-        // The host answers the client.
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                host,
-                Arc::new(ServerMessage::NewPeer {
-                    peer_id: *client,
-                    you_initiate: false,
+                    peer_id: *peer_id,
+                    you_initiate,
                 }),
             )
             .await;

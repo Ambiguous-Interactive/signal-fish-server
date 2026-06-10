@@ -1,0 +1,80 @@
+# Formal Verification Workflow
+#
+# Model-checks the Protocol v3 session-lifecycle TLA+ specification
+# (formal/tla/SignalFishSession.tla) with TLC across every model
+# configuration (desired=mesh, desired=host, desired=host with WebRTC
+# disabled, and the relay-floor model with both upgrade transports
+# disabled). The spec mirrors the modeled source files action-for-action
+# (the full correspondence table in formal/README.md spans
+# session_policy.rs, signaling.rs, room_service.rs, database/mod.rs,
+# protocol/room_state.rs, and reconnection_service.rs), so this workflow
+# triggers on changes to those files as well: a behavioral change there
+# must keep the spec (and its invariants) green or update them
+# deliberately.
+#
+# The TLA+ tools jar is version-pinned and SHA256-verified by
+# scripts/run-tla-model-check.sh; the verified jar is cached between runs.
+# See formal/README.md for the spec <-> code correspondence table.
+
+name: Formal Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "formal/**"
+      - "scripts/run-tla-model-check.sh"
+      - "src/server/session_policy.rs"
+      - "src/server/signaling.rs"
+      - "src/server/room_service.rs"
+      - "src/server/reconnection_service.rs"
+      - "src/database/mod.rs"
+      - "src/protocol/room_state.rs"
+      - ".github/workflows/formal-verification.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "formal/**"
+      - "scripts/run-tla-model-check.sh"
+      - "src/server/session_policy.rs"
+      - "src/server/signaling.rs"
+      - "src/server/room_service.rs"
+      - "src/server/reconnection_service.rs"
+      - "src/database/mod.rs"
+      - "src/protocol/room_state.rs"
+      - ".github/workflows/formal-verification.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    name: TLA+ Model Check (TLC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Java runtime
+        uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache TLA+ tools jar
+        uses: actions/cache@v5.0.5
+        with:
+          path: ~/.cache/signal-fish/tla
+          # The script pins the tla2tools version + SHA256, so keying the
+          # cache on the script content invalidates the cache exactly when
+          # the pin changes (the checksum is re-verified on every run).
+          key: tla2tools-${{ hashFiles('scripts/run-tla-model-check.sh') }}
+
+      - name: Run TLC model check (all configurations)
+        run: bash scripts/run-tla-model-check.sh

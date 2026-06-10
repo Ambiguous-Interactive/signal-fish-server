@@ -96,6 +96,10 @@ rustls-pki-types = { version = "1.14", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+# Test-only tokio feature additions (feature-unified with the main dependency
+# for test builds only): `process` drives the spawned server binary in
+# tests/v3_multiprocess_e2e.rs.
+tokio = { version = "1.52", features = ["process"] }
 tempfile = "3.27"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"

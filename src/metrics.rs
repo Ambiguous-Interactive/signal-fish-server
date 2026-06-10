@@ -113,8 +113,24 @@ pub struct ServerMetrics {
     pub relay_session_timeouts: AtomicU64,
 
     // Transport / session-plan metrics (Protocol v3, PLAN §P5)
-    /// Non-relay `SessionPlan`s actually emitted (one per finalized non-relay room).
+    /// Non-relay `SessionPlan`s actually emitted (one per finalized non-relay
+    /// room). Mid-session re-plans and late-join plans are counted separately
+    /// (`session_replans_emitted` / `session_plans_late_join`) so this keeps
+    /// meaning "finalized non-relay rooms".
     pub session_plans_emitted: AtomicU64,
+    /// Mid-session host re-plan events (host failover / self-heal): one per
+    /// re-plan **event**, NOT per recipient. Counted whenever an invalid
+    /// stored host (absent from the room, or seated but no longer capable of
+    /// the session) is replaced via re-election and fresh plans are emitted —
+    /// after a departure, or healing a wedged entry during a late join. NOT
+    /// counted when no remaining member can host the session (the stored plan
+    /// is dropped and nothing is emitted — no re-plan happened).
+    pub session_replans_emitted: AtomicU64,
+    /// Late-join / reconnect `SessionPlan`s delivered: one per joiner that
+    /// received a tailored plan for an already-active session. A joiner served
+    /// by a self-heal re-plan instead (invalid stored host) is part of that
+    /// single `session_replans_emitted` event and is NOT counted here.
+    pub session_plans_late_join: AtomicU64,
     /// Finalized rooms whose chosen topology was `mesh`.
     pub topology_mesh_selected: AtomicU64,
     /// Finalized rooms whose chosen topology was `host`.
@@ -320,6 +336,8 @@ pub struct RelayHealthMetrics {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransportMetrics {
     pub session_plans_emitted: u64,
+    pub session_replans_emitted: u64,
+    pub session_plans_late_join: u64,
     pub topology_mesh_selected: u64,
     pub topology_host_selected: u64,
     pub topology_relay_selected: u64,
@@ -432,6 +450,8 @@ impl ServerMetrics {
             relay_client_id_exhaustion_events: AtomicU64::new(0),
             relay_session_timeouts: AtomicU64::new(0),
             session_plans_emitted: AtomicU64::new(0),
+            session_replans_emitted: AtomicU64::new(0),
+            session_plans_late_join: AtomicU64::new(0),
             topology_mesh_selected: AtomicU64::new(0),
             topology_host_selected: AtomicU64::new(0),
             topology_relay_selected: AtomicU64::new(0),
@@ -885,9 +905,33 @@ impl ServerMetrics {
     }
 
     /// Record one non-relay `SessionPlan` actually emitted (one per finalized
-    /// non-relay room).
+    /// non-relay room). Mid-session re-plans and late-join plans must NOT move
+    /// this counter — they have their own
+    /// ([`Self::increment_session_replans_emitted`] /
+    /// [`Self::increment_session_plans_late_join`]) so the three emission kinds
+    /// stay independently observable.
     pub fn increment_session_plans_emitted(&self) {
         self.session_plans_emitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one mid-session host re-plan event — an invalid stored host
+    /// (absent, or seated but no longer session-capable) was replaced via
+    /// re-election and fresh plans emitted, whether triggered by a departure
+    /// (host failover) or by a late join healing a wedged entry: once per
+    /// **event**, not per recipient. Must NOT be called when no remaining
+    /// member can host the session (the stored plan is dropped without any
+    /// emission — that is not a re-plan).
+    pub fn increment_session_replans_emitted(&self) {
+        self.session_replans_emitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one late-join / reconnect `SessionPlan` delivered to a joiner of
+    /// an already-active session (once per joiner that received a plan). A
+    /// joiner served by a self-heal re-plan instead is covered by
+    /// [`Self::increment_session_replans_emitted`] and must not be counted
+    /// here.
+    pub fn increment_session_plans_late_join(&self) {
+        self.session_plans_late_join.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that a client reported an established P2P data path for the first
@@ -1078,6 +1122,8 @@ impl ServerMetrics {
             },
             transport: TransportMetrics {
                 session_plans_emitted: self.session_plans_emitted.load(Ordering::Relaxed),
+                session_replans_emitted: self.session_replans_emitted.load(Ordering::Relaxed),
+                session_plans_late_join: self.session_plans_late_join.load(Ordering::Relaxed),
                 topology_mesh_selected: self.topology_mesh_selected.load(Ordering::Relaxed),
                 topology_host_selected: self.topology_host_selected.load(Ordering::Relaxed),
                 topology_relay_selected: self.topology_relay_selected.load(Ordering::Relaxed),
