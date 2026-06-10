@@ -173,8 +173,8 @@ Provide legacy, self-declared peer connection metadata for the v2
 `GameStarting.peer_connections` handoff. This metadata is preserved for
 backward compatibility and is not part of protocol v3 capability negotiation:
 it does not prove that a client negotiated `direct` or `webrtc`, and it does not
-drive v3 `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, or transport
-metrics.
+drive v3 `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`,
+`PeerTransportStatus`, or transport metrics.
 
 ```json
 
@@ -809,7 +809,7 @@ missed events that occurred during the disconnection.
 ## Protocol v3 additions
 
 Protocol v3 is a **purely additive** layer on top of the v2 wire contract documented above. Everything in the
-preceding sections still applies unchanged; v3 only adds optional `Authenticate` fields, four new message types,
+preceding sections still applies unchanged; v3 only adds optional `Authenticate` fields, five new message types,
 and a capability-negotiation handshake. A v2 client never sends or receives a v3 message — the relay floor is the
 universal default and a v2 client observes byte-identical v2 behavior.
 
@@ -883,7 +883,7 @@ no v3 messages are emitted at all. This is the relay-floor guarantee: v2 and v3 
 
 ### New v3 messages
 
-These four messages exist only on a negotiated v3 connection.
+These five messages exist only on a negotiated v3 connection.
 
 | Message | Direction | Purpose |
 |---|---|---|
@@ -891,13 +891,15 @@ These four messages exist only on a negotiated v3 connection.
 | `NewPeer` | server → client | A new peer is available for a WebRTC connection (late join); designates the offerer |
 | `SessionPlan` | server → client | Per-recipient session directive emitted at finalization (alongside `GameStarting`) |
 | `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
+| `PeerTransportStatus` | server → client | A same-room peer's reported transport state changed (fan-out of an accepted `TransportStatus`) |
 
 #### Signal
 
 `Signal` carries an **opaque** payload that the server never parses — it is forwarded verbatim to the target peer.
 By convention the payload is matchbox-compatible: one of `{"Offer": "..."}`, `{"Answer": "..."}`, or
-`{"IceCandidate": "..."}`. The server validates only the envelope (same room, negotiated WebRTC, rate limit,
-v3 target); it never inspects the SDP or ICE strings.
+`{"IceCandidate": "..."}`. The server validates only the envelope (payload size cap, same room, negotiated WebRTC,
+rate limit, v3 target); it never inspects the SDP or ICE strings. A payload whose serialized JSON exceeds
+`security.max_signal_bytes` (default 16 KiB) is rejected with `SIGNAL_TOO_LARGE` and is not relayed.
 
 Client → server (`to` names the target peer):
 
@@ -1026,6 +1028,38 @@ update per-connection state or metrics.
   "data": { "transport": "webrtc", "connected": true }
 }
 ```
+
+An accepted report that records a real state change is additionally fanned out to the sender's current room
+as [`PeerTransportStatus`](#peertransportstatus) (below); ignored and duplicate reports fan out nothing.
+
+#### PeerTransportStatus
+
+`PeerTransportStatus` tells the **other** members of a room that a peer's reported data-path transport state
+changed — for example the host's WebRTC path died and it fell back to the relay, so relay-path traffic from it
+should be expected. It is the server-side fan-out of an accepted `TransportStatus` report and mirrors that
+message's fields, plus the reporting peer's id:
+
+```json
+{
+  "type": "PeerTransportStatus",
+  "data": { "peer_id": "<player-uuid>", "transport": "webrtc", "connected": true }
+}
+```
+
+Semantics:
+
+- **Deduplicated.** A fan-out fires only when the report records a real per-connection state change — the first
+  report on a connection, or a `(transport, connected)` transition. A duplicate report is dropped at the server
+  and fans out nothing. (A reconnect clears the stored state, so a reconnected client's first re-report fans out
+  again.)
+- **Sender excluded; room scoped.** Only the reporter's current room members hear it, never the reporter itself.
+  A report from a client that is not in a room is still recorded but fans out nothing.
+- **v3-gated per recipient.** Like every v3-only message, it is delivered only to members that negotiated v3
+  (Appendix K); a v2 member observes nothing. Deliberately, delivery is **not** gated on the recipient's own
+  transport capabilities (unlike `NewPeer` / plan-peer pairing, which apply the full session predicate): this is
+  informational status about a _peer's_ data path — useful even to a relay-only v3 member — not an instruction
+  for the recipient to use that transport.
+- **Purely informational**, like the report it relays: it never changes how the server relays `GameData`.
 
 ### Topology / transport selection ladder
 

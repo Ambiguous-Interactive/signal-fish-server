@@ -193,8 +193,8 @@ to. The full client-side state machine, including timeouts and the
 - [Transport Fallback Contract](transport-fallback.md) — client-side state machine
   and the relay-floor guarantee.
 - [Protocol v3 additions](../protocol.md#protocol-v3-additions) — the wire messages
-  (`Signal`, `NewPeer`, `SessionPlan`, `TransportStatus`), the selection ladder,
-  the glare rule, and ICE/TURN.
+  (`Signal`, `NewPeer`, `SessionPlan`, `TransportStatus`, `PeerTransportStatus`),
+  the selection ladder, the glare rule, and ICE/TURN.
 - [TURN / STUN configuration](../configuration.md#turn--stun-ice-credentials-protocol-v3)
   — enabling ephemeral TURN credentials.
 - [ADR-0001: Protocol v3 two-axis design](../adr/0001-protocol-v3-two-axis.md).

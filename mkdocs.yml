@@ -129,6 +129,7 @@ nav:
       - Server Config: configuration.md
       - Authentication: authentication.md
       - Deployment: deployment.md
+      - TURN Deployment: deployment-turn.md
   - Reference:
       - Protocol Messages: protocol.md
       - Error Codes: reference/error-codes.md
@@ -137,3 +138,4 @@ nav:
       - Transport Fallback (v3): architecture/transport-fallback.md
       - Handoff & Topologies (v3): architecture/handoff-and-topologies.md
       - Formal Verification (v3): architecture/formal-verification.md
+      - Scaling (Multi-Node): architecture/scaling.md

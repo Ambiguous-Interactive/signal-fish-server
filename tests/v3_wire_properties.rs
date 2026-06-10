@@ -337,6 +337,42 @@ proptest! {
         prop_assert_eq!(json_roundtrip(&transport), transport);
         prop_assert_eq!(msgpack_roundtrip(&transport), transport);
     }
+
+    /// `PeerTransportStatus` (the server-side fan-out of an accepted
+    /// `TransportStatus` state change) round-trips both encodings for every
+    /// `(peer_id, transport, connected)` combination, with the exact
+    /// externally-tagged wire shape (`type` tag + `peer_id` / `transport` /
+    /// `connected` data fields, lowercase transport tokens).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn peer_transport_status_roundtrips(
+        peer_id in arb_uuid(),
+        transport in arb_transport(),
+        connected in any::<bool>(),
+    ) {
+        let message = ServerMessage::PeerTransportStatus {
+            peer_id,
+            transport,
+            connected,
+        };
+
+        let original = canonical(&message);
+        prop_assert_eq!(canonical(&json_roundtrip(&message)), original.clone());
+        prop_assert_eq!(canonical(&msgpack_roundtrip(&message)), original.clone());
+
+        prop_assert_eq!(
+            original.get("type").cloned(),
+            Some(json!("PeerTransportStatus"))
+        );
+        let data = original
+            .get("data")
+            .and_then(Value::as_object)
+            .expect("PeerTransportStatus serializes data as an object");
+        prop_assert_eq!(data.get("peer_id").cloned(), Some(json!(peer_id.to_string())));
+        prop_assert_eq!(data.get("transport").cloned(), Some(canonical(&transport)));
+        prop_assert_eq!(data.get("connected").cloned(), Some(json!(connected)));
+        prop_assert_eq!(data.len(), 3, "exactly the three documented fields");
+    }
 }
 
 // ---------------------------------------------------------------------------

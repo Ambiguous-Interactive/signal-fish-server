@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the TURN relay deployment surface (P8 "deployment docs"). `docker-compose.yml` now ships
+  an optional `coturn` service behind the `turn` compose profile
+  (`docker compose --profile turn up`), pre-wired for the coturn REST-credential scheme
+  (`--use-auth-secret`) with the shared secret and realm interpolated from the environment; a
+  plain `docker compose up` is unchanged. The service refuses to start when
+  `TURN_STATIC_AUTH_SECRET` is unset or empty — an entrypoint guard exits with a clear message
+  instead of silently minting credentials from an empty HMAC key (an open relay). The guard is a
+  runtime check because compose interpolates `${VAR:?}` file-wide even when the profile is
+  inactive, which would break a plain `docker compose up`. Added `docs/deployment-turn.md`, the
+  TURN deployment guide: when TURN is needed (~15–20% of real-world P2P connections), the coturn
+  quick start against the compose profile, a walkthrough of the ephemeral credential scheme
+  (`username = "{expiry}:{player_id}"`, `credential = base64(HMAC-SHA1(secret, username))`) and
+  its operational consequences, zero-downtime rotation of the shared secret (coturn accepts
+  multiple secrets at once), managed TURN alternatives (Cloudflare / Twilio / Metered) and the
+  out-of-band-credential workaround for the current `mode = "managed"` STUN-only stub, why
+  signaling must run over `wss://` (DTLS fingerprints travel in the SDP, so plaintext `ws://`
+  allows a machine-in-the-middle of the WebRTC encryption itself), and capacity planning. Added
+  `docs/architecture/scaling.md`, the multi-node scaling notes: what state a node actually holds,
+  the room as the scaling unit (room affinity is the only constraint a multi-instance deployment
+  must preserve), the cross-node seams already present in the code, and the `region_id` /
+  room-code-prefix plumbing. `docs/deployment.md` gains the TURN-profile section, room-affinity
+  scaling guidance, and a `wss://`-specific security-checklist item, all cross-linked; both new
+  pages join the mkdocs nav. Documentation and compose-profile changes only — no server runtime
+  behavior or wire-format changes.
+- Added `ServerMessage::PeerTransportStatus { peer_id, transport, connected }` (protocol v3 only),
+  the peer fan-out of an accepted `TransportStatus` report: when a v3 client's report records a
+  real per-connection state change (the first report, or a `(transport, connected)` transition —
+  duplicates fan out nothing), every other member of its current room that negotiated v3 is told
+  the new state (for example, the host's WebRTC path died and relay-path traffic should be
+  expected). The reporter is excluded; a room-less reporter's state is still recorded but fans out
+  nothing; delivery is per-recipient v3-gated (a v2 member never observes it) but deliberately not
+  gated on the recipient's own transport capabilities, since this is informational status about a
+  peer rather than an instruction to use that transport. Purely informational — the relay floor
+  never closes. Added the `signal_fish_transport_status_fanout_total` Prometheus counter (one per
+  fan-out event, not per recipient), the canonical wire sample, and protocol/architecture docs.
+  v2 wire bytes are unchanged (the message exists only on negotiated v3 connections).
 - Added a formal-verification + property-testing layer for the protocol v3 session core. A TLA+
   specification (`formal/tla/SignalFishSession.tla`) models the v3 session lifecycle — finalize-time
   plan selection, per-recipient `SessionPlan` emission, late-join / seat-fill pairing, and
@@ -203,6 +239,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `--print-config` now redacts secrets (P8 security hardening, PLAN Appendix I). The printed JSON
+  replaces every **set** secret value with the marker `<redacted>` while leaving unset (`null` /
+  empty) secrets as-is, so operators can still tell "configured" apart from "missing". Redacted
+  fields: `security.metrics_auth_token`, `security.authorized_apps[*].app_secret`,
+  `session.ice_servers[*].credential` (static TURN credentials), `turn.static_auth_secret`, and
+  `turn.managed_api_token`. TLS file _paths_ are locations, not secrets, and stay visible. Backed
+  by a future-proofing test that sweeps the serialized output of a fully-populated config for any
+  string field whose key looks credential-like (`*secret*`, `*token*`, `*password*`,
+  `*credential*`, `*api_key*`) and fails if one survives redaction
+  (`Config::redacted_for_display`, `src/config/types.rs`).
+- Added a dedicated cap on the serialized size of the opaque v3 `Signal` payload (P8 / Appendix I
+  "cap signal payload size"). New config key `security.max_signal_bytes` (default `16384` — 16 KiB,
+  generously above any real SDP/ICE payload and well under the 64 KiB `security.max_message_size`
+  frame cap; must be `> 0` and ≤ `max_message_size`, larger values are rejected at validation as
+  dead config). `handle_signal` measures the canonical serialized JSON length of the `signal` value
+  before any relay work: payloads exactly at the cap relay unchanged, payloads over it are rejected
+  with the new `SIGNAL_TOO_LARGE` error code without consuming the sender's valid-signal rate
+  budget. The cap runs as step 0 of `handle_signal`, before the sender's v3+WebRTC transport gate,
+  so a malformed, oversized `Signal` from ANY client is rejected with `SIGNAL_TOO_LARGE` — including
+  a misbehaving v2 client, which previously received `UNSUPPORTED_TRANSPORT` for it. Golden v2 wire
+  behavior is unchanged for protocol-conforming v2 clients, which never send `Signal`.
+- Added a post-authentication idle timeout on the WebSocket read path (P8 / Appendix I
+  "idle-timeout"). New config key `websocket.idle_timeout_secs` (default `300`; `0` disables): an
+  authenticated connection that produces no inbound frame of any kind (including Ping/Pong) for the
+  configured window receives an `Error` with the new `CONNECTION_IDLE_TIMEOUT` code and is closed
+  through the normal disconnect path, so the reconnection grace period still applies. The error is
+  delivered on the connection's own outbound channel rather than through the message coordinator,
+  because under production defaults the `server.ping_timeout` reaper (30s) has already unregistered
+  a silent client from the coordinator long before the idle window (300s) elapses — a
+  coordinator-routed error would be silently dropped. This closes a
+  real gap: the existing `server.ping_timeout` reaper only removed server-side connection _state_
+  (and only counts `Ping` as activity) but never closed the socket, leaving zombie TCP connections
+  holding file descriptors indefinitely. The 300s default cannot affect healthy clients, which
+  already must heartbeat every ~30s to survive the state reaper. The pre-auth handshake remains
+  bounded by the stricter `websocket.auth_timeout_secs`.
+- Added a prominent once-at-startup warning when TURN is enabled but built-in TLS is disabled
+  (PLAN Appendix I: `wss://` for signaling in production — DTLS fingerprints travel in SDP, so
+  plaintext `ws://` signaling allows man-in-the-middle of the WebRTC peer connections). Emitted
+  after logging initialization via `tracing::warn!`; deliberately a warning and never a hard error
+  because reverse-proxy TLS termination (where `security.transport.tls.enabled` stays `false`) is
+  the common production deployment (`config::should_warn_missing_signaling_tls`).
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
   `rustls-pki-types` built-in `PemObject` trait.
 

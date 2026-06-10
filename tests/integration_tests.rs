@@ -832,6 +832,7 @@ async fn test_custom_rate_limiting() {
         empty_room_timeout: Duration::from_secs(300),
         inactive_room_timeout: Duration::from_secs(3600),
         max_message_size: 65536,
+        max_signal_bytes: 16384,
         max_connections_per_ip: 100,
         require_metrics_auth: false,
         metrics_auth_token: None,

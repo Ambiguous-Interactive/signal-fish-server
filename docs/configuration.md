@@ -154,6 +154,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH` | `security.require_metrics_auth` | `true` | Require auth token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN` | `security.metrics_auth_token` | `null` | Bearer token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max WebSocket message size in bytes |
+| `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES` | `security.max_signal_bytes` | `16384` | Max serialized size in bytes of a v3 `Signal` payload (must be > 0 and ≤ `max_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `10` | Max concurrent connections from one IP |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED` | `security.transport.tls.enabled` | `false` | Enable built-in TLS listener |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH` | `security.transport.tls.certificate_path` | `null` | Path to PEM certificate chain |
@@ -196,6 +197,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
 ## Common Configurations
@@ -298,7 +300,8 @@ Complete reference of all configuration options with environment variable overri
     "enable_batching": true,
     "batch_size": 10,
     "batch_interval_ms": 16,
-    "auth_timeout_secs": 10
+    "auth_timeout_secs": 10,
+    "idle_timeout_secs": 300
   }
 }
 
@@ -308,6 +311,17 @@ Complete reference of all configuration options with environment variable overri
 - `batch_size` - Max messages per batch
 - `batch_interval_ms` - Batch flush interval
 - `auth_timeout_secs` - Seconds to wait for auth after connect
+- `idle_timeout_secs` - Post-authentication idle timeout (default: 300; `0`
+  disables). An authenticated connection that produces no inbound WebSocket
+  frame of any kind (including Ping/Pong) for this long receives a
+  `CONNECTION_IDLE_TIMEOUT` error and is closed through the normal disconnect
+  path, so the reconnection grace period still applies. The error is delivered
+  on the connection's own outbound channel, so it reaches the client even
+  though the `server.ping_timeout` state reaper (default 30s) has usually
+  already removed a silent client's server-side registration by then. Clients
+  that heartbeat (which `server.ping_timeout` already requires) are never
+  affected by the 300s default. Keep this enabled in production — it reclaims
+  zombie sockets that would otherwise hold file descriptors open indefinitely.
 
 ## Session Topology (Protocol v3)
 

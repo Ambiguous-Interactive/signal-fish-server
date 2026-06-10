@@ -401,6 +401,68 @@ fn server_new_peer_round_trips_json_and_msgpack() {
     }
 }
 
+#[test]
+fn server_peer_transport_status_round_trips_json_and_msgpack() {
+    // Exact wire form (mirrors the client `TransportStatus` shape, plus the
+    // reporting peer): {"type":"PeerTransportStatus",
+    // "data":{"peer_id":"<uuid>","transport":"webrtc","connected":true}}.
+    // Cover all three transport tokens and both `connected` values.
+    let cases = [
+        (Transport::WebRtc, "webrtc", true),
+        (Transport::Direct, "direct", false),
+        (Transport::Relay, "relay", true),
+        (Transport::WebRtc, "webrtc", false),
+    ];
+
+    for (transport, token, connected) in cases {
+        let peer_id = PlayerId::new_v4();
+        let msg = ServerMessage::PeerTransportStatus {
+            peer_id,
+            transport,
+            connected,
+        };
+
+        // Exact tag, field names, and transport token.
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["type"], json!("PeerTransportStatus"));
+        assert_eq!(value["data"]["peer_id"], json!(peer_id.to_string()));
+        assert_eq!(value["data"]["transport"], json!(token));
+        assert_eq!(value["data"]["connected"], json!(connected));
+
+        // JSON round-trip.
+        let parsed: ServerMessage =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        match parsed {
+            ServerMessage::PeerTransportStatus {
+                peer_id: rt_peer,
+                transport: rt_transport,
+                connected: rt_connected,
+            } => {
+                assert_eq!(rt_peer, peer_id);
+                assert_eq!(rt_transport, transport);
+                assert_eq!(rt_connected, connected);
+            }
+            other => panic!("expected PeerTransportStatus, got {other:?}"),
+        }
+
+        // MessagePack round-trip (named fields).
+        let mp = rmp_serde::to_vec_named(&msg).unwrap();
+        let parsed_mp: ServerMessage = rmp_serde::from_slice(&mp).unwrap();
+        match parsed_mp {
+            ServerMessage::PeerTransportStatus {
+                peer_id: rt_peer,
+                transport: rt_transport,
+                connected: rt_connected,
+            } => {
+                assert_eq!(rt_peer, peer_id);
+                assert_eq!(rt_transport, transport);
+                assert_eq!(rt_connected, connected);
+            }
+            other => panic!("expected PeerTransportStatus, got {other:?}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // P3 SessionPlan wire types (Appendix A/B): exact tag, field names, tokens, and
 // the skip_serializing_if / default omissions.

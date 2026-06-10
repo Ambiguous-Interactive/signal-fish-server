@@ -513,6 +513,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Ephemeral TURN credentials minted into SessionPlans",
         snapshot.transport.turn_credentials_issued,
     );
+    counter(
+        &mut buf,
+        "signal_fish_transport_status_fanout_total",
+        "PeerTransportStatus fan-out events: accepted TransportStatus state changes from in-room clients fanned out to v3 room peers (one per event, not per recipient)",
+        snapshot.transport.transport_status_fanout,
+    );
 
     let cache_age_seconds = {
         let last_refresh = snapshot.dashboard_cache.last_refresh_timestamp;
@@ -675,6 +681,9 @@ mod tests {
         metrics.record_relay_fallback();
         metrics.increment_signals_relayed();
         metrics.add_turn_credentials_issued(3);
+        for _ in 0..5 {
+            metrics.record_transport_status_fanout();
+        }
 
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
@@ -748,6 +757,11 @@ mod tests {
                 "signal_fish_transport_turn_credentials_issued_total",
                 "Ephemeral TURN credentials minted into SessionPlans",
                 3,
+            ),
+            (
+                "signal_fish_transport_status_fanout_total",
+                "PeerTransportStatus fan-out events: accepted TransportStatus state changes from in-room clients fanned out to v3 room peers (one per event, not per recipient)",
+                5,
             ),
         ];
 

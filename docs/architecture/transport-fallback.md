@@ -99,12 +99,15 @@ The server's responsibilities are deliberately narrow:
   inferred P2P state.
 - For a WebRTC plan it relays opaque `Signal` messages between same-room peers
   (subject to the same-room, negotiated-transport, and rate-limit checks).
-- It records each client's last-reported `TransportStatus` and updates metrics.
+- It records each client's last-reported `TransportStatus`, updates metrics, and
+  fans the accepted state change out to the reporter's room as
+  `PeerTransportStatus` (v3 recipients only — see below).
 
 It never tears down the relay path for a peer, and it never requires a peer to be
 P2P-connected. `TransportStatus` is **purely informational**: it drives metrics
-(and, in the future, targeted relay for stuck peers), but reporting
-`connected: false` does not change how the server relays for that client.
+and the `PeerTransportStatus` peer notification (and, in the future, targeted
+relay for stuck peers), but reporting `connected: false` does not change how the
+server relays for that client.
 
 ## Data-channel configuration recommendation
 
@@ -146,6 +149,27 @@ first report for a connection and on later real per-connection state transitions
   neither a P2P establishment nor a fallback, so it moves **no** counter (only the
   per-connection state is updated).
 
+## `PeerTransportStatus` peer fan-out (v3 only)
+
+When an accepted report records a **real state change** (the first report on a
+connection, or a `(transport, connected)` transition — the same dedup gate the
+metrics use), the server fans it out to the reporter's current room as
+
+```json
+{ "type": "PeerTransportStatus", "data": { "peer_id": "<player-uuid>", "transport": "webrtc", "connected": true } }
+```
+
+so peers learn, for example, that the host's WebRTC path died and relay-path
+traffic from it should be expected. The reporter itself is excluded; a duplicate
+report fans out nothing; a report from a room-less client is recorded but fans
+out nothing. Delivery is per-recipient v3-gated (a v2 member never observes it,
+Appendix K) but deliberately **not** gated on the recipient's own transport
+capabilities — it is informational status about a _peer_, useful to any v3
+client, not an instruction to use that transport. Like the report it relays, it
+never changes how the server relays `GameData`. Delivery is best-effort (like
+`Signal` / `NewPeer`): a backpressured peer may miss a notice and re-syncs on
+the next state change.
+
 ## Metrics exposed (PLAN §P5)
 
 The server exposes Prometheus counters for the v3 transport surface so dashboards
@@ -176,6 +200,9 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
   accepted for best-effort dispatch to same-room WebRTC peers.
 - `signal_fish_transport_turn_credentials_issued_total` — ephemeral TURN
   credentials minted into `SessionPlan`s.
+- `signal_fish_transport_status_fanout_total` — `PeerTransportStatus` fan-out
+  events: accepted `TransportStatus` state changes from in-room clients fanned
+  out to v3 room peers (one per event, not per recipient).
 
 ## Related documents
 

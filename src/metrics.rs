@@ -153,6 +153,13 @@ pub struct ServerMetrics {
     pub signals_relayed: AtomicU64,
     /// TURN `IceServer` credentials minted into `SessionPlan`s.
     pub turn_credentials_issued: AtomicU64,
+    /// `PeerTransportStatus` fan-out events: accepted `TransportStatus` state
+    /// changes (first report or a real transition — duplicates never fan out)
+    /// from a client seated in a room, fanned out to the room's other v3
+    /// members. One per **event**, not per recipient (mirroring
+    /// `session_replans_emitted`), and counted even when no co-member
+    /// negotiated v3 (the event still happened; zero deliveries).
+    pub transport_status_fanout: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,9 +337,9 @@ pub struct RelayHealthMetrics {
 /// Exposes the per-finalized-room topology/transport selection ratios, the
 /// P2P-established-vs-relay-fallback first-report/transition split (reported by
 /// clients via `TransportStatus`), the count of opaque WebRTC signals accepted
-/// for best-effort dispatch, and the number of TURN credentials minted — so
-/// dashboards can see how often the relay floor is actually upgraded to a
-/// peer-to-peer path.
+/// for best-effort dispatch, the number of TURN credentials minted, and the
+/// number of `PeerTransportStatus` fan-out events — so dashboards can see how
+/// often the relay floor is actually upgraded to a peer-to-peer path.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransportMetrics {
     pub session_plans_emitted: u64,
@@ -348,6 +355,7 @@ pub struct TransportMetrics {
     pub relay_fallback: u64,
     pub signals_relayed: u64,
     pub turn_credentials_issued: u64,
+    pub transport_status_fanout: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -462,6 +470,7 @@ impl ServerMetrics {
             relay_fallback: AtomicU64::new(0),
             signals_relayed: AtomicU64::new(0),
             turn_credentials_issued: AtomicU64::new(0),
+            transport_status_fanout: AtomicU64::new(0),
         }
     }
 
@@ -960,6 +969,15 @@ impl ServerMetrics {
         }
     }
 
+    /// Record one `PeerTransportStatus` fan-out event: an accepted
+    /// `TransportStatus` state change from a client seated in a room was fanned
+    /// out to the room's other v3 members. Once per **event**, not per
+    /// recipient (mirroring [`Self::increment_session_replans_emitted`]);
+    /// duplicate reports and reports from room-less clients never count.
+    pub fn record_transport_status_fanout(&self) {
+        self.transport_status_fanout.fetch_add(1, Ordering::Relaxed);
+    }
+
     // Snapshot generation
     pub async fn snapshot(&self) -> MetricsSnapshot {
         let tracker = self.average_response_times.read().await;
@@ -1134,6 +1152,7 @@ impl ServerMetrics {
                 relay_fallback: self.relay_fallback.load(Ordering::Relaxed),
                 signals_relayed: self.signals_relayed.load(Ordering::Relaxed),
                 turn_credentials_issued: self.turn_credentials_issued.load(Ordering::Relaxed),
+                transport_status_fanout: self.transport_status_fanout.load(Ordering::Relaxed),
             },
         }
     }

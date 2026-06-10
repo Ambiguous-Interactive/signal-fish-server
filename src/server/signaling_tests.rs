@@ -49,7 +49,18 @@ async fn create_test_server_with_signal_limits(
     max_signals: u32,
     max_signal_errors: u32,
 ) -> Arc<EnhancedGameServer> {
+    create_test_server_with_signal_policy(max_signals, max_signal_errors, 16384).await
+}
+
+/// Build a server with full control over the per-connection signal budget AND
+/// the serialized-payload size cap (`security.max_signal_bytes`).
+async fn create_test_server_with_signal_policy(
+    max_signals: u32,
+    max_signal_errors: u32,
+    max_signal_bytes: usize,
+) -> Arc<EnhancedGameServer> {
     let config = ServerConfig {
+        max_signal_bytes,
         rate_limit_config: RateLimitConfig {
             max_signals,
             max_signal_errors,
@@ -756,6 +767,134 @@ async fn rejected_signals_do_not_consume_valid_signal_budget() {
         .await;
     let msg = recv(&mut alice_rx).await;
     assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
+}
+
+// ---------------------------------------------------------------------------
+// Signal payload size cap (`security.max_signal_bytes`, PLAN Appendix I).
+// ---------------------------------------------------------------------------
+
+/// Register a v3+WebRTC pair sharing one room on `server`.
+async fn webrtc_pair_in_room(
+    server: &EnhancedGameServer,
+) -> (
+    PlayerId,
+    mpsc::Receiver<Arc<ServerMessage>>,
+    PlayerId,
+    mpsc::Receiver<Arc<ServerMessage>>,
+) {
+    let (alice, alice_rx) = register_client(server).await;
+    let (bob, bob_rx) = register_client(server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    (alice, alice_rx, bob, bob_rx)
+}
+
+/// Serialized length of an opaque signal payload, exactly as the cap measures it.
+fn payload_len(signal: &serde_json::Value) -> usize {
+    serde_json::to_vec(signal).expect("signal serializes").len()
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn signal_exactly_at_size_cap_is_relayed() {
+    let payload = json!({ "Offer": "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n" });
+    // Boundary: the cap equals the payload's canonical serialized length.
+    let server = create_test_server_with_signal_policy(600, 60, payload_len(&payload)).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+
+    server.handle_signal(&alice, bob, payload.clone()).await;
+
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::Signal { from, signal } => {
+            assert_eq!(*from, alice);
+            assert_eq!(*signal, payload, "at-cap payload must relay byte-preserved");
+        }
+        other => panic!("expected Signal, got {other:?}"),
+    }
+    assert_silent(&mut alice_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn signal_one_byte_over_size_cap_is_rejected() {
+    let payload = json!({ "Offer": "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n" });
+    // Boundary: cap is one byte below the payload's serialized length.
+    let server = create_test_server_with_signal_policy(600, 60, payload_len(&payload) - 1).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+
+    server.handle_signal(&alice, bob, payload).await;
+
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
+    if let ServerMessage::Error { message, .. } = msg.as_ref() {
+        assert!(
+            message.contains("bytes"),
+            "rejection should name the sizes: {message}"
+        );
+    }
+    assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn oversized_signal_is_rejected_before_any_other_check() {
+    // The size cap is step 0: even a sender that is not in any room gets the
+    // size rejection, not NotInRoom, proving no relay work precedes the cap.
+    let server = create_test_server_with_signal_policy(600, 60, 8).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    server
+        .handle_signal(
+            &alice,
+            PlayerId::new_v4(),
+            json!({ "Offer": "definitely-longer-than-eight-bytes" }),
+        )
+        .await;
+
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn oversized_signal_rejection_does_not_consume_valid_signal_budget() {
+    let small = json!({ "IceCandidate": "ok" });
+    let oversized = json!({ "Offer": "x".repeat(64) });
+    // Valid-signal budget of exactly 1, cap sized to admit only `small`.
+    let server = create_test_server_with_signal_policy(1, 60, payload_len(&small)).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+
+    // Oversized first: rejected without touching the valid-signal budget.
+    server.handle_signal(&alice, bob, oversized).await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
+    assert_silent(&mut bob_rx).await;
+
+    // The single valid-signal budget slot is still available...
+    server.handle_signal(&alice, bob, small.clone()).await;
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::Signal { signal, .. } => assert_eq!(*signal, small),
+        other => panic!("expected Signal, got {other:?}"),
+    }
+
+    // ...and was budget slot #1 of 1, proving the oversized attempt did not
+    // consume it.
+    server.handle_signal(&alice, bob, small).await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
+    assert_silent(&mut bob_rx).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -3177,6 +3316,239 @@ async fn transport_status_from_non_v3_client_is_ignored() {
         server.metrics.relay_fallback.load(Ordering::Relaxed),
         0,
         "a non-v3 client's TransportStatus must not move relay_fallback"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PeerTransportStatus fan-out (P5 refinement): an accepted TransportStatus
+// state change is fanned out to the sender's current room — v3 recipients only,
+// sender excluded, duplicates never re-fan-out, no room ⇒ no fan-out.
+// ---------------------------------------------------------------------------
+
+/// Assert the next message is `PeerTransportStatus` with the given contents.
+async fn expect_peer_transport_status(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_peer: PlayerId,
+    expected_transport: Transport,
+    expected_connected: bool,
+) {
+    match recv(receiver).await.as_ref() {
+        ServerMessage::PeerTransportStatus {
+            peer_id,
+            transport,
+            connected,
+        } => {
+            assert_eq!(*peer_id, expected_peer, "fan-out must name the reporter");
+            assert_eq!(*transport, expected_transport);
+            assert_eq!(*connected, expected_connected);
+        }
+        other => panic!("expected PeerTransportStatus, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_change_fans_out_to_v3_room_peers_only() {
+    // Alice (v3 + webrtc) reports a state change in a room with Bob (v3
+    // RELAY-ONLY — must still receive: the fan-out is deliberately NOT gated on
+    // the recipient's transport capabilities, unlike the session predicate) and
+    // Carol (v2 — must NEVER receive a v3-only message, Appendix K). The
+    // reporter itself hears nothing.
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let (carol, mut carol_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_relay_only());
+    server.set_client_protocol(&carol, v2_with_webrtc_transport());
+
+    let room_id = create_db_room(&server, alice).await;
+    for (id, name) in [(bob, "bob"), (carol, "carol")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [alice, bob, carol] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    assert_silent(&mut bob_rx).await;
+    // The v2 member observes nothing, and the sender is excluded.
+    assert_silent(&mut carol_rx).await;
+    assert_silent(&mut alice_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1,
+        "one fan-out EVENT (not per recipient)"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn duplicate_transport_status_does_not_refan_out() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    let report = ClientMessage::TransportStatus {
+        transport: Transport::WebRtc,
+        connected: true,
+    };
+    // First report IS a state change and fans out…
+    server.handle_client_message(&alice, report.clone()).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+
+    // …the byte-identical duplicate is dropped at the dedup gate: no fan-out,
+    // no counter movement.
+    server.handle_client_message(&alice, report).await;
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1,
+        "a duplicate report must not re-fan-out"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        1,
+        "the duplicate must not inflate p2p_established either"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_flap_fans_out_each_transition() {
+    // true ⇒ false ⇒ true: every report is a real transition, so the peer sees
+    // all three states in order (eventually-consistent peer view of a flapping
+    // data path).
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    for connected in [true, false, true] {
+        server
+            .handle_client_message(
+                &alice,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected,
+                },
+            )
+            .await;
+    }
+
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, false).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        3,
+        "each real transition is one fan-out event"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_without_room_records_state_but_fans_out_nothing() {
+    // A room-less reporter still gets its per-connection state recorded (the
+    // pre-fan-out behavior is preserved), but there is no room to notify.
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    // Bob sits in a room alice is NOT in — he must hear nothing.
+    let room_id = create_db_room(&server, bob).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, true)),
+        "the state is still recorded for a room-less reporter"
+    );
+    assert_silent(&mut bob_rx).await;
+    assert_silent(&mut alice_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        0,
+        "no room ⇒ no fan-out event"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        1,
+        "the accepted report still moves p2p_established"
     );
 }
 

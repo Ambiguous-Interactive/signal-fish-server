@@ -61,10 +61,44 @@ pub(crate) fn local_initiates(local: PlayerId, remote: PlayerId) -> bool {
     local < remote
 }
 
+/// Canonical serialized JSON byte length of an opaque `signal` payload — the
+/// measure `security.max_signal_bytes` caps.
+///
+/// `serde_json::to_vec` over a `serde_json::Value` can only fail for maps with
+/// non-string keys, which `Value` cannot represent, so the error arm is purely
+/// defensive: treat an unserializable payload as oversized rather than relay it.
+pub(crate) fn canonical_signal_len(signal: &serde_json::Value) -> usize {
+    serde_json::to_vec(signal).map_or(usize::MAX, |bytes| bytes.len())
+}
+
 impl EnhancedGameServer {
     /// Relay an opaque WebRTC signal from `from` to `to`, enforcing the P2
-    /// security invariants (same room, negotiated WebRTC, rate limit, v3 target).
+    /// security invariants (payload size cap, same room, negotiated WebRTC,
+    /// rate limit, v3 target).
     pub async fn handle_signal(&self, from: &PlayerId, to: PlayerId, signal: serde_json::Value) {
+        // 0. Payload size cap (PLAN Appendix I). Checked first because the cap
+        //    is a property of the frame itself, independent of room/transport
+        //    state, and rejecting before any lookup keeps oversized payloads
+        //    maximally cheap. Size is the canonical serialized JSON byte
+        //    length of the opaque `signal` value — the same bytes the relay
+        //    would otherwise fan out.
+        let payload_bytes = canonical_signal_len(&signal);
+        let max_signal_bytes = self.config.max_signal_bytes;
+        if payload_bytes > max_signal_bytes {
+            self.reject_signal(
+                from,
+                to,
+                format!(
+                    "Signal payload is {payload_bytes} bytes; \
+                     the maximum allowed is {max_signal_bytes} bytes"
+                ),
+                ErrorCode::SignalTooLarge,
+                "payload_too_large",
+            )
+            .await;
+            return;
+        }
+
         // 1. Sender must be in a room.
         let Some(from_room) = self.get_client_room(from).await else {
             self.reject_signal(
@@ -457,7 +491,7 @@ impl EnhancedGameServer {
         &self,
         from: &PlayerId,
         to: PlayerId,
-        message: &'static str,
+        message: impl Into<String>,
         error_code: ErrorCode,
         reason: &'static str,
     ) {

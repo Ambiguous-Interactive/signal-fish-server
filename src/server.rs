@@ -129,6 +129,9 @@ pub struct ServerConfig {
     pub empty_room_timeout: Duration,
     pub inactive_room_timeout: Duration,
     pub max_message_size: usize,
+    /// Maximum serialized size in bytes of a v3 `Signal` payload (the opaque
+    /// `signal` JSON value). Mirrors `security.max_signal_bytes`.
+    pub max_signal_bytes: usize,
     pub max_connections_per_ip: usize,
     pub require_metrics_auth: bool,
     pub metrics_auth_token: Option<String>,
@@ -158,6 +161,7 @@ impl Default for ServerConfig {
             empty_room_timeout: Duration::from_secs(300),
             inactive_room_timeout: Duration::from_secs(3600),
             max_message_size: 65536, // 64KB
+            max_signal_bytes: 16384, // 16KB
             max_connections_per_ip: 10,
             require_metrics_auth: true,
             metrics_auth_token: None,

@@ -74,6 +74,21 @@ services:
 
 ```
 
+### TURN Relay Profile
+
+For WebRTC sessions (Protocol v3), the repository's `docker-compose.yml` includes
+an optional coturn service behind the `turn` compose profile:
+
+```bash
+export TURN_STATIC_AUTH_SECRET="$(openssl rand -hex 32)"
+docker compose --profile turn up -d
+```
+
+A plain `docker compose up` is unchanged. See the
+[TURN deployment guide](deployment-turn.md) for the matching server `[turn]`
+configuration, the ephemeral credential scheme, secret rotation, and managed
+alternatives.
+
 ## Production Configuration
 
 ```json
@@ -367,9 +382,15 @@ Signal Fish Server uses in-memory storage, so each instance maintains its own ro
 deployments:
 
 1. **Session affinity** - Use sticky sessions at the load balancer
-2. **Room sharding** - Route by game_name or room_code
+2. **Room sharding** - Route by game_name or room_code so all of a room's peers land on the same instance
 3. **Health checks** - Monitor each instance independently
 4. **Graceful shutdown** - Allow in-flight connections to complete
+
+The room is the scaling unit: all forwarding (relay-floor `GameData` and v3 WebRTC
+signaling) happens within a single room, so room affinity is the only constraint a
+multi-instance deployment must preserve. See the
+[scaling architecture notes](architecture/scaling.md) for the full reasoning,
+the cross-node seams in the code, and the `region_id` / room-code-prefix plumbing.
 
 ## Resource Requirements
 
@@ -417,7 +438,9 @@ Enable file logging:
 - [ ] Enable authentication (`require_websocket_auth: true`)
 - [ ] Set strong app secrets
 - [ ] Configure CORS origins (not `*`)
-- [ ] Use HTTPS/TLS in production
+- [ ] Serve signaling over `wss://` (TLS) — mandatory for WebRTC: DTLS fingerprints travel in the SDP through
+      the signaling channel, so plaintext `ws://` lets an on-path attacker defeat WebRTC encryption (see the
+      [TURN deployment guide](deployment-turn.md#signaling-must-run-over-wss))
 - [ ] Set rate limits appropriately
 - [ ] Limit max_connections_per_ip
 - [ ] Enable metrics authentication
@@ -429,3 +452,5 @@ Enable file logging:
 
 - [Configuration](configuration.md) - Full configuration reference
 - [Authentication](authentication.md) - Securing your server
+- [TURN Deployment](deployment-turn.md) - TURN relay for WebRTC sessions
+- [Scaling Architecture](architecture/scaling.md) - Multi-node signaling

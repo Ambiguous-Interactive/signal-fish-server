@@ -2,7 +2,7 @@
 
 use super::defaults::{
     default_auth_timeout_secs, default_batch_interval_ms, default_batch_size,
-    default_enable_batching,
+    default_enable_batching, default_idle_timeout_secs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,15 @@ pub struct WebSocketConfig {
     /// Authentication timeout in seconds (time allowed for clients to authenticate)
     #[serde(default = "default_auth_timeout_secs")]
     pub auth_timeout_secs: u64,
+    /// Post-authentication idle timeout in seconds; `0` disables the timeout.
+    ///
+    /// An authenticated connection that produces no inbound WebSocket frame of
+    /// any kind (including Ping/Pong) for this long is closed (normal
+    /// disconnect path, so the reconnection grace period still applies). The
+    /// pre-auth handshake is bounded separately by
+    /// [`auth_timeout_secs`](Self::auth_timeout_secs).
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for WebSocketConfig {
@@ -30,12 +39,18 @@ impl Default for WebSocketConfig {
             batch_size: default_batch_size(),
             batch_interval_ms: default_batch_interval_ms(),
             auth_timeout_secs: default_auth_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
         }
     }
 }
 
 impl WebSocketConfig {
     /// Validate WebSocket configuration
+    ///
+    /// `idle_timeout_secs` is deliberately unconstrained: `0` disables the
+    /// post-auth idle timeout, and any positive value is a valid operator
+    /// choice (aggressive timeouts are useful for tests and hardened
+    /// deployments alike).
     pub fn validate(&self) -> anyhow::Result<()> {
         // Validate auth timeout: must be between 5 and 60 seconds
         if self.auth_timeout_secs < 5 {

@@ -56,7 +56,10 @@ Session-plan topology/transport selection invariants are documented in
 Protocol v3 `TransportStatus` is informational, but still a negotiated-capability
 boundary: accept reports only from v3 connections and only for transports present
 in that connection's negotiated transport set. Invalid reports must not update
-stored per-connection status or transport metrics.
+stored per-connection status or transport metrics. An accepted state change
+(never a duplicate) fans out to the sender's room as `PeerTransportStatus` —
+per-recipient v3-gated like every v3-only message, but deliberately NOT gated on
+the recipient's transport capabilities (peer status is useful to any v3 client).
 
 `ProvideConnectionInfo` / `GameStarting.peer_connections` is legacy,
 self-declared metadata for the v2 handoff surface. It is preserved for backward

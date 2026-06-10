@@ -1116,6 +1116,11 @@ fn golden_enum_error_code_all_variants() {
             r#""SIGNAL_TARGET_NOT_FOUND""#,
         ),
         (ErrorCode::SignalRateLimited, r#""SIGNAL_RATE_LIMITED""#),
+        (ErrorCode::SignalTooLarge, r#""SIGNAL_TOO_LARGE""#),
+        (
+            ErrorCode::ConnectionIdleTimeout,
+            r#""CONNECTION_IDLE_TIMEOUT""#,
+        ),
         (ErrorCode::InternalError, r#""INTERNAL_ERROR""#),
         (ErrorCode::StorageError, r#""STORAGE_ERROR""#),
         (ErrorCode::ServiceUnavailable, r#""SERVICE_UNAVAILABLE""#),

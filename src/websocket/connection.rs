@@ -242,10 +242,62 @@ pub(super) async fn handle_socket(
         let auth_deadline = tokio::time::sleep_until(connection_start + auth_timeout);
         tokio::pin!(auth_deadline);
 
+        // Post-auth idle timeout (0 = disabled). Wrapping each `receiver.next()`
+        // means ANY inbound frame — Text, Binary, Ping, Pong, Close — counts as
+        // activity and resets the window. The pre-auth phase below is bounded
+        // by the (stricter) auth deadline instead.
+        let idle_timeout_secs = server_clone.config().websocket_config.idle_timeout_secs;
+        let idle_timeout = (idle_timeout_secs > 0).then(|| Duration::from_secs(idle_timeout_secs));
+
         loop {
             let msg = if authenticated {
-                // If authenticated, no timeout needed
-                match receiver.next().await {
+                // If authenticated, enforce only the idle timeout (when enabled)
+                let next_frame = match idle_timeout {
+                    Some(window) => match tokio::time::timeout(window, receiver.next()).await {
+                        Ok(frame_opt) => frame_opt,
+                        Err(_elapsed) => {
+                            // Idle timeout: deliver the error through this
+                            // connection's OWN outbound channel, not the
+                            // coordinator. With production defaults the
+                            // `server.ping_timeout` reaper (30s) unregisters a
+                            // silent client from the coordinator long before
+                            // the idle window (300s) elapses, so a
+                            // coordinator-routed error would be silently
+                            // dropped. The send task drains this channel and
+                            // flushes before the socket is torn down, so the
+                            // frame reaches the client regardless of
+                            // registration state. Then close via the normal
+                            // disconnect path so the reconnection grace period
+                            // still applies.
+                            tracing::info!(
+                                %active_player_id,
+                                timeout_secs = idle_timeout_secs,
+                                "Idle timeout - no frames received, closing connection"
+                            );
+                            let idle_error = Arc::new(ServerMessage::Error {
+                                message: format!(
+                                    "Idle timeout - no messages received for {idle_timeout_secs} seconds"
+                                ),
+                                error_code: Some(ErrorCode::ConnectionIdleTimeout),
+                            });
+                            if let Err(err) = tx_clone.try_send(idle_error) {
+                                if matches!(err, TrySendError::Full(_)) {
+                                    server_clone
+                                        .metrics()
+                                        .increment_websocket_messages_dropped();
+                                }
+                                tracing::warn!(
+                                    %active_player_id,
+                                    error = %err,
+                                    "Failed to enqueue idle timeout error"
+                                );
+                            }
+                            break;
+                        }
+                    },
+                    None => receiver.next().await,
+                };
+                match next_frame {
                     Some(msg) => msg,
                     None => break, // Connection closed
                 }

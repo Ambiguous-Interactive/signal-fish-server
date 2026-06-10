@@ -148,6 +148,7 @@ On startup the server looks for `config.json` in the working directory. See
     "require_websocket_auth": false,
     "require_metrics_auth": false,
     "max_message_size": 65536,
+    "max_signal_bytes": 16384,
     "max_connections_per_ip": 10,
     "transport": {
       "tls": { "enabled": false },
@@ -185,7 +186,8 @@ On startup the server looks for `config.json` in the working directory. See
     "enable_batching": true,
     "batch_size": 10,
     "batch_interval_ms": 16,
-    "auth_timeout_secs": 10
+    "auth_timeout_secs": 10,
+    "idle_timeout_secs": 300
   }
 }
 ```
@@ -231,11 +233,13 @@ complete reference.
 | `SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH`   | `security.require_websocket_auth`  | `true`    | Require app authentication on WebSocket connect     |
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`    | `true`    | Require auth token for metrics endpoints            |
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
+| `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES`         | `security.max_signal_bytes`        | `16384`   | Max serialized size of a v3 `Signal` payload        |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `10`      | Max concurrent connections from one IP              |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `true`    | Enable outbound message batching                    |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Post-auth idle timeout in seconds (`0` disables)    |
 | `RUST_LOG`                                       | --                                 | `info`    | Standard `tracing` log filter                       |
 
 ### CLI Flags

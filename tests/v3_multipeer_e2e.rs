@@ -32,6 +32,13 @@
 //!    re-elects the earliest-joined survivor and re-issues exactly one fresh
 //!    star-correct plan per survivor, and the star stays live through the
 //!    third host.
+//! 9. `mesh_n3_transport_status_fan_out_and_dedup` — a v3 member's
+//!    `TransportStatus` state change is fanned out to both other v3 members as
+//!    `PeerTransportStatus` (never echoed to the reporter); a byte-identical
+//!    duplicate fans out nothing, and the next real transition fans out again.
+//! 10. `mixed_v2_v3_n3_transport_status_v2_member_hears_nothing` — in a mixed
+//!     room the v3 peer receives the `PeerTransportStatus` fan-out while the v2
+//!     member observes strict silence and stays fully functional.
 
 mod test_helpers;
 mod v3_conformance_helpers;
@@ -57,7 +64,8 @@ use v3_conformance_helpers::{
     SERVER_MESSAGE_TIMEOUT,
 };
 use websocket_test_helpers::{
-    expect_no_server_message_within, next_matching_server_message_within, WsStream,
+    expect_no_server_message_within, maybe_next_matching_server_message_within,
+    next_matching_server_message_within, WsStream,
 };
 
 const APP_ID: &str = "v3-multipeer-app";
@@ -375,6 +383,7 @@ fn forbid_v3_leakage(message: &ServerMessage, who: &str) {
         ServerMessage::Signal { .. }
             | ServerMessage::NewPeer { .. }
             | ServerMessage::SessionPlan(_)
+            | ServerMessage::PeerTransportStatus { .. }
     ) {
         panic!("{who}: a v2 client must never observe v3-only traffic, got {message:?}");
     }
@@ -1207,4 +1216,178 @@ async fn mesh_n3_reconnect_full_flow() {
     let (from, signal) = expect_signal(&mut reconnector, "reconnector").await;
     assert_eq!(from, id_a);
     assert_eq!(signal, answer);
+}
+
+// ---------------------------------------------------------------------------
+// PeerTransportStatus fan-out (P5 refinement) over real WebSockets.
+// ---------------------------------------------------------------------------
+
+/// Send a `TransportStatus` report from `ws`.
+async fn report_transport_status(ws: &mut WsStream, transport: Transport, connected: bool) {
+    send(
+        ws,
+        &ClientMessage::TransportStatus {
+            transport,
+            connected,
+        },
+    )
+    .await;
+}
+
+/// Await a `PeerTransportStatus` naming exactly `(peer, transport, connected)`,
+/// skipping unrelated backlog (PlayerJoined / LobbyStateChanged from the join
+/// phase).
+async fn expect_peer_transport_status(
+    ws: &mut WsStream,
+    who: &str,
+    peer: PlayerId,
+    transport: Transport,
+    connected: bool,
+) {
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "PeerTransportStatus",
+        |message| match message {
+            ServerMessage::PeerTransportStatus {
+                peer_id,
+                transport: got_transport,
+                connected: got_connected,
+            } => {
+                assert_eq!(peer_id, peer, "{who} saw the wrong reporter");
+                assert_eq!(got_transport, transport, "{who} saw the wrong transport");
+                assert_eq!(got_connected, connected, "{who} saw the wrong state");
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_n3_transport_status_fan_out_and_dedup() {
+    // One v3 member of an N=3 room reports TransportStatus { webrtc, true }:
+    // both OTHER v3 members receive PeerTransportStatus naming the reporter,
+    // the reporter itself never hears an echo, a byte-identical duplicate fans
+    // out nothing, and the next real transition (connected: false) fans out
+    // again. No finalization needed — the fan-out is a room-membership
+    // contract, not a session-plan one.
+    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-transport-status3";
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let id_a = joined_a.player_id;
+    let room_code = joined_a.room_code;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3).await;
+
+    let mut peer_c = connect(addr).await;
+    authenticate_v3_full(&mut peer_c).await;
+    join_room(&mut peer_c, game, Some(room_code), "PeerC", 3).await;
+
+    // First report IS a state change: both other members hear it.
+    report_transport_status(&mut peer_a, Transport::WebRtc, true).await;
+    expect_peer_transport_status(&mut peer_b, "peer_b", id_a, Transport::WebRtc, true).await;
+    expect_peer_transport_status(&mut peer_c, "peer_c", id_a, Transport::WebRtc, true).await;
+
+    // The reporter is excluded from its own fan-out (its join-phase backlog is
+    // drained here too, so the strict silence below is sound for it as well).
+    assert!(
+        maybe_next_matching_server_message_within(
+            &mut peer_a,
+            SILENCE_WINDOW,
+            "reporter echo check",
+            |message| matches!(message, ServerMessage::PeerTransportStatus { .. }).then_some(()),
+        )
+        .await
+        .is_none(),
+        "the reporter must never receive its own PeerTransportStatus"
+    );
+
+    // A byte-identical duplicate is dropped at the dedup gate: strict silence
+    // for every member (backlogs were fully consumed above).
+    report_transport_status(&mut peer_a, Transport::WebRtc, true).await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after duplicate").await;
+    expect_no_server_message_within(&mut peer_c, SILENCE_WINDOW, "peer_c after duplicate").await;
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "reporter after duplicate").await;
+
+    // The next REAL transition fans out again (the dedup gate is per-state,
+    // not once-per-connection).
+    report_transport_status(&mut peer_a, Transport::WebRtc, false).await;
+    expect_peer_transport_status(&mut peer_b, "peer_b", id_a, Transport::WebRtc, false).await;
+    expect_peer_transport_status(&mut peer_c, "peer_c", id_a, Transport::WebRtc, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
+    // In a mixed v2/v3 room a v3 member's TransportStatus change reaches the
+    // OTHER v3 member as PeerTransportStatus, while the v2 member observes
+    // strict silence (Appendix K) and stays fully functional afterwards.
+    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let game = "multipeer-tstatus-mixed3";
+    let legacy_who = "legacy (v2)";
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let id_a = joined_a.player_id;
+    let room_code = joined_a.room_code;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3).await;
+
+    let mut legacy = connect(addr).await;
+    authenticate_v2(&mut legacy).await;
+    send(
+        &mut legacy,
+        &ClientMessage::JoinRoom {
+            game_name: game.to_string(),
+            room_code: Some(room_code),
+            player_name: "Legacy".to_string(),
+            max_players: Some(3),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await;
+    next_matching_v2_only(
+        &mut legacy,
+        "v2 room join response",
+        legacy_who,
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some(payload),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("v2 room join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await;
+    // Drain the room-full lobby transition so the silence window below is a
+    // strict assertion about the fan-out alone.
+    next_matching_v2_only(&mut legacy, "v2 lobby transition", legacy_who, |message| {
+        matches!(message, ServerMessage::LobbyStateChanged { .. }).then_some(())
+    })
+    .await;
+
+    report_transport_status(&mut peer_a, Transport::WebRtc, true).await;
+
+    // The v3 peer hears the change…
+    expect_peer_transport_status(&mut peer_b, "peer_b", id_a, Transport::WebRtc, true).await;
+    // …the v2 member hears NOTHING (strict window, every frame checked).
+    expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 member after fan-out").await;
+
+    // And the v2 member is still fully functional: Ping round-trips (any
+    // late-leaking v3 frame would be caught by the v2-only guard first).
+    send(&mut legacy, &ClientMessage::Ping).await;
+    next_matching_v2_only(&mut legacy, "v2 Pong", legacy_who, |message| {
+        matches!(message, ServerMessage::Pong).then_some(())
+    })
+    .await;
 }

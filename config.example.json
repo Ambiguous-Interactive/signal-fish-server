@@ -41,6 +41,7 @@
     "require_websocket_auth": false,
     "require_metrics_auth": false,
     "max_message_size": 65536,
+    "max_signal_bytes": 16384,
     "max_connections_per_ip": 10,
     "transport": {
       "tls": {
@@ -97,6 +98,7 @@
     "enable_batching": true,
     "batch_size": 10,
     "batch_interval_ms": 16,
-    "auth_timeout_secs": 10
+    "auth_timeout_secs": 10,
+    "idle_timeout_secs": 300
   }
 }

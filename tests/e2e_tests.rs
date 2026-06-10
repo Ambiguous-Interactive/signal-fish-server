@@ -1411,3 +1411,207 @@ async fn test_e2e_fallback_to_defaults_on_invalid_config() {
         _ => panic!("Expected room join to work with default config, got {response:?}"),
     }
 }
+
+// ===========================================================================
+// Post-auth idle timeout (`websocket.idle_timeout_secs`)
+// ===========================================================================
+
+/// Build a test server config with the given post-auth idle timeout.
+fn idle_timeout_server_config(idle_timeout_secs: u64) -> ServerConfig {
+    let mut config = test_server_config();
+    config.websocket_config = signal_fish_server::config::WebSocketConfig {
+        idle_timeout_secs,
+        ..signal_fish_server::config::WebSocketConfig::default()
+    };
+    config
+}
+
+/// Read frames until the connection terminates (Close frame, clean end-of-stream,
+/// or transport error), panicking on timeout. Returns the non-close frames seen.
+async fn collect_frames_until_closed(
+    receiver: &mut WsReceiver,
+    timeout: tokio::time::Duration,
+    context: &str,
+) -> Vec<Message> {
+    let mut frames = Vec::new();
+    let deadline_result = tokio::time::timeout(timeout, async {
+        loop {
+            match receiver.next().await {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(frame)) => frames.push(frame),
+                // A reset without a close handshake still proves termination.
+                Some(Err(_)) => break,
+            }
+        }
+    })
+    .await;
+    assert!(
+        deadline_result.is_ok(),
+        "{context}: connection did not close within {timeout:?}"
+    );
+    frames
+}
+
+/// An authenticated connection that sends no frames at all is closed once the
+/// idle timeout elapses, after receiving a `CONNECTION_IDLE_TIMEOUT` error.
+/// (Auth is disabled in `test_server_config`, so the connection counts as
+/// authenticated from the first frame — the idle window applies immediately.)
+///
+/// `ping_timeout` is deliberately SHORTER than the idle window — the
+/// production-default ordering (30s reaper vs 300s idle). The state reaper
+/// therefore unregisters the silent client from the message coordinator well
+/// before the idle timeout fires, so this test proves the idle-timeout error
+/// is delivered on the connection's own outbound channel rather than via the
+/// coordinator (a coordinator-routed error would be silently dropped here).
+#[tokio::test]
+async fn test_idle_client_is_disconnected_after_idle_timeout() {
+    let mut config = idle_timeout_server_config(2);
+    // Reaper window (500ms) + cleanup interval (1s, from `test_server_config`)
+    // elapse before the 2s idle window: the client is reaped first, exactly as
+    // with production defaults.
+    config.ping_timeout = tokio::time::Duration::from_millis(500);
+    let game_server = create_test_server_with_config(config, test_protocol_config()).await;
+    // Run the maintenance reaper (main.rs spawns it the same way); the e2e
+    // harness does not start it by default.
+    let cleanup_server = Arc::clone(&game_server);
+    tokio::spawn(async move {
+        cleanup_server.cleanup_task().await;
+    });
+    let addr = start_server_with_instance(game_server).await;
+    let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+
+    // Prove the connection works, then go silent.
+    let response = send_and_receive(
+        &mut sender,
+        &mut receiver,
+        ClientMessage::JoinRoom {
+            game_name: "idle-timeout-game".to_string(),
+            room_code: None,
+            player_name: "Idler".to_string(),
+            max_players: Some(4),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await
+    .expect("join before idling");
+    assert!(
+        matches!(response, ServerMessage::RoomJoined(_)),
+        "expected RoomJoined, got {response:?}"
+    );
+
+    // Stay idle: the server must deliver the idle-timeout error and close the
+    // socket well within this window (timeout is 2s; allow CI slack).
+    let frames = collect_frames_until_closed(
+        &mut receiver,
+        tokio::time::Duration::from_secs(10),
+        "idle client",
+    )
+    .await;
+
+    let idle_error_seen = frames.iter().any(|frame| match frame {
+        Message::Text(text) => matches!(
+            serde_json::from_str::<ServerMessage>(text),
+            Ok(ServerMessage::Error {
+                error_code: Some(ErrorCode::ConnectionIdleTimeout),
+                ..
+            })
+        ),
+        _ => false,
+    });
+    assert!(
+        idle_error_seen,
+        "expected an Error frame with CONNECTION_IDLE_TIMEOUT before close, got frames: {frames:?}"
+    );
+}
+
+/// A client that keeps sending frames (heartbeat pings) survives well past the
+/// idle window: every inbound frame resets the timeout.
+#[tokio::test]
+async fn test_active_client_survives_past_idle_timeout_window() {
+    let addr = start_test_server_with_config(idle_timeout_server_config(2)).await;
+    let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+
+    // Heartbeat every 500ms for 2.5s total — strictly longer than the 2s idle
+    // window — asserting the Pong response each round (no silent drains).
+    for round in 0..5 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let response = send_and_receive(&mut sender, &mut receiver, ClientMessage::Ping)
+            .await
+            .unwrap_or_else(|err| panic!("heartbeat round {round} failed: {err}"));
+        assert!(
+            matches!(response, ServerMessage::Pong),
+            "heartbeat round {round}: expected Pong, got {response:?}"
+        );
+    }
+
+    // The connection outlived the idle window and still serves requests.
+    let response = send_and_receive(
+        &mut sender,
+        &mut receiver,
+        ClientMessage::JoinRoom {
+            game_name: "active-survivor-game".to_string(),
+            room_code: None,
+            player_name: "Heartbeater".to_string(),
+            max_players: Some(4),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await
+    .expect("join after surviving idle window");
+    assert!(
+        matches!(response, ServerMessage::RoomJoined(_)),
+        "expected RoomJoined after surviving idle window, got {response:?}"
+    );
+}
+
+/// `idle_timeout_secs = 0` disables idle enforcement entirely: a completely
+/// silent authenticated client stays connected for comfortably longer than the
+/// small nonzero windows that close the sibling tests' connections.
+/// `ping_timeout` stays at the test default (10s), so the state reaper cannot
+/// reap the client within the silent window and confound the assertion — the
+/// only mechanism under test is the idle timeout.
+#[tokio::test]
+async fn test_idle_timeout_zero_disables_idle_enforcement() {
+    let addr = start_test_server_with_config(idle_timeout_server_config(0)).await;
+    let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+
+    // Prove the connection works, then go silent.
+    let response = send_and_receive(
+        &mut sender,
+        &mut receiver,
+        ClientMessage::JoinRoom {
+            game_name: "idle-disabled-game".to_string(),
+            room_code: None,
+            player_name: "Lurker".to_string(),
+            max_players: Some(4),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await
+    .expect("join before idling");
+    assert!(
+        matches!(response, ServerMessage::RoomJoined(_)),
+        "expected RoomJoined, got {response:?}"
+    );
+
+    // Stay silent for 3s — strictly longer than the 1–2s windows used by the
+    // sibling tests. With the idle timeout disabled the server must send
+    // nothing at all: no `CONNECTION_IDLE_TIMEOUT` error, no Close frame.
+    let silence = tokio::time::timeout(tokio::time::Duration::from_secs(3), receiver.next()).await;
+    assert!(
+        silence.is_err(),
+        "expected no frames while idle with idle_timeout_secs = 0, got {silence:?}"
+    );
+
+    // The connection is still alive and still serves requests.
+    let response = send_and_receive(&mut sender, &mut receiver, ClientMessage::Ping)
+        .await
+        .expect("ping after silent window");
+    assert!(
+        matches!(response, ServerMessage::Pong),
+        "expected Pong after silent window, got {response:?}"
+    );
+}
