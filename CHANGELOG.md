@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the native Rust reference client (PLAN P7) as the in-repo standalone package
+  `clients/native/` (`signal-fish-reference-native`, NOT a member of the root package — root
+  lockfile/MSRV-build/coverage gates are untouched, `scripts/check-msrv-consistency.sh` pins the
+  client's `rust-version` to the root MSRV, and the root `Cargo.toml` now carries
+  `exclude = ["clients/"]` so `cargo package` ships no `clients/` files). The client
+  drives a real WebRTC stack (webrtc-rs 0.17: actual ICE gathering, DTLS handshakes, SCTP data
+  channels — one `reliable` + one `unreliable {ordered:false, max_retransmits:0}` channel per
+  pair) through the full v3 flow, consuming the server crate's own protocol types via a path
+  dependency (zero wire drift) and speaking the ADR-0002 matchbox `PeerSignal` payload shape with
+  `IceCandidate` as the JSON-serialized `RTCIceCandidateInit`. stdout is a machine interface (one
+  JSON event per line); flags drive room mode, ready barriers, channel exchange and relay-floor
+  probes, deterministic ICE crippling, late-join gating, pure-v2 mode, and bounded run windows
+  with documented exit codes. A multi-process interop harness
+  (`clients/native/tests/interop_e2e.rs`) spawns the REAL server binary plus N≥3 client processes
+  over loopback (TURN disabled, zero STUN URLs — no external network) and proves the native↔native
+  interop matrix cells: mesh N=3 full WebRTC with a live relay floor, host star N=3, crippled-ICE
+  relay fallback, late-join `NewPeer` seat-fill pairing, and mixed v2/v3 relay-floor rooms. Wired
+  into CI via `scripts/run-webrtc-interop.sh` and the path-filtered
+  `.github/workflows/webrtc-interop.yml` (interop suite + a cargo-deny audit of the client's
+  independent dependency graph against `clients/native/deny.toml`). Recorded the design decisions
+  in ADR-0004 (`docs/adr/0004-native-reference-client.md`) and documented the CLI, the JSONL event
+  contract, transport-status semantics, and the scenario matrix in `clients/native/README.md`.
+  Additive tooling/documentation only — no server runtime behavior or wire-format changes.
 - Added the TURN relay deployment surface (P8 "deployment docs"). `docker-compose.yml` now ships
   an optional `coturn` service behind the `turn` compose profile
   (`docker compose --profile turn up`), pre-wired for the coturn REST-credential scheme

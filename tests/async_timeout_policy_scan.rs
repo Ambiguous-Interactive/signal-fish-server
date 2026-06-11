@@ -11,7 +11,19 @@ fn test_timeout_await_results_are_not_discarded() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
 
-    for scan_root in [root.join("src"), root.join("tests")] {
+    // The native reference client (clients/native/) is a standalone package
+    // the root gates never compile; the timeout discipline applies to it
+    // identically — INCLUDING its tests/ tree (this rule deliberately covers
+    // test code, exactly as it covers the root tests/, because a discarded
+    // timeout in a harness silently weakens an assertion).
+    let scan_roots = [
+        root.join("src"),
+        root.join("tests"),
+        root.join("clients").join("native").join("src"),
+        root.join("clients").join("native").join("tests"),
+    ];
+    assert_scan_roots_exist(&scan_roots);
+    for scan_root in scan_roots {
         for path in rust_source_files(&scan_root) {
             let content = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -36,9 +48,18 @@ fn test_try_recv_results_are_not_discarded_in_tests() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
 
-    for path in rust_source_files(&root.join("tests"))
-        .into_iter()
-        .chain(rust_source_files(&root.join("src")))
+    // Same scan roots as the timeout rule above: the reference client's
+    // sources and tests are held to the identical try_recv discipline.
+    let scan_roots = [
+        root.join("tests"),
+        root.join("src"),
+        root.join("clients").join("native").join("src"),
+        root.join("clients").join("native").join("tests"),
+    ];
+    assert_scan_roots_exist(&scan_roots);
+    for path in scan_roots
+        .iter()
+        .flat_map(|scan_root| rust_source_files(scan_root))
     {
         let content = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -174,6 +195,20 @@ fn fixture() {
         violations.is_empty(),
         "asserted try_recv reads should be allowed, got {violations:?}"
     );
+}
+
+/// `collect_rust_source_files` silently skips missing directories — fine for
+/// nested subtrees, but a moved/renamed scan root (e.g. `clients/native`)
+/// would silently drop policy coverage. Assert every root exists before
+/// walking.
+fn assert_scan_roots_exist(scan_roots: &[PathBuf]) {
+    for scan_root in scan_roots {
+        assert!(
+            scan_root.exists(),
+            "scan root {} is missing — update the policy scans if the directory moved",
+            scan_root.display()
+        );
+    }
 }
 
 fn rust_source_files(dir: &Path) -> Vec<PathBuf> {

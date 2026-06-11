@@ -15,17 +15,32 @@ fn test_rust_production_panic_patterns_are_absent() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
 
-    for path in rust_source_files(&root.join("src")) {
-        if rust_source_path_is_test_only(&path, &root) {
-            continue;
-        }
+    // The native reference client (clients/native/) is a standalone package
+    // the root gates never compile, so this scan walks its sources too: the
+    // production-code panic policy applies to the client crate identically.
+    // Its tests/ tree is walked as well but exempted file-by-file through
+    // the same `rust_source_path_is_test_only` rule (a `tests` path
+    // component) that exempts the root tests/ — panics are allowed in test
+    // code everywhere.
+    let scan_roots = [
+        root.join("src"),
+        root.join("clients").join("native").join("src"),
+        root.join("clients").join("native").join("tests"),
+    ];
+    assert_scan_roots_exist(&scan_roots);
+    for scan_root in scan_roots {
+        for path in rust_source_files(&scan_root) {
+            if rust_source_path_is_test_only(&path, &root) {
+                continue;
+            }
 
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        violations.extend(production_panic_pattern_violations(
-            &relative_path_for_display(&root, &path),
-            &content,
-        ));
+            let content = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            violations.extend(production_panic_pattern_violations(
+                &relative_path_for_display(&root, &path),
+                &content,
+            ));
+        }
     }
 
     assert!(
@@ -168,6 +183,20 @@ macro_rules! prod_macro {
         violations.is_empty(),
         "test-only attrs in metavariable-containing macro transcribers must suppress violations: {violations:?}"
     );
+}
+
+/// `collect_rust_source_files` silently skips missing directories — fine for
+/// nested subtrees, but a moved/renamed scan root (e.g. `clients/native`)
+/// would silently drop policy coverage. Assert every root exists before
+/// walking.
+fn assert_scan_roots_exist(scan_roots: &[PathBuf]) {
+    for scan_root in scan_roots {
+        assert!(
+            scan_root.exists(),
+            "scan root {} is missing — update the policy scans if the directory moved",
+            scan_root.display()
+        );
+    }
 }
 
 fn rust_source_files(dir: &Path) -> Vec<PathBuf> {

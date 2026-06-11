@@ -116,7 +116,20 @@ else
     check_missing "Dockerfile"
 fi
 
-# Check 4: .devcontainer/Dockerfile (informational only - may use newer Rust)
+# Check 4: clients/native/Cargo.toml (standalone reference client)
+# ADR-0004: the client lives outside the root package but pins the SAME
+# rust-version as the server; enforce the pin so the claim cannot drift.
+# A missing manifest is a hard failure: if clients/native ever moves, this
+# check must be updated rather than silently dropping coverage.
+if [ -f clients/native/Cargo.toml ]; then
+    CLIENT_MSRV=$(bash scripts/read-toml-string.sh clients/native/Cargo.toml rust-version package || true)
+    check_file "clients/native/Cargo.toml" "$MSRV" "$CLIENT_MSRV" "rust-version"
+else
+    check_missing "clients/native/Cargo.toml"
+    FAILED=$((FAILED + 1))
+fi
+
+# Check 5: .devcontainer/Dockerfile (informational only - may use newer Rust)
 if [ -f .devcontainer/Dockerfile ]; then
     # Extract MSRV comment if present
     if grep -q "# Project MSRV:" .devcontainer/Dockerfile; then
@@ -154,7 +167,10 @@ if [ "$FAILED" -ne 0 ]; then
     echo "3. Update Dockerfile:"
     echo "   FROM rust:$MSRV-bookworm"
     echo ""
-    echo "4. Update .devcontainer/Dockerfile (optional):"
+    echo "4. Update clients/native/Cargo.toml:"
+    echo "   rust-version = \"$MSRV\""
+    echo ""
+    echo "5. Update .devcontainer/Dockerfile (optional):"
     echo "   # Project MSRV: $MSRV"
     echo ""
     echo "See .llm/skills/msrv-management.md for detailed guidance."

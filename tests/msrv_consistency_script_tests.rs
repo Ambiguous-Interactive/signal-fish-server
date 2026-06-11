@@ -78,11 +78,15 @@ channel="1.88.0"
     ];
 
     for (name, cargo_toml, toolchain_toml, clippy_toml) in cases {
+        // The reference-client manifest reuses the same `[package]`
+        // rust-version shape as the root manifest, so each whitespace
+        // variant exercises the clients/native/Cargo.toml check too.
         let (exit_code, output) = run_msrv_script_with_files(&[
             ("Cargo.toml", cargo_toml),
             ("rust-toolchain.toml", toolchain_toml),
             ("clippy.toml", clippy_toml),
             ("Dockerfile", "FROM rust:1.88-bookworm\n"),
+            ("clients/native/Cargo.toml", cargo_toml),
         ]);
 
         assert_eq!(
@@ -106,6 +110,10 @@ fn test_msrv_script_reports_mismatch_after_tolerant_parsing() {
         ),
         ("clippy.toml", "msrv = \"1.88.0\"\n"),
         ("Dockerfile", "FROM rust:1.88-bookworm\n"),
+        (
+            "clients/native/Cargo.toml",
+            "[package]\nrust-version = \"1.88.0\"\n",
+        ),
     ]);
 
     assert_eq!(
@@ -115,5 +123,52 @@ fn test_msrv_script_reports_mismatch_after_tolerant_parsing() {
     assert!(
         output.contains("rust-toolchain.toml") && output.contains("expected"),
         "mismatch diagnostic should identify the inconsistent file.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_msrv_script_reports_client_manifest_mismatch() {
+    // ADR-0004: the reference client pins the same rust-version as the
+    // server; the script enforces the pin against clients/native/Cargo.toml.
+    let (exit_code, output) = run_msrv_script_with_files(&[
+        ("Cargo.toml", "[package]\nrust-version = \"1.88.0\"\n"),
+        ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.88.0\"\n"),
+        ("clippy.toml", "msrv = \"1.88.0\"\n"),
+        ("Dockerfile", "FROM rust:1.88-bookworm\n"),
+        (
+            "clients/native/Cargo.toml",
+            "[package]\nrust-version = \"1.87.0\"\n",
+        ),
+    ]);
+
+    assert_eq!(
+        exit_code, 1,
+        "a reference-client rust-version drift must fail the check.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("clients/native/Cargo.toml") && output.contains("expected"),
+        "mismatch diagnostic should identify the client manifest.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_msrv_script_fails_when_client_manifest_is_missing() {
+    // A missing client manifest is a hard failure by design: if
+    // clients/native ever moves, the check must be updated instead of
+    // silently dropping MSRV-pin coverage.
+    let (exit_code, output) = run_msrv_script_with_files(&[
+        ("Cargo.toml", "[package]\nrust-version = \"1.88.0\"\n"),
+        ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.88.0\"\n"),
+        ("clippy.toml", "msrv = \"1.88.0\"\n"),
+        ("Dockerfile", "FROM rust:1.88-bookworm\n"),
+    ]);
+
+    assert_eq!(
+        exit_code, 1,
+        "a missing clients/native/Cargo.toml must fail the check.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("clients/native/Cargo.toml not found"),
+        "the diagnostic should name the missing client manifest.\nOutput:\n{output}"
     );
 }

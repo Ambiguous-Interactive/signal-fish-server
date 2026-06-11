@@ -1,0 +1,70 @@
+[package]
+name = "signal-fish-reference-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
+description = "Native Rust reference client for the Signal Fish protocol v3 (real WebRTC stack)"
+repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
+rust-version = "1.88.0"
+publish = false
+
+[dependencies]
+# Protocol types come straight from the server crate (zero wire drift).
+signal-fish-server = { path = "../.." }
+
+# Real WebRTC stack (peer connections + data channels).
+webrtc = "0.17"
+
+# Async runtime & WebSocket wire layer.
+tokio = { version = "1.52", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+    "net",
+    "io-util",
+] }
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", features = ["std"] }
+
+# Serialization (JSON text frames + JSONL event output).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI, errors, logging (all logging goes to stderr; stdout is events-only).
+clap = { version = "4.6", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "env-filter",
+    "std",
+    "ansi",
+] }
+
+[dev-dependencies]
+# The interop harness spawns the server binary + N client binaries as real
+# child processes; `process` mirrors the root crate's test-only tokio features.
+tokio = { version = "1.52", features = ["process"] }
+tempfile = "3.27"
+# The harness compares player UUIDs for the Appendix E glare-matrix assertion
+# (PlayerId is a uuid::Uuid alias in the server crate; lib code never needs
+# the crate directly).
+uuid = { version = "1.23", features = ["serde"] }
+
+[[bin]]
+name = "signal-fish-reference-native"
+path = "src/main.rs"
+
+[lib]
+name = "signal_fish_reference_native"
+path = "src/lib.rs"
+
+# Mirror the root crate's dev-profile: line tables for the leaf crate, no
+# debug info for the (large) dependency graph — keeps webrtc builds fast.
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = 0

@@ -24,6 +24,14 @@ See [Detailed File Tables](context-file-reference.md) for full file tables.
 `src/websocket/` (WS lifecycle), `src/protocol/` (messages and types),
 `src/config/` (all config structs), `src/auth/` (auth and rate limiting).
 
+`clients/` holds reference clients as standalone packages OUTSIDE the root
+package (own lockfile/deny.toml; outside the root cargo build/test/coverage
+gates, though the root panic/timeout policy scans do walk its sources and
+`scripts/check-msrv-consistency.sh` pins `clients/native/Cargo.toml` to the
+root MSRV). `clients/native/` is the webrtc-rs reference client +
+multi-process interop suite (run via `scripts/run-webrtc-interop.sh`; see
+`clients/native/README.md` and ADR-0004).
+
 ## Architectural Invariants
 
 Protocol v3 routing invariant: `websocket::create_router()` is nest-safe and

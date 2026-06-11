@@ -13,6 +13,11 @@ categories = [
     "web-programming::websocket",
 ]
 rust-version = "1.88.0"
+# Keep the published server crate free of the reference-client tree. Cargo
+# auto-excludes NESTED PACKAGES (clients/native/ has its own Cargo.toml), but
+# plain files directly under clients/ (e.g. clients/README.md) would still be
+# packaged without this explicit exclude.
+exclude = ["clients/"]
 
 [features]
 default = []
