@@ -16,13 +16,24 @@ context.
 | Client | Directory | Stack | Status |
 |--------|-----------|-------|--------|
 | Native | [`native/`](native/README.md) | Rust + [webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17 (real DTLS/SCTP data channels) | ✅ In-repo, CI-enforced (`.github/workflows/webrtc-interop.yml`) |
-| Browser | — | WASM / `web-sys` (planned) | Planned next (PLAN P7 task 3) |
+| Browser | [`browser/`](browser/README.md) | TypeScript + real headless-Chromium `RTCPeerConnection` (playwright-core) | ✅ In-repo, CI-enforced (`.github/workflows/browser-interop.yml`) |
+
+Both clients speak the same JSONL stdout event contract and exit codes (the
+[native README](native/README.md) is canonical), so one Rust interop harness asserts over native and browser
+processes interchangeably. The browser package is an npm package (own `package-lock.json`), not a crate; its
+interop cells live in the native crate's test harness behind the `browser-interop` cargo feature. See
+[ADR-0005](../docs/adr/0005-browser-reference-client.md).
 
 ## Quick start
 
 ```bash
-bash scripts/run-webrtc-interop.sh
+bash scripts/run-webrtc-interop.sh    # native client: unit + native<->native interop suite
+bash scripts/run-browser-interop.sh   # browser client: lint/build + browser<->native interop cells
 ```
 
-That builds the server binary, lints the native client, and runs its unit + multi-process WebRTC interop suite
-(mesh, host-star, crippled-ICE fallback, late-join, mixed v2/v3 — all over loopback, zero external network).
+The first builds the server binary, lints the native client, and runs its unit + multi-process WebRTC interop
+suite (mesh, host-star, crippled-ICE fallback, late-join, mixed v2/v3). The second additionally builds the
+browser client and runs the browser cells (mixed mesh, browser↔browser, host star with a browser client,
+crippled-ICE browser fallback, the mDNS `.local` trap, pure-v2 browser, mid-handshake close handling, and
+SIGTERM/SIGKILL Chromium teardown reaping). Everything runs over loopback; the
+only network fetch is the cached Chromium headless-shell download at install time.

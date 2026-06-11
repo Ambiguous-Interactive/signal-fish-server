@@ -155,14 +155,24 @@ client processes (loopback only; the interop server config disables TURN with ze
 
 | Scenario | native ↔ native | browser ↔ native |
 |----------|-----------------|------------------|
-| Mesh N=3 full WebRTC + live relay floor | ✅ `mesh_n3_full_webrtc_session_with_live_relay_floor` | ⏳ pending (browser client planned) |
-| Host star N=3 | ✅ `host_star_n3_webrtc` | ⏳ pending |
-| Crippled-ICE relay fallback | ✅ `mesh_n3_partial_ice_cripple_relay_fallback` | ⏳ pending |
-| Late join (`NewPeer` seat fill) | ✅ `late_join_newpeer_real_webrtc_n3` | ⏳ pending |
-| Mixed v2/v3 relay floor | ✅ `mixed_v2_v3_n3_relay_floor_with_reference_client` | ⏳ pending |
+| Mesh N=3 full WebRTC + live relay floor | ✅ `mesh_n3_full_webrtc_session_with_live_relay_floor` | ✅ `mixed_mesh_n3_full_webrtc_with_browser` |
+| Host star N=3 | ✅ `host_star_n3_webrtc` | ✅ `host_star_n3_browser_client` |
+| Crippled-ICE relay fallback | ✅ `mesh_n3_partial_ice_cripple_relay_fallback` | ✅ `mesh_n3_browser_crippled_ice_fallback` |
+| Late join (`NewPeer` seat fill) | ✅ `late_join_newpeer_real_webrtc_n3` | — (native-only cell) |
+| Mixed v2/v3 relay floor | ✅ `mixed_v2_v3_n3_relay_floor_with_reference_client` | ✅ `mixed_v2_browser_v3_native_relay_floor` |
+| Browser ↔ browser mesh (Chromium↔Chromium pair) | n/a | ✅ `browser_pair_mesh_n3` |
+| mDNS `.local` obfuscation trap | n/a | ✅ `mesh_n3_browser_mdns_obfuscation` |
+| Mid-handshake close → one `error` + prompt exit 3 | n/a | ✅ `browser_cli_mid_handshake_close_single_error_exit_3` |
+| SIGTERM/SIGKILL Chromium teardown (orphan reaper) | n/a | ✅ `browser_cli_signal_teardown_reaps_chromium` |
 
-CI runs the suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
-`.github/workflows/webrtc-interop.yml`.
+The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop_e2e.rs) behind the
+`browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
+`SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
+
+CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
+`.github/workflows/webrtc-interop.yml`, and the browser cells via
+[`scripts/run-browser-interop.sh`](../../scripts/run-browser-interop.sh) in
+`.github/workflows/browser-interop.yml`.
 
 ## Troubleshooting
 

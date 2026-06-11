@@ -43,6 +43,14 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "ansi",
 ] }
 
+[features]
+# Compiles the browser interop cells (tests/browser_interop_e2e.rs), which
+# spawn the browser reference client (clients/browser/) via Node and need
+# SIGNAL_FISH_BROWSER_CLI alongside SIGNAL_FISH_SERVER_BIN. Off by default so
+# the plain native suite never requires a Node/Chromium toolchain; the runner
+# script scripts/run-browser-interop.sh enables it.
+browser-interop = []
+
 [dev-dependencies]
 # The interop harness spawns the server binary + N client binaries as real
 # child processes; `process` mirrors the root crate's test-only tokio features.
@@ -56,6 +64,10 @@ uuid = { version = "1.23", features = ["serde"] }
 [[bin]]
 name = "signal-fish-reference-native"
 path = "src/main.rs"
+
+[[test]]
+name = "browser_interop_e2e"
+required-features = ["browser-interop"]
 
 [lib]
 name = "signal_fish_reference_native"

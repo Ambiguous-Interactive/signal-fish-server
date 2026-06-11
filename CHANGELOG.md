@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the browser reference client (PLAN P7) as the in-repo standalone npm package
+  `clients/browser/` (`signal-fish-reference-browser` — TypeScript, strict; NOT a crate, so every
+  root cargo gate is untouched and `cargo package` still ships zero `clients/` files). The client
+  drives a REAL Chromium `RTCPeerConnection` (the `chromium-headless-shell` build via
+  `playwright-core` — actual browser ICE/DTLS/SCTP, not a Node WebRTC stack) through the full v3
+  flow as two esbuild bundles: an IIFE page engine (WebSocket wire + protocol state machine +
+  RTCPeerConnection engine, a faithful port of the native client's orchestrator) and a Node ESM
+  CLI that launches Chromium, bridges page events to stdout JSONL, and reaps Chromium on every
+  exit path (bounded close-then-kill on all catchable exits plus a detached reaper covering
+  SIGKILL — headless Chromium does not exit on its own when its parent dies). The JSONL stdout
+  event contract, flag surface, and exit codes are identical to the native reference client's,
+  plus a browser-specific `--mdns-obfuscation` flag that leaves Chromium's `.local`
+  host-candidate obfuscation ON; the empirically pinned outcome is that P2P still establishes via
+  the peer-reflexive path (the native webrtc-rs agent learns the browser's transport address from
+  the browser's connectivity checks and tolerates the unresolvable `.local` candidate). The
+  browser↔native interop matrix cells live in the native crate's harness behind the new
+  `browser-interop` cargo feature (`clients/native/tests/browser_interop_e2e.rs`, locating the
+  built CLI via the new `SIGNAL_FISH_BROWSER_CLI` env var; the default native suite is
+  unchanged): mixed mesh N=3 with the full glare/channel matrix, a browser↔browser mesh, a host
+  star with the browser as a non-host client, a crippled-ICE browser relay fallback, the mDNS
+  `.local` trap cell, a pure-v2 browser flooring a mesh-preferring room, a mid-handshake
+  server-close probe (exactly one `error` event carrying the real close reason, prompt exit 3),
+  and a SIGTERM/SIGKILL teardown cell pinning that Chromium never outlives the CLI (graceful
+  teardown and the detached, pid-reuse-guarded orphan reaper respectively) — all over loopback
+  with zero external network access (the cached Chromium download at install time is the only
+  fetch). Wired into CI via `scripts/run-browser-interop.sh` (which also gates
+  `cargo fmt --check` plus `cargo clippy --features browser-interop` over the feature-gated
+  cells) and the path-filtered `.github/workflows/browser-interop.yml` (npm + Playwright-browser
+  caching, lockfile-pinned `playwright-core install` — never bare `npx`). Recorded the design decisions in ADR-0005
+  (`docs/adr/0005-browser-reference-client.md`) and documented the CLI, contract deviations, the
+  mDNS posture, and the new matrix rows in `clients/browser/README.md` (the native README stays
+  the canonical contract). Additive tooling/documentation only — no server runtime behavior or
+  wire-format changes.
 - Added the native Rust reference client (PLAN P7) as the in-repo standalone package
   `clients/native/` (`signal-fish-reference-native`, NOT a member of the root package — root
   lockfile/MSRV-build/coverage gates are untouched, `scripts/check-msrv-consistency.sh` pins the

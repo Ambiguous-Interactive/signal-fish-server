@@ -30,7 +30,13 @@ gates, though the root panic/timeout policy scans do walk its sources and
 `scripts/check-msrv-consistency.sh` pins `clients/native/Cargo.toml` to the
 root MSRV). `clients/native/` is the webrtc-rs reference client +
 multi-process interop suite (run via `scripts/run-webrtc-interop.sh`; see
-`clients/native/README.md` and ADR-0004).
+`clients/native/README.md` and ADR-0004). `clients/browser/` is the
+TypeScript browser reference client (real headless-Chromium
+`RTCPeerConnection` via playwright-core, own `package-lock.json`); its
+browser↔native interop cells live in the native crate behind the
+`browser-interop` cargo feature and run via `scripts/run-browser-interop.sh`
+(see `clients/browser/README.md` and ADR-0005). Both clients share one JSONL
+stdout event contract and exit codes (the native README is canonical).
 
 ## Architectural Invariants
 

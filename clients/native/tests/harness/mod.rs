@@ -72,6 +72,28 @@ pub fn server_binary_path() -> PathBuf {
     path
 }
 
+/// Resolve the browser reference client's built CLI bundle from the REQUIRED
+/// `SIGNAL_FISH_BROWSER_CLI` env var (browser interop cells only), with
+/// actionable failure messages. The bundle is run via `node`.
+pub fn browser_cli_path() -> PathBuf {
+    let Some(raw) = std::env::var_os("SIGNAL_FISH_BROWSER_CLI") else {
+        panic!(
+            "SIGNAL_FISH_BROWSER_CLI is not set. The browser interop tests drive the \
+             browser reference client via Node: run `npm ci && npm run build` in \
+             clients/browser/ and set SIGNAL_FISH_BROWSER_CLI=<repo>/clients/browser/dist/cli.js \
+             (or use the runner script scripts/run-browser-interop.sh)."
+        );
+    };
+    let path = PathBuf::from(raw);
+    assert!(
+        path.is_file(),
+        "SIGNAL_FISH_BROWSER_CLI points at {path:?}, which is not a file. Run \
+         `npm ci && npm run build` in clients/browser/ first \
+         (or use scripts/run-browser-interop.sh)."
+    );
+    path
+}
+
 /// Guard around the spawned server binary. Dropping it kills the child
 /// (`start_kill` plus `kill_on_drop(true)` at spawn).
 pub struct ServerProcess {
@@ -383,7 +405,76 @@ pub fn spawn_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProcess {
     }
 }
 
+/// Spawn one BROWSER reference client (`node <SIGNAL_FISH_BROWSER_CLI> …`);
+/// same flag surface, JSONL event contract, and exit codes as the native
+/// client, so the resulting [`ClientProcess`] is interchangeable with
+/// [`spawn_client`]'s. The Node CLI reaps its Chromium child on every exit
+/// path (including this harness's kill-on-drop SIGKILL, via a detached
+/// reaper), so dropping the guard leaks no browser processes.
+pub fn spawn_browser_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProcess {
+    let stderr_path = workdir.join(format!("client-{}-stderr.log", spec.name));
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create client stderr capture");
+
+    let mut command = Command::new("node");
+    command
+        .arg(browser_cli_path())
+        .arg("--server-url")
+        .arg(spec.server_url)
+        .arg("--game-name")
+        .arg(spec.game_name)
+        .arg("--player-name")
+        .arg(spec.name)
+        .arg("--peers")
+        .arg(spec.peers.to_string())
+        // Same ceilings as the native spawn (Chromium launch eats ~1-2 s of
+        // the soft window; clients still exit as soon as criteria are met).
+        .arg("--run-for-secs")
+        .arg("45")
+        .arg("--max-runtime-secs")
+        .arg("90");
+    match spec.join_code {
+        Some(code) => {
+            command.arg("--join-code").arg(code);
+        }
+        None => {
+            command.arg("--create-room");
+        }
+    }
+    if spec.exchange {
+        command.arg("--exchange");
+    }
+    if let Some(payload) = spec.relay_payload {
+        command.arg("--relay-payload").arg(payload);
+    }
+    command.args(spec.extra_args);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true);
+
+    let mut child = command
+        .spawn()
+        .expect("spawn the browser reference client (node)");
+    let stdout = child.stdout.take().expect("client stdout is piped");
+    ClientProcess {
+        name: spec.name.to_string(),
+        child: Some(child),
+        lines: BufReader::new(stdout).lines(),
+        events: Vec::new(),
+        stderr_path,
+    }
+}
+
 impl ClientProcess {
+    /// OS pid of the still-running client process (panics once reaped).
+    pub fn pid(&self) -> u32 {
+        self.child
+            .as_ref()
+            .and_then(Child::id)
+            .expect("client process already exited or was reaped")
+    }
+
     /// Read events until one named `event_name` arrives; panics (with
     /// diagnostics) on timeout, EOF, or a non-JSONL stdout line.
     pub async fn await_event(&mut self, event_name: &str, timeout: Duration) -> Value {
