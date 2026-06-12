@@ -30,6 +30,11 @@ use super::session_policy::{
     ActiveSessionPlan, SessionMember, SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
 };
 
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
+const TURN_URL: &str = "turn:turn.example.com:3478";
+const TURN_CREDENTIAL_TTL_SECS: u64 = 3600;
+
 /// A fully-inert `[turn]` block (disabled, *no* STUN urls) for the P3 selection /
 /// `plan_for` tests that isolate the operator's static `session.ice_servers`: with
 /// it, `build_ice_servers` contributes nothing, so a recipient's ICE list equals
@@ -79,6 +84,14 @@ fn base_time() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp is valid")
 }
 
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
+}
+
 /// A member that supports v3 + the given transports/topologies.
 fn member(
     id: PlayerId,
@@ -113,7 +126,7 @@ fn mesh_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Mesh,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -125,7 +138,7 @@ fn host_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Host,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -1459,9 +1472,9 @@ fn enabled_turn() -> crate::config::TurnConfig {
         enabled: true,
         mode: crate::config::TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
-        urls: vec!["turn:turn.example.com:3478".to_string()],
-        stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
-        credential_ttl_secs: 3600,
+        urls: vec![TURN_URL.to_string()],
+        stun_urls: vec![TURN_STUN_URL.to_string()],
+        credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
         managed_provider: None,
         managed_api_token: None,
     }
@@ -1504,12 +1517,10 @@ async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() 
     // Each plan: STUN entry (credential-less) followed by a TURN entry (with creds).
     for plan in [&alice_plan, &bob_plan] {
         assert_eq!(plan.ice_servers.len(), 2, "STUN + TURN");
-        assert_eq!(
-            plan.ice_servers[0].urls,
-            vec!["stun:stun.l.google.com:19302"]
-        );
+        assert_eq!(plan.ice_servers[0].urls, vec![TURN_STUN_URL]);
         assert!(plan.ice_servers[0].username.is_none());
-        assert_eq!(plan.ice_servers[1].urls, vec!["turn:turn.example.com:3478"]);
+        assert!(plan.ice_servers[0].credential.is_none());
+        assert_eq!(plan.ice_servers[1].urls, vec![TURN_URL]);
         assert!(plan.ice_servers[1].username.is_some());
         assert!(plan.ice_servers[1].credential.is_some());
     }
@@ -1568,10 +1579,7 @@ async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
             other => panic!("expected SessionPlan, got {other:?}"),
         };
         assert_eq!(plan.ice_servers.len(), 1, "STUN only when TURN disabled");
-        assert_eq!(
-            plan.ice_servers[0].urls,
-            vec!["stun:stun.l.google.com:19302"]
-        );
+        assert_eq!(plan.ice_servers[0].urls, vec![TURN_STUN_URL]);
         assert!(plan.ice_servers[0].username.is_none());
         assert!(plan.ice_servers[0].credential.is_none());
     }
@@ -1609,16 +1617,18 @@ async fn emit_webrtc_room_prepends_static_ice_then_turn() {
     // Static STUN (from mesh_config), then TURN STUN, then TURN creds: 3 entries.
     assert_eq!(alice_plan.ice_servers.len(), 3);
     // The operator's static entry is first and untouched.
-    assert_eq!(
-        alice_plan.ice_servers[0].urls,
-        vec!["stun:stun.l.google.com:19302"]
-    );
+    assert_eq!(alice_plan.ice_servers[0].urls, vec![STATIC_STUN_URL]);
     assert!(alice_plan.ice_servers[0].username.is_none());
-    // The last entry is the minted TURN credential.
+    assert!(alice_plan.ice_servers[0].credential.is_none());
     assert_eq!(
-        alice_plan.ice_servers[2].urls,
-        vec!["turn:turn.example.com:3478"]
+        alice_plan.ice_servers[1].urls,
+        vec![TURN_STUN_URL],
+        "the [turn] STUN entry must remain between static ICE and minted TURN"
     );
+    assert!(alice_plan.ice_servers[1].username.is_none());
+    assert!(alice_plan.ice_servers[1].credential.is_none());
+    // The last entry is the minted TURN credential.
+    assert_eq!(alice_plan.ice_servers[2].urls, vec![TURN_URL]);
     assert!(alice_plan.ice_servers[2].username.is_some());
 }
 
@@ -4098,16 +4108,24 @@ async fn composed_ice_servers_orders_static_then_stun_then_turn() {
 
     assert_eq!(ice.len(), 3, "static + STUN + TURN");
     // Static entry, verbatim and credential-less.
-    assert_eq!(ice[0].urls, vec!["stun:stun.l.google.com:19302"]);
+    assert_eq!(ice[0].urls, vec![STATIC_STUN_URL]);
     assert!(ice[0].username.is_none());
+    assert!(ice[0].credential.is_none());
     // [turn] STUN entry, credential-less.
-    assert_eq!(ice[1].urls, vec!["stun:stun.l.google.com:19302"]);
+    assert_eq!(ice[1].urls, vec![TURN_STUN_URL]);
     assert!(ice[1].username.is_none());
+    assert!(ice[1].credential.is_none());
     // Minted TURN entry embedding the shared expiry and THIS recipient's id.
-    assert_eq!(ice[2].urls, vec!["turn:turn.example.com:3478"]);
+    assert_eq!(ice[2].urls, vec![TURN_URL]);
     assert_eq!(
         ice[2].username.as_deref(),
-        Some(format!("{}:{recipient}", now_unix + 3600).as_str())
+        Some(
+            format!(
+                "{}:{recipient}",
+                now_unix + i64::try_from(TURN_CREDENTIAL_TTL_SECS).expect("test TTL fits i64")
+            )
+            .as_str()
+        )
     );
     assert!(ice[2].credential.is_some());
     assert_eq!(minted, 1, "exactly the credentialed TURN entry is minted");

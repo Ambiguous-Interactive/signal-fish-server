@@ -48,7 +48,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::json;
-use signal_fish_server::config::{AppAuthEntry, SessionConfig};
+use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
     ClientMessage, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage,
     SessionPlanPayload, Topology, Transport,
@@ -69,6 +69,8 @@ use websocket_test_helpers::{
 };
 
 const APP_ID: &str = "v3-multipeer-app";
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
 /// Window in which a forbidden message would have arrived if it were going to.
 const SILENCE_WINDOW: tokio::time::Duration = tokio::time::Duration::from_secs(2);
 
@@ -83,11 +85,24 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and default [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
+    assert_eq!(
+        TurnConfig::default().stun_urls,
+        vec![TURN_STUN_URL.to_string()],
+        "multipeer e2e fixtures intentionally exercise the default [turn] STUN URL"
+    );
+}
+
 fn session_config_with_topology(default_topology: Topology) -> SessionConfig {
     SessionConfig {
         default_topology,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -101,6 +116,22 @@ fn mesh_session_config() -> SessionConfig {
 
 fn host_session_config() -> SessionConfig {
     session_config_with_topology(Topology::Host)
+}
+
+fn assert_static_then_default_stun_ice(ice_servers: &[IceServer]) {
+    assert_eq!(
+        ice_servers.len(),
+        2,
+        "webrtc plans carry static ICE followed by the default [turn] STUN entry"
+    );
+    assert_eq!(ice_servers[0].urls, vec![STATIC_STUN_URL]);
+    assert_eq!(ice_servers[1].urls, vec![TURN_STUN_URL]);
+    assert!(
+        ice_servers
+            .iter()
+            .all(|server| server.username.is_none() && server.credential.is_none()),
+        "no TURN credentials are minted when [turn] is disabled"
+    );
 }
 
 /// Boot the production router (`/v2` nest + `/v3/ws` alias) around a server
@@ -325,7 +356,7 @@ fn assert_host_star_plans(
         Some(host_id),
         "the host's own plan must name it as the elected host"
     );
-    assert!(!host_plan.ice_servers.is_empty());
+    assert_static_then_default_stun_ice(&host_plan.ice_servers);
     let host_peer_ids: BTreeSet<PlayerId> =
         host_plan.peers.iter().map(|peer| peer.player_id).collect();
     assert_eq!(
@@ -357,7 +388,7 @@ fn assert_host_star_plans(
             Some(host_id),
             "client {client_id} plan must name the elected host"
         );
-        assert!(!plan.ice_servers.is_empty());
+        assert_static_then_default_stun_ice(&plan.ice_servers);
         assert_eq!(
             plan.peers.len(),
             1,
@@ -440,7 +471,7 @@ async fn mesh_n3_full_glare_matrix_and_pairwise_signaling() {
         assert_eq!(plan.fallback, Transport::Relay);
         assert!(plan.host.is_none(), "mesh plans elect no host");
         assert_eq!(plan.peers.len(), 2, "3-peer mesh lists exactly 2 peers");
-        assert!(!plan.ice_servers.is_empty(), "webrtc plans carry ICE");
+        assert_static_then_default_stun_ice(&plan.ice_servers);
         plans.push(plan);
     }
     let plan_refs: Vec<(PlayerId, &SessionPlanPayload)> = ids
@@ -927,7 +958,7 @@ async fn mesh_n3_seat_fill_late_join() {
     .await;
     assert_eq!(joiner_plan.topology, Topology::Mesh);
     assert_eq!(joiner_plan.transport, Transport::WebRtc);
-    assert!(!joiner_plan.ice_servers.is_empty());
+    assert_static_then_default_stun_ice(&joiner_plan.ice_servers);
     let joiner_peer_ids: BTreeSet<PlayerId> = joiner_plan
         .peers
         .iter()
@@ -1133,10 +1164,7 @@ async fn mesh_n3_reconnect_full_flow() {
             peer.player_id
         );
     }
-    // Fresh ICE: with the static STUN + default (disabled) [turn] block this
-    // deployment always carries credential-less entries; an ICE-less plan is
-    // only legal when both sources are empty, which this config rules out.
-    assert!(!reconnect_plan.ice_servers.is_empty());
+    assert_static_then_default_stun_ice(&reconnect_plan.ice_servers);
 
     // Each remaining member receives PlayerReconnected then the NewPeer delta
     // for the reconnector.

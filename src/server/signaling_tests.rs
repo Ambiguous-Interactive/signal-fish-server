@@ -28,6 +28,11 @@ use tokio::time::{timeout, Duration};
 use super::session_policy::{ActiveSessionPlan, SessionPlanDecision};
 use super::signaling::local_initiates;
 
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
+const TURN_URL: &str = "turn:turn.example.com:3478";
+const TURN_CREDENTIAL_TTL_SECS: u64 = 3600;
+
 /// Allocate a unique loopback address per registered client so tests never
 /// collide on the same `SocketAddr`.
 static PORT: AtomicU16 = AtomicU16::new(52000);
@@ -152,13 +157,26 @@ fn store_active_plan(
     );
 }
 
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and default [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
+    assert_eq!(
+        TurnConfig::default().stun_urls,
+        vec![TURN_STUN_URL.to_string()],
+        "late-join signaling fixtures intentionally exercise the default [turn] STUN URL"
+    );
+}
+
 /// A STUN-only `SessionConfig` preferring `mesh` (so an all-v3+webrtc room
 /// resolves to `mesh + webrtc`).
 fn mesh_session_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Mesh,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -172,7 +190,7 @@ fn host_session_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Host,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -191,6 +209,22 @@ fn host_direct_session_config() -> SessionConfig {
         ice_servers: Vec::new(),
         ..SessionConfig::default()
     }
+}
+
+fn assert_static_then_default_stun_ice(ice_servers: &[IceServer]) {
+    assert_eq!(
+        ice_servers.len(),
+        2,
+        "webrtc plans carry static ICE followed by the default [turn] STUN entry"
+    );
+    assert_eq!(ice_servers[0].urls, vec![STATIC_STUN_URL]);
+    assert_eq!(ice_servers[1].urls, vec![TURN_STUN_URL]);
+    assert!(
+        ice_servers
+            .iter()
+            .all(|server| server.username.is_none() && server.credential.is_none()),
+        "no TURN credentials are minted when [turn] is disabled"
+    );
 }
 
 /// Fetch a room and mark it `Finalized` so late-join handling engages (it only
@@ -1042,11 +1076,7 @@ async fn late_join_stored_mesh_sends_joiner_plan_and_existing_new_peer() {
     );
     // WebRTC plan carries ICE: the static STUN from `mesh_session_config` plus
     // the default `[turn]` block's public STUN (TURN disabled => no creds).
-    assert_eq!(joiner_plan.ice_servers.len(), 2);
-    assert!(joiner_plan
-        .ice_servers
-        .iter()
-        .all(|server| server.username.is_none()));
+    assert_static_then_default_stun_ice(&joiner_plan.ice_servers);
 
     // The existing member gets the antisymmetric NewPeer delta.
     match recv(&mut existing_rx).await.as_ref() {
@@ -2296,9 +2326,9 @@ async fn late_join_counts_plan_and_turn_credentials() {
         enabled: true,
         mode: crate::config::TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
-        urls: vec!["turn:turn.example.com:3478".to_string()],
-        stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
-        credential_ttl_secs: 3600,
+        urls: vec![TURN_URL.to_string()],
+        stun_urls: vec![TURN_STUN_URL.to_string()],
+        credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
         managed_provider: None,
         managed_api_token: None,
     };
@@ -2624,10 +2654,7 @@ async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
             assert_eq!(plan.transport, Transport::WebRtc);
             assert_eq!(plan.peers.len(), 1);
             assert_eq!(plan.peers[0].player_id, existing);
-            assert!(
-                !plan.ice_servers.is_empty(),
-                "a reconnect plan re-mints ICE (original credentials may be stale)"
-            );
+            assert_static_then_default_stun_ice(&plan.ice_servers);
             plan.peers[0].initiate
         }
         other => panic!("reconnecting expected SessionPlan after reconnect, got {other:?}"),

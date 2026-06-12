@@ -21,3 +21,8 @@ See [Core Testing Patterns](skills/testing-core-patterns.md) and
   Avoid matchers that skip nonmatching `ServerMessage`s when stale or unexpected
   frames would indicate a broken test setup; assert no pending messages at phase
   boundaries when backlog would affect later checks.
+- When asserting ordered composition from multiple sources (for example static
+  `session.ice_servers` followed by `[turn]`-derived STUN/TURN entries), use
+  source-distinguishable sentinel fixture values and assert the exact ordered
+  sequence. If a test relies on defaults, add a fixture invariant so a future
+  default/static value collision fails before it weakens the ordering assertion.

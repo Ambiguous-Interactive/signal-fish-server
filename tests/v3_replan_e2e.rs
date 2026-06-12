@@ -25,7 +25,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::SinkExt;
-use signal_fish_server::config::{AppAuthEntry, SessionConfig};
+use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
     ClientMessage, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage, Topology,
     Transport,
@@ -41,6 +41,8 @@ use websocket_test_helpers::{
 
 const APP_ID: &str = "v3-replan-app";
 const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
 /// Window in which a forbidden message would have arrived if it were going to.
 const SILENCE_WINDOW: tokio::time::Duration = tokio::time::Duration::from_secs(2);
 
@@ -55,11 +57,24 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and default [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
+    assert_eq!(
+        TurnConfig::default().stun_urls,
+        vec![TURN_STUN_URL.to_string()],
+        "replan e2e fixtures intentionally exercise the default [turn] STUN URL"
+    );
+}
+
 fn host_session_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Host,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -71,12 +86,28 @@ fn mesh_session_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Mesh,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
         ..SessionConfig::default()
     }
+}
+
+fn assert_static_then_default_stun_ice(ice_servers: &[IceServer]) {
+    assert_eq!(
+        ice_servers.len(),
+        2,
+        "webrtc plans carry static ICE followed by the default [turn] STUN entry"
+    );
+    assert_eq!(ice_servers[0].urls, vec![STATIC_STUN_URL]);
+    assert_eq!(ice_servers[1].urls, vec![TURN_STUN_URL]);
+    assert!(
+        ice_servers
+            .iter()
+            .all(|server| server.username.is_none() && server.credential.is_none()),
+        "no TURN credentials are minted when [turn] is disabled"
+    );
 }
 
 async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAddr {
@@ -373,10 +404,7 @@ async fn host_disconnect_reelects_host_and_reissues_session_plans() {
             "both fresh plans name the re-elected host (earliest remaining joiner)"
         );
         assert_eq!(plan.fallback, Transport::Relay);
-        assert!(
-            !plan.ice_servers.is_empty(),
-            "a webrtc re-plan carries (fresh) ICE"
-        );
+        assert_static_then_default_stun_ice(&plan.ice_servers);
     }
     // New host answers its one remaining client; the client offers to it.
     assert_eq!(replan_a.peers.len(), 1);
@@ -552,7 +580,7 @@ async fn mesh_late_join_sends_joiner_plan_and_existing_member_new_peer() {
         joiner_id < peer_a_id,
         "the joiner's initiate flag follows the UUID glare rule"
     );
-    assert!(!joiner_plan.ice_servers.is_empty());
+    assert_static_then_default_stun_ice(&joiner_plan.ice_servers);
 
     // The existing member sees PlayerJoined then the antisymmetric NewPeer
     // delta — and no second SessionPlan.
