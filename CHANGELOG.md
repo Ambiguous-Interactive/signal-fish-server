@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added ICE pre-gather on `RoomJoined` / `Reconnected` (PLAN §P4's deferred "RoomJoined ICE
+  pre-gather" refinement): both payloads gain an optional `ice_servers` field carrying the same
+  composed ICE list a WebRTC `SessionPlan` delivers — the operator's static `session.ice_servers`
+  first, then the `[turn]` block's STUN entry, then a freshly minted per-player TURN credential
+  (built by the single shared composition seam `composed_ice_servers_for`, so the two surfaces can
+  never drift) — letting v3 WebRTC-capable clients start gathering ICE candidates during the lobby
+  wait instead of adding that latency at game start. Strictly gated (the pure, exhaustively
+  unit-tested `ice_pregather_eligible` predicate): the new `session.enable_ice_pregather` toggle
+  (default `true`; the operator kill switch) AND `session.enable_webrtc` AND a non-relay desired
+  topology for the game (a relay-desired game can never select a WebRTC plan, so minting for it
+  would hand out credentials that can never be used) AND a non-`Finalized` room (a late join /
+  reconnect into an active session receives its fresh ICE via the immediately following
+  late-join `SessionPlan` — pre-gather is gated off there, so one logical join event never mints
+  twice) AND a v3-negotiated recipient that advertised the `webrtc` transport AND the game's
+  desired topology (the relay-desired argument applied per-recipient: the ladder seats a member
+  on a rung only when it negotiated the rung's topology, so a relay-only-topology client can
+  never appear in any WebRTC plan and its credential could never be used). In every other case
+  the field is absent from the wire entirely (`skip_serializing_if`), so the v2 `RoomJoined` /
+  `Reconnected` JSON and MessagePack bytes are untouched — all 44 v2 golden snapshots pass
+  unchanged. The `SessionPlan` ICE list supersedes the pre-gather list (clients apply the most
+  recent set; pre-gather credentials may expire during a long lobby). Observability: new
+  `signal_fish_transport_ice_pregather_emitted_total` counter (one per payload that actually
+  carried a non-empty list; an eligible joiner with no ICE configured emits no field and is not
+  counted), and pre-gather-minted TURN credentials count on the existing
+  `signal_fish_transport_turn_credentials_issued_total` total-issuance counter — for TURN capacity
+  planning, issuance now scales with joins, not just finalizes (documented in
+  `docs/deployment-turn.md`; `docs/protocol.md` and
+  `docs/architecture/handoff-and-topologies.md` describe the wire field and gate). Covered end to
+  end by the new `tests/v3_ice_pregather_e2e.rs` (composed list + per-player credential on join,
+  raw-frame absence assertions for v2 / relay-only / kill-switch / WebRTC-disabled / relay-desired
+  cases, STUN-only pre-gather with TURN disabled, late-join and reconnect single-mint invariants,
+  and metrics deltas) plus a fully-populated `RoomJoined` line in the canonical v3 wire samples.
 - Added the browser reference client (PLAN P7) as the in-repo standalone npm package
   `clients/browser/` (`signal-fish-reference-browser` — TypeScript, strict; NOT a crate, so every
   root cargo gate is untouched and `cargo package` still ships zero `clients/` files). The client
@@ -453,6 +485,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Tightened ICE URL validation in the `[session]` and `[turn]` config blocks (closing the
+  scheme/deduplication check deferred from P4): every `session.ice_servers[].urls` entry must now
+  start with one of the four ICE schemes (`stun:`, `stuns:`, `turn:`, `turns:`), every `turn.urls`
+  entry with `turn:`/`turns:`, and every `turn.stun_urls` entry with `stun:`/`stuns:` — matched
+  case-insensitively (URI schemes are case-insensitive per RFC 3986 §3.1) and requiring a
+  non-empty remainder after the colon (`turn:host:3478?transport=udp` and IPv6 literals like
+  `turn:[2001:db8::1]:3478` remain valid; a bare `stun:` or a space inside the scheme is
+  rejected). **This is intentional fail-fast behavior:** a config that previously started with a
+  malformed scheme (e.g. `http://example.com` or a typo like `trun:`) now fails validation at
+  startup with the existing indexed message style (`session.ice_servers[i].urls[j] …` /
+  `turn.urls[i] …`) instead of propagating a URL clients' `RTCIceServer` parsing would choke on.
+  Like the existing blank-URL hygiene, the scheme check applies regardless of `turn.enabled`. The
+  check lives in one shared private helper (`src/config/ice_url.rs`) used by both blocks.
+  Exact-duplicate URLs (within one server's list or across a block's full URL set) additionally
+  log a deterministic `tracing::warn!` but deliberately stay non-fatal, mirroring the existing
+  warn-but-succeed precedent for the disabled-P2P topology warning.
 - Simplified the Miri (Advanced Safety) job to run with `MIRIFLAGS=-Zmiri-disable-isolation`,
   which lets the interpreter service wall-clock (`clock_gettime`), entropy (`getrandom`), and
   `getcwd` syscalls instead of aborting on them. This structurally eliminates the entire

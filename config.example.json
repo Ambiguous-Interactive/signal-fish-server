@@ -84,6 +84,7 @@
     "game_topology_mappings": {},
     "enable_webrtc": true,
     "enable_direct": true,
+    "enable_ice_pregather": true,
     "ice_servers": []
   },
   "turn": {

@@ -2,8 +2,9 @@
 
 How to give Signal Fish Server's WebRTC sessions a TURN relay, and how to run the
 signaling side securely. Signal Fish Server never relays WebRTC media itself — it
-only mints and advertises ICE credentials in each `SessionPlan` — so TURN is
-bring-your-own: self-hosted coturn or a managed provider.
+only mints and advertises ICE credentials, in `SessionPlan`s and pre-gather
+`RoomJoined` / `Reconnected` ICE lists — so TURN is bring-your-own: self-hosted
+coturn or a managed provider.
 
 ## When you need TURN
 
@@ -85,8 +86,8 @@ Operationally this means:
 
 - **The secret never reaches clients.** `turn.static_auth_secret` lives only on
   the signaling server and in coturn. Clients receive only the derived,
-  short-lived `username`/`credential` pair inside their `SessionPlan`'s
-  `ice_servers`; coturn recomputes the HMAC to authenticate them.
+  short-lived `username`/`credential` pair inside their `SessionPlan` or
+  pre-gather `ice_servers`; coturn recomputes the HMAC to authenticate them.
 - **Each player gets their own credential.** The username embeds the player's id,
   so credentials are per-player and individually expiring. Members finalized
   together share one expiry timestamp.
@@ -95,6 +96,20 @@ Operationally this means:
   lifetime. Size the TTL to comfortably exceed your longest expected session,
   because mid-session ICE restarts need a still-valid credential; late joiners
   and host-failover re-plans always receive freshly minted credentials.
+- **ICE pre-gather mints at join time.** With `session.enable_ice_pregather`
+  (the default), every eligible v3 client — one that negotiated the WebRTC
+  transport and the game's desired topology — joining or reconnecting into a
+  non-relay-desired game's lobby receives a freshly minted credential on
+  `RoomJoined` / `Reconnected` — before, and in addition to, the one in its
+  eventual `SessionPlan`. For capacity planning that means **issuance scales
+  with joins, not just finalizes** (a player that joins, leaves, and rejoins
+  mints each time; an abandoned lobby still minted for everyone eligible who
+  entered). Minted-but-never-used credentials cost coturn nothing until a client
+  allocates with them, but each one is a live credential for its full TTL —
+  `enable_ice_pregather: false` is the kill switch if join-time issuance is
+  unwanted, and the TTL is the exposure lever either way. The shared
+  `signal_fish_transport_turn_credentials_issued_total` counter includes
+  pre-gather minting, so dashboards see total issuance.
 - **No coturn user database is needed** for this scheme — the shared secret is
   the entire trust relationship.
 

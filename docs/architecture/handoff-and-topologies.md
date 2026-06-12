@@ -121,6 +121,18 @@ exact behavior. The key invariants: initial pairing is owned by the
 finalize-time `SessionPlan`; `NewPeer` only covers post-finalization arrivals
 and only ever targets existing members.
 
+ICE can also arrive **before** any plan: an eligible v3 client — one that
+negotiated the WebRTC transport and the game's desired topology — joining (or
+reconnecting into) a non-finalized room of a non-relay-desired game receives the
+same composed ICE list on its `RoomJoined` / `Reconnected` payload (the
+[ICE pre-gather](../protocol.md#ice-pre-gather)), so candidate gathering can
+start during the lobby wait. A client that negotiated only a rung below the
+desired one forfeits the head start — the finalize-time `SessionPlan` still
+delivers its ICE if the whole room settles there. The `SessionPlan` ICE always
+supersedes it; joins and reconnects into a `Finalized` room never pre-gather —
+their fresh ICE is the late-join `SessionPlan`'s job, exactly as described
+above.
+
 ## Mid-session re-planning (host failover and self-heal)
 
 Topology and transport are **sticky for the session lifetime**: the ladder runs

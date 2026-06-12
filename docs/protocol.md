@@ -810,8 +810,9 @@ missed events that occurred during the disconnection.
 
 Protocol v3 is a **purely additive** layer on top of the v2 wire contract documented above. Everything in the
 preceding sections still applies unchanged; v3 only adds optional `Authenticate` fields, five new message types,
-and a capability-negotiation handshake. A v2 client never sends or receives a v3 message — the relay floor is the
-universal default and a v2 client observes byte-identical v2 behavior.
+a capability-negotiation handshake, and an optional `ice_servers` field on `RoomJoined` / `Reconnected` (the
+[ICE pre-gather](#ice-pre-gather), emitted only to v3 WebRTC-capable clients). A v2 client never sends or receives
+a v3 message — the relay floor is the universal default and a v2 client observes byte-identical v2 behavior.
 
 Canonical wire samples for this section:
 
@@ -1142,6 +1143,30 @@ Every WebRTC `SessionPlan` carries an `ice_servers` list:
 
 See the [TURN / STUN configuration](configuration.md#turn--stun-ice-credentials-protocol-v3) section and the
 [Transport Fallback Contract](architecture/transport-fallback.md) for the full ICE/fallback behavior.
+
+### ICE pre-gather
+
+`RoomJoined` and `Reconnected` carry an optional `ice_servers` field (same shape and composition as the
+`SessionPlan` list: the operator's static `session.ice_servers` first, then the configured STUN, then a freshly
+minted per-player TURN credential) so a WebRTC-capable client can start gathering ICE candidates **during the
+lobby wait** instead of adding that latency at game start. The field is populated **iff all of**:
+
+- `session.enable_ice_pregather` is `true` (the default; `false` is the operator kill switch), and
+- `session.enable_webrtc` is `true`, and
+- the game's desired topology (per-game mapping, else `session.default_topology`) is non-relay — a relay-desired
+  game can never select a WebRTC plan, so minting for it would hand out credentials that can never be used, and
+- the room is **not** `Finalized` — a join/reconnect into an active non-relay session already receives a fresh
+  per-recipient `SessionPlan` (pre-gathering too would double-mint), and a room floored to relay stays relay
+  (sticky), so pre-gather is pointless there, and
+- the recipient negotiated v3 **and** the `webrtc` transport, and
+- the recipient's negotiated topologies contain the game's desired topology — the relay-desired argument applied
+  per-recipient: the ladder seats a member on a rung only when that member negotiated the rung's topology, so a
+  relay-only-topology client can never appear in any WebRTC plan and its credentials could never be used.
+
+In every other case the field is **absent from the wire entirely**, so the v2 `RoomJoined` / `Reconnected` bytes
+are untouched. The `SessionPlan` ICE list **supersedes** the pre-gather list: clients should always apply the most
+recent set — pre-gather TURN credentials can expire during a long lobby (their TTL starts at join time), and fresh
+ones always arrive in the `SessionPlan`.
 
 ### Sequence diagrams
 

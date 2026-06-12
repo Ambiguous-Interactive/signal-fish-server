@@ -497,6 +497,13 @@ impl EnhancedGameServer {
                     ready_players: room.ready_players.clone(),
                     relay_type: room.relay_type.clone(),
                     current_spectators: room.get_spectators(),
+                    // v3 ICE pre-gather (PLAN §P4 deferred refinement): empty —
+                    // and skipped on the wire — unless this reconnector passes
+                    // the pre-gather gate (its original credentials may have
+                    // expired while it was away), so v2 bytes are untouched. A
+                    // reconnect into a Finalized room gets fresh ICE from the
+                    // late-join SessionPlan below instead (never both).
+                    ice_servers: self.pregather_ice_servers(&room, reconnect_player_id),
                     missed_events,
                 }))),
             )

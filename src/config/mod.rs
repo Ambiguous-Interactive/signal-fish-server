@@ -26,6 +26,7 @@
 // Submodules
 pub mod coordination;
 pub mod defaults;
+mod ice_url;
 pub mod loader;
 pub mod logging;
 pub mod metrics;

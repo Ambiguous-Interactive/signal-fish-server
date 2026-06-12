@@ -19,6 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::ice_url;
+
 /// How TURN credentials are obtained.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -101,7 +103,13 @@ impl TurnConfig {
     /// [`urls`](Self::urls) and [`stun_urls`](Self::stun_urls) must be non-blank
     /// (whitespace-only is rejected with an indexed message), because the URLs are
     /// propagated verbatim to clients and a blank entry would break client-side
-    /// `RTCIceServer` parsing.
+    /// `RTCIceServer` parsing. For the same reason, schemes are checked
+    /// unconditionally too: `urls` entries must start with `turn:`/`turns:` and
+    /// `stun_urls` entries with `stun:`/`stuns:` — case-insensitively (URI
+    /// schemes are case-insensitive, RFC 3986 §3.1) and with a non-empty
+    /// remainder after the colon. Exact-duplicate URLs anywhere in the block
+    /// only warn (clients tolerate repeated entries — the warn-but-succeed
+    /// stance).
     ///
     /// When [`enabled`](Self::enabled):
     /// - [`credential_ttl_secs`](Self::credential_ttl_secs) must be `> 0` (a
@@ -122,12 +130,25 @@ impl TurnConfig {
             if url.trim().is_empty() {
                 anyhow::bail!("turn.urls[{index}] must not be blank");
             }
+            if let Err(reason) = ice_url::check_url_scheme(url, ice_url::TURN_SCHEMES) {
+                anyhow::bail!("turn.urls[{index}] {reason}");
+            }
         }
         for (index, url) in self.stun_urls.iter().enumerate() {
             if url.trim().is_empty() {
                 anyhow::bail!("turn.stun_urls[{index}] must not be blank");
             }
+            if let Err(reason) = ice_url::check_url_scheme(url, ice_url::STUN_SCHEMES) {
+                anyhow::bail!("turn.stun_urls[{index}] {reason}");
+            }
         }
+        ice_url::warn_on_duplicate_urls(
+            "turn",
+            self.urls
+                .iter()
+                .chain(self.stun_urls.iter())
+                .map(String::as_str),
+        );
 
         if !self.enabled {
             return Ok(());
@@ -439,5 +460,129 @@ mod tests {
                 "whitespace-only URL {blank:?} must be rejected"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // URL scheme validation: `urls` must be turn:/turns:, `stun_urls` must be
+    // stun:/stuns: (case-insensitive, non-empty remainder). Like the blank
+    // check, scheme hygiene applies regardless of `enabled`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn turn_urls_accept_turn_schemes_case_insensitively() {
+        for url in [
+            "turn:turn.example.com:3478",
+            "turns:turn.example.com:5349",
+            "TURN:turn.example.com:3478",
+            "TURNS:turn.example.com:5349",
+            "turn:turn.example.com:3478?transport=udp",
+            "turn:[2001:db8::1]:3478",
+        ] {
+            let cfg = TurnConfig {
+                urls: vec![url.to_string()],
+                ..enabled_static()
+            };
+            assert!(cfg.validate().is_ok(), "{url:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn stun_urls_accept_stun_schemes_case_insensitively() {
+        for url in [
+            "stun:stun.l.google.com:19302",
+            "stuns:stun.example.com:5349",
+            "STUN:stun.l.google.com:19302",
+            "STUNS:stun.example.com:5349",
+        ] {
+            let cfg = TurnConfig {
+                enabled: false,
+                stun_urls: vec![url.to_string()],
+                ..TurnConfig::default()
+            };
+            assert!(cfg.validate().is_ok(), "{url:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn turn_urls_reject_non_turn_schemes_with_indexed_message() {
+        // A STUN url in `turn.urls` is also wrong: that list feeds the
+        // credentialed TURN `IceServer` entry.
+        for url in [
+            "http://example.com",
+            "relay:foo",
+            "stun:stun.l.google.com:19302",
+            "turn:",
+            "turn :host",
+            "no-colon-at-all",
+        ] {
+            let cfg = TurnConfig {
+                urls: vec!["turn:turn.example.com:3478".to_string(), url.to_string()],
+                ..enabled_static()
+            };
+            let err = cfg
+                .validate()
+                .expect_err(&format!("{url:?} must be rejected in turn.urls"));
+            assert!(
+                err.to_string().contains("turn.urls[1]"),
+                "error must point at the offending index: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn stun_urls_reject_non_stun_schemes_with_indexed_message() {
+        for url in [
+            "http://example.com",
+            "relay:foo",
+            "turn:turn.example.com:3478",
+            "stun:",
+            "stun :host",
+        ] {
+            let cfg = TurnConfig {
+                enabled: false,
+                stun_urls: vec!["stun:stun.l.google.com:19302".to_string(), url.to_string()],
+                ..TurnConfig::default()
+            };
+            let err = cfg
+                .validate()
+                .expect_err(&format!("{url:?} must be rejected in turn.stun_urls"));
+            assert!(
+                err.to_string().contains("turn.stun_urls[1]"),
+                "error must point at the offending index: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_scheme_rejected_even_when_disabled() {
+        // Scheme hygiene applies regardless of `enabled`, exactly like the
+        // blank-URL check: a disabled block's URLs still reach clients via
+        // `stun_urls`, and a stray malformed `urls` entry should fail fast.
+        let cfg = TurnConfig {
+            enabled: false,
+            urls: vec!["http://example.com".to_string()],
+            ..TurnConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn duplicate_urls_warn_but_validate_ok() {
+        // Exact duplicates (within `urls`, within `stun_urls`, or across the
+        // whole `[turn]` block) only warn via `tracing::warn!` — clients
+        // tolerate repeated entries, so this is a misconfiguration, not an
+        // error (the warn-but-succeed precedent). Asserting Ok pins that.
+        let cfg = TurnConfig {
+            urls: vec![
+                "turn:turn.example.com:3478".to_string(),
+                "turn:turn.example.com:3478".to_string(),
+            ],
+            stun_urls: vec![
+                "stun:stun.l.google.com:19302".to_string(),
+                "stun:stun.l.google.com:19302".to_string(),
+            ],
+            ..enabled_static()
+        };
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -184,6 +184,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS` | `session.game_topology_mappings` | `{}` | JSON object mapping game names to topologies |
 | `SIGNAL_FISH__SESSION__ENABLE_WEBRTC` | `session.enable_webrtc` | `true` | Permit the WebRTC transport for `mesh`/`host` upgrades |
 | `SIGNAL_FISH__SESSION__ENABLE_DIRECT` | `session.enable_direct` | `true` | Permit the Direct (LAN/routable) transport for `host` upgrades |
+| `SIGNAL_FISH__SESSION__ENABLE_ICE_PREGATHER` | `session.enable_ice_pregather` | `true` | Surface the composed ICE list on `RoomJoined`/`Reconnected` for eligible v3 WebRTC clients |
 | `SIGNAL_FISH__SESSION__ICE_SERVERS` | `session.ice_servers` | `[]` | JSON array of static ICE servers advertised in a WebRTC plan |
 | `SIGNAL_FISH__TURN__ENABLED` | `turn.enabled` | `false` | Mint and advertise TURN credentials |
 | `SIGNAL_FISH__TURN__MODE` | `turn.mode` | `static_secret` | TURN credential source (`static_secret`, `managed`) |
@@ -333,6 +334,7 @@ Complete reference of all configuration options with environment variable overri
     "game_topology_mappings": {},
     "enable_webrtc": true,
     "enable_direct": true,
+    "enable_ice_pregather": true,
     "ice_servers": []
   }
 }
@@ -343,12 +345,22 @@ Complete reference of all configuration options with environment variable overri
 - `game_topology_mappings` - Per-game topology overrides, e.g. `{"FastFPS": "mesh", "BoardGame": "host"}`
 - `enable_webrtc` - Permit the WebRTC transport for `mesh`/`host` upgrades (default: true)
 - `enable_direct` - Permit the Direct (LAN/routable) transport for `host` upgrades (default: true)
-- `ice_servers` - Static ICE (STUN/TURN) servers advertised in a WebRTC `SessionPlan`; appended before any TURN-derived entries
+- `enable_ice_pregather` - Surface the composed ICE list (static `ice_servers`, then STUN, then a freshly minted
+  TURN credential) on `RoomJoined`/`Reconnected` so v3 WebRTC-capable clients can pre-gather ICE candidates during
+  the lobby wait (default: true). Only fires for non-relay-desired games in non-finalized rooms; the `SessionPlan`
+  ICE list supersedes it. Set `false` to mint TURN credentials only via `SessionPlan` emission
+  (finalize / late-join / host-failover re-plan) (see [TURN deployment](deployment-turn.md))
+- `ice_servers` - Static ICE (STUN/TURN) servers advertised in a WebRTC `SessionPlan` and in the pre-gather list;
+  appended before any TURN-derived entries. Every URL must use a `stun:`/`stuns:`/`turn:`/`turns:` scheme
+  (validated at startup)
 
 Every upgrade gracefully degrades to the `relay` floor, so a fully-disabled
 deployment keeps working exactly like v2. ICE servers are advertised only when a
 WebRTC topology (`mesh`, or `host` with the WebRTC transport) is actually
-selected; under the default `relay` topology no `SessionPlan` is emitted at all.
+selected — plus, with `enable_ice_pregather`, at join/reconnect time for v3
+WebRTC-capable members of non-relay-desired games still in the lobby; under the
+default `relay` topology no `SessionPlan` is emitted and no ICE is pre-gathered
+at all.
 
 ## TURN / STUN (ICE Credentials) (Protocol v3)
 
@@ -392,9 +404,11 @@ it into the config file.
 
 `turn.stun_urls` defaults to a public Google STUN server
 (`stun:stun.l.google.com:19302`). It is only advertised to clients once a WebRTC
-topology (`mesh`, or `host` with the WebRTC transport) is actually selected — it
-is **never** sent under the default `relay` topology. Operators who want no
-third-party STUN dependency should set `stun_urls: []`.
+topology (`mesh`, or `host` with the WebRTC transport) is actually selected — or,
+with `session.enable_ice_pregather`, when a v3 WebRTC-capable client joins a
+non-relay-desired game's lobby — it is **never** sent under the default `relay`
+topology. Operators who want no third-party STUN dependency should set
+`stun_urls: []`.
 
 ## Validation
 

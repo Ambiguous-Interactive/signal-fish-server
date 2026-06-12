@@ -431,6 +431,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("true"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__ENABLE_ICE_PREGATHER",
+        path: "session.enable_ice_pregather",
+        default: Some("true"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__SESSION__ICE_SERVERS",
         path: "session.ice_servers",
         default: Some("[]"),
@@ -944,6 +949,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         "game_topology_mappings",
         "enable_webrtc",
         "enable_direct",
+        "enable_ice_pregather",
         "ice_servers",
     ] {
         assert!(
@@ -958,6 +964,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
     );
     assert!(config.session.enable_webrtc);
     assert!(config.session.enable_direct);
+    assert!(config.session.enable_ice_pregather);
     assert_eq!(
         value.pointer("/session/default_topology"),
         Some(&serde_json::json!("relay")),
