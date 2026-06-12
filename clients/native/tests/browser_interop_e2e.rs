@@ -1054,35 +1054,152 @@ fn proc_info(pid: u32) -> Option<ProcInfo> {
 }
 
 #[cfg(target_os = "linux")]
-fn is_chromium_process(info: &ProcInfo) -> bool {
-    if matches!(
-        info.comm.as_str(),
-        "headless_shell" | "chrome" | "chromium" | "chromium-browser"
-    ) {
-        return true;
-    }
+fn path_basename(value: &str) -> &str {
+    std::path::Path::new(value)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or(value)
+}
 
-    let executable_name = info
+#[cfg(target_os = "linux")]
+fn argv0_basename(value: &str) -> &str {
+    let argv0 = value.split_whitespace().next().unwrap_or(value);
+    path_basename(argv0)
+}
+
+#[cfg(target_os = "linux")]
+fn proc_identity_summary(info: &ProcInfo) -> String {
+    let exe = info
         .exe
         .as_deref()
-        .and_then(|exe| std::path::Path::new(exe).file_name())
-        .and_then(std::ffi::OsStr::to_str);
-    if matches!(
-        executable_name,
-        Some("headless_shell" | "chrome" | "chromium" | "chromium-browser")
-    ) {
+        .map(path_basename)
+        .unwrap_or("<unavailable>");
+    let argv0 = info
+        .cmdline
+        .first()
+        .map(|arg| argv0_basename(arg))
+        .unwrap_or("<empty>");
+    format!(
+        "pid={} comm={} exe_basename={} argv0_basename={}",
+        info.pid, info.comm, exe, argv0
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_chromium_process_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "chrome"
+            | "chrome-headless"
+            | "chrome-headless-shell"
+            | "chrome_crashpad_handler"
+            | "chromium"
+            | "chromium-browser"
+            | "crashpad_handler"
+            | "headless_shell"
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_chromium_process(info: &ProcInfo) -> bool {
+    if is_chromium_process_name(&info.comm) {
         return true;
     }
 
-    let first_arg = info.cmdline.first();
-    matches!(
-        first_arg.and_then(|arg| std::path::Path::new(arg).file_name()),
-        Some(name)
-            if matches!(
-                name.to_str(),
-                Some("headless_shell" | "chrome" | "chromium" | "chromium-browser")
-            )
-    )
+    if info
+        .exe
+        .as_deref()
+        .map(path_basename)
+        .is_some_and(is_chromium_process_name)
+    {
+        return true;
+    }
+
+    info.cmdline
+        .first()
+        .map(|arg| argv0_basename(arg))
+        .is_some_and(is_chromium_process_name)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_is_chromium_process_recognizes_playwright_headless_shell_names() {
+    fn test_proc(comm: &str, exe: Option<&str>, cmdline: &[&str]) -> ProcInfo {
+        ProcInfo {
+            pid: 1,
+            ppid: 0,
+            comm: comm.to_string(),
+            state: 'S',
+            start_time: "1".to_string(),
+            exe: exe.map(str::to_string),
+            cmdline: cmdline.iter().map(|arg| (*arg).to_string()).collect(),
+        }
+    }
+
+    let cases = [
+        (
+            "current Playwright comm truncated by Linux TASK_COMM_LEN",
+            test_proc("chrome-headless", None, &[]),
+            true,
+        ),
+        (
+            "current Playwright executable name",
+            test_proc(
+                "ignored",
+                Some(
+                    "/home/runner/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell",
+                ),
+                &[],
+            ),
+            true,
+        ),
+        (
+            "executable path containing spaces is not whitespace-split",
+            test_proc(
+                "ignored",
+                Some("/tmp/path with spaces/chrome-headless-shell"),
+                &[],
+            ),
+            true,
+        ),
+        (
+            "Chromium argv0 containing helper flags",
+            test_proc(
+                "ignored",
+                None,
+                &[
+                    "/home/runner/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=zygote --no-sandbox",
+                ],
+            ),
+            true,
+        ),
+        (
+            "legacy Chromium headless shell name",
+            test_proc("headless_shell", None, &[]),
+            true,
+        ),
+        (
+            "detached Node reaper script mentions chrome but argv0 is node",
+            test_proc(
+                "node",
+                Some("/usr/bin/node"),
+                &[
+                    "node",
+                    "-e",
+                    "const [nodePid, chromePid] = process.argv.slice(1).map(Number);",
+                ],
+            ),
+            false,
+        ),
+    ];
+
+    for (description, process, expected) in cases {
+        assert_eq!(
+            is_chromium_process(&process),
+            expected,
+            "{description}: {process:?}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1199,9 +1316,22 @@ async fn wait_for_chromium_descendants(
         if !chromium.is_empty() {
             return chromium;
         }
+        let descendants = live_descendants(root);
+        let match_diagnostics = if descendants.is_empty() {
+            "no live descendants under the CLI".to_string()
+        } else {
+            let summaries = descendants
+                .iter()
+                .map(proc_identity_summary)
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            format!(
+                "live descendants existed, but none matched the Chromium process-name predicate:\n  {summaries}"
+            )
+        };
         assert!(
             std::time::Instant::now() < deadline,
-            "{signal_name}: no live Chromium descendant of the CLI (pid {root})\n{}",
+            "{signal_name}: no recognized Chromium descendant of the CLI (pid {root}); {match_diagnostics}\n{}",
             describe_process_tree(root)
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
