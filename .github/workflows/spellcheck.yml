@@ -55,6 +55,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Check spelling with typos
         uses: crate-ci/typos@v1.47.0

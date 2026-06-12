@@ -61,7 +61,7 @@ escalating to `kill()`, and (2) launches via `launchServer` to obtain the Chromi
 detached **reaper** process that SIGKILLs Chromium if the CLI dies unannounced (guarded against pid reuse by
 re-checking `/proc/<pid>/stat` starttime before killing). Both paths are pinned by the automated
 `browser_cli_signal_teardown_reaps_chromium` cell — SIGTERM must tear Chromium down and exit 143; a SIGKILLed
-CLI's Chromium must be reaped within a bounded window — so CI leaks no `headless_shell` processes even from
+CLI's Chromium must be reaped within a bounded window — so CI leaks no Chromium processes even from
 panicking tests.
 
 ### mDNS posture (the `.local` trap)

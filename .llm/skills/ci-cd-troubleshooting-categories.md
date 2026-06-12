@@ -109,7 +109,7 @@ Before committing workflow changes, verify:
 
 - [ ] MSRV consistent across: `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml`, Dockerfile
 - [ ] Pinned nightly toolchains documented with age and update criteria
-- [ ] All action `uses:` references use explicit version tags (for example `@v6.0.2`)
+- [ ] All action `uses:` references use explicit version tags (for example `@v6.0.3`)
 - [ ] No moving action refs (`@stable`, `@main`, `@master`, floating `@v2`)
 
 ### Dependency Hygiene

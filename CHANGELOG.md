@@ -341,6 +341,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed CI reliability by normalizing all workflow `actions/checkout` pins to `v6.0.3`, making the
+  browser interop Chromium teardown check tolerant of process-name/topology drift with better
+  `/proc` diagnostics, and allowing doc-consistency version checks to read CRLF `.llm/context.md`
+  lines correctly.
 - Fixed the creator's stored `is_authority` flag so it matches `authority_player` in rooms created
   with `supports_authority: false`. `create_room` previously seeded the creator's `PlayerInfo` with
   `is_authority: true` unconditionally while correctly leaving `authority_player` unset, so the two

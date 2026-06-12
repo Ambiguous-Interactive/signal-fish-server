@@ -3560,7 +3560,7 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
                     violations.push(format!(
                         "{filename}:{line_num}: Malformed remote action reference in uses: {uses_value}\n  \
                          Reason: {reason}\n  \
-                         Expected format: owner/repo@ref (for example actions/checkout@v6.0.2)."
+                         Expected format: owner/repo@ref (for example actions/checkout@v6.0.3)."
                     ));
                     malformed_remote_refs += 1;
                     file_has_violation = true;
@@ -3727,22 +3727,22 @@ fn test_cargo_deny_action_minimum_version() {
 fn test_action_reference_parsing_and_validation_data_driven() {
     let parse_cases = [
         (
-            "uses: actions/checkout@v6.0.2",
-            Some(("actions/checkout", "v6.0.2")),
+            "uses: actions/checkout@v6.0.3",
+            Some(("actions/checkout", "v6.0.3")),
         ),
         (
-            "- uses: actions/checkout@v6.0.2",
-            Some(("actions/checkout", "v6.0.2")),
+            "- uses: actions/checkout@v6.0.3",
+            Some(("actions/checkout", "v6.0.3")),
         ),
         (
-            "uses: 'actions/checkout@v6.0.2'",
-            Some(("actions/checkout", "v6.0.2")),
+            "uses: 'actions/checkout@v6.0.3'",
+            Some(("actions/checkout", "v6.0.3")),
         ),
         ("uses: ./.github/actions/custom", None),
         ("- uses: docker://alpine:3.20", None),
         ("uses: actions/checkout", None),
         ("uses: actions/checkout@", None),
-        ("uses: checkout@v6.0.2", None),
+        ("uses: checkout@v6.0.3", None),
         ("run: echo hello", None),
     ];
 
@@ -3753,10 +3753,10 @@ fn test_action_reference_parsing_and_validation_data_driven() {
 
     let classification_cases = [
         (
-            "uses: actions/checkout@v6.0.2",
+            "uses: actions/checkout@v6.0.3",
             ActionReferenceParseResult::Remote {
                 action_name: "actions/checkout",
-                action_ref: "v6.0.2",
+                action_ref: "v6.0.3",
             },
         ),
         (
@@ -3780,7 +3780,7 @@ fn test_action_reference_parsing_and_validation_data_driven() {
             },
         ),
         (
-            "uses: checkout@v6.0.2",
+            "uses: checkout@v6.0.3",
             ActionReferenceParseResult::MalformedRemote {
                 reason: "remote action must use owner/repo@ref syntax",
             },
@@ -19961,5 +19961,88 @@ fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
         ci_content.contains("Validate CI/devcontainer tool parity")
             && ci_content.contains("bash scripts/check-tooling-parity.sh"),
         "ci.yml must run scripts/check-tooling-parity.sh so parity drift fails in CI."
+    );
+}
+
+#[test]
+fn test_devcontainer_docker_feature_avoids_moby_repo_path() {
+    let root = repo_root();
+    let devcontainer_json = read_file(&root.join(".devcontainer/devcontainer.json"));
+
+    assert!(
+        devcontainer_json.contains("ghcr.io/devcontainers/features/docker-outside-of-docker:1"),
+        ".devcontainer/devcontainer.json must keep docker-outside-of-docker configured."
+    );
+
+    assert!(
+        devcontainer_json.contains("\"moby\": false"),
+        ".devcontainer/devcontainer.json must set docker-outside-of-docker moby=false\n\
+         to avoid the Microsoft package feed path that has caused build-time DNS failures."
+    );
+}
+
+#[test]
+fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
+    let root = repo_root();
+    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+
+    let required_fragments = [
+        "cargo install --locked cargo-binstall",
+        "cargo binstall --no-confirm --locked",
+        "cargo-deny",
+        "cargo-tarpaulin",
+        "cargo-watch",
+        "cargo-expand",
+        "cargo-llvm-cov",
+        "cargo-nextest",
+        "cargo-deny --version",
+        "cargo-tarpaulin --version",
+        "cargo-watch --version",
+        "cargo-expand --version",
+        "cargo llvm-cov --version",
+        "cargo-nextest --version",
+    ];
+
+    for fragment in required_fragments {
+        assert!(
+            dockerfile_content.contains(fragment),
+            ".devcontainer/Dockerfile must include fast heavy-tool install fragment: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn test_post_create_verifies_required_rust_tools() {
+    let root = repo_root();
+    let post_create_content = read_file(&root.join(".devcontainer/post-create.sh"));
+
+    let required_fragments = [
+        "verify_required_rust_tools",
+        "cargo-deny --version",
+        "cargo-nextest --version",
+        "cargo llvm-cov --version",
+        "taplo --version",
+    ];
+
+    for fragment in required_fragments {
+        assert!(
+            post_create_content.contains(fragment),
+            ".devcontainer/post-create.sh must verify required Rust tooling fragment: {fragment}"
+        );
+    }
+}
+
+#[test]
+fn test_post_create_uses_opt_in_cargo_check_warmup() {
+    let root = repo_root();
+    let post_create_content = read_file(&root.join(".devcontainer/post-create.sh"));
+
+    assert!(
+        post_create_content.contains("SIGNAL_FISH_WARM_CARGO_CHECK"),
+        ".devcontainer/post-create.sh must gate cargo check warm-up behind SIGNAL_FISH_WARM_CARGO_CHECK."
+    );
+    assert!(
+        post_create_content.contains("Skipping cargo check warm-up"),
+        ".devcontainer/post-create.sh should log when warm-up is skipped by default."
     );
 }

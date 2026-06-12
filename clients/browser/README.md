@@ -56,7 +56,7 @@ SIGKILLs Chromium if the CLI itself is SIGKILLed (the interop harness's kill-on-
 does NOT exit on its own when its parent dies). The reaper re-checks `/proc/<pid>/stat` starttime before
 killing, so a recycled pid is never signalled. Both halves are pinned by the automated
 `browser_cli_signal_teardown_reaps_chromium` interop cell (SIGTERM → graceful teardown + exit 143;
-SIGKILL → the reaper clears every `headless_shell` descendant within a bounded window).
+SIGKILL → the reaper clears every Chromium descendant within a bounded window).
 
 ## CLI reference
 
@@ -115,7 +115,7 @@ The browser cells live in
 | mDNS `.local` obfuscation trap (see above) | `mesh_n3_browser_mdns_obfuscation` |
 | Pure-v2 browser on `/v2/ws` floors a mesh-preferring room (zero session traffic, full relay matrix) | `mixed_v2_browser_v3_native_relay_floor` |
 | Mid-handshake server close → exactly one `error` (real close reason) + prompt exit `3` | `browser_cli_mid_handshake_close_single_error_exit_3` |
-| SIGTERM (graceful teardown, exit 143) and SIGKILL (detached reaper) leave zero `headless_shell` survivors | `browser_cli_signal_teardown_reaps_chromium` |
+| SIGTERM (graceful teardown, exit 143) and SIGKILL (detached reaper) leave zero Chromium survivors | `browser_cli_signal_teardown_reaps_chromium` |
 
 ## Dependency policy
 
@@ -132,5 +132,5 @@ runner script's `console.log` grep (stdout purity); an eslint toolchain would ou
 - **Chromium fails to launch:** install the headless shell
   (`node_modules/.bin/playwright-core install chromium-headless-shell`; on bare CI runners add `--with-deps`
   for the apt libraries).
-- **Leftover `headless_shell` processes:** should never happen (bounded teardown + the reaper); if observed,
+- **Leftover Chromium processes:** should never happen (bounded teardown + the reaper); if observed,
   capture how the CLI exited — that is a bug in this client, not something to `pkill` away.

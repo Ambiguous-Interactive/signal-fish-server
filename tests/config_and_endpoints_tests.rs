@@ -1198,6 +1198,7 @@ fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
         "SIGNAL_FISH_CONFIG_PATH",
         "SIGNAL_FISH_PRODUCTION",
         "SIGNAL_FISH_HOOK_PROFILE",
+        "SIGNAL_FISH_WARM_CARGO_CHECK",
     ];
 
     let mut violations = Vec::new();

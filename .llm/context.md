@@ -112,6 +112,13 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   `.devcontainer/Dockerfile` in the same PR.
 - Keep Docker CLI support enabled in `.devcontainer/devcontainer.json` for local
   Docker CI parity.
+- Keep `docker-outside-of-docker` configured with `"moby": false` in
+  `.devcontainer/devcontainer.json` unless a tested replacement is introduced.
+- Keep heavy cargo tool bootstrap in `.devcontainer/Dockerfile` on the
+  `cargo-binstall` path (`cargo install cargo-binstall` + `cargo binstall`) to
+  avoid slow no-cache rebuild regressions.
+- Keep `.devcontainer/post-create.sh` cargo warm-up opt-in via
+  `SIGNAL_FISH_WARM_CARGO_CHECK`; default path should stay fast.
 - Run `bash scripts/check-tooling-parity.sh` after tooling changes.
 
 ---

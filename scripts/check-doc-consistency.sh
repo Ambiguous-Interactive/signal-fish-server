@@ -192,7 +192,8 @@ if [ -n "$CARGO_VERSION" ]; then
         action_error "Missing required file: .llm/context.md"
     else
         expected_context_line="- **Version:** $CARGO_VERSION"
-        if grep -Fqx -- "$expected_context_line" .llm/context.md; then
+        context_without_cr=$(tr -d '\r' < .llm/context.md)
+        if grep -Fqx -- "$expected_context_line" <<< "$context_without_cr"; then
             action_ok ".llm/context.md version line matches Cargo.toml"
         else
             action_error ".llm/context.md must contain exact line: $expected_context_line"

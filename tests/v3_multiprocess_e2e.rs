@@ -376,7 +376,7 @@ async fn expect_socket_closed_within(ws: &mut WsStream, timeout: Duration, conte
             // Transport error (e.g. reset without close handshake): observed.
             Ok(Some(Err(_error))) => return,
             // A buffered protocol frame means a ServerMessage was pending —
-            // the test mis-sequenced its reads.
+            // the test sequenced its reads incorrectly.
             Ok(Some(Ok(frame @ (Message::Text(_) | Message::Binary(_))))) => {
                 panic!(
                     "{context}: no ServerMessage may be pending while awaiting \

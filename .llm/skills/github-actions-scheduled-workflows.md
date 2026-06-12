@@ -114,7 +114,7 @@ jobs:
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
 
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2.0.15
@@ -149,7 +149,7 @@ jobs:
     # No `if:` guard — runs on ALL triggers including schedule
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6.0.3
       - uses: EmbarkStudios/cargo-deny-action@v2.0.15
 
   lint:

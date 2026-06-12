@@ -46,7 +46,7 @@ jobs:
     name: Shellcheck Workflow Scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6.0.3
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Validate inline shell scripts

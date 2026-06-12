@@ -107,7 +107,7 @@ cargo-fuzz here).
 | TLC              | Contract violations across any event interleaving in the bounded model | Bugs outside the model boundary (rate limits, ICE minting, the actual Rust); behavior beyond the player/churn bounds |
 | proptest invariants | Logic bugs in the real selection/election/peer-list/TURN code      | Orderings/interleavings (single-call properties); unsampled inputs   |
 | proptest wire    | Encode/decode fidelity drift; optional-field wire regressions       | Semantic bugs above the wire; float exactness on the JSON path (documented bounded drift) |
-| fuzz hardening   | Decoder panics/overflows on hostile input                           | Logical mis-parses that still return `Ok`; coverage-guided deep paths |
+| fuzz hardening   | Decoder panics/overflows on hostile input                           | Semantically wrong parses that still return `Ok`; coverage-guided deep paths |
 | e2e / golden     | Real end-to-end wire conformance; frozen-v2 byte drift              | Exhaustive interleavings; rare input shapes                          |
 
 The boundary TLC intentionally does not model (rate limits, opaque-payload relay,

@@ -160,6 +160,35 @@ install_codex_cli() {
     codex --version
 }
 
+verify_required_rust_tools() {
+    local required_tools=(
+        cargo
+        cargo-deny
+        cargo-tarpaulin
+        cargo-watch
+        cargo-expand
+        cargo-llvm-cov
+        cargo-nextest
+        taplo
+    )
+
+    echo "[setup] Verifying required Rust tooling..."
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "[setup] ERROR: required tool '$tool' is missing from PATH."
+            echo "[setup] Rebuild the dev container so the tooling image layer is refreshed."
+            exit 1
+        fi
+    done
+
+    # Ensure key binaries execute successfully, not just exist on PATH.
+    cargo-deny --version >/dev/null
+    cargo-nextest --version >/dev/null
+    cargo llvm-cov --version >/dev/null
+    taplo --version >/dev/null
+    echo "[setup] Rust tooling verified."
+}
+
 make_project_scripts_executable() {
     local chmod_log
     local chmod_probe
@@ -201,15 +230,20 @@ make_project_scripts_executable() {
 }
 
 install_codex_cli
+verify_required_rust_tools
 
 # Pre-download all dependencies
 echo "[setup] Fetching cargo dependencies..."
 cargo fetch
 echo "[setup] Dependencies fetched."
 
-echo "[setup] Pre-building (cargo check --all-features)..."
-cargo check --all-features 2>&1 || echo "[setup] Warning: cargo check failed, continuing..."
-echo "[setup] Build cache warmed."
+if [ "${SIGNAL_FISH_WARM_CARGO_CHECK:-0}" = "1" ]; then
+    echo "[setup] Pre-building (cargo check --all-features)..."
+    cargo check --all-features 2>&1 || echo "[setup] Warning: cargo check failed, continuing..."
+    echo "[setup] Build cache warmed."
+else
+    echo "[setup] Skipping cargo check warm-up (set SIGNAL_FISH_WARM_CARGO_CHECK=1 to enable)."
+fi
 
 make_project_scripts_executable
 

@@ -292,6 +292,17 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_contain: vec![".llm/context.md must contain exact line"],
             must_not_contain: vec![],
         },
+        ScriptCase {
+            name: "passes_context_version_check_with_crlf_line_endings",
+            overrides: vec![(
+                ".llm/context.md",
+                "# Context\r\n\r\n- **Version:** 0.1.1\r\n\r\n[v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\r\n[v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\r\n",
+            )],
+            args: vec![],
+            expected_exit: 0,
+            must_contain: vec![".llm/context.md version line matches Cargo.toml"],
+            must_not_contain: vec![".llm/context.md must contain exact line"],
+        },
         // ---------------------------------------------------------------
         // Changelog format checks (gate 2)
         // ---------------------------------------------------------------

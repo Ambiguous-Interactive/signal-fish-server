@@ -60,7 +60,7 @@
 //!    outlives-the-CLI guarantee, both halves: a SIGTERM'd CLI tears Chromium
 //!    down itself and exits 143; a SIGKILL'd CLI (this harness's kill-on-drop
 //!    path, untrappable in-process) is covered by the detached reaper. Either
-//!    way zero `headless_shell` descendants survive a bounded window.
+//!    way zero Chromium descendants survive a bounded window.
 //!
 //! Scenario assertions are copies of the native suite's
 //! (`tests/interop_e2e.rs`) — deliberately NOT shared, so this feature-gated
@@ -1003,29 +1003,92 @@ async fn browser_cli_mid_handshake_close_single_error_exit_3() {
     stub.await.expect("stub server task");
 }
 
-/// One `/proc/<pid>/stat` row: `(comm, state, ppid)`. `None` once the pid is
-/// gone (or on a non-Linux /proc-less box, where the caller never runs).
+#[derive(Clone, Debug)]
 #[cfg(target_os = "linux")]
-fn proc_stat(pid: u32) -> Option<(String, char, u32)> {
+struct ProcInfo {
+    pid: u32,
+    ppid: u32,
+    comm: String,
+    state: char,
+    start_time: String,
+    exe: Option<String>,
+    cmdline: Vec<String>,
+}
+
+/// One live `/proc/<pid>` row. `None` once the pid is gone (or on a non-Linux
+/// /proc-less box, where the caller never runs).
+#[cfg(target_os = "linux")]
+fn proc_info(pid: u32) -> Option<ProcInfo> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // comm sits in parentheses and may itself contain spaces/parens; parse
     // around the LAST closing paren.
     let open = stat.find('(')?;
     let close = stat.rfind(')')?;
     let comm = stat.get(open + 1..close)?.to_string();
-    let mut rest = stat.get(close + 2..)?.split(' ');
-    let state = rest.next()?.chars().next()?;
-    let ppid = rest.next()?.parse().ok()?;
-    Some((comm, state, ppid))
+    let fields: Vec<&str> = stat.get(close + 2..)?.split_whitespace().collect();
+    let state = fields.first()?.chars().next()?;
+    let ppid = fields.get(1)?.parse().ok()?;
+    let start_time = fields.get(19)?.to_string();
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|path| path.display().to_string());
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .map(|bytes| {
+            bytes
+                .split(|byte| *byte == b'\0')
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ProcInfo {
+        pid,
+        ppid,
+        comm,
+        state,
+        start_time,
+        exe,
+        cmdline,
+    })
 }
 
-/// Every live (non-zombie) `headless_shell` descendant of `root`, via one
-/// /proc scan (scoped to THIS process tree — concurrent browsers from other
-/// suites are invisible here).
 #[cfg(target_os = "linux")]
-fn headless_shell_descendants(root: u32) -> Vec<u32> {
+fn is_chromium_process(info: &ProcInfo) -> bool {
+    if matches!(
+        info.comm.as_str(),
+        "headless_shell" | "chrome" | "chromium" | "chromium-browser"
+    ) {
+        return true;
+    }
+
+    let executable_name = info
+        .exe
+        .as_deref()
+        .and_then(|exe| std::path::Path::new(exe).file_name())
+        .and_then(std::ffi::OsStr::to_str);
+    if matches!(
+        executable_name,
+        Some("headless_shell" | "chrome" | "chromium" | "chromium-browser")
+    ) {
+        return true;
+    }
+
+    let first_arg = info.cmdline.first();
+    matches!(
+        first_arg.and_then(|arg| std::path::Path::new(arg).file_name()),
+        Some(name)
+            if matches!(
+                name.to_str(),
+                Some("headless_shell" | "chrome" | "chromium" | "chromium-browser")
+            )
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn live_descendants(root: u32) -> Vec<ProcInfo> {
     let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-    let mut by_pid: BTreeMap<u32, (String, char)> = BTreeMap::new();
+    let mut by_pid: BTreeMap<u32, ProcInfo> = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -1037,12 +1100,13 @@ fn headless_shell_descendants(root: u32) -> Vec<u32> {
         else {
             continue;
         };
-        let Some((comm, state, ppid)) = proc_stat(pid) else {
+        let Some(info) = proc_info(pid) else {
             continue;
         };
-        children.entry(ppid).or_default().push(pid);
-        by_pid.insert(pid, (comm, state));
+        children.entry(info.ppid).or_default().push(pid);
+        by_pid.insert(pid, info);
     }
+
     let mut found = Vec::new();
     let mut queue = vec![root];
     while let Some(pid) = queue.pop() {
@@ -1052,24 +1116,109 @@ fn headless_shell_descendants(root: u32) -> Vec<u32> {
         if pid == root {
             continue;
         }
-        if let Some((comm, state)) = by_pid.get(&pid) {
-            if comm == "headless_shell" && *state != 'Z' {
-                found.push(pid);
+        if let Some(info) = by_pid.get(&pid) {
+            if info.state != 'Z' {
+                found.push(info.clone());
             }
         }
     }
-    found.sort_unstable();
+    found.sort_unstable_by_key(|info| info.pid);
     found
 }
 
-/// True while `pid` is still a live (non-zombie) `headless_shell` process;
-/// a recycled pid running anything else reads as gone.
 #[cfg(target_os = "linux")]
-fn headless_shell_alive(pid: u32) -> bool {
-    matches!(
-        proc_stat(pid),
-        Some((comm, state, _ppid)) if comm == "headless_shell" && state != 'Z'
+fn describe_proc(info: &ProcInfo) -> String {
+    let exe = info.exe.as_deref().unwrap_or("<unavailable>");
+    let cmdline = if info.cmdline.is_empty() {
+        "<empty>".to_string()
+    } else {
+        let rendered = info
+            .cmdline
+            .iter()
+            .map(|arg| format!("{arg:?}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if rendered.chars().count() > 240 {
+            let prefix: String = rendered.chars().take(240).collect();
+            format!("{prefix}...")
+        } else {
+            rendered
+        }
+    };
+    format!(
+        "pid={} ppid={} state={} comm={} exe={} cmdline={}",
+        info.pid, info.ppid, info.state, info.comm, exe, cmdline
     )
+}
+
+#[cfg(target_os = "linux")]
+fn describe_process_tree(root: u32) -> String {
+    let Some(root_info) = proc_info(root) else {
+        return format!("process tree for pid {root}: root process is gone");
+    };
+    let descendants = live_descendants(root);
+    if descendants.is_empty() {
+        return format!(
+            "process tree for pid {root}:\n  root: {}\n  descendants: <none>",
+            describe_proc(&root_info)
+        );
+    }
+
+    let rows: Vec<String> = descendants
+        .iter()
+        .map(|info| format!("  {}", describe_proc(info)))
+        .collect();
+    format!(
+        "process tree for pid {root}:\n  root: {}\n  descendants:\n{}",
+        describe_proc(&root_info),
+        rows.join("\n")
+    )
+}
+
+/// Every live (non-zombie) Chromium descendant of `root`, via one /proc scan
+/// scoped to THIS process tree. Matching uses process identity, not only the
+/// Linux `comm` field, because Playwright/Chromium launch names can drift
+/// across browser package revisions.
+#[cfg(target_os = "linux")]
+fn chromium_descendants(root: u32) -> Vec<ProcInfo> {
+    live_descendants(root)
+        .into_iter()
+        .filter(is_chromium_process)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_chromium_descendants(
+    root: u32,
+    signal_name: &str,
+    timeout: Duration,
+) -> Vec<ProcInfo> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let chromium = chromium_descendants(root);
+        if !chromium.is_empty() {
+            return chromium;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{signal_name}: no live Chromium descendant of the CLI (pid {root})\n{}",
+            describe_process_tree(root)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// True while the same original Chromium process is still live; a recycled pid
+/// reads as gone.
+#[cfg(target_os = "linux")]
+fn chromium_process_alive(process: &ProcInfo) -> bool {
+    if let Some(current) = proc_info(process.pid) {
+        if current.state == 'Z' || current.start_time != process.start_time {
+            return false;
+        }
+        return is_chromium_process(&current);
+    }
+    false
 }
 
 /// The Chromium-never-outlives-the-CLI guarantee, both halves (advertised in
@@ -1102,11 +1251,8 @@ async fn browser_cli_signal_teardown_reaps_chromium() {
         // Any page event proves Chromium is fully up: the page runs inside it.
         client.await_event("room_joined", EVENT_TIMEOUT).await;
         let node_pid = client.pid();
-        let chromium = headless_shell_descendants(node_pid);
-        assert!(
-            !chromium.is_empty(),
-            "{signal_name}: no live headless_shell descendant of the CLI (pid {node_pid})"
-        );
+        let chromium =
+            wait_for_chromium_descendants(node_pid, signal_name, Duration::from_secs(5)).await;
 
         if sigkill {
             // Dropping the guard IS the harness kill-on-drop SIGKILL under
@@ -1127,17 +1273,19 @@ async fn browser_cli_signal_teardown_reaps_chromium() {
         // close-then-kill; the reaper polls every 500 ms. 15 s absorbs CI lag.
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
-            let survivors: Vec<u32> = chromium
+            let survivors: Vec<String> = chromium
                 .iter()
-                .copied()
-                .filter(|pid| headless_shell_alive(*pid))
+                .filter(|process| chromium_process_alive(process))
+                .map(describe_proc)
                 .collect();
             if survivors.is_empty() {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "{signal_name}: headless_shell pids {survivors:?} outlived the CLI"
+                "{signal_name}: Chromium processes outlived the CLI:\n{}\n{}",
+                survivors.join("\n"),
+                describe_process_tree(node_pid)
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }

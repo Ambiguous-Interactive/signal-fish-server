@@ -4,7 +4,9 @@
 # Verifies:
 #   1. doc-validation workflow tool versions match devcontainer Dockerfile ARGs.
 #   2. Devcontainer installs required modern tooling (yq, taplo, fd).
-#   3. Devcontainer feature set includes Docker CLI support.
+#   3. Devcontainer feature set includes Docker CLI support with resilient settings.
+#   4. Devcontainer uses cargo-binstall for heavy cargo tools to keep rebuilds fast.
+#   5. Post-create keeps required Rust tool verification and opt-in warm-up behavior.
 #
 # Usage:
 #   ./scripts/check-tooling-parity.sh
@@ -55,6 +57,7 @@ cd "$REPO_ROOT"
 DOC_VALIDATION_WORKFLOW=".github/workflows/doc-validation.yml"
 DEVCONTAINER_DOCKERFILE=".devcontainer/Dockerfile"
 DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
+DEVCONTAINER_POST_CREATE=".devcontainer/post-create.sh"
 
 ERRORS=0
 
@@ -116,8 +119,11 @@ extract_docker_arg_value() {
 
 assert_equal() {
     local label="$1"
-    local expected="$2"
-    local actual="$3"
+    local expected
+    local actual
+
+    expected=$(printf '%s' "$2" | tr -d '\r')
+    actual=$(printf '%s' "$3" | tr -d '\r')
 
     if [ "$expected" = "$actual" ]; then
         ok "$label matches: $actual"
@@ -143,6 +149,7 @@ info "Validating CI/devcontainer tooling parity"
 require_file "$DOC_VALIDATION_WORKFLOW"
 require_file "$DEVCONTAINER_DOCKERFILE"
 require_file "$DEVCONTAINER_JSON"
+require_file "$DEVCONTAINER_POST_CREATE"
 
 WORKFLOW_YQ_VERSION=$(extract_workflow_env_value "YQ_VERSION" "$DOC_VALIDATION_WORKFLOW")
 DOCKERFILE_YQ_VERSION=$(extract_docker_arg_value "YQ_VERSION" "$DEVCONTAINER_DOCKERFILE")
@@ -173,10 +180,21 @@ assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "fd-find" "Devcontainer insta
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ln -sf /usr/bin/fdfind /usr/local/bin/fd" "Devcontainer maps fdfind to fd"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'yq_linux_${yq_arch}' "Devcontainer installs yq from pinned release binaries"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION"' "Devcontainer installs pinned taplo-cli"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo install --locked cargo-binstall" "Devcontainer installs cargo-binstall"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo binstall --no-confirm --locked" "Devcontainer uses cargo-binstall for heavy cargo tools"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-deny --version" "Devcontainer smoke checks cargo-deny"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-tarpaulin --version" "Devcontainer smoke checks cargo-tarpaulin"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-watch --version" "Devcontainer smoke checks cargo-watch"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-expand --version" "Devcontainer smoke checks cargo-expand"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo llvm-cov --version" "Devcontainer smoke checks cargo-llvm-cov"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-nextest --version" "Devcontainer smoke checks cargo-nextest"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "fd --version;" "Devcontainer smoke checks fd"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "yq --version;" "Devcontainer smoke checks yq"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "taplo --version" "Devcontainer smoke checks taplo"
 assert_contains_literal "$DEVCONTAINER_JSON" "ghcr.io/devcontainers/features/docker-outside-of-docker:1" "Devcontainer enables Docker CLI feature"
+assert_contains_literal "$DEVCONTAINER_JSON" '"moby": false' "Devcontainer uses Docker CE path for docker-outside-of-docker reliability"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "verify_required_rust_tools" "Post-create verifies required Rust tools"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "SIGNAL_FISH_WARM_CARGO_CHECK" "Post-create uses opt-in cargo warm-up"
 
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
