@@ -254,7 +254,7 @@ scripts such as `scripts/check-links-fast.sh --staged` and
 link-check:
   runs-on: ubuntu-latest
   steps:
-    - uses: actions/checkout@v6.0.2
+    - uses: actions/checkout@v6.0.3
     - uses: lycheeverse/lychee-action@v2.7.0
       with:
         args: --verbose './**/*.md' --config .lychee.toml

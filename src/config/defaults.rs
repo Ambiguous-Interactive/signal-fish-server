@@ -210,6 +210,13 @@ pub const fn default_max_message_size() -> usize {
     65536 // 64KB
 }
 
+/// Default cap on the serialized size of a v3 `Signal` payload (16 KiB):
+/// generously above any real SDP/ICE payload, well under the 64 KiB
+/// `max_message_size` frame cap.
+pub const fn default_max_signal_bytes() -> usize {
+    16384 // 16KB
+}
+
 pub const fn default_max_connections_per_ip() -> usize {
     10
 }
@@ -379,4 +386,15 @@ pub const fn default_batch_interval_ms() -> u64 {
 
 pub const fn default_auth_timeout_secs() -> u64 {
     10 // Default auth timeout: 10 seconds
+}
+
+/// Default post-authentication idle timeout (5 minutes; `0` disables).
+///
+/// Conservative by construction: the existing server-side activity reaper
+/// (`server.ping_timeout`, default 30s) already unregisters any client that
+/// stays silent (no `Ping`) for ~30s, so every healthy client heartbeats far
+/// more often than this socket-level timeout. 300s therefore only closes
+/// zombie sockets whose server-side state was already reaped.
+pub const fn default_idle_timeout_secs() -> u64 {
+    300
 }

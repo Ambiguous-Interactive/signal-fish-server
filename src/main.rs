@@ -40,9 +40,11 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration from config.json if present; otherwise use code defaults.
     let cfg = Arc::new(config::load());
 
-    // Handle --print-config: output the loaded configuration as JSON
+    // Handle --print-config: output the loaded configuration as JSON. Secrets
+    // (TURN secrets, metrics/app auth tokens, ICE credentials) are redacted so
+    // credential material never reaches stdout — see Config::redacted_for_display.
     if cli.print_config {
-        let json = serde_json::to_string_pretty(&*cfg)
+        let json = serde_json::to_string_pretty(&cfg.redacted_for_display())
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
         println!("{json}");
         return Ok(());
@@ -86,6 +88,21 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging from config.
     logging::init_with_config(&cfg.logging);
 
+    // PLAN Appendix I: DTLS fingerprints travel inside the SDP that `Signal`
+    // relays, so a server actively brokering WebRTC (TURN enabled) should have
+    // its signaling terminated over wss://. Reverse-proxy TLS termination is
+    // the common deployment, so this is a once-at-startup warning, never a
+    // hard error. Emitted here (after logging init) so it actually reaches the
+    // configured tracing subscriber.
+    if config::should_warn_missing_signaling_tls(&cfg) {
+        tracing::warn!(
+            "TURN is enabled but built-in TLS is disabled: serve signaling over wss:// in \
+             production (enable security.transport.tls, or terminate TLS at a reverse proxy). \
+             DTLS fingerprints travel in SDP, so plaintext ws:// signaling allows \
+             man-in-the-middle of the WebRTC peer connections."
+        );
+    }
+
     let port: u16 = cfg.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
@@ -107,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         empty_room_timeout: tokio::time::Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: tokio::time::Duration::from_secs(cfg.server.inactive_room_timeout),
         max_message_size: cfg.security.max_message_size,
+        max_signal_bytes: cfg.security.max_signal_bytes,
         max_connections_per_ip: cfg.security.max_connections_per_ip,
         require_metrics_auth: cfg.security.require_metrics_auth,
         metrics_auth_token: cfg.security.metrics_auth_token.clone(),

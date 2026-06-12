@@ -505,6 +505,23 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             if all_ready {
                 let finalized_members = room_players;
 
+                // Persist the finalized lobby state BEFORE broadcasting, still
+                // under the room-operation lock, so storage and clients agree
+                // the session is live. Without this write the stored room
+                // stays `Lobby` forever: a post-game departure would wrongly
+                // regress it to `Waiting` and replay the whole lobby cycle,
+                // and every `Finalized`-gated path (v3 late-join/reconnect
+                // pairing, departure re-planning) would be unreachable.
+                // Best-effort: a persist failure must not abort the v2
+                // GameStarting broadcast (the relay floor still works).
+                if let Err(err) = self.database.finalize_room_game(room_id).await {
+                    tracing::warn!(
+                        %room_id,
+                        error = %err,
+                        "Failed to persist finalized lobby state"
+                    );
+                }
+
                 // Preserve the legacy GameStarting metadata; v3 transport proof
                 // comes from negotiation and TransportStatus, not this payload.
                 let peer_connections =

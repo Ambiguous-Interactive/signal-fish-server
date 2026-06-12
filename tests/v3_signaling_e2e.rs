@@ -49,7 +49,12 @@ async fn start_auth_server() -> std::net::SocketAddr {
 }
 
 async fn start_auth_server_with_handle() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
-    let mut server_config: ServerConfig = test_server_config();
+    start_auth_server_with_config(test_server_config()).await
+}
+
+async fn start_auth_server_with_config(
+    mut server_config: ServerConfig,
+) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
     server_config.auth_enabled = true;
 
     let mut protocol_config = test_protocol_config();
@@ -332,4 +337,58 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
         "post-reconnect signal must be routed under the restored player id"
     );
     assert_eq!(relayed_signal, ice);
+}
+
+#[tokio::test]
+async fn oversized_signal_is_rejected_over_the_wire_and_small_signal_still_relays() {
+    // Cap the serialized `signal` payload at 256 bytes (`security.max_signal_bytes`).
+    let mut server_config = test_server_config();
+    server_config.max_signal_bytes = 256;
+    let (addr, _server) = start_auth_server_with_config(server_config).await;
+
+    let mut peer1 = connect(addr).await;
+    authenticate_v3(&mut peer1).await;
+    let (_room_id, room_code, _peer1_id) = join_room(&mut peer1, None, "PeerOne").await;
+
+    let mut peer2 = connect(addr).await;
+    authenticate_v3(&mut peer2).await;
+    let (_room_id, _code, peer2_id) = join_room(&mut peer2, Some(room_code), "PeerTwo").await;
+
+    // Over the cap (serialized length > 256): the sender gets SIGNAL_TOO_LARGE
+    // and the target receives nothing.
+    let oversized = json!({ "Offer": "x".repeat(512) });
+    send(
+        &mut peer1,
+        &ClientMessage::Signal {
+            to: peer2_id,
+            signal: oversized,
+        },
+    )
+    .await;
+    next_matching(&mut peer1, "oversized signal rejection", |msg| match msg {
+        ServerMessage::Error {
+            error_code: Some(signal_fish_server::protocol::ErrorCode::SignalTooLarge),
+            ..
+        } => Some(()),
+        ServerMessage::Signal { .. } => panic!("oversized signal must not be relayed"),
+        _ => None,
+    })
+    .await;
+
+    // A small signal on the same connection still relays: the rejection did not
+    // poison the connection or consume the valid-signal budget.
+    let small = json!({ "IceCandidate": "candidate:ok" });
+    send(
+        &mut peer1,
+        &ClientMessage::Signal {
+            to: peer2_id,
+            signal: small.clone(),
+        },
+    )
+    .await;
+    let (_from, relayed) = next_signal(&mut peer2).await;
+    assert_eq!(
+        relayed, small,
+        "small signal must relay after a size rejection"
+    );
 }

@@ -52,7 +52,8 @@ enums; new fields are added with `#[serde(skip_serializing_if = "Option::is_none
 and `#[serde(default)]` so existing v2 wire bytes are unchanged.
 
 - The server **must not** emit a v3-only message (`Signal`, `NewPeer`,
-  `SessionPlan`) to a connection that did not negotiate v3.
+  `SessionPlan`, `PeerTransportStatus`) to a connection that did not negotiate
+  v3.
 - Negotiation reuses the existing `game_data_format` mechanism: `Authenticate`
   gains optional `protocol_version`, `supported_transports`, and
   `supported_topologies`; the server computes

@@ -273,7 +273,7 @@ jobs:
     name: Configuration Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6.0.3
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1

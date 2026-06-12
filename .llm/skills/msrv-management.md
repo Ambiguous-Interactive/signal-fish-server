@@ -19,7 +19,8 @@ See also:
 ## TL;DR
 
 - **MSRV is defined ONCE** in `Cargo.toml` (`rust-version` field) — this is the single source of truth
-- **All other files must match**: `rust-toolchain.toml`, `clippy.toml`, `Dockerfile`, `.devcontainer/Dockerfile`
+- **All other files must match**: `rust-toolchain.toml`, `clippy.toml`, `Dockerfile`,
+  `clients/native/Cargo.toml` (the reference client pins the root MSRV), `.devcontainer/Dockerfile`
 - **CI enforces consistency** with a dedicated MSRV verification job
 - **Before updating MSRV**: Check all dependencies support the new version (`cargo msrv`)
 - **MSRV updates are coordinated changes** affecting multiple files — use the checklist below
@@ -69,6 +70,7 @@ rust-version = "1.88.0"  # ← Single source of truth
 | `rust-toolchain.toml` | Developer toolchain pinning | `channel = "1.88.0"` (full semver) | Yes |
 | `clippy.toml` | Clippy MSRV-aware lints | `msrv = "1.88.0"` (full semver) | Yes |
 | `Dockerfile` | Production build environment | `FROM rust:1.88-bookworm` (Docker format) | Yes (normalized) |
+| `clients/native/Cargo.toml` | Reference client MSRV pin (ADR-0004) | `rust-version = "1.88.0"` (full semver) | Yes |
 | `.devcontainer/Dockerfile` | Dev container (optional) | Comment or use MS base image | Optional |
 | `.github/dependabot.yml` | Dependency update policy | MSRV in comments | No |
 | `README.md` | User-facing documentation | Full semver in requirements section | No |
@@ -164,6 +166,7 @@ Checklist for MSRV update from `1.87.0` to `1.88.0`:
 - [ ] **`rust-toolchain.toml`**: `channel = "1.88.0"`
 - [ ] **`clippy.toml`**: `msrv = "1.88.0"`
 - [ ] **`Dockerfile`**: `FROM rust:1.88-bookworm AS chef`
+- [ ] **`clients/native/Cargo.toml`**: `rust-version = "1.88.0"`
 - [ ] **`.devcontainer/Dockerfile`**: Add comment `# Project MSRV: 1.88.0`
 - [ ] **`.github/dependabot.yml`**: Update MSRV comments
 - [ ] **`README.md`**: Update "Requirements" section

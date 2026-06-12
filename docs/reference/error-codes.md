@@ -70,6 +70,7 @@ establishment.
 | `APP_ID_SUSPENDED` | The application ID has been suspended by an administrator. |
 | `MISSING_APP_ID` | Application ID is required but was not provided in the request. |
 | `AUTHENTICATION_TIMEOUT` | Authentication took too long to complete. |
+| `CONNECTION_IDLE_TIMEOUT` | The connection was closed because no messages were received within the idle timeout (`websocket.idle_timeout_secs`). Send periodic `Ping` messages to keep the connection alive. |
 | `SDK_VERSION_UNSUPPORTED` | The SDK version is no longer supported. Upgrade to the latest version. |
 | `UNSUPPORTED_GAME_DATA_FORMAT` | The requested game data format is not supported by this server. |
 
@@ -143,6 +144,20 @@ Errors related to spectator (read-only observer) mode.
 | `TOO_MANY_SPECTATORS` | The room has reached its maximum spectator capacity. |
 | `NOT_A_SPECTATOR` | You are not a spectator in this room. |
 | `SPECTATOR_JOIN_FAILED` | Failed to join as a spectator. The room may be full or spectating disabled. |
+
+### Signaling Errors (8xxx)
+
+Errors related to targeted WebRTC signal relay (protocol v3 `Signal`
+messages). The signal envelope is validated; the opaque payload is
+never parsed.
+
+| Error Code | Description |
+|---|---|
+| `CROSS_ROOM_SIGNAL` | Cannot signal a peer in a different room. Signaling is restricted to same-room peers. |
+| `UNSUPPORTED_TRANSPORT` | Signaling requires the WebRTC transport, which was not negotiated for this connection. |
+| `SIGNAL_TARGET_NOT_FOUND` | The target peer was not found in your room, or does not support WebRTC signaling. |
+| `SIGNAL_RATE_LIMITED` | Too many signaling messages in a short time. Slow down trickle-ICE and retry shortly. |
+| `SIGNAL_TOO_LARGE` | The serialized signal payload exceeds the server's `security.max_signal_bytes` cap (default 16 KiB). |
 
 ### Server Errors (9xxx)
 

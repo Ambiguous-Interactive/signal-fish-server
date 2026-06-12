@@ -9,6 +9,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the browser reference client (PLAN P7) as the in-repo standalone npm package
+  `clients/browser/` (`signal-fish-reference-browser` — TypeScript, strict; NOT a crate, so every
+  root cargo gate is untouched and `cargo package` still ships zero `clients/` files). The client
+  drives a REAL Chromium `RTCPeerConnection` (the `chromium-headless-shell` build via
+  `playwright-core` — actual browser ICE/DTLS/SCTP, not a Node WebRTC stack) through the full v3
+  flow as two esbuild bundles: an IIFE page engine (WebSocket wire + protocol state machine +
+  RTCPeerConnection engine, a faithful port of the native client's orchestrator) and a Node ESM
+  CLI that launches Chromium, bridges page events to stdout JSONL, and reaps Chromium on every
+  exit path (bounded close-then-kill on all catchable exits plus a detached reaper covering
+  SIGKILL — headless Chromium does not exit on its own when its parent dies). The JSONL stdout
+  event contract, flag surface, and exit codes are identical to the native reference client's,
+  plus a browser-specific `--mdns-obfuscation` flag that leaves Chromium's `.local`
+  host-candidate obfuscation ON; the empirically pinned outcome is that P2P still establishes via
+  the peer-reflexive path (the native webrtc-rs agent learns the browser's transport address from
+  the browser's connectivity checks and tolerates the unresolvable `.local` candidate). The
+  browser↔native interop matrix cells live in the native crate's harness behind the new
+  `browser-interop` cargo feature (`clients/native/tests/browser_interop_e2e.rs`, locating the
+  built CLI via the new `SIGNAL_FISH_BROWSER_CLI` env var; the default native suite is
+  unchanged): mixed mesh N=3 with the full glare/channel matrix, a browser↔browser mesh, a host
+  star with the browser as a non-host client, a crippled-ICE browser relay fallback, the mDNS
+  `.local` trap cell, a pure-v2 browser flooring a mesh-preferring room, a mid-handshake
+  server-close probe (exactly one `error` event carrying the real close reason, prompt exit 3),
+  and a SIGTERM/SIGKILL teardown cell pinning that Chromium never outlives the CLI (graceful
+  teardown and the detached, pid-reuse-guarded orphan reaper respectively) — all over loopback
+  with zero external network access (the cached Chromium download at install time is the only
+  fetch). Wired into CI via `scripts/run-browser-interop.sh` (which also gates
+  `cargo fmt --check` plus `cargo clippy --features browser-interop` over the feature-gated
+  cells) and the path-filtered `.github/workflows/browser-interop.yml` (npm + Playwright-browser
+  caching, lockfile-pinned `playwright-core install` — never bare `npx`). Recorded the design decisions in ADR-0005
+  (`docs/adr/0005-browser-reference-client.md`) and documented the CLI, contract deviations, the
+  mDNS posture, and the new matrix rows in `clients/browser/README.md` (the native README stays
+  the canonical contract). Additive tooling/documentation only — no server runtime behavior or
+  wire-format changes.
+- Added the native Rust reference client (PLAN P7) as the in-repo standalone package
+  `clients/native/` (`signal-fish-reference-native`, NOT a member of the root package — root
+  lockfile/MSRV-build/coverage gates are untouched, `scripts/check-msrv-consistency.sh` pins the
+  client's `rust-version` to the root MSRV, and the root `Cargo.toml` now carries
+  `exclude = ["clients/"]` so `cargo package` ships no `clients/` files). The client
+  drives a real WebRTC stack (webrtc-rs 0.17: actual ICE gathering, DTLS handshakes, SCTP data
+  channels — one `reliable` + one `unreliable {ordered:false, max_retransmits:0}` channel per
+  pair) through the full v3 flow, consuming the server crate's own protocol types via a path
+  dependency (zero wire drift) and speaking the ADR-0002 matchbox `PeerSignal` payload shape with
+  `IceCandidate` as the JSON-serialized `RTCIceCandidateInit`. stdout is a machine interface (one
+  JSON event per line); flags drive room mode, ready barriers, channel exchange and relay-floor
+  probes, deterministic ICE crippling, late-join gating, pure-v2 mode, and bounded run windows
+  with documented exit codes. A multi-process interop harness
+  (`clients/native/tests/interop_e2e.rs`) spawns the REAL server binary plus N≥3 client processes
+  over loopback (TURN disabled, zero STUN URLs — no external network) and proves the native↔native
+  interop matrix cells: mesh N=3 full WebRTC with a live relay floor, host star N=3, crippled-ICE
+  relay fallback, late-join `NewPeer` seat-fill pairing, and mixed v2/v3 relay-floor rooms. Wired
+  into CI via `scripts/run-webrtc-interop.sh` and the path-filtered
+  `.github/workflows/webrtc-interop.yml` (interop suite + a cargo-deny audit of the client's
+  independent dependency graph against `clients/native/deny.toml`). Recorded the design decisions
+  in ADR-0004 (`docs/adr/0004-native-reference-client.md`) and documented the CLI, the JSONL event
+  contract, transport-status semantics, and the scenario matrix in `clients/native/README.md`.
+  Additive tooling/documentation only — no server runtime behavior or wire-format changes.
+- Added the TURN relay deployment surface (P8 "deployment docs"). `docker-compose.yml` now ships
+  an optional `coturn` service behind the `turn` compose profile
+  (`docker compose --profile turn up`), pre-wired for the coturn REST-credential scheme
+  (`--use-auth-secret`) with the shared secret and realm interpolated from the environment; a
+  plain `docker compose up` is unchanged. The service refuses to start when
+  `TURN_STATIC_AUTH_SECRET` is unset or empty — an entrypoint guard exits with a clear message
+  instead of silently minting credentials from an empty HMAC key (an open relay). The guard is a
+  runtime check because compose interpolates `${VAR:?}` file-wide even when the profile is
+  inactive, which would break a plain `docker compose up`. Added `docs/deployment-turn.md`, the
+  TURN deployment guide: when TURN is needed (~15–20% of real-world P2P connections), the coturn
+  quick start against the compose profile, a walkthrough of the ephemeral credential scheme
+  (`username = "{expiry}:{player_id}"`, `credential = base64(HMAC-SHA1(secret, username))`) and
+  its operational consequences, zero-downtime rotation of the shared secret (coturn accepts
+  multiple secrets at once), managed TURN alternatives (Cloudflare / Twilio / Metered) and the
+  out-of-band-credential workaround for the current `mode = "managed"` STUN-only stub, why
+  signaling must run over `wss://` (DTLS fingerprints travel in the SDP, so plaintext `ws://`
+  allows a machine-in-the-middle of the WebRTC encryption itself), and capacity planning. Added
+  `docs/architecture/scaling.md`, the multi-node scaling notes: what state a node actually holds,
+  the room as the scaling unit (room affinity is the only constraint a multi-instance deployment
+  must preserve), the cross-node seams already present in the code, and the `region_id` /
+  room-code-prefix plumbing. `docs/deployment.md` gains the TURN-profile section, room-affinity
+  scaling guidance, and a `wss://`-specific security-checklist item, all cross-linked; both new
+  pages join the mkdocs nav. Documentation and compose-profile changes only — no server runtime
+  behavior or wire-format changes.
+- Added `ServerMessage::PeerTransportStatus { peer_id, transport, connected }` (protocol v3 only),
+  the peer fan-out of an accepted `TransportStatus` report: when a v3 client's report records a
+  real per-connection state change (the first report, or a `(transport, connected)` transition —
+  duplicates fan out nothing), every other member of its current room that negotiated v3 is told
+  the new state (for example, the host's WebRTC path died and relay-path traffic should be
+  expected). The reporter is excluded; a room-less reporter's state is still recorded but fans out
+  nothing; delivery is per-recipient v3-gated (a v2 member never observes it) but deliberately not
+  gated on the recipient's own transport capabilities, since this is informational status about a
+  peer rather than an instruction to use that transport. Purely informational — the relay floor
+  never closes. Added the `signal_fish_transport_status_fanout_total` Prometheus counter (one per
+  fan-out event, not per recipient), the canonical wire sample, and protocol/architecture docs.
+  v2 wire bytes are unchanged (the message exists only on negotiated v3 connections).
+- Added a formal-verification + property-testing layer for the protocol v3 session core. A TLA+
+  specification (`formal/tla/SignalFishSession.tla`) models the v3 session lifecycle — finalize-time
+  plan selection, per-recipient `SessionPlan` emission, late-join / seat-fill pairing, and
+  host-failover re-planning — mirroring `src/server/session_policy.rs` and
+  `src/server/signaling.rs` action-for-action, and TLC exhaustively model-checks it across four
+  configurations (`desired = mesh`, `desired = host`, `host` with WebRTC disabled, and a
+  relay-floor model with both upgrade transports disabled) for the named invariants (back-compat
+  v2 gating, plan legality, the host-validity self-heal contract, the desired-topology ceiling,
+  sticky topology/transport, mesh glare antisymmetry, host-star shape, two-sided peer-capability
+  filtering, the no-qualifier re-plan drop, and the relay-floor enabled-gate denial). A pinned,
+  SHA256-verified TLC runner (`scripts/run-tla-model-check.sh`) and a path-filtered CI workflow
+  (`.github/workflows/formal-verification.yml`) run the check on changes to the spec or the modeled
+  source. Added proptest invariant suites over the real code: selection / host-election / peer-list
+  properties (`src/server/session_policy_tests.rs`), v3 wire round-trips for JSON and MessagePack
+  plus TURN-credential determinism (`tests/v3_wire_properties.rs`), and parser fuzz-hardening
+  (`tests/protocol_fuzz_hardening.rs`) that asserts the decoders never panic on arbitrary bytes,
+  mutated samples, or deep-nesting bombs — including a release-profile-only probe enforcing the
+  measured MessagePack depth-limit stack margin on a default 2 MiB worker stack. Documented the
+  layered approach in
+  `docs/architecture/formal-verification.md` and the tool-choice rationale in ADR-0003
+  (`docs/adr/0003-formal-verification-and-fuzzing.md`). This is test/verification tooling only — no
+  runtime behavior or wire format changes.
 - Added ADR-0001 (`docs/adr/0001-protocol-v3-two-axis.md`) locking the protocol v3 design:
   additive capability-gated versioning, relay-as-floor invariant, opaque-signal routing,
   deterministic glare avoidance, and the `{Relay, Host, Mesh}` topology / `{Relay, Direct, WebRtc}`
@@ -116,14 +230,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.llm/context.md`, and `.llm/context-protocol-and-scenarios.md`, plus a `tests/v3_protocol_samples.rs`
   test that deserializes every sample line into the real `ClientMessage` / `ServerMessage` types and
   asserts the `type` tag round-trips — the enforceable proof that the samples match the wire.
+- Added mid-session re-planning for protocol v3 sessions (host failover + stored-plan consistency).
+  Each non-relay finalize now records the room's _active session plan_ (topology, transport, host) —
+  the single source of truth for the session the room is running — and removes it when the room
+  empties or is cleaned up. Whenever a membership-touching event (a departure — explicit `LeaveRoom`
+  or disconnect — or a late join/reconnect) finds a `host`-topology session whose stored host is no
+  longer a member (or is seated but no longer capable of the session, after a reconnect that
+  downgraded its negotiated capabilities), the server re-elects a host over the remaining members and re-issues a fresh
+  per-recipient `SessionPlan` to every remaining v3 member — same sticky topology/transport, new
+  `host`, freshly minted per-recipient TURN credentials for WebRTC — instead of leaving the room
+  pointed at a dead host (the invalid-host trigger also self-heals wedge states such as a re-plan
+  skipped by a transient storage error). Re-election is capability-aware: only members that
+  negotiated v3 plus the sticky topology/transport pair are electable (the authority preference
+  passes the same filter, so a seat-filling v2 or relay-only authority is never named host of a
+  session it cannot run; otherwise authority preferred, else earliest joiner with a smaller-UUID
+  tie-break), and when no member qualifies the stored plan is dropped with no emission — the
+  session is over and the relay floor carries the room. Re-issued and late-join plan peer lists
+  are capability-filtered on both sides by the same predicate: `peers[]` names only members that
+  negotiated the session's sticky topology/transport, so a v3 member that did not (e.g. a
+  relay-only seat-filler, or one with the WebRTC transport but not the session's topology)
+  receives its (v3-gated) plan with an empty peer list and participates
+  via the relay floor (`host` stays as elected, informational), and capable members never see it
+  listed — and the late-join `NewPeer` gating applies this same full predicate to both ends of
+  every announced pair, so clients are never instructed to attempt WebRTC pairs the plan itself
+  excludes (or that `Signal` validation would reject); at finalize the filter is vacuous because
+  plan selection requires every member to support the plan. A late joiner or reconnector entering
+  an active non-relay session now receives its own tailored `SessionPlan` (current peers,
+  glare-correct `initiate` flags, stored host, fresh ICE) and is no longer sent joiner-side
+  `NewPeer`s; existing members still receive the
+  additive `NewPeer` delta (mesh: every session-capable member; host: the star edge only), making the client
+  contract uniform — the latest `SessionPlan` wins; `NewPeer` is an additive delta for existing
+  members. Topology/transport are sticky for the session lifetime (the selection ladder runs once at
+  finalize and is never re-run mid-session). A late join that itself heals an invalid host is served
+  by the re-plan to every v3 member (joiner included) instead of the joiner-plan + `NewPeer` pair. No new
+  message types and no wire-shape changes; all emission stays v3-gated. Added Prometheus counters
+  `signal_fish_transport_session_replans_emitted_total` (one per host re-plan event — departure
+  failover or late-join self-heal; not moved when no member qualifies and the plan is dropped)
+  and `signal_fish_transport_session_plans_late_join_total` (one per joiner that received a
+  late-join plan; a heal-served joiner counts on the re-plan event instead);
+  `signal_fish_transport_session_plans_emitted_total` keeps meaning "finalized
+  non-relay rooms", and TURN credentials minted by re-plans/late-join plans count toward the
+  existing `signal_fish_transport_turn_credentials_issued_total`.
+- Added a protocol v3 multi-peer (N≥3) signaling conformance suite
+  (`tests/v3_multipeer_e2e.rs`): full-lobby flows over real WebSockets pinning the global mesh
+  glare matrix at N=3/N=4 (every unordered pair has exactly one offerer — the smaller UUID — and
+  pairwise opaque signals relay byte-identically across all ordered pairs), the strict N=4 host
+  star property (clients offer only to the host and never appear in each other's plans), the mixed
+  v2+v3 relay floor (`GameStarting` for everyone, no `SessionPlan`/`NewPeer` leakage to anyone),
+  N=4 host-failover re-planning (one fresh star-correct plan per survivor naming the
+  earliest-joined remaining member) plus an N=4 cascade variant (two consecutive host deaths, each
+  wave re-electing and re-issuing from the surviving session state), seat-filling late join into a
+  live mesh session (joiner plan +
+  per-member `NewPeer` deltas), and the full wire reconnect flow (`Reconnected` + fresh plan,
+  `PlayerReconnected` + `NewPeer`, post-reconnect signals under the restored player id).
+- Added a true multi-process conformance suite (`tests/v3_multiprocess_e2e.rs`) that spawns the
+  compiled `signal-fish-server` binary as a real child process (per-test temp config via
+  `SIGNAL_FISH_CONFIG_PATH`, free-port reservation with spawn retries, `/v2/health` readiness
+  polling, and a kill-on-drop child guard so no orphan survives a panicking test): a 3-peer mesh
+  session over real TCP repeats the glare-matrix and pairwise-signal assertions across a genuine
+  OS process boundary, and a SIGKILL + same-port restart proves clients observe the close, the
+  in-memory reconnection registry dies with the process (old reconnect identities are rejected
+  with `ReconnectionFailed`), and fresh sessions work against the new process. Enabled the
+  tokio `process` feature for dev/test builds only.
 
 ### Security
 
+- `--print-config` now redacts secrets (P8 security hardening, PLAN Appendix I). The printed JSON
+  replaces every **set** secret value with the marker `<redacted>` while leaving unset (`null` /
+  empty) secrets as-is, so operators can still tell "configured" apart from "missing". Redacted
+  fields: `security.metrics_auth_token`, `security.authorized_apps[*].app_secret`,
+  `session.ice_servers[*].credential` (static TURN credentials), `turn.static_auth_secret`, and
+  `turn.managed_api_token`. TLS file _paths_ are locations, not secrets, and stay visible. Backed
+  by a future-proofing test that sweeps the serialized output of a fully-populated config for any
+  string field whose key looks credential-like (`*secret*`, `*token*`, `*password*`,
+  `*credential*`, `*api_key*`) and fails if one survives redaction
+  (`Config::redacted_for_display`, `src/config/types.rs`).
+- Added a dedicated cap on the serialized size of the opaque v3 `Signal` payload (P8 / Appendix I
+  "cap signal payload size"). New config key `security.max_signal_bytes` (default `16384` — 16 KiB,
+  generously above any real SDP/ICE payload and well under the 64 KiB `security.max_message_size`
+  frame cap; must be `> 0` and ≤ `max_message_size`, larger values are rejected at validation as
+  dead config). `handle_signal` measures the canonical serialized JSON length of the `signal` value
+  before any relay work: payloads exactly at the cap relay unchanged, payloads over it are rejected
+  with the new `SIGNAL_TOO_LARGE` error code without consuming the sender's valid-signal rate
+  budget. The cap runs as step 0 of `handle_signal`, before the sender's v3+WebRTC transport gate,
+  so a malformed, oversized `Signal` from ANY client is rejected with `SIGNAL_TOO_LARGE` — including
+  a misbehaving v2 client, which previously received `UNSUPPORTED_TRANSPORT` for it. Golden v2 wire
+  behavior is unchanged for protocol-conforming v2 clients, which never send `Signal`.
+- Added a post-authentication idle timeout on the WebSocket read path (P8 / Appendix I
+  "idle-timeout"). New config key `websocket.idle_timeout_secs` (default `300`; `0` disables): an
+  authenticated connection that produces no inbound frame of any kind (including Ping/Pong) for the
+  configured window receives an `Error` with the new `CONNECTION_IDLE_TIMEOUT` code and is closed
+  through the normal disconnect path, so the reconnection grace period still applies. The error is
+  delivered on the connection's own outbound channel rather than through the message coordinator,
+  because under production defaults the `server.ping_timeout` reaper (30s) has already unregistered
+  a silent client from the coordinator long before the idle window (300s) elapses — a
+  coordinator-routed error would be silently dropped. This closes a
+  real gap: the existing `server.ping_timeout` reaper only removed server-side connection _state_
+  (and only counts `Ping` as activity) but never closed the socket, leaving zombie TCP connections
+  holding file descriptors indefinitely. The 300s default cannot affect healthy clients, which
+  already must heartbeat every ~30s to survive the state reaper. The pre-auth handshake remains
+  bounded by the stricter `websocket.auth_timeout_secs`.
+- Added a prominent once-at-startup warning when TURN is enabled but built-in TLS is disabled
+  (PLAN Appendix I: `wss://` for signaling in production — DTLS fingerprints travel in SDP, so
+  plaintext `ws://` signaling allows man-in-the-middle of the WebRTC peer connections). Emitted
+  after logging initialization via `tracing::warn!`; deliberately a warning and never a hard error
+  because reverse-proxy TLS termination (where `security.transport.tls.enabled` stays `false`) is
+  the common production deployment (`config::should_warn_missing_signaling_tls`).
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
   `rustls-pki-types` built-in `PemObject` trait.
 
 ### Fixed
 
+- Fixed CI reliability by normalizing all workflow `actions/checkout` pins to `v6.0.3`, making the
+  browser interop Chromium teardown check tolerant of process-name/topology drift with better
+  `/proc` diagnostics, and allowing doc-consistency version checks to read CRLF `.llm/context.md`
+  lines correctly.
+- Fixed the creator's stored `is_authority` flag so it matches `authority_player` in rooms created
+  with `supports_authority: false`. `create_room` previously seeded the creator's `PlayerInfo` with
+  `is_authority: true` unconditionally while correctly leaving `authority_player` unset, so the two
+  wire surfaces derived from them could contradict each other: `RoomJoined.is_authority` (and the
+  `Reconnected` payload) reported `false` while the v2 `current_players` list /
+  `GameStarting`-adjacent peer metadata and v3 mesh `SessionPeer.is_authority` (copied from the
+  stored flag) reported `true`. Both now derive from the same condition: in an authority-less room
+  nobody — including the creator — is marked authority.
+- Fixed a critical protocol v3 dead-session bug where the elected host disconnecting from a
+  finalized `host`-topology room left every remaining client holding a `SessionPlan` that pointed at
+  a dead host: authority was silently cleared, no host was re-elected, and no new plan was issued.
+  Host departures now trigger the mid-session re-plan described under Added (re-election + fresh
+  per-recipient `SessionPlan`s), hooked into `leave_room` so both explicit leaves and disconnects are
+  covered.
+- Fixed protocol v3 late-join/reconnect pairing recomputing the session plan over the current
+  members instead of consulting the plan the room actually runs. A room that finalized to the relay
+  floor (for example one v3 + one v2 member) could, after the v2 member departed and a v3+WebRTC
+  player filled the seat, wrongly emit `NewPeer` and push clients of a relay session into WebRTC
+  negotiation even though no `SessionPlan` was ever issued. Late join and reconnect now read the
+  stored active session plan: no stored plan ⇒ no v3 emission at all; topology/transport are sticky.
+- Fixed lobby finalization never persisting `lobby_state = "finalized"` to room storage (the
+  in-memory coordinator only broadcast `GameStarting` and tracked ready state in its own map, so the
+  stored room stayed `lobby`). A post-game departure therefore regressed the room to `waiting` and a
+  refill replayed the whole lobby/ready/`GameStarting` cycle, and every `Finalized`-gated path
+  (late-join/reconnect pairing, departure re-planning) was unreachable in production. The room
+  coordinator now persists the finalized state (with player ready flags) under the room-operation
+  lock before broadcasting `GameStarting`; a player joining a finalized non-full room now sees
+  `lobby_state: "finalized"` (an existing v2 wire value) in `RoomJoined` instead of a spurious
+  re-lobby cycle. Post-finalize `PlayerReady` toggles now receive `Error{error_code:
+  INVALID_ROOM_STATE}` instead of mutating lobby state (matching the documented terminal
+  `Finalized` state).
 - Fixed protocol v3 `TransportStatus` validation so reports for transports that
   were not negotiated by the connection are ignored and no longer update
   per-connection status or inflate P2P / relay-fallback metrics.
@@ -156,7 +408,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a single data-driven constant (`UPGRADE_LADDER`) walked by topology-richness rank, the four legal
   `(topology, transport)` pairings are enforced by `is_valid_pair` plus a `debug_assert!`, and an
   exhaustive selection-invariant test guards the whole class of topology/transport drift.
-- Fixed `handle_webrtc_late_join` emitting WebRTC `NewPeer` control messages for a non-WebRTC active
+- Fixed `handle_active_session_late_join` emitting WebRTC `NewPeer` control messages for a non-WebRTC active
   session. Late-join pairing is now gated on the plan's _transport_
   (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == webrtc`) rather than its _topology_,
   so a `host+direct` (LAN) room — a non-relay topology whose transport is not WebRTC — no longer pushes

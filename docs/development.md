@@ -18,6 +18,15 @@ pre-commit support scripts, and local test workflows, including:
 - `fd` (modern file discovery)
 - Docker CLI support in VS Code devcontainers
 
+To keep rebuilds reliable on Windows + WSL + Docker Desktop and avoid known
+DNS failures in the feature install path:
+
+- `.devcontainer/devcontainer.json` keeps `docker-outside-of-docker` configured
+   with `"moby": false`.
+- `.devcontainer/Dockerfile` installs heavy cargo tools via `cargo-binstall`.
+- `.devcontainer/post-create.sh` skips `cargo check --all-features` warm-up by
+   default for faster startup. Set `SIGNAL_FISH_WARM_CARGO_CHECK=1` to enable it.
+
 Validate parity at any time with:
 
 ```bash

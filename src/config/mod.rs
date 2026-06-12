@@ -68,9 +68,11 @@ pub use session::SessionConfig;
 
 pub use turn::{TurnConfig, TurnMode};
 
-pub use types::Config;
+pub use types::{Config, REDACTED_SECRET};
 
-pub use validation::{is_production_mode, validate_config_security};
+pub use validation::{
+    is_production_mode, should_warn_missing_signaling_tls, validate_config_security,
+};
 
 pub use websocket::WebSocketConfig;
 

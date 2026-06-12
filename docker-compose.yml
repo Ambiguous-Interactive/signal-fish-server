@@ -9,3 +9,78 @@ services:
       # Optional: mount a config file
       - ./config.example.json:/app/config.json:ro
     restart: unless-stopped
+
+  # Optional coturn TURN relay for WebRTC sessions (Protocol v3).
+  #
+  # Opt-in via the "turn" compose profile, so a plain `docker compose up` is
+  # unchanged:
+  #
+  #   TURN_STATIC_AUTH_SECRET=$(openssl rand -hex 32) \
+  #     docker compose --profile turn up
+  #
+  # IMPORTANT: the SAME secret must be configured on the signaling server as
+  # `[turn].static_auth_secret` (env: SIGNAL_FISH__TURN__STATIC_AUTH_SECRET),
+  # because the server mints ephemeral coturn REST credentials from it
+  # (HMAC-SHA1) and coturn recomputes that HMAC to authenticate clients.
+  # Never commit the secret; supply it via the environment or an .env file.
+  #
+  # See docs/deployment-turn.md for the full TURN deployment guide.
+  coturn:
+    image: coturn/coturn:4.12.0-alpine
+    profiles: ["turn"]
+    restart: unless-stopped
+    environment:
+      # Soft (`:-`) interpolation on purpose: compose interpolates variables
+      # FILE-WIDE even when the profile is inactive, so a hard `${VAR:?}` here
+      # would break a plain `docker compose up` / `docker compose config` for
+      # operators who never use the turn profile (verified empirically). The
+      # fail-fast guard lives in the entrypoint below instead.
+      TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET:-}
+    # Runtime guard: refuse to start with an unset/empty secret. coturn in
+    # `--use-auth-secret` mode would otherwise mint-and-accept credentials
+    # HMAC'd with an EMPTY key — an open relay anyone can derive credentials
+    # for. After the check, hand off to the image's own entrypoint
+    # (`docker-entrypoint.sh`) with the original command intact.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -z "$${TURN_STATIC_AUTH_SECRET}" ]; then
+          echo "ERROR: TURN_STATIC_AUTH_SECRET is not set (or empty)." >&2
+          echo "Refusing to start coturn: an empty REST-auth secret would let" >&2
+          echo "anyone mint valid TURN credentials (open relay)." >&2
+          echo "Generate one with: openssl rand -hex 32" >&2
+          echo "and configure the SAME value on the signaling server" >&2
+          echo "(SIGNAL_FISH__TURN__STATIC_AUTH_SECRET)." >&2
+          echo "See docs/deployment-turn.md." >&2
+          exit 1
+        fi
+        exec docker-entrypoint.sh "$$@"
+      - coturn-secret-guard
+    ports:
+      # STUN/TURN listening port (both transports).
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      # Relay port range: coturn allocates one relay port per TURN allocation
+      # from min-port..max-port. Every port in that range must be reachable by
+      # remote peers, so the WHOLE range has to be published — an unpublished
+      # relay port means the allocation succeeds but media never flows.
+      # Uncomment together with --min-port/--max-port below. (Docker sets up
+      # one proxy per published port; for large ranges prefer
+      # `network_mode: host` on Linux instead of publishing thousands of
+      # ports.)
+      # - "49160-49200:49160-49200/udp"
+    command:
+      - --fingerprint
+      - --realm=${TURN_REALM:-turn.example.com}
+      - --listening-port=3478
+      # REST-credential ("ephemeral credentials") scheme, PLAN Appendix F.
+      # TURN_STATIC_AUTH_SECRET must match the signaling server's
+      # `[turn].static_auth_secret` exactly (see the note above). `$$` defers
+      # expansion to the container (the image's docker-entrypoint.sh expands
+      # each argument), reading the env var the guard above just validated.
+      - --use-auth-secret
+      - --static-auth-secret=$$TURN_STATIC_AUTH_SECRET
+      # Relay port range — keep in sync with the published range above.
+      # - --min-port=49160
+      # - --max-port=49200

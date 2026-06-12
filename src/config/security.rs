@@ -2,7 +2,8 @@
 
 use super::defaults::{
     default_client_auth_mode, default_cors_origins, default_max_connections_per_ip,
-    default_max_message_size, default_require_auth, default_token_binding_subprotocol,
+    default_max_message_size, default_max_signal_bytes, default_require_auth,
+    default_token_binding_subprotocol,
 };
 use crate::security::token_binding::TokenBindingScheme;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,16 @@ pub struct SecurityConfig {
     /// Maximum WebSocket message size in bytes
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
+    /// Maximum serialized size in bytes of a v3 `Signal` payload (the opaque
+    /// `signal` value, measured as canonical JSON).
+    ///
+    /// Lives in `[security]` beside `max_message_size` because it bounds
+    /// attacker-controlled payload *bytes* (a size cap), not a request *rate* —
+    /// the per-connection signal rate limit stays in `[rate_limit].max_signals`.
+    /// Must be `> 0` and must not exceed `max_message_size` (a larger value is
+    /// dead config: such a frame is rejected by the frame cap first).
+    #[serde(default = "default_max_signal_bytes")]
+    pub max_signal_bytes: usize,
     /// Maximum connections per IP address
     #[serde(default = "default_max_connections_per_ip")]
     pub max_connections_per_ip: usize,
@@ -48,6 +59,7 @@ impl Default for SecurityConfig {
             require_metrics_auth: default_require_auth(),
             metrics_auth_token: None,
             max_message_size: default_max_message_size(),
+            max_signal_bytes: default_max_signal_bytes(),
             max_connections_per_ip: default_max_connections_per_ip(),
             transport: TransportSecurityConfig::default(),
             authorized_apps: Vec::new(),

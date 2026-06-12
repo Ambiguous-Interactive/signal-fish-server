@@ -44,16 +44,70 @@ the exhaustive `selection_only_ever_yields_a_legal_pair` test. Never hand-build 
 
 ## Gate WebRTC signaling on transport, never topology
 
-`Signal` and `NewPeer` are WebRTC-signaling control messages. Decisions to emit
-them must gate on the **transport**, via `SessionPlanDecision::uses_webrtc_signaling`
-(`transport == WebRtc`) — never on topology alone. `Host + Direct` is a non-relay
-_topology_ whose transport is **not** WebRTC, so keying off topology would wrongly
-start WebRTC negotiation for a LAN session.
+`Signal` and `NewPeer` are WebRTC-signaling control messages. The **per-session**
+decision to emit them must gate on the **transport**, via
+`SessionPlanDecision::uses_webrtc_signaling` (`transport == WebRtc`) — never on
+topology alone. `Host + Direct` is a non-relay _topology_ whose transport is
+**not** WebRTC, so keying off topology would wrongly start WebRTC negotiation for
+a LAN session. Two further layers sit on top of (and below) that session gate:
 
-- `handle_webrtc_late_join` checks `uses_webrtc_signaling()` before shaping pairing
-  by topology (mesh pairs all peers; host pairs clients with the host only).
-- `emit_session_plan` advertises ICE servers only for a WebRTC transport, and skips
-  emission entirely on the relay floor (`is_relay()`).
+- The **per-member** `NewPeer` pairing gate is the FULL session predicate
+  (`SessionPlanDecision::recipient_pairable` / `pairable`: v3 + the sticky
+  topology AND transport), applied to both ends of every announcement — the same
+  rule as plan peer lists and host election. A v3 member with the WebRTC
+  transport but without the session's topology is plan-filtered, so it must be
+  `NewPeer`-silent too.
+- `handle_signal` stays **transport-only** (`supports_webrtc_signaling`: v3 +
+  WebRTC transport, both sender and target) — deliberately weaker: it is dumb
+  plumbing per Appendix K and must not topology-gate or second-guess which pairs
+  the plan brokered.
+
+Per path:
+
+- `handle_active_session_late_join` rehydrates the room's **stored**
+  `ActiveSessionPlan` (never a ladder recompute), sends the joiner its tailored
+  `SessionPlan` (v3-gated only — an incapable v3 joiner still gets its
+  empty-`peers` plan), and announces via `NewPeer` only when
+  `uses_webrtc_signaling()` AND the joiner passes `recipient_pairable` (mesh
+  announces to all session-capable members; host along the star edge only —
+  the announce helpers re-check the predicate per member). The joiner is never
+  sent `NewPeer`. If the stored host is invalid (`host_invalid`: missing, or
+  seated but unpairable) it first self-heals via `replan_host_session` and skips
+  the joiner plan + `NewPeer` (the heal re-plan covers every v3 member, joiner
+  included — even a joiner that cannot run the session: the heal is about the
+  room).
+- `emit_session_plan` advertises ICE servers only for a WebRTC transport, skips
+  emission entirely on the relay floor (`is_relay()`), and records the non-relay
+  decision in `active_session_plans` (relay removes any stale entry).
+- `handle_session_member_departure` re-elects + re-emits to every remaining v3
+  member (via the shared `replan_host_session`) whenever the stored host is
+  invalid (`ActiveSessionPlan::host_invalid`: absent from the current members,
+  or still seated but failing the session predicate after a
+  capability-downgrading reconnect) — capability-aware: only v3 members
+  supporting the sticky pair are electable (the authority preference passes the
+  same filter), and if none qualifies the stored entry is dropped with no
+  emission and no `session_replans_emitted` increment. Topology/transport are
+  sticky for the session lifetime.
+
+## Peer lists are capability-filtered on both sides (`plan_for`)
+
+Re-issued and late-join member lists can contain members that never negotiated
+the session's sticky pair (`add_player_to_room` gates only on fullness — e.g. a
+v3 relay-only client can seat-fill a `mesh + webrtc` room).
+`SessionPlanDecision::plan_for` — the single peer-list seam every emission path
+shares (finalize, failover/heal re-plan, late join / reconnect) — filters
+`peers[]` with the same predicate host election uses (v3 + sticky topology +
+sticky transport, `SessionMember::supports_session`): a member that did not
+negotiate the session's pair still RECEIVES its v3-gated plan, but with an
+**empty** `peers` list (`fallback: relay` is its data path; `host` stays as
+elected, informational), and capable recipients never see it listed. The
+`NewPeer` announce helpers apply this same predicate (via
+`recipient_pairable` / `pairable`) to both ends of every announcement, so
+clients are never told to attempt WebRTC pairs the plan excludes (or that
+`handle_signal` would reject). At finalize the filter is vacuous (`all_support`
+gates selection); an elected host always satisfies the predicate (debug-asserted
+in `host_peers_for`, structurally unfireable: `host_invalid` re-plans away any
+host that stops satisfying it before plans are built).
 
 The two gates are distinct and must not be conflated: `is_relay()` (topology) gates
 `SessionPlan` emission — which a `Host + Direct` room _does_ receive — while

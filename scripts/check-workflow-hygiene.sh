@@ -401,7 +401,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 
             if [[ "$USES_VALUE" != *@* ]]; then
                 error "$WORKFLOW_NAME:$line_num: Malformed remote action reference: $USES_VALUE"
-                error "  Expected owner/repo@ref (for example actions/checkout@v6.0.2)."
+                error "  Expected owner/repo@ref (for example actions/checkout@v6.0.3)."
                 MALFORMED_REF_COUNT=$((MALFORMED_REF_COUNT + 1))
                 continue
             fi

@@ -31,7 +31,7 @@
 #   contents: read   — required to check out the repository
 #
 # Action reference policy:
-#   This repository requires explicit version tags (for example `@v6.0.2`) and
+#   This repository requires explicit version tags (for example `@v6.0.3`) and
 #   disallows commit SHAs/moving refs for remote actions.
 #
 # Security note:

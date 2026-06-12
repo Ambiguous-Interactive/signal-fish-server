@@ -1,0 +1,31 @@
+{
+  "name": "signal-fish-reference-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser reference client for the Signal Fish protocol v3 (real Chromium RTCPeerConnection via playwright-core)",
+  "license": "MIT",
+  "author": "Ambiguous Interactive <eli@theambiguous.co>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ambiguous-Interactive/signal-fish-server"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.page.json && tsc -p tsconfig.cli.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "playwright-core": "1.60.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.13",
+    "esbuild": "0.27.7",
+    "prettier": "3.8.4",
+    "typescript": "5.9.3"
+  }
+}

@@ -73,6 +73,13 @@ pub enum ErrorCode {
     UnsupportedTransport,
     SignalTargetNotFound,
     SignalRateLimited,
+    /// Signaling errors (8xxx), continued: the serialized `Signal` payload
+    /// exceeds `security.max_signal_bytes`.
+    SignalTooLarge,
+
+    // Connection lifecycle errors (1xxx category, appended at the END for rkyv
+    // discriminant stability — see the signaling-errors note above).
+    ConnectionIdleTimeout,
 }
 
 impl ErrorCode {
@@ -220,6 +227,14 @@ impl ErrorCode {
             Self::SignalRateLimited => {
                 "Too many signaling messages in a short time. Please slow down trickle-ICE and try again shortly."
             }
+            Self::SignalTooLarge => {
+                "The signal payload exceeds the maximum allowed size. Send smaller SDP/ICE payloads, e.g. individual trickle-ICE candidates."
+            }
+
+            // Connection lifecycle errors (1xxx)
+            Self::ConnectionIdleTimeout => {
+                "The connection was closed because no messages were received within the idle timeout. Send periodic Ping messages to keep the connection alive."
+            }
 
             // Server errors (9xxx)
             Self::InternalError => {
@@ -293,6 +308,8 @@ mod tests {
             ErrorCode::UnsupportedTransport,
             ErrorCode::SignalTargetNotFound,
             ErrorCode::SignalRateLimited,
+            ErrorCode::SignalTooLarge,
+            ErrorCode::ConnectionIdleTimeout,
         ];
 
         for error_code in &error_codes {

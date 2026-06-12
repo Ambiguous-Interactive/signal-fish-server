@@ -24,6 +24,20 @@ See [Detailed File Tables](context-file-reference.md) for full file tables.
 `src/websocket/` (WS lifecycle), `src/protocol/` (messages and types),
 `src/config/` (all config structs), `src/auth/` (auth and rate limiting).
 
+`clients/` holds reference clients as standalone packages OUTSIDE the root
+package (own lockfile/deny.toml; outside the root cargo build/test/coverage
+gates, though the root panic/timeout policy scans do walk its sources and
+`scripts/check-msrv-consistency.sh` pins `clients/native/Cargo.toml` to the
+root MSRV). `clients/native/` is the webrtc-rs reference client +
+multi-process interop suite (run via `scripts/run-webrtc-interop.sh`; see
+`clients/native/README.md` and ADR-0004). `clients/browser/` is the
+TypeScript browser reference client (real headless-Chromium
+`RTCPeerConnection` via playwright-core, own `package-lock.json`); its
+browser↔native interop cells live in the native crate behind the
+`browser-interop` cargo feature and run via `scripts/run-browser-interop.sh`
+(see `clients/browser/README.md` and ADR-0005). Both clients share one JSONL
+stdout event contract and exit codes (the native README is canonical).
+
 ## Architectural Invariants
 
 Protocol v3 routing invariant: `websocket::create_router()` is nest-safe and
@@ -56,7 +70,10 @@ Session-plan topology/transport selection invariants are documented in
 Protocol v3 `TransportStatus` is informational, but still a negotiated-capability
 boundary: accept reports only from v3 connections and only for transports present
 in that connection's negotiated transport set. Invalid reports must not update
-stored per-connection status or transport metrics.
+stored per-connection status or transport metrics. An accepted state change
+(never a duplicate) fans out to the sender's room as `PeerTransportStatus` —
+per-recipient v3-gated like every v3-only message, but deliberately NOT gated on
+the recipient's transport capabilities (peer status is useful to any v3 client).
 
 `ProvideConnectionInfo` / `GameStarting.peer_connections` is legacy,
 self-declared metadata for the v2 handoff surface. It is preserved for backward

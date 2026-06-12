@@ -1,4 +1,6 @@
-use crate::protocol::{ClientMessage, PlayerId};
+use std::sync::Arc;
+
+use crate::protocol::{ClientMessage, PlayerId, ServerMessage};
 
 use super::{EnhancedGameServer, TransportStatusUpdate};
 
@@ -95,8 +97,9 @@ impl EnhancedGameServer {
     /// peers.
     ///
     /// Duplicate reports of the same `(transport, connected)` pair update no
-    /// counters; the metrics below are emitted only for the first report or a
-    /// real per-connection state transition.
+    /// counters and fan nothing out; the metrics and the `PeerTransportStatus`
+    /// fan-out below are emitted only for the first report or a real
+    /// per-connection state transition.
     ///
     /// Metric interpretation:
     /// - `connected == true` AND a P2P transport (`Direct` / `WebRtc`) ⇒
@@ -165,5 +168,63 @@ impl EnhancedGameServer {
             // means "still on the floor" and is intentionally not counted.
             self.metrics.record_p2p_established();
         }
+
+        // Fan the accepted state change out to the sender's CURRENT room as
+        // `PeerTransportStatus` (PLAN §P5 refinement), so peers learn e.g. that
+        // the host's WebRTC path died and relay-path traffic should be
+        // expected. Duplicate reports returned early above, so a fan-out fires
+        // once per real per-connection state change (including the first
+        // report). No room ⇒ nothing to fan out — the per-connection state was
+        // still recorded above.
+        let Some(room_id) = self.get_client_room(player_id).await else {
+            return;
+        };
+        let members = match self.database.get_room_players(&room_id).await {
+            Ok(members) => members,
+            Err(err) => {
+                tracing::warn!(
+                    %player_id,
+                    %room_id,
+                    error = %err,
+                    "Failed to load room members for PeerTransportStatus fan-out"
+                );
+                return;
+            }
+        };
+
+        let message = Arc::new(ServerMessage::PeerTransportStatus {
+            peer_id: *player_id,
+            transport,
+            connected,
+        });
+        for member in &members {
+            // The reporter never hears its own status echoed back.
+            if member.id == *player_id {
+                continue;
+            }
+            // Deliver only to recipients that negotiated v3 (defense-in-depth,
+            // Appendix K — the same per-recipient guard `Signal` / `NewPeer` /
+            // `SessionPlan` apply: a v2 member must never observe a v3-only
+            // message). Deliberately NOT gated on the recipient's own transport
+            // capabilities — weaker than the full session-pairing predicate
+            // (`SessionPlanDecision::recipient_pairable`) — because this is
+            // informational status about a PEER's data path, useful to any v3
+            // client (a relay-only member still wants to know the host fell
+            // back to the relay), not an instruction to use that transport.
+            if !self.client_supports_v3(&member.id) {
+                continue;
+            }
+            // Best-effort delivery, mirroring `Signal` / `NewPeer`: a
+            // backpressured peer may miss the notice; the relay floor (and the
+            // next state change) is unaffected.
+            let _ = self
+                .message_coordinator
+                .send_to_player(&member.id, Arc::clone(&message))
+                .await;
+        }
+
+        // One fan-out EVENT per accepted in-room state change — not per
+        // recipient (see `ServerMetrics::record_transport_status_fanout`).
+        self.metrics.record_transport_status_fanout();
     }
 }

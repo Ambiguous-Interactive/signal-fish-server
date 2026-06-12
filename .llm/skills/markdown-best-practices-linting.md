@@ -169,7 +169,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6.0.3
       - uses: DavidAnson/markdownlint-cli2-action@v22.0.0
         with:
           globs: |
@@ -182,7 +182,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6.0.3
       - uses: lycheeverse/lychee-action@v2.7.0
         with:
           args: --verbose './**/*.md' --config .lychee.toml
@@ -194,7 +194,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6.0.3
       - uses: crate-ci/typos@v1.30.1
         with:
           config: .typos.toml

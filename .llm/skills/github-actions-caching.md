@@ -147,7 +147,7 @@ grep -r "cargo\|Cargo\.toml\|rust-cache" .github/workflows/
 - uses: taiki-e/install-action@v2
 
 # ✅ CORRECT: Explicit version tags are readable and auditable
-- uses: actions/checkout@v6.0.2
+- uses: actions/checkout@v6.0.3
 - uses: Swatinem/rust-cache@v2.8.2
 ```
 

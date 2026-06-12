@@ -443,6 +443,18 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_transport_session_replans_emitted_total",
+        "Mid-session host re-plan events (departure failover or late-join self-heal; one per event, not per recipient)",
+        snapshot.transport.session_replans_emitted,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_session_plans_late_join_total",
+        "SessionPlans delivered to late joiners or reconnectors of already-active sessions",
+        snapshot.transport.session_plans_late_join,
+    );
+    counter(
+        &mut buf,
         "signal_fish_transport_topology_mesh_selected_total",
         "Finalized rooms whose chosen session topology was mesh",
         snapshot.transport.topology_mesh_selected,
@@ -500,6 +512,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "signal_fish_transport_turn_credentials_issued_total",
         "Ephemeral TURN credentials minted into SessionPlans",
         snapshot.transport.turn_credentials_issued,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_status_fanout_total",
+        "PeerTransportStatus fan-out events: accepted TransportStatus state changes from in-room clients fanned out to v3 room peers (one per event, not per recipient)",
+        snapshot.transport.transport_status_fanout,
     );
 
     let cache_age_seconds = {
@@ -649,6 +667,12 @@ mod tests {
         metrics.record_topology_selected(Topology::Mesh);
         metrics.record_transport_selected(Transport::WebRtc);
         metrics.increment_session_plans_emitted();
+        metrics.increment_session_replans_emitted();
+        metrics.increment_session_replans_emitted();
+        metrics.increment_session_plans_late_join();
+        metrics.increment_session_plans_late_join();
+        metrics.increment_session_plans_late_join();
+        metrics.increment_session_plans_late_join();
         metrics.record_topology_selected(Topology::Host);
         metrics.record_transport_selected(Transport::Direct);
         metrics.record_topology_selected(Topology::Relay);
@@ -657,6 +681,9 @@ mod tests {
         metrics.record_relay_fallback();
         metrics.increment_signals_relayed();
         metrics.add_turn_credentials_issued(3);
+        for _ in 0..5 {
+            metrics.record_transport_status_fanout();
+        }
 
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
@@ -670,6 +697,16 @@ mod tests {
                 "signal_fish_transport_session_plans_emitted_total",
                 "Non-relay v3 SessionPlans emitted (one per finalized non-relay room)",
                 1u64,
+            ),
+            (
+                "signal_fish_transport_session_replans_emitted_total",
+                "Mid-session host re-plan events (departure failover or late-join self-heal; one per event, not per recipient)",
+                2,
+            ),
+            (
+                "signal_fish_transport_session_plans_late_join_total",
+                "SessionPlans delivered to late joiners or reconnectors of already-active sessions",
+                4,
             ),
             (
                 "signal_fish_transport_topology_mesh_selected_total",
@@ -720,6 +757,11 @@ mod tests {
                 "signal_fish_transport_turn_credentials_issued_total",
                 "Ephemeral TURN credentials minted into SessionPlans",
                 3,
+            ),
+            (
+                "signal_fish_transport_status_fanout_total",
+                "PeerTransportStatus fan-out events: accepted TransportStatus state changes from in-room clients fanned out to v3 room peers (one per event, not per recipient)",
+                5,
             ),
         ];
 

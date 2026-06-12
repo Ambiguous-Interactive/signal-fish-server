@@ -260,5 +260,6 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::NewSpectatorJoined { .. } => "NewSpectatorJoined",
         ServerMessage::SpectatorDisconnected { .. } => "SpectatorDisconnected",
         ServerMessage::Error { .. } => "Error",
+        ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
     }
 }

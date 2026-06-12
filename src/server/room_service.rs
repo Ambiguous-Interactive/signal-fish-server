@@ -225,16 +225,16 @@ impl EnhancedGameServer {
                     )
                     .await;
 
-                // Additively pair the joiner into an ACTIVE (finalized) v3 P2P
-                // session via `NewPeer` (PLAN §P3, Appendix E/L). Initial
-                // lobby-fill pairing is delivered by the `SessionPlan` at
-                // finalize; a room reaches `Finalized` only while full, which
-                // rejects new joins, so on the normal path this is a no-op here.
-                // It remains correct (and fires topology-aware pairing) for the
-                // reconnect path and any future join-into-active flow. Purely
-                // additive and gated to v3 + WebRTC peers, so v2 message ordering
-                // and bytes are untouched.
-                self.handle_webrtc_late_join(&room, player_id, &current_players)
+                // Bring the joiner into an ACTIVE (finalized) v3 session (PLAN
+                // §P3, Appendix E/L): the joiner receives a tailored
+                // `SessionPlan` for the room's stored running session and
+                // existing members receive the additive `NewPeer` delta. A room
+                // reaches `Finalized` only while full, but a departure can
+                // reopen a seat (`add_player_to_room` gates only on fullness),
+                // so this fires for seat-filling joins into live sessions.
+                // Purely additive and gated to v3 (+ WebRTC for `NewPeer`), so
+                // v2 message ordering and bytes are untouched.
+                self.handle_active_session_late_join(&room, player_id, &current_players)
                     .await;
 
                 // Check if room should transition to lobby state
@@ -338,6 +338,16 @@ impl EnhancedGameServer {
                     player_id: *player_id,
                 }),
             )
+            .await;
+
+        // v3 mid-session re-planning (after the PlayerLeft broadcast): if the
+        // departed player hosted the room's active non-relay session, re-elect
+        // the host and re-emit fresh per-recipient SessionPlans. `leave_room`
+        // is the single choke point for explicit LeaveRoom AND disconnects
+        // (`unregister_client` routes through here), so one hook covers both.
+        // Rooms without a stored plan (relay floor / pre-v3) return immediately
+        // — pure v2 semantics, where PlayerLeft alone suffices.
+        self.handle_session_member_departure(&room_id, player_id)
             .await;
 
         // Check if room should transition out of lobby state after player left

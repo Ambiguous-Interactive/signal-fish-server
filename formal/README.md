@@ -1,0 +1,262 @@
+# Formal Verification (TLA+ / TLC)
+
+This directory contains the TLA+ specification of the Protocol v3 per-room session
+lifecycle — finalize-time plan selection, per-recipient `SessionPlan` emission,
+late-join / seat-fill pairing, and host-failover re-planning — together with the TLC
+model configurations that exhaustively check it.
+
+The spec mirrors the implementation, not an idealization: every operator corresponds to
+a concrete function in the Rust code, and each TLA+ action models one membership-touching
+event together with all of its session side effects as a single atomic step. That
+atomicity is a deliberate **sequential abstraction**: the server runs each event's side
+effects on one task, but it does not serialize distinct events on the same room against
+each other — see [Atomicity argument](#atomicity-argument) for exactly what the
+abstraction proves and what it leaves to the heal-on-next-event mechanism. When
+`src/server/session_policy.rs`,
+`src/server/signaling.rs`, or `src/server/room_service.rs` change behavior, the spec must
+be re-checked and, if the contract moved, updated deliberately — CI enforces a run via
+path filters in `.github/workflows/formal-verification.yml`.
+
+## Layout
+
+| Path                                  | Purpose                                                              |
+| ------------------------------------- | -------------------------------------------------------------------- |
+| `tla/SignalFishSession.tla`           | The specification: actions, invariants, action properties            |
+| `tla/SignalFishSession_Mesh.cfg`      | Model: `desired = mesh`, both upgrade transports enabled             |
+| `tla/SignalFishSession_Host.cfg`      | Model: `desired = host`, both upgrade transports enabled, a v2 member |
+| `tla/SignalFishSession_HostDirect.cfg` | Model: `desired = host`, WebRTC transport disabled (host+direct rung) |
+| `tla/SignalFishSession_Floor.cfg`     | Model: `desired = mesh`, BOTH upgrade transports disabled (relay-floor denial)  |
+
+## How to run
+
+```bash
+# All four configurations (downloads + verifies the pinned tla2tools.jar once):
+bash scripts/run-tla-model-check.sh
+
+# One configuration / full TLC output:
+bash scripts/run-tla-model-check.sh --config Mesh
+bash scripts/run-tla-model-check.sh --config Host --verbose
+```
+
+Requirements: a Java runtime (11+). The script downloads `tla2tools.jar` pinned by
+version **and** SHA256 into `${XDG_CACHE_HOME:-~/.cache}/signal-fish/tla` (override with
+`SIGNAL_FISH_TLA_CACHE_DIR`) and re-verifies the checksum on every run, so a corrupted or
+tampered jar never executes. CI runs the same script via
+`.github/workflows/formal-verification.yml`.
+
+## Correspondence table (spec ⇄ code)
+
+Function names are the stable anchors; line numbers are as of the commit that introduced
+this table and may drift a few lines.
+
+| Spec operator / action                  | Code                                                                                          |
+| --------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `UpgradeLadder`                          | `UPGRADE_LADDER` — `src/server/session_policy.rs:179`                                          |
+| `RelayPair`                              | `RELAY_FLOOR` — `src/server/session_policy.rs:189`                                             |
+| `TopologyRank`                           | `topology_rank` — `src/server/session_policy.rs:197`                                           |
+| `TransportEnabled`                       | `transport_enabled` — `src/server/session_policy.rs:207`                                       |
+| `IsValidPair`                            | `is_valid_pair` — `src/server/session_policy.rs:224`                                           |
+| `SupportsSession`                        | `SessionMember::supports_session` — `src/server/session_policy.rs:142`                         |
+| `AllSupportOver`                         | `all_support` — `src/server/session_policy.rs:164`                                             |
+| `ChoosePair`                             | ladder walk in `choose_session_plan` — `src/server/session_policy.rs:254`                      |
+| `ElectHost`                              | `elect_host` — `src/server/session_policy.rs:303`                                              |
+| `Pairable`                               | `SessionPlanDecision::pairable` / `ActiveSessionPlan::supported_by` — `session_policy.rs:366`  |
+| `HostInvalid`                            | `ActiveSessionPlan::host_invalid` — `src/server/session_policy.rs:88`                          |
+| `PlanFor`                                | `SessionPlanDecision::plan_for` + `host_peers_for` — `src/server/session_policy.rs:409,450`    |
+| `NewPeersFor`                            | `announce_webrtc_peer_to_members` / `announce_webrtc_peer_in_star` — `signaling.rs:375,413`    |
+| `V3Members` delivery gate                | v3 gate in `send_session_plan_to` — `src/server/session_policy.rs:899`                         |
+| `PlansForAll`                            | `send_session_plans_to_members` — `src/server/session_policy.rs:860`                           |
+| `ReplanResult`                           | `replan_host_session` — `src/server/session_policy.rs:793`                                     |
+| `LateJoinResult` (inside `Join`)         | `handle_active_session_late_join` — `src/server/signaling.rs:246`                              |
+| `DepartureResult` (inside `Depart`)      | `handle_session_member_departure` — `src/server/session_policy.rs:692`                         |
+| `Finalize`                               | `emit_session_plan` (after coordinator finalize) — `src/server/session_policy.rs:544`          |
+| `Join` fullness-only gate                | `add_player_to_room` — `src/database/mod.rs:398` (seat-fill into `Finalized` non-full is legal) |
+| `Depart` + authority clearing            | `leave_room` — `src/server/room_service.rs:279`; `remove_player_from_room` — `database/mod.rs:412` |
+| `GrantAuthority`                         | `request_room_authority` — `src/database/mod.rs:477` (no version gate; only while unheld)      |
+| `Finalize` fullness precondition         | `Room::should_enter_lobby` — `src/protocol/room_state.rs:344` (lobby — and so readiness/finalize — requires a full room) |
+| `r < q` (glare rule, election tie-break) | `local_initiates` — `src/server/signaling.rs:60`; UUID order via integer player ids            |
+
+### Invariants and properties
+
+| Name (spec)                   | Pins (code contract)                                                                        |
+| ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `TypeOK`                      | Variable domains; member list duplicate-free and within `max_players`                         |
+| `AuthorityIsCurrentMember`    | `remove_player_from_room` clears a departing authority                                        |
+| `PlanLegality`                | Only ladder rungs are ever stored; the relay floor is never stored (`is_valid_pair`)          |
+| `V2Gating`                    | Appendix K: no `SessionPlan`/`NewPeer` ever reaches (or names) a sub-v3 connection            |
+| `HostValid`                   | A stored host plan always names a current, session-capable member — a theorem of the atomic-event abstraction (see [Atomicity argument](#atomicity-argument)) |
+| `CeilingRespected`            | Stored topology rank never exceeds the desired ceiling (`topology_rank` gate)                 |
+| `PeerCapability`              | No peer list (even a stale one) names the recipient or a member that cannot run the pair      |
+| `MeshPlanExactness`           | Fresh mesh plans list exactly the other capable members, glare-correct `initiate`             |
+| `GlareAntisymmetry`           | Exactly one initiator per mutually listed mesh pair — the smaller id (`local_initiates`)      |
+| `StarProperty`                | Fresh host plans form a star: host answers all capable clients; clients offer to host only    |
+| `EmissionRequiresStoredPlan`  | Plans are only ever emitted while a matching stored decision exists, carrying its exact pair  |
+| `NoEmissionWithoutQualifier`  | A replan emission implies a capable elected host; the no-qualifier arm drops + stays silent   |
+| `NewPeerSoundness`            | `NewPeer` only for WebRTC sessions, both sides capable members, topology-correct direction    |
+| `StickyPairProperty` (action) | Topology/transport never change while stored; failover rewrites only `host`                   |
+| `HostDepartureHealedSameStep` (action) | A departing stored host is re-elected (qualifier survives) or the entry dropped — same step |
+| `RelayFloorOnly` (`Floor` model only) | With both upgrade transports config-disabled, nothing is ever stored, delivered, or emitted (the `transport_enabled` denial path) |
+
+## Model configurations
+
+`MAX_PLAYERS` is smaller than the player universe in every model, so finalize-time
+membership varies per behavior and post-finalize **seat-fill** joins (the fullness-only
+gate) bring capability-mismatched players into live sessions.
+
+| Configuration | Players (profiles)                                                       | Reaches                                                                                                       |
+| ------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `Mesh`        | 2 × `V3Full`, `V3MeshWebRtc`, `V3HostWebRtcOnly`, `V3RelayOnly`           | mesh+webrtc rung; host+webrtc under the mesh ceiling; relay floor; v3-but-incapable seat-fills both directions |
+| `Host`        | 2 × `V3Full`, `V3HostWebRtcOnly`, `V2`                                    | host+webrtc star; v2 seat-fill (Appendix-K silence); capability-filtered failover; v2 authority never elected; no-qualifier entry drop |
+| `HostDirect`  | `V3HostDirect`, 2 × `V3Full`, `V3RelayOnly`; `enable_webrtc = false`      | host+direct rung via the transport config gate; `SessionPlan` without any `NewPeer` (non-WebRTC session)       |
+| `Floor`       | same players as `Mesh`; `enable_webrtc = false`, `enable_direct = false`  | the enabled-gate denial path end-to-end: capability-rich rooms still floor to relay; nothing is ever stored, delivered, or emitted (`RelayFloorOnly`) |
+
+The five required capability profiles (`V2`, `V3RelayOnly`, `V3MeshWebRtc`,
+`V3HostWebRtcOnly`, `V3Full`) are all covered across the `Mesh`, `Host`, and
+`HostDirect` models; `V3HostDirect` (direct without WebRTC) is added so the third
+ladder rung is reachable while WebRTC-capable members exist. The `Floor` model pins the
+opposite direction — config gates deny every rung even though the members could run
+them, so `ChoosePair` must always return the relay floor and the room must store
+nothing. The `DESIRED = relay` ceiling (denial by topology rank rather than transport
+gate) is additionally covered by the randomized-config proptests
+(`session_policy_tests.rs::properties`, whose generated `SessionConfig`s draw
+`default_topology` and per-game mappings from all three topologies).
+
+### Observed state spaces (TLC 2.19, `CHURN_BUDGET = 10`, 12 workers)
+
+| Configuration | States generated | Distinct states | Graph depth | Wall time |
+| ------------- | ---------------- | --------------- | ----------- | --------- |
+| `Mesh`        | 159,466          | 56,786          | 12          | ~2 s      |
+| `Host`        | 49,078           | 16,709          | 12          | ~1 s      |
+| `HostDirect`  | 60,382           | 21,485          | 12          | ~1 s      |
+| `Floor`       | 16,593           | 3,975           | 12          | ~1 s      |
+
+Reachability of the interesting states was confirmed with temporary negated "sanity"
+invariants during development (each must be _violated_): mesh and host plans stored, the
+host+direct rung selected, replan emissions, `NewPeer` emissions, v2 seat-fill into a live
+session, the no-qualifier entry drop, and late-join plan delivery. In the `HostDirect`
+model the "a `NewPeer` was emitted" probe is **unreachable**, which is itself the
+checked contract (non-WebRTC sessions never announce `NewPeer`). The `Floor` model
+needs no reachability probes at all: its contract is exactly an unreachability claim,
+stated directly as the `RelayFloorOnly` invariant.
+
+## Modeling decisions
+
+### Atomicity argument
+
+Each TLA+ action bundles one external event with all of its session side effects into a
+single atomic step. _Within_ one event the server really is sequential: `leave_room`
+runs the departure hook inline after the `PlayerLeft` broadcast
+(`src/server/room_service.rs`), the join/reconnect handlers run
+`handle_active_session_late_join` inline, finalize runs `emit_session_plan` inline, and
+`replan_host_session` rewrites the stored entry _before_ emitting, so every emission is
+computed from one membership snapshot and is internally consistent. Cross-room
+interleavings do not interact (state is per-room).
+
+What the abstraction deliberately drops: distinct events on the same room are **not**
+serialized against each other. `leave_room` takes no per-room lock (see the concurrency
+note on `handle_session_member_departure` in `src/server/session_policy.rs`), so two
+concurrent departures can interleave: a stalled departure hook can insert a stored-host
+entry computed from its older membership snapshot _after_ a faster event already healed
+the entry — the stored-plan map is last-writer-wins — resurrecting an already-departed
+player as the stored host. The reconnect-failure rollback (`reject_claimed_reconnect`
+in `src/server/reconnection_service.rs`) is another window: it removes a just-restored
+member without running the departure hook.
+
+`HostValid` is therefore a theorem **of the sequential abstraction**, not of every
+machine-level interleaving. The contract the running system keeps is _eventually
+healed_, not instantaneously valid: between heals a stored host is a current capable
+member; a concurrent-membership interleaving can transiently wedge the stored entry;
+and the next membership-touching event repairs or drops it, because the
+`host_invalid` trigger is deliberately "the stored host is invalid" rather than "the
+departed player was the host" — it was widened exactly so these windows self-heal (its
+doc comment enumerates them). The model proves the strong half — no _sequence_ of whole
+events ever wedges a room — and the Rust unit tests around the widened trigger
+(`session_policy_tests.rs`, `signaling_tests.rs`) cover the transient windows the
+abstraction collapses.
+
+### Stale client-held plans (relay-floor soundness)
+
+When the stored entry is dropped (last member out, or no qualified host remains), the
+server does **not** retract previously delivered plans — clients keep them and fall back
+to the relay floor. The model mirrors this honestly: `delivered` is never cleared, so
+"no stale plan exists" is deliberately **not** an invariant. The soundness claim is about
+_emission_: `EmissionRequiresStoredPlan` states plans are only ever created while a
+matching stored decision exists and carry exactly its pair and host. Exactness claims
+(`MeshPlanExactness`, `StarProperty`, `GlareAntisymmetry`) are evaluated against
+`lastEmission` — the freshly emitted plans, for which the membership is current — because
+a stale plan legitimately disagrees with the current membership (mesh departures re-emit
+nothing; `PlayerLeft` prunes client-side).
+
+### Liveness
+
+Healing is atomic with its triggering event, so the meaningful "eventually" facts are
+single-step consequences, stated as **action properties** (`StickyPairProperty`,
+`HostDepartureHealedSameStep` — both `[][...]_vars`, checked under `PROPERTIES`). A
+classic weak-fairness liveness property would have to assume the _environment_ keeps
+acting (clients keep joining/departing), an assumption the server neither makes nor
+controls — under churn-budget exhaustion the room legitimately stutters forever. No
+fairness conditions are therefore asserted, and `HostValid` (a state invariant) already
+expresses the strongest form of "the room is never wedged on an invalid host": it holds
+in _every_ reachable state of the model. (How that maps onto the running system's
+eventually-healed contract is the [Atomicity argument](#atomicity-argument).)
+
+### Deadlock checking
+
+TLC deadlock checking stays **enabled**. The churn budget's terminal states would be
+spurious deadlocks, so the spec adds an explicit `Done` self-loop action once the budget
+is exhausted; any remaining deadlock TLC reports is then a real modeling bug (a reachable
+mid-protocol state with no enabled action).
+
+## Intentionally not modeled (and why)
+
+- **Rate limits / backpressure** — quantitative throttling, orthogonal to state-machine
+  correctness; delivery in the code is best-effort and the relay floor is the documented
+  fallback for missed messages.
+- **`Signal` payload relay** — `handle_signal` is transport-only plumbing over opaque
+  payloads (deliberately weaker than the session predicate, see
+  `src/server/signaling.rs`); its gates are direct conditionals with no state evolution,
+  exhaustively covered by `signaling_tests.rs` and the wire/fuzz property suites.
+- **Reconnection tokens / auth** — orthogonal subsystems; a reconnect is modeled as
+  depart-then-join of the same player. One real difference is deliberately not
+  captured: a reconnect restores the disconnect-time `PlayerInfo` snapshot with the
+  _original_ `connected_at` (`src/server/reconnection_service.rs`), so the reconnector
+  re-enters the host-election order at its original position — and can have its
+  previously held authority auto-restored while unheld — whereas the modeled
+  depart-then-join re-enters at the end of the join order and re-acquires authority
+  only through `GrantAuthority`. Both differences change only _which_ capable member
+  election picks, and no checked invariant or property depends on the elected identity
+  — each requires only that the elected host is a current, session-capable member — so
+  every checked claim transfers.
+- **Authority release and reconnect auto-restore** — `request_room_authority`'s release
+  arm (`src/database/mod.rs`) and the reconnect path's authority auto-restore are not
+  modeled as actions; they are coverage-equivalent because every (membership, authority)
+  input the replan logic can observe is already reachable through the timing of the
+  modeled grant-while-unheld action (releasing and re-granting is the same as granting
+  later, or to the other member, in some behavior).
+- **TURN minting / ICE lists** — per-recipient data that never feeds back into the state
+  machine; covered by deterministic-HMAC property tests
+  (`src/security/turn_credentials.rs`, `tests/v3_wire_properties.rs`).
+- **Multi-room state** — all session state is keyed per room and rooms do not interact;
+  a single-room model loses nothing.
+- **Storage errors and capability-downgrading reconnects** — the code self-heals a
+  wedged host entry left by a transient storage error or a reconnect that shrank the
+  host's negotiated capabilities (`host_invalid`'s broader gate, checked on _every_
+  membership-touching event). With reliable atomic actions and constant per-player
+  capabilities, those wedge states are unreachable in the model, so the late-join heal
+  arm is modeled (it mirrors the code structure) but never fires. The defensive arms
+  remain covered by Rust unit tests (`session_policy_tests.rs`,
+  `signaling_tests.rs`).
+- **`joined_at` ties** — model join times strictly increase (sequence order), so the
+  smaller-UUID election tie-break is structurally dead in the model; it is covered by
+  the `elect_host` property tests.
+- **`player_name` / `is_authority` peer fields** — informational wire payload fields
+  that never drive pairing or validation.
+
+## See also
+
+- [`docs/architecture/formal-verification.md`](../docs/architecture/formal-verification.md)
+  — how this layer fits with the property-test and fuzz-hardening layers.
+- [`docs/adr/0003-formal-verification-and-fuzzing.md`](../docs/adr/0003-formal-verification-and-fuzzing.md)
+  — the decision record (why TLC + proptest, why not cargo-fuzz/SMT/kani/loom today).
+- [`docs/architecture/handoff-and-topologies.md`](../docs/architecture/handoff-and-topologies.md)
+  — the documented protocol contract this spec checks.

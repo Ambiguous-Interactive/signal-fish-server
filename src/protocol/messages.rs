@@ -327,6 +327,28 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error_code: Option<ErrorCode>,
     },
+    /// A same-room peer's reported data-path transport state changed (v3 only).
+    ///
+    /// Fan-out of an accepted [`ClientMessage::TransportStatus`]: when a v3
+    /// client's report is recorded as a real per-connection state change (the
+    /// first report, or a `(transport, connected)` transition — duplicates are
+    /// dropped at the handler), every **other** member of its current room that
+    /// negotiated v3 is told the new state, e.g. "the host's WebRTC path died,
+    /// expect relay-path traffic from it". Delivery is gated on the recipient's
+    /// negotiated protocol version only — deliberately NOT on the recipient's
+    /// own transport capabilities, because this is informational status about a
+    /// peer, not an instruction to use that transport. Like the report itself it
+    /// is purely informational: the relay floor never closes.
+    ///
+    /// NOTE: appended at the END of the enum (after `Error`) so any future
+    /// positional/discriminant-sensitive encoding (e.g. the rkyv path sketched
+    /// in `src/broadcast.rs`) keeps prior discriminants stable. The current wire
+    /// encodings (`serde_json`, `rmp_serde::to_vec_named`) are name-based.
+    PeerTransportStatus {
+        peer_id: PlayerId,
+        transport: Transport,
+        connected: bool,
+    },
 }
 
 /// Custom serde module for `bytes::Bytes` serialization

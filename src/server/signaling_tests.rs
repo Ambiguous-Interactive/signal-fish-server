@@ -1,10 +1,11 @@
 //! Handler tests for the P2 targeted signal relay (`signaling.rs`).
 //!
 //! Mirrors the `message_router_tests` harness: register clients, set their
-//! negotiated protocol, drive `handle_signal` / `handle_webrtc_late_join`, and
-//! assert on what each client receives. Covers the happy path, every rejection
-//! branch, glare determinism, late-join offerer designation, and v2 gating
-//! (Appendix K).
+//! negotiated protocol, drive `handle_signal` /
+//! `handle_active_session_late_join`, and assert on what each client receives.
+//! Covers the happy path, every rejection branch, glare determinism, late-join
+//! plan delivery + offerer designation against the stored `ActiveSessionPlan`,
+//! and v2 gating (Appendix K).
 
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+use super::session_policy::{ActiveSessionPlan, SessionPlanDecision};
 use super::signaling::local_initiates;
 
 /// Allocate a unique loopback address per registered client so tests never
@@ -47,7 +49,18 @@ async fn create_test_server_with_signal_limits(
     max_signals: u32,
     max_signal_errors: u32,
 ) -> Arc<EnhancedGameServer> {
+    create_test_server_with_signal_policy(max_signals, max_signal_errors, 16384).await
+}
+
+/// Build a server with full control over the per-connection signal budget AND
+/// the serialized-payload size cap (`security.max_signal_bytes`).
+async fn create_test_server_with_signal_policy(
+    max_signals: u32,
+    max_signal_errors: u32,
+    max_signal_bytes: usize,
+) -> Arc<EnhancedGameServer> {
     let config = ServerConfig {
+        max_signal_bytes,
         rate_limit_config: RateLimitConfig {
             max_signals,
             max_signal_errors,
@@ -75,12 +88,21 @@ async fn create_test_server_with_signal_limits(
 /// Build a server whose session policy is the given `SessionConfig`, so the
 /// finalization-gated late-join path can resolve to a non-relay topology.
 async fn create_test_server_with_session(session: SessionConfig) -> Arc<EnhancedGameServer> {
+    create_test_server_with_session_and_turn(session, TurnConfig::default()).await
+}
+
+/// Build a server with the given session **and** TURN config, so the late-join
+/// ICE-minting path can be exercised with active TURN credentials.
+async fn create_test_server_with_session_and_turn(
+    session: SessionConfig,
+    turn: TurnConfig,
+) -> Arc<EnhancedGameServer> {
     EnhancedGameServer::new(
         ServerConfig::default(),
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
         session,
-        TurnConfig::default(),
+        turn,
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
         AuthMaintenanceConfig::default(),
@@ -90,6 +112,44 @@ async fn create_test_server_with_session(session: SessionConfig) -> Arc<Enhanced
     )
     .await
     .expect("failed to construct test server")
+}
+
+/// Rehydrate a [`SessionPlanDecision`] exactly as the late-join path does —
+/// the sticky (topology, transport, host) over the current members with their
+/// negotiated capabilities — so the `NewPeer` announce primitives can be
+/// driven directly.
+fn decision_for(
+    server: &EnhancedGameServer,
+    topology: Topology,
+    transport: Transport,
+    host: Option<PlayerId>,
+    members: &[PlayerInfo],
+) -> SessionPlanDecision {
+    ActiveSessionPlan {
+        topology,
+        transport,
+        host,
+    }
+    .decision_with(server.session_members_from(members))
+}
+
+/// Record `room_id`'s sticky session decision directly, isolating the late-join
+/// path from finalize emission (which is covered by `session_policy_tests`).
+fn store_active_plan(
+    server: &EnhancedGameServer,
+    room_id: uuid::Uuid,
+    topology: Topology,
+    transport: Transport,
+    host: Option<PlayerId>,
+) {
+    server.active_session_plans.insert(
+        room_id,
+        ActiveSessionPlan {
+            topology,
+            transport,
+            host,
+        },
+    );
 }
 
 /// A STUN-only `SessionConfig` preferring `mesh` (so an all-v3+webrtc room
@@ -133,9 +193,10 @@ fn host_direct_session_config() -> SessionConfig {
     }
 }
 
-/// Fetch a room and mark it `Finalized` so late-join pairing engages (it only
-/// fires for an active, finalized session). Storage state is irrelevant to
-/// `handle_webrtc_late_join`, which reads `lobby_state` from the passed `Room`.
+/// Fetch a room and mark it `Finalized` so late-join handling engages (it only
+/// fires for an active, finalized session). The stored lobby state is irrelevant
+/// to `handle_active_session_late_join`, which reads `lobby_state` from the
+/// passed `Room` (the stored ActiveSessionPlan is still looked up by room id).
 async fn finalized_room(server: &EnhancedGameServer, room_id: &uuid::Uuid) -> Room {
     let mut room = server
         .database
@@ -239,6 +300,19 @@ fn v3_relay_only() -> NegotiatedProtocol {
     NegotiatedProtocol {
         version: 3,
         transports: vec![Transport::Relay],
+        topologies: vec![Topology::Relay],
+    }
+}
+
+/// A v3 client that negotiated the WebRTC *transport* but only the relay
+/// *topology*: it passes the transport-level `supports_webrtc_signaling` gate
+/// yet cannot run a mesh or star session — the discriminator proving `NewPeer`
+/// pairing gates on the FULL session predicate (v3 + topology + transport),
+/// not on the transport alone.
+fn v3_webrtc_relay_topology_only() -> NegotiatedProtocol {
+    NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc],
         topologies: vec![Topology::Relay],
     }
 }
@@ -696,6 +770,134 @@ async fn rejected_signals_do_not_consume_valid_signal_budget() {
 }
 
 // ---------------------------------------------------------------------------
+// Signal payload size cap (`security.max_signal_bytes`, PLAN Appendix I).
+// ---------------------------------------------------------------------------
+
+/// Register a v3+WebRTC pair sharing one room on `server`.
+async fn webrtc_pair_in_room(
+    server: &EnhancedGameServer,
+) -> (
+    PlayerId,
+    mpsc::Receiver<Arc<ServerMessage>>,
+    PlayerId,
+    mpsc::Receiver<Arc<ServerMessage>>,
+) {
+    let (alice, alice_rx) = register_client(server).await;
+    let (bob, bob_rx) = register_client(server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    (alice, alice_rx, bob, bob_rx)
+}
+
+/// Serialized length of an opaque signal payload, exactly as the cap measures it.
+fn payload_len(signal: &serde_json::Value) -> usize {
+    serde_json::to_vec(signal).expect("signal serializes").len()
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn signal_exactly_at_size_cap_is_relayed() {
+    let payload = json!({ "Offer": "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n" });
+    // Boundary: the cap equals the payload's canonical serialized length.
+    let server = create_test_server_with_signal_policy(600, 60, payload_len(&payload)).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+
+    server.handle_signal(&alice, bob, payload.clone()).await;
+
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::Signal { from, signal } => {
+            assert_eq!(*from, alice);
+            assert_eq!(*signal, payload, "at-cap payload must relay byte-preserved");
+        }
+        other => panic!("expected Signal, got {other:?}"),
+    }
+    assert_silent(&mut alice_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn signal_one_byte_over_size_cap_is_rejected() {
+    let payload = json!({ "Offer": "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n" });
+    // Boundary: cap is one byte below the payload's serialized length.
+    let server = create_test_server_with_signal_policy(600, 60, payload_len(&payload) - 1).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+
+    server.handle_signal(&alice, bob, payload).await;
+
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
+    if let ServerMessage::Error { message, .. } = msg.as_ref() {
+        assert!(
+            message.contains("bytes"),
+            "rejection should name the sizes: {message}"
+        );
+    }
+    assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn oversized_signal_is_rejected_before_any_other_check() {
+    // The size cap is step 0: even a sender that is not in any room gets the
+    // size rejection, not NotInRoom, proving no relay work precedes the cap.
+    let server = create_test_server_with_signal_policy(600, 60, 8).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    server
+        .handle_signal(
+            &alice,
+            PlayerId::new_v4(),
+            json!({ "Offer": "definitely-longer-than-eight-bytes" }),
+        )
+        .await;
+
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn oversized_signal_rejection_does_not_consume_valid_signal_budget() {
+    let small = json!({ "IceCandidate": "ok" });
+    let oversized = json!({ "Offer": "x".repeat(64) });
+    // Valid-signal budget of exactly 1, cap sized to admit only `small`.
+    let server = create_test_server_with_signal_policy(1, 60, payload_len(&small)).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+
+    // Oversized first: rejected without touching the valid-signal budget.
+    server.handle_signal(&alice, bob, oversized).await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
+    assert_silent(&mut bob_rx).await;
+
+    // The single valid-signal budget slot is still available...
+    server.handle_signal(&alice, bob, small.clone()).await;
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::Signal { signal, .. } => assert_eq!(*signal, small),
+        other => panic!("expected Signal, got {other:?}"),
+    }
+
+    // ...and was budget slot #1 of 1, proving the oversized attempt did not
+    // consume it.
+    server.handle_signal(&alice, bob, small).await;
+    let msg = recv(&mut alice_rx).await;
+    assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
+    assert_silent(&mut bob_rx).await;
+}
+
+// ---------------------------------------------------------------------------
 // Late join (offerer designation).
 // ---------------------------------------------------------------------------
 
@@ -740,10 +942,12 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_into_unfinalized_room_emits_no_new_peer() {
+async fn late_join_into_unfinalized_room_emits_nothing() {
     // Premature-pairing suppression: a join while the room is still filling
-    // (lobby_state != Finalized) must emit NO `NewPeer` — the SessionPlan owns
-    // finalize-time initial pairing. Receivers are registered and asserted silent.
+    // (lobby_state != Finalized) must emit NO message — the SessionPlan owns
+    // finalize-time initial pairing. A stored plan is present (anomalous for a
+    // Waiting room) to prove the Finalized gate fires before the stored-plan
+    // lookup. Receivers are registered and asserted silent.
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
@@ -751,6 +955,7 @@ async fn late_join_into_unfinalized_room_emits_no_new_peer() {
     server.set_client_protocol(&joiner, v3_webrtc());
 
     let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
     server
         .database
         .add_player_to_room(&room_id, player_info(joiner, "joiner"))
@@ -773,7 +978,7 @@ async fn late_join_into_unfinalized_room_emits_no_new_peer() {
     // Room is in the default `Waiting` state.
     let room = waiting_room(&server, &room_id).await;
     server
-        .handle_webrtc_late_join(&room, &joiner, &members)
+        .handle_active_session_late_join(&room, &joiner, &members)
         .await;
 
     assert_silent(&mut existing_rx).await;
@@ -782,9 +987,11 @@ async fn late_join_into_unfinalized_room_emits_no_new_peer() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_finalized_mesh_room_designates_exactly_one_offerer() {
-    // A Finalized room resolving to mesh pairs the joiner with each existing
-    // webrtc member (one offerer per pair, UUID glare rule).
+async fn late_join_stored_mesh_sends_joiner_plan_and_existing_new_peer() {
+    // A Finalized room with a stored mesh+webrtc decision: the JOINER receives a
+    // tailored SessionPlan (current members, glare-correct initiate, ICE) and NO
+    // NewPeer; each EXISTING webrtc member receives the NewPeer delta naming the
+    // joiner (one offerer per pair, UUID glare rule).
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
@@ -792,6 +999,7 @@ async fn late_join_finalized_mesh_room_designates_exactly_one_offerer() {
     server.set_client_protocol(&joiner, v3_webrtc());
 
     let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
     server
         .database
         .add_player_to_room(&room_id, player_info(joiner, "joiner"))
@@ -813,35 +1021,48 @@ async fn late_join_finalized_mesh_room_designates_exactly_one_offerer() {
         .expect("room players");
     let room = finalized_room(&server, &room_id).await;
     server
-        .handle_webrtc_late_join(&room, &joiner, &members)
+        .handle_active_session_late_join(&room, &joiner, &members)
         .await;
 
-    // Both sides receive a NewPeer naming the other.
-    let existing_flag = match recv(&mut existing_rx).await.as_ref() {
+    // The joiner gets its tailored view of the RUNNING session, not a NewPeer.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.topology, Topology::Mesh);
+    assert_eq!(joiner_plan.transport, Transport::WebRtc);
+    assert_eq!(joiner_plan.fallback, Transport::Relay);
+    assert!(joiner_plan.host.is_none());
+    assert_eq!(joiner_plan.peers.len(), 1, "one existing peer");
+    assert_eq!(joiner_plan.peers[0].player_id, existing);
+    assert_eq!(
+        joiner_plan.peers[0].initiate,
+        local_initiates(joiner, existing),
+        "joiner's initiate flag follows the glare rule"
+    );
+    // WebRTC plan carries ICE: the static STUN from `mesh_session_config` plus
+    // the default `[turn]` block's public STUN (TURN disabled => no creds).
+    assert_eq!(joiner_plan.ice_servers.len(), 2);
+    assert!(joiner_plan
+        .ice_servers
+        .iter()
+        .all(|server| server.username.is_none()));
+
+    // The existing member gets the antisymmetric NewPeer delta.
+    match recv(&mut existing_rx).await.as_ref() {
         ServerMessage::NewPeer {
             peer_id,
             you_initiate,
         } => {
             assert_eq!(*peer_id, joiner);
-            *you_initiate
+            assert_eq!(*you_initiate, local_initiates(existing, joiner));
+            assert_ne!(
+                *you_initiate, joiner_plan.peers[0].initiate,
+                "exactly one side of the pair initiates"
+            );
         }
         other => panic!("existing expected NewPeer, got {other:?}"),
-    };
-    let joiner_flag = match recv(&mut joiner_rx).await.as_ref() {
-        ServerMessage::NewPeer {
-            peer_id,
-            you_initiate,
-        } => {
-            assert_eq!(*peer_id, existing);
-            *you_initiate
-        }
-        other => panic!("joiner expected NewPeer, got {other:?}"),
-    };
-
-    // Exactly one side initiates, consistent with local_initiates (mesh rule).
-    assert_ne!(existing_flag, joiner_flag);
-    assert_eq!(existing_flag, local_initiates(existing, joiner));
-    assert_eq!(joiner_flag, local_initiates(joiner, existing));
+    }
 
     assert_silent(&mut existing_rx).await;
     assert_silent(&mut joiner_rx).await;
@@ -849,124 +1070,449 @@ async fn late_join_finalized_mesh_room_designates_exactly_one_offerer() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_finalized_host_room_pairs_client_with_host_only() {
-    // A Finalized room resolving to host topology: a client joiner is told to
-    // offer to the host (you_initiate=true) and the host is told to answer the
-    // client (you_initiate=false). No client is told to initiate to another
-    // client. The owner (existing) joined first, so it is the elected host.
+async fn late_join_stored_host_client_joiner_gets_plan_host_gets_new_peer() {
+    // A Finalized room with a stored host+webrtc decision: a CLIENT joiner gets
+    // a SessionPlan targeting the STORED host only (initiate=true) and no
+    // NewPeer; the host gets the NewPeer delta (you_initiate=false). No other
+    // client hears anything (clients never signal each other in a star).
     let server = create_test_server_with_session(host_session_config()).await;
     let (host, mut host_rx) = register_client(&server).await;
-    let (client, mut client_rx) = register_client(&server).await;
+    let (other_client, mut other_client_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
     server.set_client_protocol(&host, v3_webrtc_host());
-    server.set_client_protocol(&client, v3_webrtc_host());
+    server.set_client_protocol(&other_client, v3_webrtc_host());
+    server.set_client_protocol(&joiner, v3_webrtc_host());
 
     let room_id = create_db_room(&server, host).await;
-    server
-        .database
-        .add_player_to_room(&room_id, player_info(client, "client"))
-        .await
-        .expect("add client");
-    server
-        .connection_manager
-        .assign_client_to_room(&host, room_id)
-        .await;
-    server
-        .connection_manager
-        .assign_client_to_room(&client, room_id)
-        .await;
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(host),
+    );
+    for (id, name) in [(other_client, "other"), (joiner, "joiner")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [&host, &other_client, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
 
     let members = server
         .database
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    // Make the host explicit and finalize the room.
-    let mut room = finalized_room(&server, &room_id).await;
-    room.authority_player = Some(host);
+    let room = finalized_room(&server, &room_id).await;
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
     server
-        .handle_webrtc_late_join(&room, &client, &members)
+        .handle_active_session_late_join(&room, &joiner, &members)
         .await;
 
-    // The client offers to the host.
-    match recv(&mut client_rx).await.as_ref() {
-        ServerMessage::NewPeer {
-            peer_id,
-            you_initiate,
-        } => {
-            assert_eq!(*peer_id, host, "client's only peer is the host");
-            assert!(*you_initiate, "client offers to the host");
-        }
-        other => panic!("client expected NewPeer(host, initiate=true), got {other:?}"),
-    }
-    // The host answers the client.
+    // A normal late join — the stored host IS present — must never trigger the
+    // self-heal re-plan.
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before,
+        "a late join with the stored host present is not a re-plan"
+    );
+
+    // The joiner's plan: star view, stored host, host is its only peer.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.topology, Topology::Host);
+    assert_eq!(joiner_plan.transport, Transport::WebRtc);
+    assert_eq!(joiner_plan.host, Some(host));
+    assert_eq!(joiner_plan.peers.len(), 1, "a client targets the host only");
+    assert_eq!(joiner_plan.peers[0].player_id, host);
+    assert!(
+        joiner_plan.peers[0].initiate,
+        "the client offers to the host"
+    );
+    assert!(joiner_plan.peers[0].is_authority);
+
+    // The host answers the joiner.
     match recv(&mut host_rx).await.as_ref() {
         ServerMessage::NewPeer {
             peer_id,
             you_initiate,
         } => {
-            assert_eq!(*peer_id, client);
+            assert_eq!(*peer_id, joiner);
             assert!(!*you_initiate, "host answers (never offers in a star)");
         }
-        other => panic!("host expected NewPeer(client, initiate=false), got {other:?}"),
+        other => panic!("host expected NewPeer(joiner, initiate=false), got {other:?}"),
     }
 
-    assert_silent(&mut client_rx).await;
+    assert_silent(&mut joiner_rx).await;
     assert_silent(&mut host_rx).await;
+    assert_silent(&mut other_client_rx).await;
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_finalized_host_direct_room_emits_no_new_peer() {
-    // Regression (Copilot): a Finalized room that resolves to `host + direct`
-    // (WebRTC disabled in config) must emit NO `NewPeer`. `NewPeer` is a
-    // WebRTC-signaling control message and this room's transport is Direct, not
-    // WebRTC. Both members advertise the WebRTC transport, so the per-peer gate
-    // (`supports_webrtc_signaling`) passes — only the plan's *transport* gate
-    // suppresses pairing. Before the fix this wrongly emitted WebRTC `NewPeer`
-    // for a non-WebRTC session because the match keyed on topology alone.
-    let server = create_test_server_with_session(host_direct_session_config()).await;
-    let (host, mut host_rx) = register_client(&server).await;
-    let (client, mut client_rx) = register_client(&server).await;
-    server.set_client_protocol(&host, v3_webrtc_direct_host());
-    server.set_client_protocol(&client, v3_webrtc_direct_host());
+async fn late_join_after_host_failover_pairs_ex_host_as_client_of_new_host() {
+    // Host failover then ex-host rejoin: the stored entry now names the
+    // re-elected host, so the returning ex-host is brought in as a CLIENT — its
+    // plan targets the new host (initiate=true) and the new host answers it.
+    // This pins that late-join uses the STORED host, not a re-election.
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (new_host, mut new_host_rx) = register_client(&server).await;
+    let (ex_host, mut ex_host_rx) = register_client(&server).await;
+    server.set_client_protocol(&new_host, v3_webrtc_host());
+    server.set_client_protocol(&ex_host, v3_webrtc_host());
 
-    let room_id = create_db_room(&server, host).await;
+    // The room was created by the ex-host (it would win a re-election as the
+    // earliest joiner if late-join wrongly re-elected instead of using the
+    // stored entry), but the stored post-failover host is `new_host`.
+    let room_id = create_db_room(&server, ex_host).await;
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(new_host),
+    );
     server
         .database
-        .add_player_to_room(&room_id, player_info(client, "client"))
+        .add_player_to_room(&room_id, player_info(new_host, "new-host"))
         .await
-        .expect("add client");
-    server
-        .connection_manager
-        .assign_client_to_room(&host, room_id)
-        .await;
-    server
-        .connection_manager
-        .assign_client_to_room(&client, room_id)
-        .await;
+        .expect("add new host");
+    for id in [&new_host, &ex_host] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
 
     let members = server
         .database
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    let mut room = finalized_room(&server, &room_id).await;
-    room.authority_player = Some(host);
+    let room = finalized_room(&server, &room_id).await;
     server
-        .handle_webrtc_late_join(&room, &client, &members)
+        .handle_active_session_late_join(&room, &ex_host, &members)
         .await;
 
-    // host + direct ⇒ no WebRTC signaling ⇒ neither side is paired.
-    assert_silent(&mut client_rx).await;
+    let ex_host_plan = match recv(&mut ex_host_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("ex-host expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(ex_host_plan.host, Some(new_host), "stored host wins");
+    assert_eq!(ex_host_plan.peers.len(), 1);
+    assert_eq!(ex_host_plan.peers[0].player_id, new_host);
+    assert!(
+        ex_host_plan.peers[0].initiate,
+        "the ex-host is now a client and offers to the re-elected host"
+    );
+
+    match recv(&mut new_host_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, ex_host);
+            assert!(!*you_initiate, "the re-elected host answers the ex-host");
+        }
+        other => panic!("new host expected NewPeer, got {other:?}"),
+    }
+
+    assert_silent(&mut ex_host_rx).await;
+    assert_silent(&mut new_host_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_with_missing_stored_host_heals_via_replan() {
+    // Self-heal on late join: the stored host of a Finalized host+webrtc room
+    // is no longer a member (wedge state — e.g. the departure hook was skipped
+    // by a transient storage error before the seat refilled). The join must
+    // trigger the same capability-aware re-election + full re-plan a host
+    // departure does: EVERY current member — the joiner included — receives
+    // exactly ONE fresh SessionPlan (the healed plan naming the re-elected
+    // host, already carrying the joiner pairing), NO NewPeer fires to anyone,
+    // the re-plan counter moves once, and the late-join counter does NOT move
+    // (the joiner was served by the re-plan event, not a late-join plan).
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc_host());
+    server.set_client_protocol(&joiner, v3_webrtc_host());
+
+    // `existing` owns the room (and holds authority); the stored host is a
+    // ghost id that was never restored to the member list.
+    let room_id = create_db_room(&server, existing).await;
+    let ghost_host = PlayerId::new_v4();
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(ghost_host),
+    );
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    for id in [&existing, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
+    let late_before = server
+        .metrics
+        .session_plans_late_join
+        .load(Ordering::Relaxed);
+    let plans_before = server.metrics.session_plans_emitted.load(Ordering::Relaxed);
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The authority (`existing`) qualifies and is healed in as host; its plan
+    // is its host view of the star including the joiner.
+    let existing_plan = match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("existing expected the healed SessionPlan, got {other:?}"),
+    };
+    assert_eq!(existing_plan.topology, Topology::Host);
+    assert_eq!(existing_plan.transport, Transport::WebRtc);
+    assert_eq!(existing_plan.host, Some(existing), "authority healed in");
+    assert_eq!(existing_plan.peers.len(), 1);
+    assert_eq!(existing_plan.peers[0].player_id, joiner);
+    assert!(
+        !existing_plan.peers[0].initiate,
+        "the healed host answers the joiner"
+    );
+
+    // The joiner's ONLY message is the same healed plan, tailored to it: it
+    // offers to the healed host. No separate late-join plan, no NewPeer.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected the healed SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.host, Some(existing));
+    assert_eq!(joiner_plan.peers.len(), 1);
+    assert_eq!(joiner_plan.peers[0].player_id, existing);
+    assert!(
+        joiner_plan.peers[0].initiate,
+        "the joiner offers to the host"
+    );
+
+    // Exactly one plan each and zero NewPeer: the heal replaces the normal
+    // joiner-plan + NewPeer emission.
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+
+    assert_eq!(
+        server.active_session_plan(&room_id),
+        Some(ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(existing),
+        }),
+        "the wedged entry is healed in place"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before + 1,
+        "the heal is one re-plan event"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_plans_late_join
+            .load(Ordering::Relaxed),
+        late_before,
+        "a heal-served joiner is NOT counted as a late-join plan"
+    );
+    assert_eq!(
+        server.metrics.session_plans_emitted.load(Ordering::Relaxed),
+        plans_before,
+        "the heal is not a finalize emission"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_heal_can_elect_the_joiner_when_it_is_the_only_candidate() {
+    // Degenerate wedge (stored host: None) + a v2-only existing member: the
+    // v3+webrtc JOINER is the only electable member, so the heal elects the
+    // joiner itself. The joiner receives exactly ONE plan naming itself host;
+    // the v2 member (who also holds authority, which must not outrank the
+    // capability filter) receives nothing; one re-plan event, no late-join
+    // count.
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (legacy_owner, mut legacy_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    // legacy_owner stays on the default v2 / relay-only protocol (and is the
+    // room's authority as its creator).
+    server.set_client_protocol(&joiner, v3_webrtc_host());
+
+    let room_id = create_db_room(&server, legacy_owner).await;
+    store_active_plan(&server, room_id, Topology::Host, Transport::WebRtc, None);
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    for id in [&legacy_owner, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
+    let late_before = server
+        .metrics
+        .session_plans_late_join
+        .load(Ordering::Relaxed);
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected the healed SessionPlan, got {other:?}"),
+    };
+    assert_eq!(
+        joiner_plan.host,
+        Some(joiner),
+        "the joiner is the only electable member and becomes the host"
+    );
+    assert_eq!(
+        server.active_session_plan(&room_id).and_then(|p| p.host),
+        Some(joiner)
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before + 1
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_plans_late_join
+            .load(Ordering::Relaxed),
+        late_before,
+        "a heal-served joiner is NOT counted as a late-join plan"
+    );
+    // The v2 member never observes a SessionPlan; the joiner got exactly one.
+    assert_silent(&mut legacy_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_stored_host_direct_sends_plan_but_no_new_peer() {
+    // A stored `host + direct` decision is non-relay (it received SessionPlans
+    // at finalize), so a late joiner still gets its plan view — with an EMPTY
+    // ICE list and Direct transport — but NOBODY gets a NewPeer: `NewPeer` is a
+    // WebRTC-signaling control message and this session's transport is Direct.
+    // Both members advertise the WebRTC transport, so the per-peer capability
+    // gate passes — only the stored plan's *transport* gate suppresses pairing.
+    let server = create_test_server_with_session(host_direct_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc_direct_host());
+    server.set_client_protocol(&joiner, v3_webrtc_direct_host());
+
+    let room_id = create_db_room(&server, host).await;
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::Direct,
+        Some(host),
+    );
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    for id in [&host, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.topology, Topology::Host);
+    assert_eq!(joiner_plan.transport, Transport::Direct);
+    assert_eq!(joiner_plan.host, Some(host));
+    assert!(
+        joiner_plan.ice_servers.is_empty(),
+        "a non-WebRTC plan carries no ICE"
+    );
+
+    // host + direct ⇒ no WebRTC signaling ⇒ no NewPeer to anyone.
+    assert_silent(&mut joiner_rx).await;
     assert_silent(&mut host_rx).await;
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_finalized_relay_room_emits_no_new_peer() {
-    // The default-config contradiction is gone: a Finalized room that resolves
-    // to the relay floor (default SessionConfig keeps relay even for all-v3
-    // rooms) emits NO `NewPeer` — the active session is relay.
+async fn late_join_without_stored_plan_emits_nothing() {
+    // A Finalized room with NO stored decision (the relay floor stores none, as
+    // does any pre-v3 room) emits neither SessionPlan nor NewPeer — even though
+    // both current members are v3+webrtc and a recompute would now fit mesh.
+    // The running session is relay; it is sticky.
     let server = create_test_server().await; // default SessionConfig => relay floor
     let (existing, mut existing_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
@@ -995,7 +1541,7 @@ async fn late_join_finalized_relay_room_emits_no_new_peer() {
         .expect("room players");
     let room = finalized_room(&server, &room_id).await;
     server
-        .handle_webrtc_late_join(&room, &joiner, &members)
+        .handle_active_session_late_join(&room, &joiner, &members)
         .await;
 
     assert_silent(&mut existing_rx).await;
@@ -1004,11 +1550,98 @@ async fn late_join_finalized_relay_room_emits_no_new_peer() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn pair_webrtc_peer_with_members_skips_v2_members() {
-    // Appendix K gating at the mesh-pairing primitive: a v2 (relay-only) member
-    // receives no NewPeer, and the joiner is not paired with it. (The room-wide
-    // gate is covered by `late_join_*` tests; here we drive the primitive
-    // directly so a v2 member can be present without forcing the plan to relay.)
+async fn late_join_after_relay_finalize_and_departure_emits_nothing() {
+    // Problem-2 regression pin: A(v3+webrtc)+B(v2) finalize on a mesh-preferring
+    // server => relay floor => NO stored decision. B leaves; C(v3+webrtc) joins
+    // the still-Finalized, no-longer-full room. Before the stored-plan fix the
+    // late-join path RECOMPUTED the ladder over {A, C} (now all-v3) and wrongly
+    // emitted `NewPeer` for a room whose running session is relay and which
+    // never received any SessionPlan. Now: nothing is emitted to anyone.
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (legacy, _legacy_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    // legacy stays on the default v2 / relay-only protocol.
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room_id = create_db_room_with_max(&server, alice, 2).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(legacy, "legacy"))
+        .await
+        .expect("add legacy");
+    for id in [&alice, &legacy] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    // Finalize through the real emission path: the mixed room resolves to the
+    // relay floor, so emit_session_plan stores NO ActiveSessionPlan.
+    finalize_db_room(&server, &room_id, &[alice, legacy]).await;
+    let finalized = crate::coordination::FinalizedRoom {
+        game_name: "webrtc-game".to_string(),
+        authority_player: None,
+        members: server
+            .database
+            .get_room_players(&room_id)
+            .await
+            .expect("room players"),
+    };
+    server.emit_session_plan(&room_id, &finalized).await;
+    assert!(
+        server.active_session_plan(&room_id).is_none(),
+        "a relay-resolved finalize must store no active session plan"
+    );
+
+    // B (v2) departs, reopening a seat in the Finalized room.
+    server.leave_room(&legacy).await;
+    match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::PlayerLeft { player_id } => assert_eq!(*player_id, legacy),
+        other => panic!("alice expected PlayerLeft, got {other:?}"),
+    }
+
+    // C (v3+webrtc) joins the still-Finalized room.
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    server
+        .connection_manager
+        .assign_client_to_room(&joiner, room_id)
+        .await;
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    assert_eq!(room.lobby_state, LobbyState::Finalized);
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The room's running session is relay: no SessionPlan, no NewPeer, to anyone.
+    assert_silent(&mut alice_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn announce_webrtc_peer_to_members_skips_v2_members() {
+    // Appendix K gating at the mesh-announcement primitive: a v2 (relay-only)
+    // member receives no NewPeer. (The room-wide gate is covered by the
+    // `late_join_*` tests; here we drive the primitive directly so a v2 member
+    // can be present.) The joiner itself receives nothing either — its pairing
+    // arrives in its SessionPlan, never via NewPeer.
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (webrtc_peer, mut webrtc_rx) = register_client(&server).await;
     let (legacy, mut legacy_rx) = register_client(&server).await;
@@ -1046,34 +1679,34 @@ async fn pair_webrtc_peer_with_members_skips_v2_members() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    // A relay-only member forces the room-wide plan to relay, which would emit
-    // no NewPeer at all. To exercise the per-member skip while still resolving
-    // to mesh, drive the mesh primitive directly with the legacy member present.
+    let decision = decision_for(&server, Topology::Mesh, Transport::WebRtc, None, &members);
     server
-        .pair_webrtc_peer_with_members(&joiner, &members)
+        .announce_webrtc_peer_to_members(&decision, &joiner)
         .await;
 
-    // The WebRTC peer and the joiner are paired.
+    // Only the WebRTC-capable existing member learns of the joiner.
     match recv(&mut webrtc_rx).await.as_ref() {
         ServerMessage::NewPeer { peer_id, .. } => assert_eq!(*peer_id, joiner),
         other => panic!("expected NewPeer, got {other:?}"),
     }
-    match recv(&mut joiner_rx).await.as_ref() {
-        ServerMessage::NewPeer { peer_id, .. } => assert_eq!(*peer_id, webrtc_peer),
-        other => panic!("expected NewPeer, got {other:?}"),
-    }
 
-    // The legacy member is never told about the joiner, and the joiner is only
-    // paired with the single WebRTC peer (no NewPeer for legacy).
+    // The legacy member is never told about the joiner, and the joiner side is
+    // suppressed entirely (its pairing belongs to its SessionPlan).
     assert_silent(&mut legacy_rx).await;
     assert_silent(&mut joiner_rx).await;
+    assert_silent(&mut webrtc_rx).await;
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn late_join_noop_when_joiner_is_relay_only() {
-    // The joiner gate fires before finalization/topology is even considered: a
-    // relay-only joiner is never paired, regardless of room state.
+async fn late_join_relay_only_v3_joiner_gets_plan_but_no_new_peer_fires() {
+    // A v3 joiner that negotiated only the relay transport still receives its
+    // SessionPlan view of the running session (the plan is v3-gated, not
+    // webrtc-gated; the relay floor stays its data path) — but with an EMPTY
+    // peer list: it must not be instructed to attempt WebRTC pairs that
+    // `handle_signal` would reject. And NO NewPeer fires in either direction:
+    // existing members must never be told to WebRTC-pair with a peer that
+    // cannot signal.
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (joiner, mut joiner_rx) = register_client(&server).await;
@@ -1081,6 +1714,7 @@ async fn late_join_noop_when_joiner_is_relay_only() {
     server.set_client_protocol(&joiner, v3_relay_only());
 
     let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
     server
         .database
         .add_player_to_room(&room_id, player_info(joiner, "joiner"))
@@ -1102,12 +1736,667 @@ async fn late_join_noop_when_joiner_is_relay_only() {
         .expect("room players");
     let room = finalized_room(&server, &room_id).await;
     server
-        .handle_webrtc_late_join(&room, &joiner, &members)
+        .handle_active_session_late_join(&room, &joiner, &members)
         .await;
 
-    // A relay-only joiner triggers no NewPeer in either direction.
+    // The joiner (v3) gets its plan view of the running mesh session — with an
+    // empty peer list (capability-filtered: it has no P2P peers; the plan's
+    // relay fallback is its data path).
+    match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.topology, Topology::Mesh);
+            assert_eq!(plan.transport, Transport::WebRtc);
+            assert!(
+                plan.peers.is_empty(),
+                "a relay-only joiner must not be told to attempt WebRTC pairs"
+            );
+            assert_eq!(plan.fallback, Transport::Relay);
+        }
+        other => panic!("v3 joiner expected SessionPlan, got {other:?}"),
+    }
+
+    // But the WebRTC NewPeer delta is suppressed: the joiner cannot signal.
     assert_silent(&mut existing_rx).await;
     assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_capable_joiner_plan_excludes_relay_only_member() {
+    // The other side of the capability filter: a CAPABLE v3+webrtc joiner
+    // late-joins an active mesh+webrtc session whose membership contains a
+    // relay-only seat-filler. The joiner's plan must list ONLY the capable
+    // existing member — never the relay-only one (those offers would be doomed
+    // at `handle_signal` and burn signal budget). NewPeer behavior is the
+    // already-pinned skip rule: only the capable existing member is announced
+    // to; the relay-only member hears nothing.
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (seat_filler, mut seat_filler_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&seat_filler, v3_relay_only());
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
+    for (id, name) in [(seat_filler, "seat-filler"), (joiner, "joiner")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [&existing, &seat_filler, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The joiner's plan pairs it with the capable member only.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.topology, Topology::Mesh);
+    assert_eq!(joiner_plan.transport, Transport::WebRtc);
+    assert_eq!(
+        joiner_plan.peers.len(),
+        1,
+        "the relay-only seat-filler must be filtered from the joiner's peers"
+    );
+    assert_eq!(joiner_plan.peers[0].player_id, existing);
+    assert_eq!(
+        joiner_plan.peers[0].initiate,
+        local_initiates(joiner, existing)
+    );
+
+    // The capable existing member gets the NewPeer delta; the relay-only
+    // seat-filler hears nothing at all.
+    match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::NewPeer { peer_id, .. } => assert_eq!(*peer_id, joiner),
+        other => panic!("existing expected NewPeer, got {other:?}"),
+    }
+    assert_silent(&mut seat_filler_rx).await;
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_topology_incapable_v3_joiner_gets_plan_but_no_new_peer_fires() {
+    // The full-predicate discriminator: a v3 joiner that negotiated the WebRTC
+    // TRANSPORT but not the session's mesh TOPOLOGY (transports=[relay,webrtc],
+    // topologies=[relay]) seat-fills an active mesh+webrtc session. It passes
+    // the transport-only `supports_webrtc_signaling` gate, yet the plan filter
+    // excludes it everywhere — so `NewPeer` must stay silent in BOTH
+    // directions too (one rule: the server never instructs a pair its own plan
+    // contract excludes). The joiner still receives its v3-gated SessionPlan
+    // with an EMPTY peer list (the relay floor is its data path).
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&joiner, v3_webrtc_relay_topology_only());
+
+    let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    for id in [&existing, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The joiner (v3) gets its plan view of the running mesh session — with an
+    // empty peer list: it never negotiated the mesh topology, so every WebRTC
+    // pair with it is outside the session contract.
+    match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.topology, Topology::Mesh);
+            assert_eq!(plan.transport, Transport::WebRtc);
+            assert!(
+                plan.peers.is_empty(),
+                "a topology-incapable joiner must not be told to attempt WebRTC pairs"
+            );
+            assert_eq!(plan.fallback, Transport::Relay);
+        }
+        other => panic!("v3 joiner expected SessionPlan, got {other:?}"),
+    }
+
+    // No NewPeer in either direction: the existing member is never told to
+    // pair with a peer the plan excludes, and the joiner gets no NewPeer.
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_capable_joiner_plan_excludes_topology_incapable_member() {
+    // The other side of the full-predicate filter: a CAPABLE v3+webrtc+mesh
+    // joiner late-joins an active mesh+webrtc session seating a
+    // topology-incapable member (webrtc transport, relay-only topologies). The
+    // joiner's plan lists ONLY the capable existing member; NewPeer fires only
+    // between the capable pair; the topology-incapable member hears nothing
+    // (before the gate unification it was wrongly NewPeer-announced, since it
+    // passes the transport-only check).
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (seat_filler, mut seat_filler_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&seat_filler, v3_webrtc_relay_topology_only());
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
+    for (id, name) in [(seat_filler, "seat-filler"), (joiner, "joiner")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [&existing, &seat_filler, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The joiner's plan pairs it with the capable member only.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(
+        joiner_plan.peers.len(),
+        1,
+        "the topology-incapable seat-filler must be filtered from the joiner's peers"
+    );
+    assert_eq!(joiner_plan.peers[0].player_id, existing);
+
+    // The capable existing member gets the NewPeer delta; the
+    // topology-incapable seat-filler hears nothing at all.
+    match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::NewPeer { peer_id, .. } => assert_eq!(*peer_id, joiner),
+        other => panic!("existing expected NewPeer, got {other:?}"),
+    }
+    assert_silent(&mut seat_filler_rx).await;
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_star_topology_incapable_client_joiner_gets_plan_but_no_new_peer() {
+    // Star variant of the full-predicate gate, client-join path: a v3 joiner
+    // with the WebRTC transport but no `host` topology seat-fills an active
+    // host+webrtc session whose stored host is present. The joiner gets its
+    // plan with EMPTY peers (it must not be told to offer to the host); the
+    // host gets NO NewPeer about it (before the gate unification it was
+    // wrongly told to answer a transport-capable joiner); other clients stay
+    // silent as always.
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (other_client, mut other_client_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc_host());
+    server.set_client_protocol(&other_client, v3_webrtc_host());
+    server.set_client_protocol(&joiner, v3_webrtc_relay_topology_only());
+
+    let room_id = create_db_room(&server, host).await;
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(host),
+    );
+    for (id, name) in [(other_client, "other"), (joiner, "joiner")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [&host, &other_client, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The stored host is present AND capable: no heal fires.
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before,
+        "a capable, present stored host must not trigger the self-heal"
+    );
+
+    // The joiner's plan: star view with the informational host, but no peers —
+    // it cannot run a star session.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.topology, Topology::Host);
+    assert_eq!(joiner_plan.transport, Transport::WebRtc);
+    assert_eq!(joiner_plan.host, Some(host), "host stays informational");
+    assert!(
+        joiner_plan.peers.is_empty(),
+        "a topology-incapable client must not be told to offer to the host"
+    );
+
+    // NO NewPeer to the host (or anyone): the joiner cannot run the session.
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut other_client_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_star_host_rejoin_announces_only_to_session_capable_clients() {
+    // Star variant, host-(re)join path: the stored host rejoins a room seating
+    // one capable client and one topology-incapable seat-filler (webrtc
+    // transport, relay-only topologies). Only the capable client is told to
+    // offer to the host; the seat-filler hears nothing (it passes the
+    // transport-only gate, so this pins the per-member full predicate inside
+    // the star announcement), and the host's own plan lists only the capable
+    // client.
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (capable_client, mut capable_client_rx) = register_client(&server).await;
+    let (seat_filler, mut seat_filler_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc_host());
+    server.set_client_protocol(&capable_client, v3_webrtc_host());
+    server.set_client_protocol(&seat_filler, v3_webrtc_relay_topology_only());
+
+    let room_id = create_db_room(&server, host).await;
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(host),
+    );
+    for (id, name) in [(capable_client, "capable"), (seat_filler, "seat-filler")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [&host, &capable_client, &seat_filler] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_active_session_late_join(&room, &host, &members)
+        .await;
+
+    // The rejoining host's plan answers only the capable client.
+    let host_plan = match recv(&mut host_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("host expected SessionPlan, got {other:?}"),
+    };
+    assert_eq!(host_plan.host, Some(host));
+    assert_eq!(
+        host_plan.peers.len(),
+        1,
+        "the host's star must exclude the topology-incapable seat-filler"
+    );
+    assert_eq!(host_plan.peers[0].player_id, capable_client);
+    assert!(!host_plan.peers[0].initiate, "the host answers");
+
+    // Only the capable client is told to offer to the rejoined host.
+    match recv(&mut capable_client_rx).await.as_ref() {
+        ServerMessage::NewPeer {
+            peer_id,
+            you_initiate,
+        } => {
+            assert_eq!(*peer_id, host);
+            assert!(*you_initiate, "clients offer to the host");
+        }
+        other => panic!("capable client expected NewPeer(host, true), got {other:?}"),
+    }
+
+    // The topology-incapable seat-filler hears nothing.
+    assert_silent(&mut seat_filler_rx).await;
+    assert_silent(&mut capable_client_rx).await;
+    assert_silent(&mut host_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_heal_with_topology_incapable_joiner_still_replans() {
+    // Heal reachability: the heal is about the ROOM, not the joiner. A
+    // topology-incapable v3 joiner (webrtc transport, relay-only topologies)
+    // arriving into a host-missing room must still trigger the self-heal
+    // re-plan: the capable existing member is healed in as host and gets its
+    // fresh plan, and the joiner — served by the heal, not a late-join plan —
+    // gets the same healed plan with EMPTY peers. No NewPeer fires anywhere;
+    // one re-plan event; the late-join counter does not move.
+    let server = create_test_server_with_session(host_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc_host());
+    server.set_client_protocol(&joiner, v3_webrtc_relay_topology_only());
+
+    let room_id = create_db_room(&server, existing).await;
+    let ghost_host = PlayerId::new_v4();
+    store_active_plan(
+        &server,
+        room_id,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(ghost_host),
+    );
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    for id in [&existing, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
+    let late_before = server
+        .metrics
+        .session_plans_late_join
+        .load(Ordering::Relaxed);
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The capable member is healed in as host; its star is empty (its only
+    // would-be client cannot run the session).
+    let existing_plan = match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("existing expected the healed SessionPlan, got {other:?}"),
+    };
+    assert_eq!(
+        existing_plan.host,
+        Some(existing),
+        "capable member healed in"
+    );
+    assert!(
+        existing_plan.peers.is_empty(),
+        "the healed host must not be told to pair with the incapable joiner"
+    );
+
+    // The heal delivers the joiner (v3) its plan too — empty peers, relay
+    // fallback as its data path — and nothing else.
+    let joiner_plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected the healed SessionPlan, got {other:?}"),
+    };
+    assert_eq!(joiner_plan.host, Some(existing));
+    assert!(
+        joiner_plan.peers.is_empty(),
+        "a topology-incapable joiner gets the healed plan with no peers"
+    );
+    assert_eq!(joiner_plan.fallback, Transport::Relay);
+
+    assert_eq!(
+        server.active_session_plan(&room_id),
+        Some(ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(existing),
+        }),
+        "the wedged entry is healed in place"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before + 1,
+        "an incapable joiner still triggers the heal (the heal is about the room)"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_plans_late_join
+            .load(Ordering::Relaxed),
+        late_before,
+        "a heal-served joiner is NOT counted as a late-join plan"
+    );
+
+    // No NewPeer to anyone in the heal case (already pinned for capable
+    // joiners; holds for incapable ones too).
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut joiner_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_v2_joiner_gets_nothing() {
+    // Appendix K: a pure v2 joiner into an active mesh+webrtc session receives
+    // neither a SessionPlan nor a NewPeer, and existing members are not told to
+    // pair with it.
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (legacy_joiner, mut legacy_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&legacy_joiner, v2_with_webrtc_transport());
+
+    let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(legacy_joiner, "legacy"))
+        .await
+        .expect("add legacy joiner");
+    for id in [&existing, &legacy_joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+    server
+        .handle_active_session_late_join(&room, &legacy_joiner, &members)
+        .await;
+
+    assert_silent(&mut existing_rx).await;
+    assert_silent(&mut legacy_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn late_join_counts_plan_and_turn_credentials() {
+    // Metrics: a late-join plan counts session_plans_late_join once and the TURN
+    // credentials it mints via the shared turn_credentials_issued counter, but
+    // never touches session_plans_emitted (finalize-only) or
+    // session_replans_emitted (departure-only).
+    let turn = TurnConfig {
+        enabled: true,
+        mode: crate::config::TurnMode::StaticSecret,
+        static_auth_secret: "super-secret".to_string(),
+        urls: vec!["turn:turn.example.com:3478".to_string()],
+        stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        credential_ttl_secs: 3600,
+        managed_provider: None,
+        managed_api_token: None,
+    };
+    let server = create_test_server_with_session_and_turn(mesh_session_config(), turn).await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add joiner");
+    for id in [&existing, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(id, room_id)
+            .await;
+    }
+
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    let room = finalized_room(&server, &room_id).await;
+
+    let plans_before = server.metrics.session_plans_emitted.load(Ordering::Relaxed);
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
+    let late_before = server
+        .metrics
+        .session_plans_late_join
+        .load(Ordering::Relaxed);
+    let creds_before = server
+        .metrics
+        .turn_credentials_issued
+        .load(Ordering::Relaxed);
+
+    server
+        .handle_active_session_late_join(&room, &joiner, &members)
+        .await;
+
+    // The joiner's plan carries a freshly minted TURN credential for ITS id.
+    let plan = match recv(&mut joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("joiner expected SessionPlan, got {other:?}"),
+    };
+    let turn_entry = plan
+        .ice_servers
+        .iter()
+        .find(|server| server.username.is_some())
+        .expect("late-join WebRTC plan must mint a TURN credential");
+    let username = turn_entry.username.clone().expect("username present");
+    assert!(
+        username.ends_with(&joiner.to_string()),
+        "the minted credential embeds the joiner's own id"
+    );
+    // Existing member got its NewPeer delta (drained so the channel stays clean).
+    match recv(&mut existing_rx).await.as_ref() {
+        ServerMessage::NewPeer { peer_id, .. } => assert_eq!(*peer_id, joiner),
+        other => panic!("existing expected NewPeer, got {other:?}"),
+    }
+
+    assert_eq!(
+        server
+            .metrics
+            .session_plans_late_join
+            .load(Ordering::Relaxed),
+        late_before + 1,
+        "one late-join plan delivered => counted once"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .turn_credentials_issued
+            .load(Ordering::Relaxed),
+        creds_before + 1,
+        "the joiner's minted TURN credential is counted"
+    );
+    assert_eq!(
+        server.metrics.session_plans_emitted.load(Ordering::Relaxed),
+        plans_before,
+        "late-join must not count as a finalize emission"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before,
+        "late-join must not count as a departure re-plan"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,9 +2405,10 @@ async fn late_join_noop_when_joiner_is_relay_only() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn pair_webrtc_peer_with_members_designates_one_offerer_per_pair() {
-    // The mesh primitive: pair one peer with every other webrtc member, exactly
-    // one offerer per pair (UUID glare rule).
+async fn announce_webrtc_peer_to_members_notifies_existing_members_only() {
+    // The mesh primitive announces the joiner to every other webrtc member with
+    // the glare-correct flag — and sends NOTHING to the joiner itself (its
+    // pairing is delivered in its SessionPlan).
     let server = create_test_server().await;
     let (peer, mut peer_rx) = register_client(&server).await;
     let (other, mut other_rx) = register_client(&server).await;
@@ -1126,67 +2416,61 @@ async fn pair_webrtc_peer_with_members_designates_one_offerer_per_pair() {
     server.set_client_protocol(&other, v3_webrtc());
 
     let members = vec![player_info(peer, "peer"), player_info(other, "other")];
-    server.pair_webrtc_peer_with_members(&peer, &members).await;
+    let decision = decision_for(&server, Topology::Mesh, Transport::WebRtc, None, &members);
+    server
+        .announce_webrtc_peer_to_members(&decision, &peer)
+        .await;
 
-    let other_flag = match recv(&mut other_rx).await.as_ref() {
+    match recv(&mut other_rx).await.as_ref() {
         ServerMessage::NewPeer {
             peer_id,
             you_initiate,
         } => {
             assert_eq!(*peer_id, peer);
-            *you_initiate
+            assert_eq!(
+                *you_initiate,
+                local_initiates(other, peer),
+                "the existing member's flag follows the glare rule"
+            );
         }
         other => panic!("other expected NewPeer, got {other:?}"),
-    };
-    let peer_flag = match recv(&mut peer_rx).await.as_ref() {
-        ServerMessage::NewPeer {
-            peer_id,
-            you_initiate,
-        } => {
-            assert_eq!(*peer_id, other);
-            *you_initiate
-        }
-        other => panic!("peer expected NewPeer, got {other:?}"),
-    };
-    assert_ne!(peer_flag, other_flag);
-    assert_eq!(peer_flag, local_initiates(peer, other));
+    }
 
+    // The joiner side is suppressed.
     assert_silent(&mut peer_rx).await;
     assert_silent(&mut other_rx).await;
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn pair_webrtc_peer_with_host_client_offers_host_answers() {
-    // The star primitive: a client joiner offers to the host; the host answers.
+async fn announce_webrtc_peer_in_star_client_joiner_notifies_host_only() {
+    // The star primitive for a client joiner: only the host is told (it answers,
+    // you_initiate=false). The joiner gets nothing (its offer-to-host
+    // instruction is in its SessionPlan); other clients never hear about it.
     let server = create_test_server().await;
     let (host, mut host_rx) = register_client(&server).await;
     let (client, mut client_rx) = register_client(&server).await;
     let (other_client, mut other_client_rx) = register_client(&server).await;
-    server.set_client_protocol(&host, v3_webrtc());
-    server.set_client_protocol(&client, v3_webrtc());
-    server.set_client_protocol(&other_client, v3_webrtc());
+    server.set_client_protocol(&host, v3_webrtc_host());
+    server.set_client_protocol(&client, v3_webrtc_host());
+    server.set_client_protocol(&other_client, v3_webrtc_host());
 
     let members = vec![
         player_info(host, "host"),
         player_info(client, "client"),
         player_info(other_client, "other"),
     ];
+    let decision = decision_for(
+        &server,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(host),
+        &members,
+    );
     server
-        .pair_webrtc_peer_with_host(&client, host, &members)
+        .announce_webrtc_peer_in_star(&decision, &client, host)
         .await;
 
-    // Client offers to the host.
-    match recv(&mut client_rx).await.as_ref() {
-        ServerMessage::NewPeer {
-            peer_id,
-            you_initiate,
-        } => {
-            assert_eq!(*peer_id, host);
-            assert!(*you_initiate);
-        }
-        other => panic!("client expected NewPeer(host, true), got {other:?}"),
-    }
     // Host answers the client.
     match recv(&mut host_rx).await.as_ref() {
         ServerMessage::NewPeer {
@@ -1194,37 +2478,46 @@ async fn pair_webrtc_peer_with_host_client_offers_host_answers() {
             you_initiate,
         } => {
             assert_eq!(*peer_id, client);
-            assert!(!*you_initiate);
+            assert!(!*you_initiate, "the host answers (never offers in a star)");
         }
         other => panic!("host expected NewPeer(client, false), got {other:?}"),
     }
 
-    // The other client is never paired with this client (clients never mesh).
-    assert_silent(&mut other_client_rx).await;
+    // The joiner side is suppressed; other clients are never told (no client ⇄
+    // client edges in a star).
     assert_silent(&mut client_rx).await;
+    assert_silent(&mut other_client_rx).await;
     assert_silent(&mut host_rx).await;
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn pair_webrtc_peer_with_host_host_joiner_pairs_every_client() {
-    // When the host itself (re)joins, it is paired with every webrtc client; each
-    // client offers, the host answers.
+async fn announce_webrtc_peer_in_star_host_joiner_notifies_every_client() {
+    // When the host itself (re)joins, every webrtc client is told to offer to
+    // it; the (joining) host receives nothing — its answer-everyone view is in
+    // its SessionPlan.
     let server = create_test_server().await;
     let (host, mut host_rx) = register_client(&server).await;
     let (client_a, mut client_a_rx) = register_client(&server).await;
     let (client_b, mut client_b_rx) = register_client(&server).await;
-    server.set_client_protocol(&host, v3_webrtc());
-    server.set_client_protocol(&client_a, v3_webrtc());
-    server.set_client_protocol(&client_b, v3_webrtc());
+    server.set_client_protocol(&host, v3_webrtc_host());
+    server.set_client_protocol(&client_a, v3_webrtc_host());
+    server.set_client_protocol(&client_b, v3_webrtc_host());
 
     let members = vec![
         player_info(host, "host"),
         player_info(client_a, "a"),
         player_info(client_b, "b"),
     ];
+    let decision = decision_for(
+        &server,
+        Topology::Host,
+        Transport::WebRtc,
+        Some(host),
+        &members,
+    );
     server
-        .pair_webrtc_peer_with_host(&host, host, &members)
+        .announce_webrtc_peer_in_star(&decision, &host, host)
         .await;
 
     // Each client is told to offer to the host.
@@ -1241,23 +2534,7 @@ async fn pair_webrtc_peer_with_host_host_joiner_pairs_every_client() {
         }
     }
 
-    // The host answers both clients (two NewPeer, both initiate=false).
-    let mut answered = std::collections::HashSet::new();
-    for _ in 0..2 {
-        match recv(&mut host_rx).await.as_ref() {
-            ServerMessage::NewPeer {
-                peer_id,
-                you_initiate,
-            } => {
-                assert!(!*you_initiate, "host answers every client");
-                answered.insert(*peer_id);
-            }
-            other => panic!("host expected NewPeer, got {other:?}"),
-        }
-    }
-    assert!(answered.contains(&client_a));
-    assert!(answered.contains(&client_b));
-
+    // The joiner (host) side is suppressed.
     assert_silent(&mut host_rx).await;
     assert_silent(&mut client_a_rx).await;
     assert_silent(&mut client_b_rx).await;
@@ -1265,12 +2542,11 @@ async fn pair_webrtc_peer_with_host_host_joiner_pairs_every_client() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn reconnect_restores_room_membership_and_webrtc_pairing() {
-    // Reconnect re-pairing is now finalization + transport gated: only a Finalized
-    // room whose plan uses the WebRTC transport re-pairs via NewPeer (mesh+webrtc
-    // here; a non-relay `host+direct` plan would not). Set up a mesh server and a
-    // finalized 2-player room so the reconnecting peer is re-meshed with the
-    // existing peer.
+async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
+    // Reconnect re-entry consults the stored ActiveSessionPlan: the reconnector
+    // receives `Reconnected` then a fresh tailored `SessionPlan` (fresh ICE —
+    // its original TURN credentials may have expired) and NO NewPeer; the
+    // existing member receives `PlayerReconnected` then the NewPeer delta.
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (existing, mut existing_rx) = register_client(&server).await;
     let (reconnecting, _old_rx) = register_client(&server).await;
@@ -1280,6 +2556,9 @@ async fn reconnect_restores_room_membership_and_webrtc_pairing() {
     server.set_client_protocol(&current, v3_webrtc());
 
     let room_id = create_db_room_with_max(&server, existing, 2).await;
+    // The room runs an active mesh+webrtc session (as emit_session_plan would
+    // have stored at finalize).
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
     let reconnecting_info = player_info(reconnecting, "reconnecting");
     server
         .database
@@ -1295,7 +2574,7 @@ async fn reconnect_restores_room_membership_and_webrtc_pairing() {
         .assign_client_to_room(&reconnecting, room_id)
         .await;
 
-    // Finalize the (now full) room so the post-reconnect re-pairing engages.
+    // Finalize the (now full) room so the post-reconnect re-entry engages.
     finalize_db_room(&server, &room_id, &[existing, reconnecting]).await;
 
     let token = server
@@ -1338,6 +2617,22 @@ async fn reconnect_restores_room_membership_and_webrtc_pairing() {
         other => panic!("expected PlayerReconnected, got {other:?}"),
     }
 
+    // The reconnector receives a fresh SessionPlan for the running session.
+    let reconnecting_flag = match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.topology, Topology::Mesh);
+            assert_eq!(plan.transport, Transport::WebRtc);
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].player_id, existing);
+            assert!(
+                !plan.ice_servers.is_empty(),
+                "a reconnect plan re-mints ICE (original credentials may be stale)"
+            );
+            plan.peers[0].initiate
+        }
+        other => panic!("reconnecting expected SessionPlan after reconnect, got {other:?}"),
+    };
+    // The existing member receives the NewPeer delta (antisymmetric flags).
     let existing_flag = match recv(&mut existing_rx).await.as_ref() {
         ServerMessage::NewPeer {
             peer_id,
@@ -1348,17 +2643,11 @@ async fn reconnect_restores_room_membership_and_webrtc_pairing() {
         }
         other => panic!("existing expected NewPeer after reconnect, got {other:?}"),
     };
-    let reconnecting_flag = match recv(&mut current_rx).await.as_ref() {
-        ServerMessage::NewPeer {
-            peer_id,
-            you_initiate,
-        } => {
-            assert_eq!(*peer_id, existing);
-            *you_initiate
-        }
-        other => panic!("reconnecting expected NewPeer after reconnect, got {other:?}"),
-    };
     assert_ne!(existing_flag, reconnecting_flag);
+
+    // No NewPeer to the reconnector; no SessionPlan to the existing member.
+    assert_silent(&mut current_rx).await;
+    assert_silent(&mut existing_rx).await;
 
     let members = server
         .database
@@ -2027,6 +3316,239 @@ async fn transport_status_from_non_v3_client_is_ignored() {
         server.metrics.relay_fallback.load(Ordering::Relaxed),
         0,
         "a non-v3 client's TransportStatus must not move relay_fallback"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PeerTransportStatus fan-out (P5 refinement): an accepted TransportStatus
+// state change is fanned out to the sender's current room — v3 recipients only,
+// sender excluded, duplicates never re-fan-out, no room ⇒ no fan-out.
+// ---------------------------------------------------------------------------
+
+/// Assert the next message is `PeerTransportStatus` with the given contents.
+async fn expect_peer_transport_status(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    expected_peer: PlayerId,
+    expected_transport: Transport,
+    expected_connected: bool,
+) {
+    match recv(receiver).await.as_ref() {
+        ServerMessage::PeerTransportStatus {
+            peer_id,
+            transport,
+            connected,
+        } => {
+            assert_eq!(*peer_id, expected_peer, "fan-out must name the reporter");
+            assert_eq!(*transport, expected_transport);
+            assert_eq!(*connected, expected_connected);
+        }
+        other => panic!("expected PeerTransportStatus, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_change_fans_out_to_v3_room_peers_only() {
+    // Alice (v3 + webrtc) reports a state change in a room with Bob (v3
+    // RELAY-ONLY — must still receive: the fan-out is deliberately NOT gated on
+    // the recipient's transport capabilities, unlike the session predicate) and
+    // Carol (v2 — must NEVER receive a v3-only message, Appendix K). The
+    // reporter itself hears nothing.
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let (carol, mut carol_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_relay_only());
+    server.set_client_protocol(&carol, v2_with_webrtc_transport());
+
+    let room_id = create_db_room(&server, alice).await;
+    for (id, name) in [(bob, "bob"), (carol, "carol")] {
+        server
+            .database
+            .add_player_to_room(&room_id, player_info(id, name))
+            .await
+            .expect("add member");
+    }
+    for id in [alice, bob, carol] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    assert_silent(&mut bob_rx).await;
+    // The v2 member observes nothing, and the sender is excluded.
+    assert_silent(&mut carol_rx).await;
+    assert_silent(&mut alice_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1,
+        "one fan-out EVENT (not per recipient)"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn duplicate_transport_status_does_not_refan_out() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    let report = ClientMessage::TransportStatus {
+        transport: Transport::WebRtc,
+        connected: true,
+    };
+    // First report IS a state change and fans out…
+    server.handle_client_message(&alice, report.clone()).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+
+    // …the byte-identical duplicate is dropped at the dedup gate: no fan-out,
+    // no counter movement.
+    server.handle_client_message(&alice, report).await;
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1,
+        "a duplicate report must not re-fan-out"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        1,
+        "the duplicate must not inflate p2p_established either"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_flap_fans_out_each_transition() {
+    // true ⇒ false ⇒ true: every report is a real transition, so the peer sees
+    // all three states in order (eventually-consistent peer view of a flapping
+    // data path).
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    for connected in [true, false, true] {
+        server
+            .handle_client_message(
+                &alice,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected,
+                },
+            )
+            .await;
+    }
+
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, false).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        3,
+        "each real transition is one fan-out event"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_without_room_records_state_but_fans_out_nothing() {
+    // A room-less reporter still gets its per-connection state recorded (the
+    // pre-fan-out behavior is preserved), but there is no room to notify.
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    // Bob sits in a room alice is NOT in — he must hear nothing.
+    let room_id = create_db_room(&server, bob).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&bob, room_id)
+        .await;
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, true)),
+        "the state is still recorded for a room-less reporter"
+    );
+    assert_silent(&mut bob_rx).await;
+    assert_silent(&mut alice_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        0,
+        "no room ⇒ no fan-out event"
+    );
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        1,
+        "the accepted report still moves p2p_established"
     );
 }
 

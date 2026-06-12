@@ -1,0 +1,151 @@
+# Browser Interop Workflow
+#
+# Builds and runs the browser reference client's browser<->native interop
+# suite (clients/browser/ + the feature-gated cells in
+# clients/native/tests/browser_interop_e2e.rs): the REAL signal-fish-server
+# binary plus native client processes plus browser client processes — each
+# browser client drives an actual Chromium RTCPeerConnection (headless shell
+# via playwright-core) — negotiate real webrtc-rs<->Chromium (and
+# Chromium<->Chromium) DTLS+SCTP sessions over loopback UDP, brokered by the
+# server's protocol v3 signaling. Scenarios cover the mixed mesh, the
+# browser<->browser pair, the host star with a browser client, the
+# crippled-ICE browser relay fallback, the mDNS `.local` obfuscation trap,
+# a pure-v2 browser flooring a mesh-preferring room, the mid-handshake-close
+# error contract, and the SIGTERM/SIGKILL Chromium-teardown (orphan-reaper)
+# guarantee. The interop server
+# config disables TURN and configures zero STUN URLs, so the suite performs
+# no external network access (the Chromium download at install time is the
+# one network fetch, cached across runs).
+#
+# Triggers on changes to either client package and every input the suite
+# actually depends on: all server sources, the root manifest/lockfile, the
+# pinned toolchain, the runner script, and this workflow.
+
+name: Browser Interop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/**"
+      - "scripts/run-browser-interop.sh"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/browser-interop.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/**"
+      - "scripts/run-browser-interop.sh"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/browser-interop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  interop:
+    name: Browser Client Interop (Linux)
+    runs-on: ubuntu-latest
+    # Worst case: 8 serialized scenarios x the suite's 240 s per-scenario
+    # panic ceiling (SCENARIO_CEILING in browser_interop_e2e.rs) = 32 min of
+    # fully degraded test time, plus cold cargo builds (server + the native
+    # client's webrtc tree), npm ci, and a cache-miss Chromium download.
+    # Warm-cache green runs finish in a small fraction of this.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          # Cover BOTH compilation graphs: the root package (the server
+          # binary the harness spawns) and the standalone reference-client
+          # crate (the webrtc dependency tree + the feature-gated test
+          # target this workflow runs).
+          workspaces: |
+            .
+            clients/native
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Set up Node.js
+        # Node version floor is pinned by clients/browser/package.json
+        # `engines` (>= 20); the workflow tracks the active LTS line.
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/browser/package-lock.json
+
+      - name: Install browser-client dependencies
+        working-directory: clients/browser
+        run: npm ci
+
+      - name: Read playwright-core version
+        id: playwright
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./clients/browser/node_modules/playwright-core/package.json').version")
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Could not determine the playwright-core version"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5.0.5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      - name: Install Chromium headless shell
+        # The lockfile-pinned playwright-core binary (never bare npx);
+        # --with-deps also installs the apt packages Chromium needs on the
+        # runner. A warm cache makes the browser download itself a no-op.
+        working-directory: clients/browser
+        run: node_modules/.bin/playwright-core install --with-deps chromium-headless-shell
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          rustc -Vv
+          cargo -V
+          node --version
+          npm --version
+
+      - name: Run the browser interop suite
+        # Builds the server + native client, lints/typechecks/builds the
+        # browser client, and runs the feature-gated browser interop cells
+        # with SIGNAL_FISH_SERVER_BIN + SIGNAL_FISH_BROWSER_CLI exported.
+        run: bash scripts/run-browser-interop.sh

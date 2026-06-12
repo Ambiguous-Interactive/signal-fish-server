@@ -125,7 +125,8 @@ RUN rustup component add \
     llvm-tools-preview
 
 # Cargo tools (installed globally, available to all users)
-RUN cargo install --locked \
+RUN cargo install --locked cargo-binstall \
+    && cargo binstall --no-confirm --locked \
     cargo-deny \
     cargo-tarpaulin \
     cargo-watch \
@@ -134,6 +135,12 @@ RUN cargo install --locked \
     cargo-nextest \
     && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \
     && taplo --version \
+    && cargo-deny --version \
+    && cargo-tarpaulin --version \
+    && cargo-watch --version \
+    && cargo-expand --version \
+    && cargo llvm-cov --version \
+    && cargo-nextest --version \
     && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
 
 # Fix ownership so the non-root "vscode" user (set via remoteUser in

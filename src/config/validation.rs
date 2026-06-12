@@ -106,6 +106,24 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Signal payload cap validation. `max_signal_bytes` larger than
+    // `max_message_size` is rejected (not just warned about) because it is
+    // contradictory dead config: a frame that large is rejected by the
+    // `max_message_size` cap before the signal cap could ever apply, so the
+    // configured value silently never takes effect.
+    if config.security.max_signal_bytes == 0 {
+        anyhow::bail!("security.max_signal_bytes must be greater than 0");
+    }
+    if config.security.max_signal_bytes > config.security.max_message_size {
+        anyhow::bail!(
+            "security.max_signal_bytes ({}) must not exceed security.max_message_size ({}): \
+             a Signal frame that large would be rejected by the message size cap first, \
+             so the configured signal cap could never take effect",
+            config.security.max_signal_bytes,
+            config.security.max_message_size
+        );
+    }
+
     // Token binding validation
     if config.security.transport.token_binding.enabled {
         let binding = &config.security.transport.token_binding;
@@ -146,6 +164,23 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether startup should warn that signaling is not TLS-terminated while the
+/// server is actively brokering WebRTC.
+///
+/// PLAN Appendix I requires `wss://` for signaling in production because DTLS
+/// fingerprints travel inside the SDP that `Signal` relays: a plaintext `ws://`
+/// signaling path lets an on-path attacker substitute fingerprints and
+/// man-in-the-middle the "encrypted" peer connections. The condition is
+/// TURN-specific (`turn.enabled`) because that is the deployment signal that
+/// this server is brokering real WebRTC sessions. This is deliberately a
+/// warning, never a hard error: terminating TLS at a reverse proxy (where
+/// `security.transport.tls.enabled` stays `false`) is the most common
+/// production deployment and is perfectly safe.
+#[must_use]
+pub fn should_warn_missing_signaling_tls(config: &Config) -> bool {
+    config.turn.enabled && !config.security.transport.tls.enabled
+}
+
 /// Detect if we're running in production mode.
 ///
 /// Checks for `SIGNAL_FISH_PRODUCTION` or generic `PRODUCTION` / `PROD` environment variables.
@@ -161,4 +196,43 @@ pub fn is_production_mode() -> bool {
     env::var("SIGNAL_FISH_PRODUCTION").is_ok()
         || env::var("PRODUCTION").is_ok()
         || env::var("PROD").is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Truth table for the TURN-without-TLS startup warning: it fires exactly
+    /// when the server brokers WebRTC (`turn.enabled`) over a plaintext
+    /// listener (`tls.enabled == false`).
+    #[test]
+    fn signaling_tls_warning_fires_only_for_turn_without_tls() {
+        let cases = [
+            (false, false, false),
+            (false, true, false),
+            (true, false, true),
+            (true, true, false),
+        ];
+        for (turn_enabled, tls_enabled, expected) in cases {
+            let mut config = Config::default();
+            config.turn.enabled = turn_enabled;
+            config.security.transport.tls.enabled = tls_enabled;
+            assert_eq!(
+                should_warn_missing_signaling_tls(&config),
+                expected,
+                "turn.enabled={turn_enabled}, tls.enabled={tls_enabled}"
+            );
+        }
+    }
+
+    /// The warning predicate must not be affected by unrelated security knobs.
+    #[test]
+    fn signaling_tls_warning_ignores_unrelated_settings() {
+        let mut config = Config::default();
+        config.turn.enabled = true;
+        config.security.require_websocket_auth = false;
+        config.security.require_metrics_auth = false;
+        config.security.transport.token_binding.enabled = true;
+        assert!(should_warn_missing_signaling_tls(&config));
+    }
 }

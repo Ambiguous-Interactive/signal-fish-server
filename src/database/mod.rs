@@ -299,11 +299,20 @@ impl GameDatabase for InMemoryDatabase {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
 
+        // One source of truth for creator authority: the room's
+        // `authority_player` and the creator's stored `is_authority` flag both
+        // derive from this condition, so the wire surfaces built from them
+        // (`RoomJoined.is_authority` from `authority_player`; v2
+        // `current_players` / `GameStarting` peers and v3 `SessionPeer` from
+        // the stored flag) can never disagree. In a `supports_authority: false`
+        // room nobody — including the creator — holds authority.
+        let authority_player = supports_authority.then_some(creator_id);
+
         // Create creator player info before acquiring locks
         let creator_info = PlayerInfo {
             id: creator_id,
             name: "Creator".to_string(), // This will be updated later when we have the actual name
-            is_authority: true,
+            is_authority: authority_player == Some(creator_id),
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
@@ -311,8 +320,7 @@ impl GameDatabase for InMemoryDatabase {
         };
 
         let mut players = HashMap::new();
-        let creator_id_val = creator_info.id;
-        players.insert(creator_id_val, creator_info);
+        players.insert(creator_id, creator_info);
 
         // Lock ordering: rooms first, then room_codes (consistent with delete_room, cleanup_*)
         // Both locks are held simultaneously to ensure atomicity of the room creation:
@@ -348,11 +356,7 @@ impl GameDatabase for InMemoryDatabase {
             max_players,
             supports_authority,
             players,
-            authority_player: if supports_authority {
-                Some(creator_id_val)
-            } else {
-                None
-            },
+            authority_player,
             lobby_state: crate::protocol::LobbyState::Waiting,
             ready_players: Vec::new(),
             lobby_started_at: None,
@@ -413,6 +417,13 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             let removed_player = room.players.remove(player_id);
+
+            // Prune the departed player's ready entry so it cannot linger in
+            // `RoomJoined` / `Reconnected` payloads: `finalize_room_game`
+            // force-populates `ready_players` with every member, and
+            // `transition_room_to_waiting` clears it only on the Lobby →
+            // Waiting regression (a Finalized room never regresses).
+            room.ready_players.retain(|id| id != player_id);
 
             // If removed player was authority, CLEAR authority (don't auto-reassign per protocol)
             if room.authority_player == Some(*player_id) {
@@ -803,7 +814,23 @@ impl GameDatabase for InMemoryDatabase {
     async fn finalize_room_game(&self, room_id: &RoomId) -> Result<()> {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            room.finalize_game();
+            // The caller (the room coordinator, holding the room-operation
+            // lock) is the policy authority that determined every player is
+            // ready; the store persists that decision. The coordinator tracks
+            // ready state in its own map, so the room's per-player flags are
+            // synchronized here rather than required as a precondition —
+            // otherwise finalization would silently no-op and the persisted
+            // `lobby_state` could never reach `Finalized` (which gates v3
+            // late-join/reconnect pairing and departure re-planning).
+            if room.lobby_state != crate::protocol::LobbyState::Finalized {
+                let member_ids: Vec<PlayerId> = room.players.keys().copied().collect();
+                for player in room.players.values_mut() {
+                    player.is_ready = true;
+                }
+                room.ready_players = member_ids;
+                room.lobby_state = crate::protocol::LobbyState::Finalized;
+                room.game_finalized_at = Some(chrono::Utc::now());
+            }
         }
         Ok(())
     }
@@ -1232,5 +1259,114 @@ mod tests {
 
         // Authority player should be set to creator
         assert_eq!(room.authority_player, Some(creator_id));
+    }
+
+    #[tokio::test]
+    async fn test_create_room_without_authority_creator_flag_matches_authority_player() {
+        // In a `supports_authority: false` room nobody holds authority:
+        // `authority_player` is `None` and the creator's stored `is_authority`
+        // must mirror it. (It previously seeded `true`, contradicting every
+        // surface derived from `authority_player`.)
+        let db = InMemoryDatabase::new();
+        let creator_id = Uuid::new_v4();
+
+        let room = db
+            .create_room(
+                "no_auth_game".to_string(),
+                Some("NOAUT1".to_string()),
+                4,
+                false,
+                creator_id,
+                "relay".to_string(),
+                "us-east-1".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation should succeed");
+
+        assert!(!room.supports_authority);
+        assert_eq!(
+            room.authority_player, None,
+            "an authority-less room elects no authority player"
+        );
+        let creator = &room.players[&creator_id];
+        assert!(
+            !creator.is_authority,
+            "the creator's stored flag must mirror authority_player (None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_player_from_room_prunes_ready_players() {
+        // `finalize_room_game` force-populates `ready_players` with every
+        // member; removing a player must prune its id so it cannot linger in
+        // `RoomJoined` / `Reconnected` payloads (a Finalized room never
+        // regresses, so `transition_room_to_waiting`'s clear never runs).
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "prune_game", "PRUNE1")
+            .await
+            .expect("room creation should succeed");
+        let creator_id = *room
+            .players
+            .keys()
+            .next()
+            .expect("creator is in the players map");
+
+        let member_id = Uuid::new_v4();
+        let member = PlayerInfo {
+            id: member_id,
+            name: "Member".to_string(),
+            is_authority: false,
+            is_ready: false,
+            connected_at: chrono::Utc::now(),
+            connection_info: None,
+            region_id: "us-east-1".to_string(),
+        };
+        assert!(db
+            .add_player_to_room(&room.id, member)
+            .await
+            .expect("add_player_to_room should not error"));
+
+        db.finalize_room_game(&room.id)
+            .await
+            .expect("finalize_room_game should not error");
+        let finalized = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("get_room_by_id should not error")
+            .expect("room should exist");
+        assert_eq!(
+            finalized.lobby_state,
+            crate::protocol::LobbyState::Finalized
+        );
+        assert!(
+            finalized.ready_players.contains(&member_id),
+            "finalize must populate ready_players with every member"
+        );
+
+        let removed = db
+            .remove_player_from_room(&room.id, &member_id)
+            .await
+            .expect("remove_player_from_room should not error");
+        assert!(removed.is_some(), "the member must be removed");
+
+        let after = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("get_room_by_id should not error")
+            .expect("room should exist");
+        assert!(
+            !after.ready_players.contains(&member_id),
+            "the departed player's id must be pruned from ready_players"
+        );
+        assert!(
+            after.ready_players.contains(&creator_id),
+            "remaining members keep their ready entries"
+        );
+        assert_eq!(
+            after.lobby_state,
+            crate::protocol::LobbyState::Finalized,
+            "a departure never regresses the Finalized state"
+        );
     }
 }

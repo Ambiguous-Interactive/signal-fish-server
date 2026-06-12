@@ -279,6 +279,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("65536"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES",
+        path: "security.max_signal_bytes",
+        default: Some("16384"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP",
         path: "security.max_connections_per_ip",
         default: Some("10"),
@@ -494,6 +499,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS",
         path: "websocket.auth_timeout_secs",
         default: Some("10"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS",
+        path: "websocket.idle_timeout_secs",
+        default: Some("300"),
     },
 ];
 
@@ -1188,6 +1198,7 @@ fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
         "SIGNAL_FISH_CONFIG_PATH",
         "SIGNAL_FISH_PRODUCTION",
         "SIGNAL_FISH_HOOK_PROFILE",
+        "SIGNAL_FISH_WARM_CARGO_CHECK",
     ];
 
     let mut violations = Vec::new();
@@ -1679,6 +1690,54 @@ fn test_config_validation_scenarios() {
             }),
             true,
         ),
+        (
+            "max_signal_bytes of 0 → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.max_signal_bytes = 0;
+            }),
+            false,
+        ),
+        (
+            "max_signal_bytes above max_message_size → fails (dead config)",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.max_signal_bytes = c.security.max_message_size + 1;
+            }),
+            false,
+        ),
+        (
+            "max_signal_bytes equal to max_message_size → passes (boundary)",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.max_signal_bytes = c.security.max_message_size;
+            }),
+            true,
+        ),
+        (
+            "idle timeout of 0 (disabled) → passes",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.websocket.idle_timeout_secs = 0;
+            }),
+            true,
+        ),
+        (
+            "aggressive 1s idle timeout → passes (any positive value is valid)",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.websocket.idle_timeout_secs = 1;
+            }),
+            true,
+        ),
+        (
+            "very large idle timeout → passes",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.websocket.idle_timeout_secs = 86_400;
+            }),
+            true,
+        ),
     ];
 
     for (name, modifier, expected_ok) in &scenarios {
@@ -1762,4 +1821,84 @@ fn test_validate_config_security_tls_validation() {
             result,
         );
     }
+}
+
+/// `--print-config` must never leak credential material: every *set* secret in
+/// the printed JSON is replaced with the [`REDACTED_SECRET`] marker. This
+/// drives the REAL compiled binary (`CARGO_BIN_EXE_signal-fish-server`)
+/// end-to-end through `Config::redacted_for_display`, pinning the operator
+/// contract the unit tests in `src/config/types.rs` only cover in-process.
+///
+/// [`REDACTED_SECRET`]: signal_fish_server::config::REDACTED_SECRET
+#[test]
+fn test_print_config_redacts_secrets_end_to_end() {
+    use signal_fish_server::config::REDACTED_SECRET;
+
+    const SENTINEL_SECRET: &str = "super-secret-turn-key-do-not-print";
+
+    // Per-test temp config file + working directory (no stray repo
+    // `config.json` can interfere), mirroring `tests/v3_multiprocess_e2e.rs`.
+    let workdir = tempfile::tempdir().expect("create temp workdir");
+    let config_path = workdir.path().join("config.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "turn": {
+                "enabled": true,
+                "mode": "static_secret",
+                "static_auth_secret": SENTINEL_SECRET,
+                "urls": ["turn:turn.example.com:3478"]
+            }
+        }))
+        .expect("serialize test config"),
+    )
+    .expect("write test config");
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-server"));
+    command
+        .arg("--print-config")
+        .current_dir(workdir.path())
+        .stdin(std::process::Stdio::null());
+    // Scrub every inherited SIGNAL_FISH* variable: env overrides are applied
+    // last by the loader and would silently override the temp config.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+        {
+            command.env_remove(&key);
+        }
+    }
+    command.env("SIGNAL_FISH_CONFIG_PATH", &config_path);
+
+    let output = command
+        .output()
+        .expect("run signal-fish-server --print-config");
+    assert!(
+        output.status.success(),
+        "--print-config exited with {:?}; stderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let printed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--print-config stdout is a single JSON document");
+
+    // The set secret is replaced by the redaction marker...
+    assert_eq!(
+        printed["turn"]["static_auth_secret"],
+        serde_json::Value::String(REDACTED_SECRET.to_string()),
+        "expected turn.static_auth_secret to print as the redaction marker"
+    );
+    // ...and the raw credential appears nowhere in the output.
+    assert!(
+        !stdout.contains(SENTINEL_SECRET),
+        "raw secret leaked into --print-config output:\n{stdout}"
+    );
+    // Non-secret TURN fields stay visible so operators can audit the config.
+    assert_eq!(
+        printed["turn"]["urls"][0], "turn:turn.example.com:3478",
+        "non-secret turn.urls should print unredacted"
+    );
 }

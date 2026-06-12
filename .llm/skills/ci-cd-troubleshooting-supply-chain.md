@@ -25,7 +25,7 @@ See also: [CI CD Troubleshooting Ecosystem](./ci-cd-troubleshooting-ecosystem.md
 
 - **Stale Dockerfile COPY**: Audit all `COPY`/`ADD` instructions when removing directories
 - **Action refs policy**: All `uses:` references must use explicit version tags
-  (for example `@v6.0.2`), not commit SHAs and not moving refs (`@stable`, `@main`)
+  (for example `@v6.0.3`), not commit SHAs and not moving refs (`@stable`, `@main`)
 - **Action syntax policy**: Treat malformed remote refs (missing `@ref`, empty ref,
   or missing `owner/repo`) as violations, not as ignorable lines
 - **Stale script references**: Audit workflow `run:` steps when deleting scripts;

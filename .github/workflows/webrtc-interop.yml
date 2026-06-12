@@ -1,0 +1,139 @@
+# WebRTC Interop Workflow
+#
+# Builds and runs the native reference client's multi-process WebRTC interop
+# suite (clients/native/, package signal-fish-reference-native): the REAL
+# signal-fish-server binary plus several real client processes negotiate
+# actual WebRTC sessions (DTLS + SCTP data channels over loopback UDP)
+# brokered by the server's protocol v3 signaling. Scenarios cover the mesh
+# and host-star topologies, the crippled-ICE relay fallback, late-join
+# NewPeer pairing, and mixed v2/v3 relay-floor rooms. The interop server
+# config disables TURN and configures zero STUN URLs, so the suite performs
+# no external network access.
+#
+# The reference client is a standalone crate OUTSIDE the root package (its
+# own Cargo.lock and deny.toml), so this workflow also runs cargo-deny over
+# that independent dependency graph; the root graph is covered by ci.yml.
+#
+# Triggers on changes to the client crate and every input the suite actually
+# depends on: all server sources (the harness spawns the binary built from the
+# whole src/ tree, including root-level modules like src/server.rs), the root
+# manifest/lockfile, the pinned toolchain, the runner script, and this
+# workflow.
+
+name: WebRTC Interop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/native/**"
+      - "scripts/run-webrtc-interop.sh"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/webrtc-interop.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/native/**"
+      - "scripts/run-webrtc-interop.sh"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/webrtc-interop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  interop:
+    name: Native Client Interop (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          # Cover BOTH compilation graphs: the root package (the server
+          # binary the harness spawns) and the standalone reference-client
+          # crate (the webrtc dependency tree). rust-cache caches each
+          # workspace's target directory plus the shared registry, keyed on
+          # the Cargo.lock files found under both workspaces.
+          workspaces: |
+            .
+            clients/native
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Show Rust tool versions
+        shell: bash
+        run: |
+          rustc -Vv
+          cargo -V
+          cargo clippy -V
+          cargo fmt --version
+
+      - name: Run the WebRTC interop suite
+        # Builds the server binary, lints the reference client (fmt + clippy
+        # -D warnings), and runs its unit + multi-process interop tests with
+        # SIGNAL_FISH_SERVER_BIN exported.
+        run: bash scripts/run-webrtc-interop.sh
+
+  client-deny:
+    name: Client Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The reference client has its own lockfile and dependency graph (webrtc
+    # et al.) that the root deny job never sees; audit it with the crate's
+    # own deny.toml (clients/native/deny.toml).
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+      - name: Extract client MSRV for cargo-deny toolchain
+        id: deny-msrv
+        run: |
+          set -euo pipefail
+          MSRV=$(bash scripts/read-toml-string.sh clients/native/Cargo.toml rust-version package || true)
+          if [ -z "$MSRV" ]; then
+            echo "ERROR: Could not extract rust-version from clients/native/Cargo.toml"
+            exit 1
+          fi
+          echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+      - name: Run cargo-deny (reference client)
+        uses: EmbarkStudios/cargo-deny-action@v2.0.20
+        with:
+          manifest-path: clients/native/Cargo.toml
+          arguments: --all-features
+          # Ensure the Dockerized action installs and uses a concrete toolchain
+          # before executing cargo-deny. This avoids relying on preinstalled
+          # aliases like `stable` that may be absent in the container image.
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
