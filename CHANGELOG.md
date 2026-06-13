@@ -370,6 +370,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the common production deployment (`config::should_warn_missing_signaling_tls`).
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
   `rustls-pki-types` built-in `PemObject` trait.
+- **Security review (PLAN §P8 acceptance) — three hardening fixes from an adversarial audit of the
+  v3 signaling surface:**
+- Bounded the v3 `TransportStatus` → `PeerTransportStatus` room fan-out (PLAN §P8 / Appendix I). An
+  accepted `TransportStatus` state change fans out 1→N to the reporter's room; it was the one
+  client-triggered v3 control-plane emit path with no rate limit (the dedup gate is trivially
+  defeated by alternating `connected`), unlike the targeted `Signal` relay. The accepted-change
+  fan-out now consumes the same per-connection WebRTC control-plane budget as `Signal`
+  (`rate_limit.max_signals`); over-budget changes are dropped silently (the message is informational
+  and defines no error reply). The gate sits after the p2p/relay observability counters and the
+  no-room early return, so accurate metrics are never suppressed and a room-less reporter spends no
+  budget; the per-connection transport state is always recorded regardless of the budget. (The
+  dominant relay-floor `GameData` fan-out is intentionally bounded by other means — `max_message_size`,
+  connection/room caps, best-effort sends — so this only closes the control-plane consistency gap
+  with `Signal`.) Covered by `transport_status_fanout_is_bounded_by_signal_budget`.
+- Reject zero-valued background-task interval configs at startup instead of silently killing the
+  task at runtime (PLAN §P8 / Appendix J resource-exhaustion). `server.room_cleanup_interval`,
+  `rate_limit.time_window`, and (when `websocket.enable_batching` is true) `websocket.batch_interval_ms`
+  each become the period of a `tokio::time::interval`, which **panics** on a zero period — previously
+  this killed the spawned task while the process kept serving, so a one-line operator typo silently
+  disabled the maintenance sweep (unbounded room/client/token/lock growth), the rate-limiter cleanup
+  (and the rate-limit windows themselves), or every connection's batch flush. `validate_config_security`
+  now rejects these at startup with a field-named error. **Behavior change:** a config with one of
+  these set to `0` that previously started (degrading silently) now fails fast at startup. As
+  defense-in-depth for direct library construction (the server is part of the public API and may be
+  built without running config validation), the three interval use sites also clamp to a non-zero
+  floor, mirroring the existing dashboard-cache `.max(..)` zero-guard.
+- Consolidated all secret comparison into a single constant-time helper and closed two
+  non-constant-time compares (PLAN §P8 / Appendix I). New crate-internal `security::constant_time_eq`
+  (over `subtle`) is now the sole secret-comparison implementation, replacing two prior copies
+  (`auth::middleware` and `security::token_binding`). The reconnection-token check
+  (`reconnection::{validate,claim}_reconnection`) and the metrics bearer-token check
+  (`websocket::metrics`) previously used short-circuiting `String`/`&str` `==`/`!=`, leaking via
+  timing how many leading bytes matched; both now route through the constant-time helper, consistent
+  with the app-secret path. (Exploitation was already impractical — the reconnect token is a
+  122-bit v4 UUID — so this is a consistency/defense-in-depth hardening, not a fixed vulnerability.)
 
 ### Fixed
 

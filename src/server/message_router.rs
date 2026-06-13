@@ -179,6 +179,32 @@ impl EnhancedGameServer {
         let Some(room_id) = self.get_client_room(player_id).await else {
             return;
         };
+
+        // The room fan-out below is the only 1→N amplifier on this path (the
+        // per-connection state update and the p2p/relay counters above are O(1)
+        // local bookkeeping), so bound *it* on the same per-connection WebRTC
+        // control-plane budget as `Signal` (`rate_limiter.check_signal`). A
+        // client that alternates `connected` to force a `Changed` on every frame
+        // (defeating the dedup gate above) therefore cannot use the tiny status
+        // message as an unbounded room amplifier. The gate is placed here — after
+        // the metrics and the no-room early return — so accurate observability is
+        // never suppressed and a room-less reporter consumes no budget for a
+        // fan-out that can't happen. Over-budget changes are dropped SILENTLY:
+        // `TransportStatus` is informational and defines no error reply, and the
+        // per-connection state was already recorded above, so the connection's
+        // own transport truth stays current regardless of the fan-out budget.
+        // (The dominant relay-floor `GameData` fan-out is bounded by other means
+        // — size cap, connection/room caps, best-effort sends — so this only
+        // closes the control-plane consistency gap with `Signal`.)
+        if self.rate_limiter.check_signal(player_id).await.is_err() {
+            tracing::debug!(
+                %player_id,
+                ?transport,
+                connected,
+                "Dropping TransportStatus fan-out: per-connection signal rate limit exceeded"
+            );
+            return;
+        }
         let members = match self.database.get_room_players(&room_id).await {
             Ok(members) => members,
             Err(err) => {

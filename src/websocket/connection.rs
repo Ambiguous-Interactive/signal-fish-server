@@ -146,8 +146,12 @@ pub(super) async fn handle_socket(
         if batching_enabled {
             // Batching mode: collect multiple messages and send together
             let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
+            // Clamp to a 1ms floor: `batch_interval_ms` is validated `> 0` (when
+            // batching is enabled) at startup, but `tokio::time::interval`
+            // panics on a zero period, so guard the timer regardless of how this
+            // config was constructed.
             let mut flush_interval =
-                tokio::time::interval(Duration::from_millis(batch_interval_ms));
+                tokio::time::interval(Duration::from_millis(batch_interval_ms.max(1)));
             flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {

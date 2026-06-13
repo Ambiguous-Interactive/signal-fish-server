@@ -3528,6 +3528,85 @@ async fn transport_status_flap_fans_out_each_transition() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn transport_status_fanout_is_bounded_by_signal_budget() {
+    // `TransportStatus` is v3 WebRTC control-plane traffic, and an accepted state
+    // change triggers a 1→N `PeerTransportStatus` fan-out to the room. A client
+    // that alternates `connected` to force a `Changed` on every frame (defeating
+    // the dedup gate) must not be able to use the tiny message as an unbounded
+    // room amplifier: the accepted-change path consumes the same per-connection
+    // budget as `Signal` (`max_signals`). Over-budget changes are dropped
+    // SILENTLY (no error frame — `TransportStatus` is informational), but the
+    // per-connection state is still recorded. Budget = 2 here.
+    let server = create_test_server_with_signals(2).await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    // Five real transitions, but only two fit the budget.
+    for connected in [true, false, true, false, true] {
+        server
+            .handle_client_message(
+                &alice,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected,
+                },
+            )
+            .await;
+    }
+
+    // Bob sees exactly the two budgeted transitions, in order, then nothing.
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, false).await;
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        2,
+        "fan-out events are capped at the per-connection control-plane budget"
+    );
+    // Only the 1→N fan-out is budget-bounded. The O(1) local bookkeeping is NOT:
+    // every accepted transition still updates the per-connection state and the
+    // p2p/relay observability counters, so the budget cannot distort metrics.
+    // The five transitions are [true, false, true, false, true] over WebRtc:
+    // three `true` ⇒ p2p_established += 3, two `false` ⇒ relay_fallback += 2.
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        3,
+        "every accepted P2P-up transition is counted, even when its fan-out is dropped"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        2,
+        "every accepted fallback transition is counted, even when its fan-out is dropped"
+    );
+    // The latest reported state is still recorded even though its fan-out was
+    // dropped (per-connection truth is never rate-limited).
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, true)),
+        "the connection's own transport state tracks the last report regardless of fan-out budget"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn transport_status_without_room_records_state_but_fans_out_nothing() {
     // A room-less reporter still gets its per-connection state recorded (the
     // pre-fan-out behavior is preserved), but there is no room to notify.
@@ -3573,6 +3652,17 @@ async fn transport_status_without_room_records_state_but_fans_out_nothing() {
         server.metrics.p2p_established.load(Ordering::Relaxed),
         1,
         "the accepted report still moves p2p_established"
+    );
+    // The fan-out rate-limit gate sits AFTER the no-room early return, so a
+    // room-less reporter spends no signal budget on a fan-out that can't happen.
+    assert_eq!(
+        server
+            .rate_limiter
+            .get_player_stats(&alice)
+            .await
+            .map_or(0, |stats| stats.signals),
+        0,
+        "a room-less TransportStatus must not consume the sender's signal budget"
     );
 }
 

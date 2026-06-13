@@ -137,6 +137,34 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         );
     }
 
+    // Background-task interval validation. These values become the period of a
+    // `tokio::time::interval`, which PANICS on a zero period — killing the
+    // spawned task while the process keeps serving, so the failure is silent and
+    // severe. `room_cleanup_interval` drives the maintenance sweep (expired
+    // rooms/clients/reconnection records/tokens/locks); losing it leaks memory
+    // unboundedly. `time_window` is both the rate-limiter cleanup period and the
+    // width of every rate-limit window (zero ⇒ the window resets on every check,
+    // disabling the limits). `batch_interval_ms` is validated in
+    // `WebSocketConfig::validate` below (it only feeds an interval when batching
+    // is on). Rejecting a zero here turns an operator typo into a loud startup
+    // error; the use sites below ALSO clamp defensively (the server is
+    // constructible directly via the public API, bypassing this check). Loud
+    // rejection is reserved for these panic-prone periods — other interval sites
+    // that already clamp and therefore never panic (e.g. the dedup sweep) keep
+    // their non-fatal use-site handling.
+    if config.server.room_cleanup_interval == 0 {
+        anyhow::bail!(
+            "server.room_cleanup_interval must be greater than 0 seconds \
+             (it is the period of the room/client/token cleanup task)"
+        );
+    }
+    if config.rate_limit.time_window == 0 {
+        anyhow::bail!(
+            "rate_limit.time_window must be greater than 0 seconds \
+             (it is the rate-limit window width and the limiter cleanup interval)"
+        );
+    }
+
     // Token binding validation
     if config.security.transport.token_binding.enabled {
         let binding = &config.security.transport.token_binding;
@@ -306,5 +334,72 @@ mod tests {
                 "error must point at the blank field {expected}: {err}"
             );
         }
+    }
+
+    /// A zero `server.room_cleanup_interval` is rejected: it is fed to
+    /// `tokio::time::interval`, which panics on a zero period, silently killing
+    /// the maintenance sweep (room/client/token/lock reaping) and leaking memory
+    /// unboundedly while the process keeps serving. Fail fast at startup instead.
+    #[test]
+    fn zero_room_cleanup_interval_is_rejected() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.server.room_cleanup_interval = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("zero room_cleanup_interval must be rejected");
+        assert!(
+            err.to_string().contains("server.room_cleanup_interval"),
+            "error must name the offending field: {err}"
+        );
+    }
+
+    /// A zero `rate_limit.time_window` is rejected: it is the period of the
+    /// rate-limiter's cleanup `interval` (panics on zero) and the width of every
+    /// rate-limit window (zero ⇒ every check resets the window ⇒ limits disabled).
+    #[test]
+    fn zero_rate_limit_time_window_is_rejected() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.rate_limit.time_window = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("zero rate_limit.time_window must be rejected");
+        assert!(
+            err.to_string().contains("rate_limit.time_window"),
+            "error must name the offending field: {err}"
+        );
+    }
+
+    /// A zero `websocket.batch_interval_ms` is rejected ONLY when batching is
+    /// enabled (the value is the flush `interval` period, which panics on zero).
+    #[test]
+    fn zero_batch_interval_is_rejected_when_batching_enabled() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.websocket.enable_batching = true;
+        config.websocket.batch_interval_ms = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("zero batch_interval_ms with batching on must be rejected");
+        assert!(
+            err.to_string().contains("websocket.batch_interval_ms"),
+            "error must name the offending field: {err}"
+        );
+    }
+
+    /// With batching DISABLED the flush interval is never constructed, so a zero
+    /// `batch_interval_ms` is harmless and must not block startup.
+    #[test]
+    fn zero_batch_interval_is_allowed_when_batching_disabled() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.websocket.enable_batching = false;
+        config.websocket.batch_interval_ms = 0;
+
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "zero batch_interval_ms is harmless when batching is disabled"
+        );
     }
 }

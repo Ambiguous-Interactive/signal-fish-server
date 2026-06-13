@@ -275,7 +275,7 @@ impl ReconnectionManager {
         };
         let player = &record.disconnected;
 
-        if player.token.token != token {
+        if !crate::security::constant_time_eq(&player.token.token, token) {
             self.metrics.increment_reconnection_validation_failure();
             return Err("Invalid reconnection token".to_string());
         }
@@ -327,7 +327,7 @@ impl ReconnectionManager {
 
         let player = &record.disconnected;
 
-        if player.token.token != token {
+        if !crate::security::constant_time_eq(&player.token.token, token) {
             self.metrics.increment_reconnection_validation_failure();
             return Err("Invalid reconnection token".to_string());
         }

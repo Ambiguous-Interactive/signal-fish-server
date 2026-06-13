@@ -65,6 +65,17 @@ impl WebSocketConfig {
                 self.auth_timeout_secs
             );
         }
+        // When batching is enabled, `batch_interval_ms` is the flush
+        // `tokio::time::interval` period; a zero period panics that timer (and
+        // the per-connection send task with it), so reject it at startup. With
+        // batching disabled the interval is never constructed, so any value is
+        // fine.
+        if self.enable_batching && self.batch_interval_ms == 0 {
+            anyhow::bail!(
+                "websocket.batch_interval_ms must be greater than 0 when websocket.enable_batching \
+                 is true (it is the batch-flush interval, which cannot be zero)"
+            );
+        }
         Ok(())
     }
 }
