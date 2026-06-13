@@ -264,6 +264,11 @@ Signal Fish Server uses a JSON-based WebSocket protocol (v2). Messages are JSON
 objects with a `type` field and an optional `data` field. MessagePack encoding
 is also supported for game data when `enable_message_pack_game_data` is enabled.
 
+Building a client? See the [Platform Integration Guide](docs/guides/platform-integration.md)
+for which WebRTC stack to use per platform (browser, native, mobile, Steam, Godot,
+Unity, Unreal), and the [Rust Client Guide](docs/guides/rust-client.md) for a complete
+relay-floor client walkthrough.
+
 ### Client Messages
 
 Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/code-samples/protocol/v2-client-messages.jsonl)

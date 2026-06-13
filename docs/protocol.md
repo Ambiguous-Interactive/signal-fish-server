@@ -1209,4 +1209,5 @@ C1                        server                          H (host)            C2
 ## Next Steps
 
 - [Getting Started](getting-started.md) - Basic usage examples
+- [Platform Integration Guide](guides/platform-integration.md) - which WebRTC stack to use per platform
 - [Features](features.md) - Complete feature overview

@@ -186,3 +186,4 @@ hardening items in the [security checklist](deployment.md#security-checklist).
 - [Transport Fallback Contract](architecture/transport-fallback.md) — the relay floor
 - [Scaling architecture notes](architecture/scaling.md) — multi-node signaling
 - [Protocol v3 ICE / TURN credentials](protocol.md#ice--turn-credentials)
+- [Platform Integration Guide](guides/platform-integration.md) — which client stacks consume these credentials

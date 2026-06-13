@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a [Platform Integration Guide](docs/guides/platform-integration.md) (PLAN §P7 task 5,
+  Appendix H): per-platform WebRTC-stack guidance for browser, native desktop, mobile, Steam,
+  Godot, Unity, and Unreal, plus the universal v3 client contract (relay floor, opaque
+  matchbox-shaped signal payloads, the two-channel data layout, stateless glare resolution) and
+  the cross-stack interop traps (Chrome/Safari `.local` mDNS candidates, SCTP `a=sctp-port` vs
+  legacy `sctpmap`, DTLS/BUNDLE, the no-raw-UDP-in-browsers constraint). Wired into the MkDocs
+  nav, the docs landing page, and the Handoff & Topologies "See also". The browser and native
+  rows are demonstrated end to end by the in-repo reference clients; the mobile, Steam, and
+  engine rows are integration notes for out-of-repo builds.
 - Added ICE pre-gather on `RoomJoined` / `Reconnected` (PLAN §P4's deferred "RoomJoined ICE
   pre-gather" refinement): both payloads gain an optional `ice_servers` field carrying the same
   composed ICE list a WebRTC `SessionPlan` delivers — the operator's static `session.ice_servers`

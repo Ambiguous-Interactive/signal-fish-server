@@ -125,6 +125,7 @@ nav:
       - Spectator Mode: concepts/spectator-mode.md
   - Guides:
       - Rust Client: guides/rust-client.md
+      - Platform Integration: guides/platform-integration.md
   - Configuration:
       - Server Config: configuration.md
       - Authentication: authentication.md
