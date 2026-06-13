@@ -3,9 +3,10 @@
 //! Closes the scheme/duplicate URL checks formerly deferred to P4 (now that P4
 //! wired in real STUN/TURN): every ICE URL a config block propagates verbatim to
 //! clients must carry one of the four ICE schemes — checked **case-insensitively**
-//! because URI schemes are case-insensitive (RFC 3986 §3.1) — with a non-empty
-//! remainder after the colon. Scheme violations are hard errors (fail fast at
-//! startup, before a client ever receives an `RTCIceServer` it cannot parse);
+//! because URI schemes are case-insensitive (RFC 3986 §3.1) — with a
+//! non-whitespace remainder after the colon. Scheme violations are hard errors
+//! (fail fast at startup, before a client ever receives an `RTCIceServer` it
+//! cannot parse);
 //! exact-duplicate URLs only warn (clients tolerate repeated entries, mirroring
 //! the warn-but-succeed stance of the disabled-P2P topology warning).
 
@@ -23,7 +24,7 @@ pub(crate) const STUN_SCHEMES: &[&str] = &["stun", "stuns"];
 
 /// Check that `url` starts with one of `allowed_schemes` (ASCII
 /// case-insensitively — schemes are ASCII by grammar) followed by `:` and a
-/// non-empty remainder.
+/// non-whitespace remainder.
 ///
 /// Returns the human-readable violation on `Err`; the caller prefixes its own
 /// indexed config path (e.g. `session.ice_servers[0].urls[1]`) so the two config
@@ -57,7 +58,7 @@ pub(crate) fn check_url_scheme(url: &str, allowed_schemes: &[&str]) -> Result<()
             allowed_list()
         ));
     }
-    if remainder.is_empty() {
+    if remainder.trim().is_empty() {
         return Err(format!(
             "must have a host after the \"{scheme}:\" scheme (got {url:?})"
         ));
@@ -121,6 +122,9 @@ mod tests {
             "relay:foo",
             "no-colon",
             "stun:",
+            "stun: ",
+            "stun:\t",
+            "turn: ",
             "stun :host",
         ] {
             assert!(

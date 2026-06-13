@@ -106,7 +106,7 @@ impl TurnConfig {
     /// `RTCIceServer` parsing. For the same reason, schemes are checked
     /// unconditionally too: `urls` entries must start with `turn:`/`turns:` and
     /// `stun_urls` entries with `stun:`/`stuns:` — case-insensitively (URI
-    /// schemes are case-insensitive, RFC 3986 §3.1) and with a non-empty
+    /// schemes are case-insensitive, RFC 3986 §3.1) and with a non-whitespace
     /// remainder after the colon. Exact-duplicate URLs anywhere in the block
     /// only warn (clients tolerate repeated entries — the warn-but-succeed
     /// stance).
@@ -512,6 +512,7 @@ mod tests {
             "relay:foo",
             "stun:stun.l.google.com:19302",
             "turn:",
+            "turn: ",
             "turn :host",
             "no-colon-at-all",
         ] {
@@ -536,6 +537,7 @@ mod tests {
             "relay:foo",
             "turn:turn.example.com:3478",
             "stun:",
+            "stun:\t",
             "stun :host",
         ] {
             let cfg = TurnConfig {

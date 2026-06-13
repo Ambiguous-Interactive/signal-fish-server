@@ -43,6 +43,9 @@ const APP_ID: &str = "v3-ice-pregather-app";
 const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
 const POST_GAME_STARTING_SESSION_PLAN_WINDOW: tokio::time::Duration =
     tokio::time::Duration::from_secs(5);
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
+const TURN_URL: &str = "turn:turn.example.com:3478";
 const TURN_TTL_SECS: u64 = 3600;
 
 fn app_entry() -> AppAuthEntry {
@@ -65,7 +68,7 @@ fn mesh_session_config() -> SessionConfig {
         default_topology: Topology::Mesh,
         game_topology_mappings: mappings,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:static.example.com:3478".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -79,12 +82,20 @@ fn enabled_turn_config() -> TurnConfig {
         enabled: true,
         mode: TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
-        urls: vec!["turn:turn.example.com:3478".to_string()],
-        stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        urls: vec![TURN_URL.to_string()],
+        stun_urls: vec![TURN_STUN_URL.to_string()],
         credential_ttl_secs: TURN_TTL_SECS,
         managed_provider: None,
         managed_api_token: None,
     }
+}
+
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
 }
 
 /// Disabled `[turn]` block that still advertises public STUN.
@@ -206,6 +217,46 @@ async fn next_raw_server_message_of_type(
         );
         return text.to_string();
     }
+}
+
+fn raw_server_message_value(raw: &str, context: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|err| {
+        panic!("{context}: invalid JSON server frame: {err}; raw frame: {raw}")
+    })
+}
+
+fn assert_no_ice_servers_data_field(raw: &str, context: &str) {
+    let value = raw_server_message_value(raw, context);
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("{context}: expected a JSON object at /data: {raw}"));
+    assert!(
+        !data.contains_key("ice_servers"),
+        "{context}: /data/ice_servers must be absent: {raw}"
+    );
+}
+
+#[test]
+fn ice_server_absence_check_ignores_nested_missed_events() {
+    let raw = r#"{
+        "type": "Reconnected",
+        "data": {
+            "player_id": "00000000-0000-0000-0000-000000000001",
+            "missed_events": [
+                {
+                    "type": "SessionPlan",
+                    "data": {
+                        "ice_servers": [
+                            { "urls": ["stun:nested.example.com:3478"] }
+                        ]
+                    }
+                }
+            ]
+        }
+    }"#;
+
+    assert_no_ice_servers_data_field(raw, "nested missed_events fixture");
 }
 
 /// Authenticate, advertising the given protocol version + capabilities.
@@ -475,16 +526,16 @@ async fn v3_webrtc_join_carries_composed_ice_servers_with_minted_turn_credential
     assert_eq!(ice.len(), 3, "static + STUN + TURN expected, got {ice:?}");
 
     // Operator's static entry first, verbatim and credential-less.
-    assert_eq!(ice[0].urls, vec!["stun:static.example.com:3478"]);
+    assert_eq!(ice[0].urls, vec![STATIC_STUN_URL]);
     assert!(ice[0].username.is_none() && ice[0].credential.is_none());
 
     // [turn] STUN entry next, credential-less.
-    assert_eq!(ice[1].urls, vec!["stun:stun.l.google.com:19302"]);
+    assert_eq!(ice[1].urls, vec![TURN_STUN_URL]);
     assert!(ice[1].username.is_none() && ice[1].credential.is_none());
 
     // Freshly minted TURN entry last: username is "{expiry}:{player_id}" for
     // THIS player, credential decodes as standard base64.
-    assert_eq!(ice[2].urls, vec!["turn:turn.example.com:3478"]);
+    assert_eq!(ice[2].urls, vec![TURN_URL]);
     let username = ice[2].username.as_deref().expect("TURN username");
     let (expiry, id) = username.split_once(':').expect("expiry:player_id shape");
     assert_eq!(id, joined.player_id.to_string());
@@ -519,9 +570,9 @@ async fn v2_client_room_joined_raw_json_has_no_ice_servers_key() {
     authenticate_v2(&mut peer).await;
     let raw = join_room_raw(&mut peer, "mesh-game", None, "LegacyPeer").await;
 
-    assert!(
-        !raw.contains("\"ice_servers\""),
-        "v2 RoomJoined must stay byte-identical (no ice_servers key): {raw}"
+    assert_no_ice_servers_data_field(
+        &raw,
+        "v2 RoomJoined must stay byte-identical (no ice_servers key)",
     );
 }
 
@@ -533,9 +584,9 @@ async fn v3_relay_only_transport_client_gets_no_ice_servers_key() {
     authenticate_v3_relay_only_transport(&mut peer).await;
     let raw = join_room_raw(&mut peer, "mesh-game", None, "RelayOnly").await;
 
-    assert!(
-        !raw.contains("\"ice_servers\""),
-        "a relay-only transport set cannot use ICE; no key expected: {raw}"
+    assert_no_ice_servers_data_field(
+        &raw,
+        "a relay-only transport set cannot use ICE; no key expected",
     );
 }
 
@@ -547,10 +598,9 @@ async fn v3_relay_only_topology_client_gets_no_ice_servers_key() {
     authenticate_v3_relay_only_topology(&mut peer).await;
     let raw = join_room_raw(&mut peer, "mesh-game", None, "RelayTopology").await;
 
-    assert!(
-        !raw.contains("\"ice_servers\""),
-        "a topology set missing the desired one can never seat the desired WebRTC rung; \
-         no key expected: {raw}"
+    assert_no_ice_servers_data_field(
+        &raw,
+        "a topology set missing the desired one can never seat the desired WebRTC rung; no key expected",
     );
 }
 
@@ -566,9 +616,9 @@ async fn pregather_kill_switch_suppresses_ice_servers_key() {
     authenticate_v3_mesh(&mut peer).await;
     let raw = join_room_raw(&mut peer, "mesh-game", None, "PeerOne").await;
 
-    assert!(
-        !raw.contains("\"ice_servers\""),
-        "enable_ice_pregather=false is the kill switch; no key expected: {raw}"
+    assert_no_ice_servers_data_field(
+        &raw,
+        "enable_ice_pregather=false is the kill switch; no key expected",
     );
 }
 
@@ -584,9 +634,9 @@ async fn webrtc_disabled_suppresses_ice_servers_key() {
     authenticate_v3_mesh(&mut peer).await;
     let raw = join_room_raw(&mut peer, "mesh-game", None, "PeerOne").await;
 
-    assert!(
-        !raw.contains("\"ice_servers\""),
-        "with WebRTC disabled no WebRTC plan can ever be selected; no key expected: {raw}"
+    assert_no_ice_servers_data_field(
+        &raw,
+        "with WebRTC disabled no WebRTC plan can ever be selected; no key expected",
     );
 }
 
@@ -599,9 +649,9 @@ async fn relay_desired_game_gets_no_ice_servers_key() {
     // "relay-game" is mapped to the relay topology in mesh_session_config().
     let raw = join_room_raw(&mut peer, "relay-game", None, "PeerOne").await;
 
-    assert!(
-        !raw.contains("\"ice_servers\""),
-        "a relay-desired game can never select a WebRTC plan; no key expected: {raw}"
+    assert_no_ice_servers_data_field(
+        &raw,
+        "a relay-desired game can never select a WebRTC plan; no key expected",
     );
 }
 
@@ -627,10 +677,7 @@ async fn turn_disabled_with_stun_urls_yields_stun_only_pregather() {
         "only the [turn] block's STUN entry expected: {:?}",
         joined.ice_servers
     );
-    assert_eq!(
-        joined.ice_servers[0].urls,
-        vec!["stun:stun.l.google.com:19302"]
-    );
+    assert_eq!(joined.ice_servers[0].urls, vec![TURN_STUN_URL]);
     assert!(
         joined.ice_servers[0].username.is_none() && joined.ice_servers[0].credential.is_none(),
         "no credentials are minted when the [turn] block is disabled"
@@ -691,12 +738,11 @@ async fn late_join_into_active_session_mints_only_via_the_session_plan() {
     let mut joiner = connect(addr).await;
     authenticate_v3_mesh(&mut joiner).await;
     let raw_joined = join_room_raw(&mut joiner, "mesh-game", Some(room_code), "SeatFiller").await;
-    assert!(
-        !raw_joined.contains("\"ice_servers\""),
-        "a join into a Finalized room must not pre-gather: {raw_joined}"
+    assert_no_ice_servers_data_field(
+        &raw_joined,
+        "a join into a Finalized room must not pre-gather",
     );
-    let joiner_id: PlayerId = serde_json::from_str::<serde_json::Value>(&raw_joined)
-        .expect("raw RoomJoined parses")
+    let joiner_id: PlayerId = raw_server_message_value(&raw_joined, "raw RoomJoined")
         .pointer("/data/player_id")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .expect("player_id present");
@@ -836,9 +882,9 @@ async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice()
     let raw_reconnected =
         next_raw_server_message_of_type(&mut replacement, "Reconnected", "raw reconnect response")
             .await;
-    assert!(
-        !raw_reconnected.contains("\"ice_servers\""),
-        "a reconnect into a Finalized room must not pre-gather: {raw_reconnected}"
+    assert_no_ice_servers_data_field(
+        &raw_reconnected,
+        "a reconnect into a Finalized room must not pre-gather",
     );
 
     // ... then the fresh late-join SessionPlan carries the ICE.

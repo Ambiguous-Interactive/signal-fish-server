@@ -14,7 +14,7 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
             .security
             .metrics_auth_token
             .as_ref()
-            .map(|t| !t.is_empty())
+            .map(|t| !t.trim().is_empty())
             .unwrap_or(false);
 
         if !token_present {
@@ -31,6 +31,7 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
 
         if let Some(token) = &config.security.metrics_auth_token {
+            let token = token.trim();
             if token.len() < 16 {
                 eprintln!(
                     "\nWARNING: Metrics auth token is very short ({} chars).\n\
@@ -52,6 +53,18 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
              export SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=\"$(openssl rand -hex 32)\"\n\
              ===================================================================\n"
         );
+    }
+
+    for (index, app) in config.security.authorized_apps.iter().enumerate() {
+        if app.app_id.trim().is_empty() {
+            anyhow::bail!("security.authorized_apps[{index}].app_id must not be blank");
+        }
+        if app.app_secret.trim().is_empty() {
+            anyhow::bail!("security.authorized_apps[{index}].app_secret must not be blank");
+        }
+        if app.app_name.trim().is_empty() {
+            anyhow::bail!("security.authorized_apps[{index}].app_name must not be blank");
+        }
     }
 
     // TLS validation
@@ -201,6 +214,7 @@ pub fn is_production_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppAuthEntry;
 
     /// Truth table for the TURN-without-TLS startup warning: it fires exactly
     /// when the server brokers WebRTC (`turn.enabled`) over a plaintext
@@ -234,5 +248,63 @@ mod tests {
         config.security.require_metrics_auth = false;
         config.security.transport.token_binding.enabled = true;
         assert!(should_warn_missing_signaling_tls(&config));
+    }
+
+    #[test]
+    fn metrics_auth_rejects_whitespace_only_token() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = true;
+        config.security.metrics_auth_token = Some(" \t\n".to_string());
+
+        let err = validate_config_security(&config)
+            .expect_err("whitespace-only metrics token is not configured credentials");
+        assert!(
+            err.to_string()
+                .contains("Metrics authentication is enabled but no credentials are configured"),
+            "error must explain the missing metrics credentials: {err}"
+        );
+    }
+
+    #[test]
+    fn authorized_apps_reject_blank_required_fields_with_indexed_errors() {
+        let cases: [(&str, fn(&mut AppAuthEntry)); 3] = [
+            ("app_id", |app| app.app_id = " ".to_string()),
+            ("app_secret", |app| app.app_secret = "\t".to_string()),
+            ("app_name", |app| app.app_name = "\n".to_string()),
+        ];
+
+        for (field, mutate) in cases {
+            let mut app = AppAuthEntry {
+                app_id: "game".to_string(),
+                app_secret: "secret".to_string(),
+                app_name: "Game".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: None,
+            };
+            mutate(&mut app);
+
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.authorized_apps = vec![
+                AppAuthEntry {
+                    app_id: "valid".to_string(),
+                    app_secret: "valid-secret".to_string(),
+                    app_name: "Valid".to_string(),
+                    max_rooms: None,
+                    max_players_per_room: None,
+                    rate_limit_per_minute: None,
+                },
+                app,
+            ];
+
+            let err = validate_config_security(&config)
+                .expect_err("blank authorized app fields are rejected");
+            let expected = format!("security.authorized_apps[1].{field}");
+            assert!(
+                err.to_string().contains(&expected),
+                "error must point at the blank field {expected}: {err}"
+            );
+        }
     }
 }

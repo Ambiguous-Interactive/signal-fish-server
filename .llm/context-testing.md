@@ -21,6 +21,10 @@ See [Core Testing Patterns](skills/testing-core-patterns.md) and
   Avoid matchers that skip nonmatching `ServerMessage`s when stale or unexpected
   frames would indicate a broken test setup; assert no pending messages at phase
   boundaries when backlog would affect later checks.
+- When asserting that a raw JSON wire frame omits a field, parse the frame and
+  inspect the exact JSON path (for example `/data/ice_servers`) instead of using
+  string containment. Whole-frame substring checks can be false positives when
+  payloads include nested messages such as `Reconnected.missed_events`.
 - When asserting ordered composition from multiple sources (for example static
   `session.ice_servers` followed by `[turn]`-derived STUN/TURN entries), use
   source-distinguishable sentinel fixture values and assert the exact ordered

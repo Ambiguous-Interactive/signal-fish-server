@@ -72,8 +72,8 @@ impl SessionConfig {
     /// parsing/connection. Every entry must additionally start with one of the
     /// four ICE schemes — `stun:`, `stuns:`, `turn:`, `turns:`, matched
     /// case-insensitively (URI schemes are case-insensitive, RFC 3986 §3.1) —
-    /// followed by a non-empty remainder; any other scheme is a hard error for
-    /// the same reason. Exact-duplicate URLs (within one server's list or across
+    /// followed by a non-whitespace remainder; any other scheme is a hard error
+    /// for the same reason. Exact-duplicate URLs (within one server's list or across
     /// the whole block) only warn: clients tolerate repeated `RTCIceServer`
     /// entries, so this mirrors the warn-but-succeed stance below. A non-`Relay`
     /// desired topology with *both* transports disabled is only warned about —
@@ -439,6 +439,23 @@ mod tests {
             assert!(
                 cfg.validate().is_err(),
                 "bare scheme {url:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_scheme_with_whitespace_only_remainder() {
+        for url in ["stun: ", "stuns:\t", "turn: \n", "turns:\u{00A0}"] {
+            let cfg = SessionConfig {
+                ice_servers: vec![stun(url)],
+                ..SessionConfig::default()
+            };
+            let err = cfg
+                .validate()
+                .expect_err(&format!("{url:?} must be rejected"));
+            assert!(
+                err.to_string().contains("ice_servers[0].urls[0]"),
+                "error must point at the offending URL index: {err}"
             );
         }
     }
