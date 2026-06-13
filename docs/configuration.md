@@ -186,14 +186,11 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SESSION__ENABLE_DIRECT` | `session.enable_direct` | `true` | Permit the Direct (LAN/routable) transport for `host` upgrades |
 | `SIGNAL_FISH__SESSION__ENABLE_ICE_PREGATHER` | `session.enable_ice_pregather` | `true` | Surface the composed ICE list on `RoomJoined`/`Reconnected` for eligible v3 WebRTC clients |
 | `SIGNAL_FISH__SESSION__ICE_SERVERS` | `session.ice_servers` | `[]` | JSON array of static ICE servers advertised in a WebRTC plan |
-| `SIGNAL_FISH__TURN__ENABLED` | `turn.enabled` | `false` | Mint and advertise TURN credentials |
-| `SIGNAL_FISH__TURN__MODE` | `turn.mode` | `static_secret` | TURN credential source (`static_secret`, `managed`) |
+| `SIGNAL_FISH__TURN__ENABLED` | `turn.enabled` | `false` | Mint and advertise self-hosted TURN credentials |
 | `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET` | `turn.static_auth_secret` | `""` | coturn `--static-auth-secret` (server-only; never sent to clients) |
 | `SIGNAL_FISH__TURN__URLS` | `turn.urls` | `[]` | JSON array of TURN server URLs (e.g. `turn:turn.example.com:3478`) |
 | `SIGNAL_FISH__TURN__STUN_URLS` | `turn.stun_urls` | `["stun:stun.l.google.com:19302"]` | JSON array of STUN URLs advertised on WebRTC plans |
 | `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential |
-| `SIGNAL_FISH__TURN__MANAGED_PROVIDER` | `turn.managed_provider` | `null` | Managed-mode provider name (required when `mode = managed`) |
-| `SIGNAL_FISH__TURN__MANAGED_API_TOKEN` | `turn.managed_api_token` | `null` | Managed-mode API token (required when `mode = managed`) |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `true` | Enable outbound message batching |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds |
@@ -364,12 +361,15 @@ at all.
 
 ## TURN / STUN (ICE Credentials) (Protocol v3)
 
+TURN is **fully self-hosted**: when enabled, the server self-mints short-lived
+coturn REST credentials for a TURN server **you** run. No third-party cloud is
+ever contacted and no external credentials are required.
+
 ```json
 
 {
   "turn": {
     "enabled": false,
-    "mode": "static_secret",
     "static_auth_secret": "",
     "urls": [],
     "stun_urls": ["stun:stun.l.google.com:19302"],
@@ -379,17 +379,12 @@ at all.
 
 ```
 
-- `enabled` - Mint and advertise TURN credentials (default: false). When false,
-  the block is inert and only `stun_urls` is advertised
-- `mode` - How credentials are obtained: `static_secret` (server self-mints
-  short-lived coturn REST credentials) or `managed` (defers to a managed
-  provider; STUN-only stub today; default: `static_secret`)
-- `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled` with `mode = static_secret`
-- `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled` with `mode = static_secret`
+- `enabled` - Mint and advertise self-hosted TURN credentials (default: false).
+  When false, the block is inert and only `stun_urls` is advertised
+- `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled`
+- `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled`
 - `stun_urls` - Public STUN URLs advertised on WebRTC plans regardless of `enabled` (default: `["stun:stun.l.google.com:19302"]`)
 - `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` when enabled (default: 3600)
-- `managed_provider` - Managed-mode provider name (e.g. `"cloudflare"`). Required when `mode = managed`
-- `managed_api_token` - Managed-mode API token. Required when `mode = managed`
 
 ### Security: `static_auth_secret` is server-only
 

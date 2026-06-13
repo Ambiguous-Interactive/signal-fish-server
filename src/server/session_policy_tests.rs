@@ -1470,13 +1470,10 @@ fn mesh_config_no_static_ice() -> SessionConfig {
 fn enabled_turn() -> crate::config::TurnConfig {
     crate::config::TurnConfig {
         enabled: true,
-        mode: crate::config::TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
         urls: vec![TURN_URL.to_string()],
         stun_urls: vec![TURN_STUN_URL.to_string()],
         credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
-        managed_provider: None,
-        managed_api_token: None,
     }
 }
 
@@ -1678,47 +1675,6 @@ async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
             plan.ice_servers.is_empty(),
             "a non-WebRTC plan carries no ICE even with TURN enabled"
         );
-    }
-}
-
-#[tokio::test]
-#[cfg_attr(miri, ignore)]
-async fn emit_webrtc_room_managed_turn_is_stun_only() {
-    // Managed mode is a P4 stub: each plan carries only the public STUN entry, no
-    // minted TURN credentials.
-    let turn = crate::config::TurnConfig {
-        enabled: true,
-        mode: crate::config::TurnMode::Managed,
-        managed_provider: Some("cloudflare".to_string()),
-        managed_api_token: Some("token".to_string()),
-        ..enabled_turn()
-    };
-    let server = create_server_with_session_and_turn(mesh_config_no_static_ice(), turn).await;
-    let (alice, mut alice_rx) = register_client(&server).await;
-    let (bob, mut bob_rx) = register_client(&server).await;
-    server.set_client_protocol(&alice, v3_webrtc());
-    server.set_client_protocol(&bob, v3_webrtc());
-
-    let room_id = uuid::Uuid::new_v4();
-    let finalized = finalized(
-        "mesh-game",
-        vec![
-            player_info(alice, "Alice", false),
-            player_info(bob, "Bob", false),
-        ],
-        None,
-    );
-
-    server.emit_session_plan(&room_id, &finalized).await;
-
-    for rx in [&mut alice_rx, &mut bob_rx] {
-        let plan = match recv(rx).await.as_ref() {
-            ServerMessage::SessionPlan(plan) => plan.clone(),
-            other => panic!("expected SessionPlan, got {other:?}"),
-        };
-        assert_eq!(plan.ice_servers.len(), 1, "managed mode is STUN-only in P4");
-        assert!(plan.ice_servers[0].username.is_none());
-        assert!(plan.ice_servers[0].credential.is_none());
     }
 }
 

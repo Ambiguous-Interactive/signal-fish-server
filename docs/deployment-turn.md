@@ -3,8 +3,10 @@
 How to give Signal Fish Server's WebRTC sessions a TURN relay, and how to run the
 signaling side securely. Signal Fish Server never relays WebRTC media itself — it
 only mints and advertises ICE credentials, in `SessionPlan`s and pre-gather
-`RoomJoined` / `Reconnected` ICE lists — so TURN is bring-your-own: self-hosted
-coturn or a managed provider.
+`RoomJoined` / `Reconnected` ICE lists. TURN is **self-hosted**: the server mints
+credentials locally for an operator-run coturn and never contacts a third-party
+cloud (see [Self-hosted by design](#self-hosted-by-design-no-managed-cloud-integration)
+if you want to point clients at a managed service instead).
 
 ## When you need TURN
 
@@ -37,7 +39,6 @@ source of truth both sides derive credentials from:
 {
   "turn": {
     "enabled": true,
-    "mode": "static_secret",
     "urls": ["turn:turn.yourgame.com:3478"],
     "credential_ttl_secs": 3600
   }
@@ -73,7 +74,7 @@ Three production notes on the compose profile:
 
 ## How the ephemeral credential scheme works
 
-With `mode = "static_secret"` the server implements the coturn REST API
+When TURN is enabled the server implements the coturn REST API
 ("ephemeral credentials") scheme — coturn's `--use-auth-secret` mode:
 
 ```text
@@ -133,23 +134,20 @@ zero-downtime rotation straightforward:
 Rotate on a schedule (and immediately on suspected exposure) — the static secret
 is the only long-lived credential in the scheme.
 
-## Managed TURN alternatives
+## Self-hosted by design (no managed-cloud integration)
 
-If you would rather not operate coturn, managed TURN services price per relayed
-gigabyte:
+TURN here is **self-hosted only**, on purpose: the signaling server never calls a
+third-party cloud and needs no external credentials. There is no `managed` mode —
+the server mints credentials locally for a coturn instance **you** operate, so the
+static secret stays inside your own infrastructure.
 
-- **Cloudflare Realtime TURN** — ~$0.05/GB with the first 1 TB/month free (STUN is
-  free), the cheapest mainstream option.
-- **Twilio Network Traversal Service** — $0.40–0.80/GB depending on region.
-- **Metered** — tiered per-GB pricing.
-
-Note that the server's `[turn]` `mode = "managed"` is currently a **STUN-only
-stub**: it performs no provider API call and contributes no TURN entry to
-`SessionPlan`s (keeping the server free of outbound-HTTP dependencies). Using
-managed TURN today therefore means provisioning credentials out-of-band — either
-have clients fetch short-lived credentials from the provider directly, or place
-long-lived provider credentials in the static `[session].ice_servers` list, which
-is advertised to WebRTC plans verbatim ahead of any TURN-derived entries.
+If you nonetheless want to use a managed TURN service (e.g. one priced per relayed
+gigabyte), the server does not integrate with one directly. You can still wire it
+in **out-of-band**, treating it as just another ICE server: either have clients
+fetch short-lived credentials from the provider themselves, or place
+provider-issued credentials in the static `[session].ice_servers` list, which is
+advertised to WebRTC plans verbatim ahead of any self-minted TURN entry. Neither
+path involves the signaling server contacting the provider.
 
 ## Signaling must run over wss://
 

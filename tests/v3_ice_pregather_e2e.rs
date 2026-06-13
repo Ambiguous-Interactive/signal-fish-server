@@ -23,7 +23,7 @@ mod websocket_test_helpers;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig, TurnMode};
+use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
     ClientMessage, IceServer, PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
@@ -80,13 +80,10 @@ fn mesh_session_config() -> SessionConfig {
 fn enabled_turn_config() -> TurnConfig {
     TurnConfig {
         enabled: true,
-        mode: TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
         urls: vec![TURN_URL.to_string()],
         stun_urls: vec![TURN_STUN_URL.to_string()],
         credential_ttl_secs: TURN_TTL_SECS,
-        managed_provider: None,
-        managed_api_token: None,
     }
 }
 

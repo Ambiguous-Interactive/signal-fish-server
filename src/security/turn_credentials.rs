@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
 
-use crate::config::{TurnConfig, TurnMode};
+use crate::config::TurnConfig;
 use crate::protocol::{IceServer, PlayerId};
 
 /// HMAC-SHA1 over a server secret, as used by the coturn REST API scheme.
@@ -110,17 +110,14 @@ pub fn turn_expiry_unix(now_unix: i64, ttl_secs: u64) -> i64 {
 ///
 /// 1. one credential-less STUN [`IceServer`] carrying every `turn.stun_urls`
 ///    entry, when that list is non-empty (public STUN needs no auth); then
-/// 2. when `turn.enabled` and `mode == static_secret` and `turn.urls` is
-///    non-empty: one TURN [`IceServer`] whose `username`/`credential` are freshly
-///    minted for `player_id` (so each recipient gets a distinct, time-limited
-///    pair embedding their own id).
+/// 2. when `turn.enabled` and `turn.urls` is non-empty: one TURN [`IceServer`]
+///    whose `username`/`credential` are freshly minted for `player_id` (so each
+///    recipient gets a distinct, time-limited pair embedding their own id).
 ///
-/// `mode == managed` is a **stub** in P4: it contributes only the STUN entry. P4
-/// adds no outbound-HTTP runtime dependency, so provider-minted creds
-/// (Cloudflare/Twilio/Metered) are deferred; the configured `stun_urls` still flow
-/// through so managed deployments are not left without STUN. A disabled block, or
-/// an enabled block whose mode/urls do not qualify, contributes no TURN entry —
-/// yielding only public STUN, which is the Appendix-F "disabled ⇒ STUN only"
+/// TURN is fully self-hosted — the credential is computed locally from the
+/// operator's `static_auth_secret`; no third-party cloud is ever contacted. A
+/// disabled block, or an enabled block with no `urls`, contributes no TURN entry
+/// — yielding only public STUN, which is the Appendix-F "disabled ⇒ STUN only"
 /// acceptance.
 ///
 /// `now_unix` is the single timestamp captured once per `emit_session_plan` call,
@@ -130,7 +127,7 @@ pub fn build_ice_servers(turn: &TurnConfig, player_id: PlayerId, now_unix: i64) 
     let mut servers = Vec::new();
 
     // Public STUN is always credential-less and is advertised whenever configured,
-    // independent of `enabled` / `mode` (it costs nothing and needs no secret).
+    // independent of `enabled` (it costs nothing and needs no secret).
     if !turn.stun_urls.is_empty() {
         servers.push(IceServer {
             urls: turn.stun_urls.clone(),
@@ -139,7 +136,7 @@ pub fn build_ice_servers(turn: &TurnConfig, player_id: PlayerId, now_unix: i64) 
         });
     }
 
-    if turn.enabled && turn.mode == TurnMode::StaticSecret && !turn.urls.is_empty() {
+    if turn.enabled && !turn.urls.is_empty() {
         let expiry_unix = turn_expiry_unix(now_unix, turn.credential_ttl_secs);
         let minted = mint_turn_credentials(&turn.static_auth_secret, player_id, expiry_unix);
         servers.push(IceServer {
@@ -148,8 +145,6 @@ pub fn build_ice_servers(turn: &TurnConfig, player_id: PlayerId, now_unix: i64) 
             credential: Some(minted.credential),
         });
     }
-    // `TurnMode::Managed`: STUN-only stub (see the doc comment) — no TURN entry,
-    // no outbound call.
 
     servers
 }
@@ -244,13 +239,10 @@ mod tests {
     fn enabled_static_turn() -> TurnConfig {
         TurnConfig {
             enabled: true,
-            mode: TurnMode::StaticSecret,
             static_auth_secret: "super-secret".to_string(),
             urls: vec!["turn:turn.example.com:3478".to_string()],
             stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
             credential_ttl_secs: 3600,
-            managed_provider: None,
-            managed_api_token: None,
         }
     }
 
@@ -320,20 +312,6 @@ mod tests {
         assert!(b_user.starts_with(&format!("{expected_expiry}:")));
         assert_ne!(a_user, b_user);
         assert_ne!(a[1].credential, b[1].credential);
-    }
-
-    #[test]
-    fn build_ice_managed_mode_is_stun_only_stub() {
-        let turn = TurnConfig {
-            mode: TurnMode::Managed,
-            managed_provider: Some("cloudflare".to_string()),
-            managed_api_token: Some("token".to_string()),
-            ..enabled_static_turn()
-        };
-        let servers = build_ice_servers(&turn, Uuid::new_v4(), 1_000);
-        assert_eq!(servers.len(), 1, "managed mode is a STUN-only stub in P4");
-        assert!(servers[0].username.is_none());
-        assert!(servers[0].credential.is_none());
     }
 
     #[test]

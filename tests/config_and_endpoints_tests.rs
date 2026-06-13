@@ -448,11 +448,6 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("false"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__TURN__MODE",
-        path: "turn.mode",
-        default: Some("static_secret"),
-    },
-    ConfigReferenceRow {
         // Empty string by default; not asserted against Config::default() here
         // (an empty default cell is awkward in the table), but its presence and
         // path are still validated.
@@ -474,18 +469,6 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS",
         path: "turn.credential_ttl_secs",
         default: Some("3600"),
-    },
-    ConfigReferenceRow {
-        // `Option`, skipped from serialization when None, so no default is
-        // asserted against Config::default(); documented as `null` (unset).
-        env: "SIGNAL_FISH__TURN__MANAGED_PROVIDER",
-        path: "turn.managed_provider",
-        default: None,
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__TURN__MANAGED_API_TOKEN",
-        path: "turn.managed_api_token",
-        default: None,
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING",
@@ -985,7 +968,6 @@ fn test_config_example_includes_all_rate_limit_fields() {
         .expect("config.example.json must include a turn object");
     for key in [
         "enabled",
-        "mode",
         "static_auth_secret",
         "urls",
         "stun_urls",
@@ -996,11 +978,6 @@ fn test_config_example_includes_all_rate_limit_fields() {
             "config.example.json turn must document `{key}`"
         );
     }
-    assert_eq!(
-        value.pointer("/turn/mode"),
-        Some(&serde_json::json!("static_secret")),
-        "config.example.json must use the canonical snake_case TURN mode token"
-    );
     assert_eq!(
         value.pointer("/turn/enabled"),
         Some(&serde_json::json!(false)),
@@ -1877,7 +1854,6 @@ fn test_print_config_redacts_secrets_end_to_end() {
         serde_json::to_vec_pretty(&serde_json::json!({
             "turn": {
                 "enabled": true,
-                "mode": "static_secret",
                 "static_auth_secret": SENTINEL_SECRET,
                 "urls": ["turn:turn.example.com:3478"]
             }

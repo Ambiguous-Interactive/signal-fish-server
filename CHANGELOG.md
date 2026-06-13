@@ -533,6 +533,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Normalized internal documentation link labels to human-readable text across
   troubleshooting and reference docs.
 
+### Removed
+
+- Removed the `managed` TURN mode (the third-party-cloud credential source) and
+  its entire config surface — `turn.mode`, `turn.managed_provider`,
+  `turn.managed_api_token` — along with the `TurnMode` type. TURN is now
+  **self-hosted only**: when `turn.enabled`, the server self-mints coturn REST
+  credentials locally from `turn.static_auth_secret` for a TURN server the
+  operator runs, and never contacts a third-party cloud or uses external
+  credentials. `managed` was only ever a STUN-only stub, so no working
+  functionality is lost. The `[turn]` block is otherwise unchanged (`enabled`,
+  `static_auth_secret`, `urls`, `stun_urls`, `credential_ttl_secs`), and because
+  the config structs do not use `deny_unknown_fields`, a legacy config still
+  carrying `mode` / `managed_*` keys continues to load (the stale keys are
+  ignored). Updated `config.example.json`, `docs/configuration.md`, and
+  `docs/deployment-turn.md` to describe the self-hosted-only model.
+
 ## [0.2.0] - 2026-02-24
 
 ### Changed

@@ -89,7 +89,6 @@
   },
   "turn": {
     "enabled": false,
-    "mode": "static_secret",
     "static_auth_secret": "",
     "urls": [],
     "stun_urls": ["stun:stun.l.google.com:19302"],

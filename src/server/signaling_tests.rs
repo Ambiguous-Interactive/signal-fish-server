@@ -2324,13 +2324,10 @@ async fn late_join_counts_plan_and_turn_credentials() {
     // session_replans_emitted (departure-only).
     let turn = TurnConfig {
         enabled: true,
-        mode: crate::config::TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
         urls: vec![TURN_URL.to_string()],
         stun_urls: vec![TURN_STUN_URL.to_string()],
         credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
-        managed_provider: None,
-        managed_api_token: None,
     };
     let server = create_test_server_with_session_and_turn(mesh_session_config(), turn).await;
     let (existing, mut existing_rx) = register_client(&server).await;

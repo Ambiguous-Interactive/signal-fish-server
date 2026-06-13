@@ -1133,8 +1133,8 @@ Every WebRTC `SessionPlan` carries an `ice_servers` list:
 
 - **STUN is always present** in a WebRTC plan (the configured `turn.stun_urls`, advertised credential-less since
   public STUN needs no auth).
-- **Ephemeral per-player TURN credentials** are added when the `[turn]` block is enabled (`mode = static_secret`
-  with non-empty `urls`). Each recipient receives its **own** short-lived credential: `username` is
+- **Ephemeral per-player TURN credentials** are added when the `[turn]` block is enabled (with non-empty
+  `urls`). Each recipient receives its **own** short-lived credential: `username` is
   `"<expiry-unix>:<player-uuid>"` and `credential` is the base64 of `HMAC-SHA1(static_auth_secret, username)`
   (the coturn REST scheme). The static auth secret is **never** sent to clients. The `username` / `credential`
   values in the [v3 server-message samples](../.llm/code-samples/protocol/v3-server-messages.jsonl) are
