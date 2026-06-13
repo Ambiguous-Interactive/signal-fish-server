@@ -13,7 +13,9 @@ use crate::config::{
 };
 use crate::coordination::FinalizedRoom;
 use crate::database::DatabaseConfig;
-use crate::protocol::{IceServer, PlayerId, PlayerInfo, ServerMessage, Topology, Transport};
+use crate::protocol::{
+    IceServer, LobbyState, PlayerId, PlayerInfo, Room, ServerMessage, Topology, Transport,
+};
 use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
 use std::collections::HashMap;
@@ -24,9 +26,14 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
 use super::session_policy::{
-    choose_session_plan, elect_host, is_valid_pair, ActiveSessionPlan, SessionMember,
-    SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
+    choose_session_plan, desired_topology_for, elect_host, ice_pregather_eligible, is_valid_pair,
+    ActiveSessionPlan, SessionMember, SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
 };
+
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
+const TURN_URL: &str = "turn:turn.example.com:3478";
+const TURN_CREDENTIAL_TTL_SECS: u64 = 3600;
 
 /// A fully-inert `[turn]` block (disabled, *no* STUN urls) for the P3 selection /
 /// `plan_for` tests that isolate the operator's static `session.ice_servers`: with
@@ -77,6 +84,14 @@ fn base_time() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp is valid")
 }
 
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
+}
+
 /// A member that supports v3 + the given transports/topologies.
 fn member(
     id: PlayerId,
@@ -111,7 +126,7 @@ fn mesh_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Mesh,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -123,7 +138,7 @@ fn host_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Host,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -1457,9 +1472,9 @@ fn enabled_turn() -> crate::config::TurnConfig {
         enabled: true,
         mode: crate::config::TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
-        urls: vec!["turn:turn.example.com:3478".to_string()],
-        stun_urls: vec!["stun:stun.l.google.com:19302".to_string()],
-        credential_ttl_secs: 3600,
+        urls: vec![TURN_URL.to_string()],
+        stun_urls: vec![TURN_STUN_URL.to_string()],
+        credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
         managed_provider: None,
         managed_api_token: None,
     }
@@ -1502,12 +1517,10 @@ async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() 
     // Each plan: STUN entry (credential-less) followed by a TURN entry (with creds).
     for plan in [&alice_plan, &bob_plan] {
         assert_eq!(plan.ice_servers.len(), 2, "STUN + TURN");
-        assert_eq!(
-            plan.ice_servers[0].urls,
-            vec!["stun:stun.l.google.com:19302"]
-        );
+        assert_eq!(plan.ice_servers[0].urls, vec![TURN_STUN_URL]);
         assert!(plan.ice_servers[0].username.is_none());
-        assert_eq!(plan.ice_servers[1].urls, vec!["turn:turn.example.com:3478"]);
+        assert!(plan.ice_servers[0].credential.is_none());
+        assert_eq!(plan.ice_servers[1].urls, vec![TURN_URL]);
         assert!(plan.ice_servers[1].username.is_some());
         assert!(plan.ice_servers[1].credential.is_some());
     }
@@ -1566,10 +1579,7 @@ async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
             other => panic!("expected SessionPlan, got {other:?}"),
         };
         assert_eq!(plan.ice_servers.len(), 1, "STUN only when TURN disabled");
-        assert_eq!(
-            plan.ice_servers[0].urls,
-            vec!["stun:stun.l.google.com:19302"]
-        );
+        assert_eq!(plan.ice_servers[0].urls, vec![TURN_STUN_URL]);
         assert!(plan.ice_servers[0].username.is_none());
         assert!(plan.ice_servers[0].credential.is_none());
     }
@@ -1607,16 +1617,18 @@ async fn emit_webrtc_room_prepends_static_ice_then_turn() {
     // Static STUN (from mesh_config), then TURN STUN, then TURN creds: 3 entries.
     assert_eq!(alice_plan.ice_servers.len(), 3);
     // The operator's static entry is first and untouched.
-    assert_eq!(
-        alice_plan.ice_servers[0].urls,
-        vec!["stun:stun.l.google.com:19302"]
-    );
+    assert_eq!(alice_plan.ice_servers[0].urls, vec![STATIC_STUN_URL]);
     assert!(alice_plan.ice_servers[0].username.is_none());
-    // The last entry is the minted TURN credential.
+    assert!(alice_plan.ice_servers[0].credential.is_none());
     assert_eq!(
-        alice_plan.ice_servers[2].urls,
-        vec!["turn:turn.example.com:3478"]
+        alice_plan.ice_servers[1].urls,
+        vec![TURN_STUN_URL],
+        "the [turn] STUN entry must remain between static ICE and minted TURN"
     );
+    assert!(alice_plan.ice_servers[1].username.is_none());
+    assert!(alice_plan.ice_servers[1].credential.is_none());
+    // The last entry is the minted TURN credential.
+    assert_eq!(alice_plan.ice_servers[2].urls, vec![TURN_URL]);
     assert!(alice_plan.ice_servers[2].username.is_some());
 }
 
@@ -3875,4 +3887,359 @@ mod properties {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ICE pre-gather on RoomJoined / Reconnected (PLAN §P4's deferred refinement).
+//
+// Pure-logic tests pin the eligibility predicate's full gating matrix (every
+// conjunct flipped independently) and the desired-topology lookup; server-based
+// tests pin the shared composition helper's ordering (static ice_servers first,
+// then the [turn] STUN entry, then the minted TURN entry) and the
+// `pregather_ice_servers` metrics contract (one `ice_pregather_emitted` per
+// non-empty list actually handed out; minted credentials counted on the shared
+// `turn_credentials_issued` total; nothing counted for ineligible or
+// nothing-configured calls).
+// ---------------------------------------------------------------------------
+
+/// A session config under which the pre-gather baseline below is eligible:
+/// pre-gather on, WebRTC on, mesh desired by default, one relay-desired game
+/// mapped for the per-game-override conjunct.
+fn pregather_session_config() -> SessionConfig {
+    let mut mappings = HashMap::new();
+    mappings.insert("relay-game".to_string(), Topology::Relay);
+    SessionConfig {
+        default_topology: Topology::Mesh,
+        game_topology_mappings: mappings,
+        ..SessionConfig::default()
+    }
+}
+
+#[test]
+fn desired_topology_prefers_per_game_mapping_over_default() {
+    let cfg = pregather_session_config();
+    assert_eq!(desired_topology_for("relay-game", &cfg), Topology::Relay);
+    assert_eq!(desired_topology_for("unmapped-game", &cfg), Topology::Mesh);
+}
+
+#[test]
+fn ice_pregather_eligibility_flips_every_conjunct_independently() {
+    let cfg = pregather_session_config();
+    let v3 = v3_webrtc();
+
+    // Baseline: every conjunct holds.
+    assert!(ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3
+    ));
+    // The `Lobby` (full, pre-finalize) state is just as eligible as `Waiting`.
+    assert!(ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Lobby,
+        &v3
+    ));
+
+    // 1. Kill switch off.
+    let pregather_off = SessionConfig {
+        enable_ice_pregather: false,
+        ..pregather_session_config()
+    };
+    assert!(!ice_pregather_eligible(
+        &pregather_off,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3
+    ));
+
+    // 2. WebRTC transport disabled: no WebRTC plan can ever be selected, so
+    //    pre-gathered candidates could never be used.
+    let webrtc_off = SessionConfig {
+        enable_webrtc: false,
+        ..pregather_session_config()
+    };
+    assert!(!ice_pregather_eligible(
+        &webrtc_off,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3
+    ));
+
+    // 3. Relay-desired game (per-game mapping, and via the default).
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "relay-game",
+        &LobbyState::Waiting,
+        &v3
+    ));
+    let relay_default = SessionConfig {
+        default_topology: Topology::Relay,
+        game_topology_mappings: HashMap::new(),
+        ..SessionConfig::default()
+    };
+    assert!(!ice_pregather_eligible(
+        &relay_default,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3
+    ));
+    // A host-desired game is still eligible (host + webrtc is a WebRTC rung).
+    let host_default = SessionConfig {
+        default_topology: Topology::Host,
+        game_topology_mappings: HashMap::new(),
+        ..SessionConfig::default()
+    };
+    assert!(ice_pregather_eligible(
+        &host_default,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3
+    ));
+
+    // 4. Finalized room: the late-join/reconnect path delivers a fresh
+    //    SessionPlan immediately after, so pre-gather would double-mint.
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Finalized,
+        &v3
+    ));
+
+    // 5. Recipient below v3 (the default negotiated protocol is v2).
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &NegotiatedProtocol::default()
+    ));
+    let v2_with_webrtc = NegotiatedProtocol {
+        version: 2,
+        ..v3_webrtc()
+    };
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v2_with_webrtc
+    ));
+
+    // 6. Recipient without the WebRTC transport (even at v3, with the
+    //    topology set intact).
+    let v3_no_webrtc_transport = NegotiatedProtocol {
+        transports: vec![Transport::Relay],
+        ..v3_webrtc()
+    };
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3_no_webrtc_transport
+    ));
+
+    // 7. Recipient whose negotiated topologies miss the game's desired one
+    //    (WebRTC transport intact): a relay-only topology set can never appear
+    //    in any WebRTC plan, ...
+    let v3_relay_only_topology = NegotiatedProtocol {
+        topologies: vec![Topology::Relay],
+        ..v3_webrtc()
+    };
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3_relay_only_topology
+    ));
+    // ... and a host-capped set cannot seat a mesh-desired game's rung ...
+    let v3_host_capable = NegotiatedProtocol {
+        topologies: vec![Topology::Relay, Topology::Host],
+        ..v3_webrtc()
+    };
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3_host_capable
+    ));
+    // ... while containing the desired topology (not necessarily every
+    // topology) is enough: the same host-capped set is eligible for a
+    // host-desired game.
+    assert!(ice_pregather_eligible(
+        &host_default,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3_host_capable
+    ));
+    // The canonical relay-floor v3 client (relay-only transport AND topology)
+    // flips both recipient conjuncts at once and stays ineligible.
+    assert!(!ice_pregather_eligible(
+        &cfg,
+        "unmapped-game",
+        &LobbyState::Waiting,
+        &v3_relay_only()
+    ));
+}
+
+/// Build a `Room` fixture in the given lobby state for the pre-gather tests.
+fn pregather_room(game_name: &str, lobby_state: LobbyState) -> Room {
+    let mut room = Room::new(
+        game_name.to_string(),
+        "ROOM01".to_string(),
+        4,
+        true,
+        "matchbox".to_string(),
+    );
+    room.lobby_state = lobby_state;
+    room
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn composed_ice_servers_orders_static_then_stun_then_turn() {
+    // The single shared composition seam (used by SessionPlan emission AND
+    // pre-gather): operator's static list first (verbatim), then the [turn]
+    // block's STUN entry, then the minted per-recipient TURN entry.
+    let server = create_server_with_session_and_turn(mesh_config(), enabled_turn()).await;
+    let (recipient, _rx) = register_client(&server).await;
+
+    let now_unix = 1_700_000_000;
+    let (ice, minted) = server.composed_ice_servers_for(recipient, now_unix);
+
+    assert_eq!(ice.len(), 3, "static + STUN + TURN");
+    // Static entry, verbatim and credential-less.
+    assert_eq!(ice[0].urls, vec![STATIC_STUN_URL]);
+    assert!(ice[0].username.is_none());
+    assert!(ice[0].credential.is_none());
+    // [turn] STUN entry, credential-less.
+    assert_eq!(ice[1].urls, vec![TURN_STUN_URL]);
+    assert!(ice[1].username.is_none());
+    assert!(ice[1].credential.is_none());
+    // Minted TURN entry embedding the shared expiry and THIS recipient's id.
+    assert_eq!(ice[2].urls, vec![TURN_URL]);
+    assert_eq!(
+        ice[2].username.as_deref(),
+        Some(
+            format!(
+                "{}:{recipient}",
+                now_unix + i64::try_from(TURN_CREDENTIAL_TTL_SECS).expect("test TTL fits i64")
+            )
+            .as_str()
+        )
+    );
+    assert!(ice[2].credential.is_some());
+    assert_eq!(minted, 1, "exactly the credentialed TURN entry is minted");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn composed_ice_servers_empty_when_nothing_configured() {
+    // No static ICE, TURN disabled, no STUN urls: the composition is empty and
+    // nothing is minted.
+    let server = create_server_with_session_and_turn(mesh_config_no_static_ice(), turn_off()).await;
+    let (recipient, _rx) = register_client(&server).await;
+
+    let (ice, minted) = server.composed_ice_servers_for(recipient, 1_700_000_000);
+    assert!(ice.is_empty());
+    assert_eq!(minted, 0);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pregather_counts_emission_and_minted_credentials_when_eligible() {
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let (joiner, _rx) = register_client(&server).await;
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let room = pregather_room("mesh-game", LobbyState::Waiting);
+    let emitted_before = server.metrics.ice_pregather_emitted.load(Ordering::Relaxed);
+    let creds_before = server
+        .metrics
+        .turn_credentials_issued
+        .load(Ordering::Relaxed);
+
+    let ice = server.pregather_ice_servers(&room, &joiner);
+
+    assert_eq!(ice.len(), 2, "STUN + minted TURN");
+    let username = ice[1].username.as_deref().expect("TURN entry has username");
+    assert!(
+        username.ends_with(&format!(":{joiner}")),
+        "credential embeds the joiner's id: {username}"
+    );
+    assert_eq!(
+        server.metrics.ice_pregather_emitted.load(Ordering::Relaxed),
+        emitted_before + 1,
+        "one pre-gather emission per non-empty list"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .turn_credentials_issued
+            .load(Ordering::Relaxed),
+        creds_before + 1,
+        "the minted pre-gather TURN credential counts on the shared issuance total"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pregather_returns_empty_and_counts_nothing_when_ineligible() {
+    // Finalized room and v2 recipient: both gates return empty and move no
+    // counter (the finalized case is what protects the late-join path from
+    // double-minting — its fresh SessionPlan is the only issuance site there).
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let (v3_joiner, _rx_a) = register_client(&server).await;
+    let (v2_joiner, _rx_b) = register_client(&server).await;
+    server.set_client_protocol(&v3_joiner, v3_webrtc());
+    // v2_joiner stays on the default v2 / relay-only protocol.
+
+    let emitted_before = server.metrics.ice_pregather_emitted.load(Ordering::Relaxed);
+    let creds_before = server
+        .metrics
+        .turn_credentials_issued
+        .load(Ordering::Relaxed);
+
+    let finalized_room = pregather_room("mesh-game", LobbyState::Finalized);
+    assert!(server
+        .pregather_ice_servers(&finalized_room, &v3_joiner)
+        .is_empty());
+
+    let waiting_room = pregather_room("mesh-game", LobbyState::Waiting);
+    assert!(server
+        .pregather_ice_servers(&waiting_room, &v2_joiner)
+        .is_empty());
+
+    assert_eq!(
+        server.metrics.ice_pregather_emitted.load(Ordering::Relaxed),
+        emitted_before
+    );
+    assert_eq!(
+        server
+            .metrics
+            .turn_credentials_issued
+            .load(Ordering::Relaxed),
+        creds_before
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn pregather_eligible_but_nothing_configured_emits_nothing_and_counts_nothing() {
+    // Eligible recipient, but the composition is empty (no static ICE, no STUN
+    // urls, TURN disabled): the field is skipped on the wire, so this must NOT
+    // count as an emission.
+    let server = create_server_with_session_and_turn(mesh_config_no_static_ice(), turn_off()).await;
+    let (joiner, _rx) = register_client(&server).await;
+    server.set_client_protocol(&joiner, v3_webrtc());
+
+    let emitted_before = server.metrics.ice_pregather_emitted.load(Ordering::Relaxed);
+    let room = pregather_room("mesh-game", LobbyState::Waiting);
+    assert!(server.pregather_ice_servers(&room, &joiner).is_empty());
+    assert_eq!(
+        server.metrics.ice_pregather_emitted.load(Ordering::Relaxed),
+        emitted_before,
+        "an empty (skipped-on-the-wire) list is not an emission"
+    );
 }

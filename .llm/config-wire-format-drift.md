@@ -7,6 +7,9 @@ binary game-data transport.
 
 - Config examples and docs must use canonical serde tokens, not Rust enum
   variant names.
+- Required string config values that represent credentials, paths, URL payloads,
+  or protocol tokens must reject whitespace-only values with `trim().is_empty()`;
+  use indexed errors for list entries so operators can find the exact bad field.
 - `logging.format` values are `json` and `text`.
 - `security.transport.tls.client_auth` values are `none`, `optional`, and
   `require`.

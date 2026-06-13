@@ -28,18 +28,26 @@
 //! [`EnhancedGameServer::emit_session_plan`] method gathers per-member
 //! capabilities, runs the core, and best-effort delivers the result — gated on
 //! v3 so a v2 client never observes a `SessionPlan` (Appendix K).
+//!
+//! This module also hosts the **ICE pre-gather** seam (PLAN §P4's deferred
+//! "RoomJoined ICE pre-gather" refinement): the pure [`ice_pregather_eligible`]
+//! gate plus [`EnhancedGameServer::pregather_ice_servers`], which surfaces the
+//! same composed ICE list ([`EnhancedGameServer::composed_ice_servers_for`] —
+//! the single composition site shared with `SessionPlan` delivery) on
+//! `RoomJoined` / `Reconnected` so v3 WebRTC-capable clients can gather
+//! candidates during the lobby wait. The `SessionPlan` ICE list supersedes it.
 
 use std::sync::Arc;
 
 use crate::config::SessionConfig;
 use crate::coordination::FinalizedRoom;
 use crate::protocol::{
-    IceServer, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage, SessionPeer,
+    IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SessionPeer,
     SessionPlanPayload, Topology, Transport,
 };
 
 use super::signaling::local_initiates;
-use super::EnhancedGameServer;
+use super::{EnhancedGameServer, NegotiatedProtocol};
 
 /// The sticky per-room session decision recorded when a room finalizes to a
 /// non-relay plan (relay-floor rooms record nothing — they behave exactly like
@@ -215,6 +223,68 @@ const fn transport_enabled(cfg: &SessionConfig, transport: Transport) -> bool {
     }
 }
 
+/// The desired (ceiling) topology for `game_name`: the per-game override when
+/// mapped, else the configured default (Appendix D's `desired` lookup).
+///
+/// Shared by the ladder walk in [`choose_session_plan`] and the ICE pre-gather
+/// gate ([`ice_pregather_eligible`]) so "what does this game want" is one rule
+/// everywhere.
+#[must_use]
+pub(crate) fn desired_topology_for(game_name: &str, cfg: &SessionConfig) -> Topology {
+    cfg.game_topology_mappings
+        .get(game_name)
+        .copied()
+        .unwrap_or(cfg.default_topology)
+}
+
+/// Whether a joiner/reconnector should receive the ICE pre-gather list on its
+/// `RoomJoined` / `Reconnected` payload (PLAN §P4's deferred "RoomJoined ICE
+/// pre-gather" refinement). Pure over plain data so the full gating matrix is
+/// unit-testable without a server. Eligible iff ALL of:
+///
+/// - `session.enable_ice_pregather` (the operator kill switch), and
+/// - `session.enable_webrtc` (with WebRTC disabled no ladder rung can ever
+///   select a WebRTC plan, so pre-gathered candidates could never be used), and
+/// - the game's desired topology is non-relay (a relay-desired game can never
+///   select a WebRTC plan — the Appendix D ladder caps at the desired ceiling —
+///   so minting for it would hand out TURN credentials that can never be
+///   used), and
+/// - the room is **not** `Finalized`: a finalized room either runs a stored
+///   non-relay plan — the late-join/reconnect path already delivers a fresh
+///   per-recipient `SessionPlan` with fresh ICE immediately after, so
+///   pre-gather would double-mint — or was floored to relay (sticky for the
+///   session lifetime — WebRTC can never start, pre-gather is pointless), and
+/// - the recipient negotiated protocol v3 (`version >= 3`, exactly the
+///   [`EnhancedGameServer::client_supports_v3`] check — Appendix K: v2 wire
+///   stays byte-identical), and
+/// - the recipient negotiated the WebRTC transport (a relay/direct-only client
+///   never runs ICE), and
+/// - the recipient's negotiated topologies contain the game's desired topology
+///   (the relay-desired "credentials that can never be used" argument applied
+///   per-recipient: the Appendix D ladder seats a member on a rung only when
+///   that member negotiated the rung's topology, so a relay-only-topology
+///   recipient can never appear in *any* WebRTC plan and minting for it would
+///   hand out live TURN credentials that can never be used. A recipient that
+///   negotiated only a rung below the desired one forfeits the head start —
+///   the finalize-time `SessionPlan` still delivers its ICE if the whole room
+///   settles there).
+#[must_use]
+pub(crate) fn ice_pregather_eligible(
+    cfg: &SessionConfig,
+    game_name: &str,
+    lobby_state: &LobbyState,
+    recipient: &NegotiatedProtocol,
+) -> bool {
+    let desired = desired_topology_for(game_name, cfg);
+    cfg.enable_ice_pregather
+        && cfg.enable_webrtc
+        && desired != Topology::Relay
+        && *lobby_state != LobbyState::Finalized
+        && recipient.version >= 3
+        && recipient.transports.contains(&Transport::WebRtc)
+        && recipient.topologies.contains(&desired)
+}
+
 /// Whether `(topology, transport)` is one of the four legal session pairs — the
 /// three [`UPGRADE_LADDER`] rungs plus the [`RELAY_FLOOR`].
 ///
@@ -260,11 +330,7 @@ pub(crate) fn choose_session_plan(
     members: Vec<SessionMember>,
     cfg: &SessionConfig,
 ) -> SessionPlanDecision {
-    let desired = cfg
-        .game_topology_mappings
-        .get(game_name)
-        .copied()
-        .unwrap_or(cfg.default_topology);
+    let desired = desired_topology_for(game_name, cfg);
 
     // Walk the richest-first ladder and settle on the first rung that fits the
     // `desired` ceiling, has its transport enabled, and is supported by *every*
@@ -904,22 +970,7 @@ impl EnhancedGameServer {
         }
 
         let (ice_servers, minted) = match now_unix {
-            Some(now_unix) => {
-                // Operator's static ICE list first (preserved verbatim for
-                // back-compat), then this recipient's TURN-derived entries.
-                let mut ice = self.session_config.ice_servers.clone();
-                let turn_derived =
-                    crate::security::build_ice_servers(&self.turn_config, recipient, now_unix);
-                // A minted TURN entry is the one carrying credentials (a
-                // `username`); credential-less STUN entries are not counted.
-                // This is the exact "credential issued" event (per recipient).
-                let minted = turn_derived
-                    .iter()
-                    .filter(|server| server.username.is_some())
-                    .count() as u64;
-                ice.extend(turn_derived);
-                (ice, minted)
-            }
+            Some(now_unix) => self.composed_ice_servers_for(recipient, now_unix),
             None => (Vec::new(), 0),
         };
 
@@ -937,5 +988,81 @@ impl EnhancedGameServer {
             )
             .await;
         Some(minted)
+    }
+
+    /// Compose `recipient`'s full ICE list — the operator's static
+    /// `session.ice_servers` first (preserved verbatim for back-compat), then
+    /// the `[turn]` block's contribution (credential-less STUN, then a TURN
+    /// entry freshly minted for `recipient` at `now_unix`, via
+    /// [`crate::security::build_ice_servers`]). Returns `(list, minted)` where
+    /// `minted` counts the entries carrying credentials (a `username`) — the
+    /// exact per-recipient "credential issued" events for
+    /// `turn_credentials_issued`.
+    ///
+    /// This is the **single** ICE composition site in the codebase, shared by
+    /// `SessionPlan` delivery ([`Self::send_session_plan_to`]) and the
+    /// `RoomJoined` / `Reconnected` pre-gather path
+    /// ([`Self::pregather_ice_servers`]), so the two surfaces can never drift.
+    pub(crate) fn composed_ice_servers_for(
+        &self,
+        recipient: PlayerId,
+        now_unix: i64,
+    ) -> (Vec<IceServer>, u64) {
+        let mut ice = self.session_config.ice_servers.clone();
+        let turn_derived =
+            crate::security::build_ice_servers(&self.turn_config, recipient, now_unix);
+        // A minted TURN entry is the one carrying credentials (a `username`);
+        // credential-less STUN entries are not counted.
+        let minted = turn_derived
+            .iter()
+            .filter(|server| server.username.is_some())
+            .count() as u64;
+        ice.extend(turn_derived);
+        (ice, minted)
+    }
+
+    /// Build the ICE pre-gather list for a `RoomJoined` / `Reconnected` payload
+    /// (PLAN §P4's deferred "RoomJoined ICE pre-gather" refinement): the same
+    /// composed list a WebRTC `SessionPlan` would carry, surfaced at join time
+    /// so a v3 WebRTC-capable client can gather ICE candidates during the lobby
+    /// wait instead of adding that latency at game start. The `SessionPlan` ICE
+    /// list supersedes it (fresh credentials always arrive there).
+    ///
+    /// Returns `Vec::new()` — the field is then skipped on the wire, keeping
+    /// the v2 bytes identical — unless [`ice_pregather_eligible`] holds for
+    /// this room/recipient (see its doc for the full gate, including why
+    /// `Finalized` rooms are excluded: the late-join `SessionPlan` is the sole
+    /// issuance site there, so one logical join event never mints twice).
+    ///
+    /// Metrics: counts one `ice_pregather_emitted` per **non-empty** list (an
+    /// eligible joiner with nothing configured emits no field and is not
+    /// counted) and adds the minted TURN credentials to the
+    /// `turn_credentials_issued` total-issuance counter.
+    pub(crate) fn pregather_ice_servers(
+        &self,
+        room: &Room,
+        player_id: &PlayerId,
+    ) -> Vec<IceServer> {
+        let protocol = self.client_protocol(player_id);
+        if !ice_pregather_eligible(
+            &self.session_config,
+            &room.game_name,
+            &room.lobby_state,
+            &protocol,
+        ) {
+            return Vec::new();
+        }
+
+        let now_unix = chrono::Utc::now().timestamp();
+        let (ice_servers, minted) = self.composed_ice_servers_for(*player_id, now_unix);
+        if ice_servers.is_empty() {
+            // Legitimate even when eligible: no static ICE, no STUN urls, TURN
+            // disabled. Nothing reaches the wire, so nothing is counted.
+            return ice_servers;
+        }
+
+        self.metrics.increment_ice_pregather_emitted();
+        self.metrics.add_turn_credentials_issued(minted);
+        ice_servers
     }
 }

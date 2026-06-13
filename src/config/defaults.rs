@@ -142,6 +142,13 @@ pub const fn default_enable_direct() -> bool {
     true
 }
 
+/// ICE pre-gather on `RoomJoined` / `Reconnected` is enabled by default: it only
+/// fires for v3 WebRTC-capable joiners of non-relay-desired, non-finalized rooms,
+/// so the v2 wire (and any relay deployment) is untouched either way.
+pub const fn default_enable_ice_pregather() -> bool {
+    true
+}
+
 // =============================================================================
 // Player Name Validation Defaults
 // =============================================================================

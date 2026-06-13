@@ -199,10 +199,14 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
 - `signal_fish_transport_signals_relayed_total` — opaque WebRTC `Signal` messages
   accepted for best-effort dispatch to same-room WebRTC peers.
 - `signal_fish_transport_turn_credentials_issued_total` — ephemeral TURN
-  credentials minted into `SessionPlan`s.
+  credentials minted into `SessionPlan`s and pre-gather `RoomJoined` /
+  `Reconnected` ICE lists.
 - `signal_fish_transport_status_fanout_total` — `PeerTransportStatus` fan-out
   events: accepted `TransportStatus` state changes from in-room clients fanned
   out to v3 room peers (one per event, not per recipient).
+- `signal_fish_transport_ice_pregather_emitted_total` — `RoomJoined` /
+  `Reconnected` payloads that carried a non-empty ICE pre-gather list (one per
+  carrying payload).
 
 ## Related documents
 

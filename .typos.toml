@@ -235,3 +235,7 @@ stdout = "stdout"
 
 # Proper nouns and company names with mixed case
 HashiCorp = "HashiCorp"
+
+[type.changelog]
+extend-glob = ["CHANGELOG.md"]
+extend-ignore-words-re = ["(?i)\\btrun\\b"]

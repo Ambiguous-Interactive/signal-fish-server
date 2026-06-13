@@ -12,7 +12,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::SinkExt;
-use signal_fish_server::config::{AppAuthEntry, SessionConfig};
+use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
     ClientMessage, IceServer, PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
@@ -31,6 +31,8 @@ const APP_ID: &str = "v3-session-plan-app";
 const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
 const POST_GAME_STARTING_SESSION_PLAN_WINDOW: tokio::time::Duration =
     tokio::time::Duration::from_secs(5);
+const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
+const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
 
 fn app_entry() -> AppAuthEntry {
     AppAuthEntry {
@@ -43,11 +45,24 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
+#[test]
+fn ice_ordering_fixtures_are_source_distinguishable() {
+    assert_ne!(
+        STATIC_STUN_URL, TURN_STUN_URL,
+        "static and default [turn] STUN fixture URLs must stay distinct so ordering assertions catch swaps"
+    );
+    assert_eq!(
+        TurnConfig::default().stun_urls,
+        vec![TURN_STUN_URL.to_string()],
+        "this e2e fixture intentionally exercises the default [turn] STUN URL"
+    );
+}
+
 fn mesh_session_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Mesh,
         ice_servers: vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            urls: vec![STATIC_STUN_URL.to_string()],
             username: None,
             credential: None,
         }],
@@ -341,8 +356,12 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
             2,
             "webrtc plan carries the static STUN plus the default TURN-block STUN"
         );
+        assert_eq!(plan.ice_servers[0].urls, vec![STATIC_STUN_URL]);
+        assert_eq!(plan.ice_servers[1].urls, vec![TURN_STUN_URL]);
         assert!(
-            plan.ice_servers.iter().all(|s| s.username.is_none()),
+            plan.ice_servers
+                .iter()
+                .all(|s| s.username.is_none() && s.credential.is_none()),
             "no TURN credentials are minted when the [turn] block is disabled"
         );
     }

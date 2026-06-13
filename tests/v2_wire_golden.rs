@@ -479,6 +479,9 @@ fn golden_server_room_joined() {
         ready_players: vec![player_a()],
         relay_type: "matchbox".to_string(),
         current_spectators: vec![spectator()],
+        // v3-only pre-gather field: empty is skipped entirely, so the golden
+        // v2 bytes below stay byte-identical.
+        ice_servers: Vec::new(),
     }));
     assert_json(
         &msg,
@@ -769,6 +772,9 @@ fn golden_server_reconnected() {
         ready_players: vec![player_a()],
         relay_type: "matchbox".to_string(),
         current_spectators: vec![],
+        // v3-only pre-gather field: empty is skipped entirely, so the golden
+        // v2 bytes below stay byte-identical.
+        ice_servers: Vec::new(),
         missed_events: vec![ServerMessage::Pong],
     }));
     assert_json(

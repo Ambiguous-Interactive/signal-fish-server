@@ -151,8 +151,20 @@ pub struct ServerMetrics {
     pub relay_fallback: AtomicU64,
     /// Opaque WebRTC `Signal` messages accepted for best-effort dispatch to a peer.
     pub signals_relayed: AtomicU64,
-    /// TURN `IceServer` credentials minted into `SessionPlan`s.
+    /// TURN `IceServer` credentials minted, totaled across every issuance site:
+    /// `SessionPlan`s (finalize, host re-plan, late join / reconnect) AND the
+    /// ICE pre-gather lists on `RoomJoined` / `Reconnected`. This is the
+    /// total-issuance counter used for TURN capacity planning. The pre-gather
+    /// gate is off for `Finalized` rooms, so a late join / reconnect into an
+    /// active WebRTC session mints ONLY via its `SessionPlan` — one logical
+    /// join event never mints twice.
     pub turn_credentials_issued: AtomicU64,
+    /// `RoomJoined` / `Reconnected` payloads that actually carried a non-empty
+    /// ICE pre-gather list: exactly once per carrying payload (PLAN §P4's
+    /// deferred "RoomJoined ICE pre-gather" refinement). An eligible joiner
+    /// whose composed list is empty (no static ICE, no STUN urls, TURN
+    /// disabled) skips the field on the wire and is NOT counted.
+    pub ice_pregather_emitted: AtomicU64,
     /// `PeerTransportStatus` fan-out events: accepted `TransportStatus` state
     /// changes (first report or a real transition — duplicates never fan out)
     /// from a client seated in a room, fanned out to the room's other v3
@@ -356,6 +368,7 @@ pub struct TransportMetrics {
     pub signals_relayed: u64,
     pub turn_credentials_issued: u64,
     pub transport_status_fanout: u64,
+    pub ice_pregather_emitted: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -471,6 +484,7 @@ impl ServerMetrics {
             signals_relayed: AtomicU64::new(0),
             turn_credentials_issued: AtomicU64::new(0),
             transport_status_fanout: AtomicU64::new(0),
+            ice_pregather_emitted: AtomicU64::new(0),
         }
     }
 
@@ -961,12 +975,25 @@ impl ServerMetrics {
         self.signals_relayed.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record `count` TURN `IceServer` credentials minted into `SessionPlan`s.
+    /// Record `count` minted TURN `IceServer` credentials on the total-issuance
+    /// counter. Called from every issuance site — `SessionPlan` emission
+    /// (finalize, host re-plan, late join / reconnect) and the `RoomJoined` /
+    /// `Reconnected` ICE pre-gather path — see the field doc for the
+    /// no-double-count invariant between the last two.
     pub fn add_turn_credentials_issued(&self, count: u64) {
         if count > 0 {
             self.turn_credentials_issued
                 .fetch_add(count, Ordering::Relaxed);
         }
+    }
+
+    /// Record one `RoomJoined` / `Reconnected` payload that actually carried a
+    /// non-empty ICE pre-gather list: exactly once per carrying payload, never
+    /// for an ineligible joiner and never for an eligible joiner whose composed
+    /// list came out empty (the field is then skipped on the wire — nothing was
+    /// emitted).
+    pub fn increment_ice_pregather_emitted(&self) {
+        self.ice_pregather_emitted.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one `PeerTransportStatus` fan-out event: an accepted
@@ -1153,6 +1180,7 @@ impl ServerMetrics {
                 signals_relayed: self.signals_relayed.load(Ordering::Relaxed),
                 turn_credentials_issued: self.turn_credentials_issued.load(Ordering::Relaxed),
                 transport_status_fanout: self.transport_status_fanout.load(Ordering::Relaxed),
+                ice_pregather_emitted: self.ice_pregather_emitted.load(Ordering::Relaxed),
             },
         }
     }

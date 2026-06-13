@@ -10,7 +10,9 @@ mod test_helpers;
 
 use axum::routing::get;
 use regex::Regex;
-use signal_fish_server::config::{ClientAuthMode, Config, DashboardHistoryField, LogFormat};
+use signal_fish_server::config::{
+    AppAuthEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat,
+};
 use signal_fish_server::security::token_binding::TokenBindingScheme;
 use signal_fish_server::websocket::{
     create_router, create_standalone_router, websocket_handler_v3,
@@ -428,6 +430,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SESSION__ENABLE_DIRECT",
         path: "session.enable_direct",
+        default: Some("true"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SESSION__ENABLE_ICE_PREGATHER",
+        path: "session.enable_ice_pregather",
         default: Some("true"),
     },
     ConfigReferenceRow {
@@ -944,6 +951,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         "game_topology_mappings",
         "enable_webrtc",
         "enable_direct",
+        "enable_ice_pregather",
         "ice_servers",
     ] {
         assert!(
@@ -958,6 +966,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
     );
     assert!(config.session.enable_webrtc);
     assert!(config.session.enable_direct);
+    assert!(config.session.enable_ice_pregather);
     assert_eq!(
         value.pointer("/session/default_topology"),
         Some(&serde_json::json!("relay")),
@@ -1666,6 +1675,14 @@ fn test_config_validation_scenarios() {
             false,
         ),
         (
+            "auth enabled with whitespace-only token → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = true;
+                c.security.metrics_auth_token = Some(" \t\n".to_string());
+            }),
+            false,
+        ),
+        (
             "both auth fields disabled → passes (Docker/CI scenario)",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = false;
@@ -1689,6 +1706,21 @@ fn test_config_validation_scenarios() {
                 c.security.require_websocket_auth = true;
             }),
             true,
+        ),
+        (
+            "authorized app with whitespace-only app_id → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.authorized_apps = vec![AppAuthEntry {
+                    app_id: " ".to_string(),
+                    app_secret: "secret".to_string(),
+                    app_name: "Game".to_string(),
+                    max_rooms: None,
+                    max_players_per_room: None,
+                    rate_limit_per_minute: None,
+                }];
+            }),
+            false,
         ),
         (
             "max_signal_bytes of 0 → fails",

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::error_codes::ErrorCode;
 use super::room_state::LobbyState;
 use super::types::{
-    ConnectionInfo, GameDataEncoding, PeerConnectionInfo, PlayerId, PlayerInfo,
+    ConnectionInfo, GameDataEncoding, IceServer, PeerConnectionInfo, PlayerId, PlayerInfo,
     ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SessionPlanPayload, SpectatorInfo,
     SpectatorStateChangeReason, Topology, Transport,
 };
@@ -125,6 +125,20 @@ pub struct RoomJoinedPayload {
     /// List of spectators currently watching (if any)
     #[serde(default)]
     pub current_spectators: Vec<SpectatorInfo>,
+    /// ICE (STUN/TURN) servers for early candidate gathering during the lobby
+    /// wait (v3 only — PLAN §P4's deferred "RoomJoined ICE pre-gather"
+    /// refinement). Populated only under the pre-gather gate
+    /// (`session.enable_ice_pregather` + WebRTC enabled + non-relay desired
+    /// topology + non-finalized room + a v3 recipient that negotiated the
+    /// WebRTC transport and whose negotiated topologies contain the game's
+    /// desired topology); empty — and absent from the wire via
+    /// `skip_serializing_if`, keeping the v2 JSON and MessagePack bytes
+    /// identical — otherwise. The `SessionPlan` ICE list supersedes this one:
+    /// clients should apply the most recent set, because pre-gather TURN
+    /// credentials may expire during a long lobby and fresh ones always arrive
+    /// in the `SessionPlan`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice_servers: Vec<IceServer>,
 }
 
 /// Payload for the Reconnected server message.
@@ -145,6 +159,21 @@ pub struct ReconnectedPayload {
     /// List of spectators currently watching (if any)
     #[serde(default)]
     pub current_spectators: Vec<SpectatorInfo>,
+    /// ICE (STUN/TURN) servers for early candidate gathering during the lobby
+    /// wait (v3 only — PLAN §P4's deferred "RoomJoined ICE pre-gather"
+    /// refinement). Populated only under the pre-gather gate
+    /// (`session.enable_ice_pregather` + WebRTC enabled + non-relay desired
+    /// topology + non-finalized room + a v3 recipient that negotiated the
+    /// WebRTC transport and whose negotiated topologies contain the game's
+    /// desired topology); empty — and absent from the wire via
+    /// `skip_serializing_if`, keeping the v2 JSON and MessagePack bytes
+    /// identical — otherwise. The `SessionPlan` ICE list supersedes this one:
+    /// clients should apply the most recent set, because pre-gather TURN
+    /// credentials may expire during a long lobby and fresh ones always arrive
+    /// in the `SessionPlan` (a reconnect into an active session gets its fresh
+    /// ICE from the late-join `SessionPlan`, never from here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice_servers: Vec<IceServer>,
     /// Events that occurred while disconnected
     pub missed_events: Vec<ServerMessage>,
 }
