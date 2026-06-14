@@ -43,6 +43,22 @@ exclude_globs = [
     "fuzz/**",
 ]
 
+# Provably-equivalent mutants — excluded with justification (not test gaps).
+#
+# `replan_host_session` re-elects the host via `elect_host(electable_authority,
+# &electable)`. The `electable_authority` filter (`session_policy.rs:880`,
+# `authority.filter(|id| electable.any(|m| m.player_id == id))`) is DELIBERATELY
+# redundant: `elect_host` already drops an authority id that is absent from its
+# members slice. Flipping that `==` to `!=` changes `electable_authority` between
+# `Some(authority)` and `None`, but in every reachable case `elect_host` produces
+# the SAME elected host (it re-filters internally), so the mutant is behaviorally
+# equivalent and cannot be killed by any test. The filter is kept for explicitness
+# (see its doc comment) and `replan_prefers_electable_authority_over_earliest_joiner`
+# pins the authority-preference contract regardless.
+exclude_re = [
+    "replace == with != in EnhancedGameServer::replan_host_session",
+]
+
 # The unit-test oracle is quick; give a generous floor so a loaded CI runner
 # never spuriously times out a surviving-mutant build.
 minimum_test_timeout = 120
