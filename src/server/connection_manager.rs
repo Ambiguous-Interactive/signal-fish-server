@@ -212,8 +212,8 @@ impl ConnectionManager {
         }
     }
 
-    // Read the full negotiated protocol for a connection. Consumed by the P3
-    // session-plan/topology selection path (see PLAN.md §P3).
+    // Read the full negotiated protocol for a connection. Consumed by the
+    // session-plan/topology selection path.
     pub fn protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.clients
             .get(player_id)
@@ -256,7 +256,7 @@ impl ConnectionManager {
     /// Read the last-reported data-path transport state for a connection.
     /// `None` until the client reports one (the relay floor is the implicit
     /// default). Mirrors [`Self::protocol`]. Consumed by tests and the future
-    /// targeted-relay path (PLAN §P5 notes); not yet read in production.
+    /// targeted-relay path; not yet read in production.
     #[allow(dead_code)]
     pub fn transport_status(&self, player_id: &PlayerId) -> Option<(Transport, bool)> {
         self.clients

@@ -143,7 +143,7 @@ pub struct RoomJoinedPayload {
     #[serde(default)]
     pub current_spectators: Vec<SpectatorInfo>,
     /// ICE (STUN/TURN) servers for early candidate gathering during the lobby
-    /// wait (v3 only — PLAN §P4's deferred "RoomJoined ICE pre-gather"
+    /// wait (v3 only — the deferred "RoomJoined ICE pre-gather"
     /// refinement). Populated only under the pre-gather gate
     /// (`session.enable_ice_pregather` + WebRTC enabled + non-relay desired
     /// topology + non-finalized room + a v3 recipient that negotiated the
@@ -177,7 +177,7 @@ pub struct ReconnectedPayload {
     #[serde(default)]
     pub current_spectators: Vec<SpectatorInfo>,
     /// ICE (STUN/TURN) servers for early candidate gathering during the lobby
-    /// wait (v3 only — PLAN §P4's deferred "RoomJoined ICE pre-gather"
+    /// wait (v3 only — the deferred "RoomJoined ICE pre-gather"
     /// refinement). Populated only under the pre-gather gate
     /// (`session.enable_ice_pregather` + WebRTC enabled + non-relay desired
     /// topology + non-finalized room + a v3 recipient that negotiated the

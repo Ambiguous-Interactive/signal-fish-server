@@ -504,7 +504,7 @@ impl EnhancedGameServer {
                     ready_players: ready_players.clone(),
                     relay_type: room.relay_type.clone(),
                     current_spectators: room.get_spectators(),
-                    // v3 ICE pre-gather (PLAN §P4 deferred refinement): empty —
+                    // v3 ICE pre-gather (deferred refinement): empty —
                     // and skipped on the wire — unless this reconnector passes
                     // the pre-gather gate (its original credentials may have
                     // expired while it was away), so v2 bytes are untouched. A
@@ -535,7 +535,7 @@ impl EnhancedGameServer {
         // `SessionPlan` (fresh ICE — its original TURN credentials may have
         // expired) and existing members receive the `NewPeer` delta per the
         // stored topology when the transport is WebRTC. A non-finalized room
-        // or the relay floor emits nothing (PLAN §P3).
+        // or the relay floor emits nothing.
         self.handle_active_session_late_join(&room, reconnect_player_id, &current_players)
             .await;
 

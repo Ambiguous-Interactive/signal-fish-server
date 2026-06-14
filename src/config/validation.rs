@@ -208,7 +208,7 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
 /// Whether startup should warn that signaling is not TLS-terminated while the
 /// server is actively brokering WebRTC.
 ///
-/// PLAN Appendix I requires `wss://` for signaling in production because DTLS
+/// Production requires `wss://` for signaling because DTLS
 /// fingerprints travel inside the SDP that `Signal` relays: a plaintext `ws://`
 /// signaling path lets an on-path attacker substitute fingerprints and
 /// man-in-the-middle the "encrypted" peer connections. The condition is

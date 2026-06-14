@@ -90,7 +90,7 @@ impl EnhancedGameServer {
         }
     }
 
-    /// Record a client's reported data-path transport state (Protocol v3, PLAN §P5).
+    /// Record a client's reported data-path transport state (Protocol v3).
     ///
     /// Purely informational and v3-only: a v2 client can never legitimately send
     /// this, and a v3 report is accepted only for a transport negotiated by that
@@ -173,7 +173,7 @@ impl EnhancedGameServer {
         }
 
         // Fan the accepted state change out to the sender's CURRENT room as
-        // `PeerTransportStatus` (PLAN §P5 refinement), so peers learn e.g. that
+        // `PeerTransportStatus`, so peers learn e.g. that
         // the host's WebRTC path died and relay-path traffic should be
         // expected. Duplicate reports returned early above, so a fan-out fires
         // once per real per-connection state change (including the first

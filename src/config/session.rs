@@ -1,4 +1,4 @@
-//! Session topology / transport selection configuration (Protocol v3, PLAN §P3).
+//! Session topology / transport selection configuration (Protocol v3).
 //!
 //! Drives the server's `choose_session_plan` selection: the preferred
 //! topology per game, whether WebRTC / Direct upgrades are permitted, and the
@@ -33,7 +33,7 @@ pub struct SessionConfig {
     /// Surface the composed ICE list (static [`ice_servers`](Self::ice_servers),
     /// then `[turn]`-derived STUN + freshly minted TURN credentials) on
     /// `RoomJoined` / `Reconnected` so v3 WebRTC-capable clients can pre-gather
-    /// ICE candidates during the lobby wait (PLAN §P4's deferred "RoomJoined ICE
+    /// ICE candidates during the lobby wait (the deferred "RoomJoined ICE
     /// pre-gather" refinement). Gated so it never fires for v2 clients,
     /// relay-only clients, relay-desired games, or finalized rooms; the
     /// `SessionPlan` ICE list always supersedes it. Disabling is the kill switch

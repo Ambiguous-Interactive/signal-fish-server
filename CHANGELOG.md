@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intra-`docs/` `#anchor` link resolves identically on both GitHub and the MkDocs Pages site — the
   two renderers slugify headings containing `/` differently, so an anchor hand-written for one
   silently 404s on the other.
-- Added a [Platform Integration Guide](docs/guides/platform-integration.md) (PLAN §P7 task 5,
-  Appendix H): per-platform WebRTC-stack guidance for browser, native desktop, mobile, Steam,
+- Added a [Platform Integration Guide](docs/guides/platform-integration.md):
+  per-platform WebRTC-stack guidance for browser, native desktop, mobile, Steam,
   Godot, Unity, and Unreal, plus the universal v3 client contract (relay floor, opaque
   matchbox-shaped signal payloads, the two-channel data layout, stateless glare resolution) and
   the cross-stack interop traps (Chrome/Safari `.local` mDNS candidates, SCTP `a=sctp-port` vs
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nav, the docs landing page, and the Handoff & Topologies "See also". The browser and native
   rows are demonstrated end to end by the in-repo reference clients; the mobile, Steam, and
   engine rows are integration notes for out-of-repo builds.
-- Added ICE pre-gather on `RoomJoined` / `Reconnected` (PLAN §P4's deferred "RoomJoined ICE
+- Added ICE pre-gather on `RoomJoined` / `Reconnected` (the deferred "RoomJoined ICE
   pre-gather" refinement): both payloads gain an optional `ice_servers` field carrying the same
   composed ICE list a WebRTC `SessionPlan` delivers — the operator's static `session.ice_servers`
   first, then the `[turn]` block's STUN entry, then a freshly minted per-player TURN credential
@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw-frame absence assertions for v2 / relay-only / kill-switch / WebRTC-disabled / relay-desired
   cases, STUN-only pre-gather with TURN disabled, late-join and reconnect single-mint invariants,
   and metrics deltas) plus a fully-populated `RoomJoined` line in the canonical v3 wire samples.
-- Added the browser reference client (PLAN P7) as the in-repo standalone npm package
+- Added the browser reference client as the in-repo standalone npm package
   `clients/browser/` (`signal-fish-reference-browser` — TypeScript, strict; NOT a crate, so every
   root cargo gate is untouched and `cargo package` still ships zero `clients/` files). The client
   drives a REAL Chromium `RTCPeerConnection` (the `chromium-headless-shell` build via
@@ -91,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mDNS posture, and the new matrix rows in `clients/browser/README.md` (the native README stays
   the canonical contract). Additive tooling/documentation only — no server runtime behavior or
   wire-format changes.
-- Added the native Rust reference client (PLAN P7) as the in-repo standalone package
+- Added the native Rust reference client as the in-repo standalone package
   `clients/native/` (`signal-fish-reference-native`, NOT a member of the root package — root
   lockfile/MSRV-build/coverage gates are untouched, `scripts/check-msrv-consistency.sh` pins the
   client's `rust-version` to the root MSRV, and the root `Cargo.toml` now carries
@@ -344,7 +344,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- `--print-config` now redacts secrets (P8 security hardening, PLAN Appendix I). The printed JSON
+- `--print-config` now redacts secrets (security hardening). The printed JSON
   replaces every **set** secret value with the marker `<redacted>` while leaving unset (`null` /
   empty) secrets as-is, so operators can still tell "configured" apart from "missing". Redacted
   fields: `security.metrics_auth_token`, `security.authorized_apps[*].app_secret`,
@@ -380,16 +380,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already must heartbeat every ~30s to survive the state reaper. The pre-auth handshake remains
   bounded by the stricter `websocket.auth_timeout_secs`.
 - Added a prominent once-at-startup warning when TURN is enabled but built-in TLS is disabled
-  (PLAN Appendix I: `wss://` for signaling in production — DTLS fingerprints travel in SDP, so
+  (`wss://` for signaling in production — DTLS fingerprints travel in SDP, so
   plaintext `ws://` signaling allows man-in-the-middle of the WebRTC peer connections). Emitted
   after logging initialization via `tracing::warn!`; deliberately a warning and never a hard error
   because reverse-proxy TLS termination (where `security.transport.tls.enabled` stays `false`) is
   the common production deployment (`config::should_warn_missing_signaling_tls`).
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
   `rustls-pki-types` built-in `PemObject` trait.
-- **Security review (PLAN §P8 acceptance) — three hardening fixes from an adversarial audit of the
+- **Security review — three hardening fixes from an adversarial audit of the
   v3 signaling surface:**
-- Bounded the v3 `TransportStatus` → `PeerTransportStatus` room fan-out (PLAN §P8 / Appendix I). An
+- Bounded the v3 `TransportStatus` → `PeerTransportStatus` room fan-out. An
   accepted `TransportStatus` state change fans out 1→N to the reporter's room; it was the one
   client-triggered v3 control-plane emit path with no rate limit (the dedup gate is trivially
   defeated by alternating `connected`), unlike the targeted `Signal` relay. The accepted-change
@@ -403,7 +403,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection/room caps, best-effort sends — so this only closes the control-plane consistency gap
   with `Signal`.) Covered by `transport_status_fanout_is_bounded_by_signal_budget`.
 - Reject zero-valued background-task interval configs at startup instead of silently killing the
-  task at runtime (PLAN §P8 / Appendix J resource-exhaustion). `server.room_cleanup_interval`,
+  task at runtime (resource-exhaustion). `server.room_cleanup_interval`,
   `rate_limit.time_window`, and (when `websocket.enable_batching` is true) `websocket.batch_interval_ms`
   each become the period of a `tokio::time::interval`, which **panics** on a zero period — previously
   this killed the spawned task while the process kept serving, so a one-line operator typo silently
@@ -415,7 +415,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built without running config validation), the three interval use sites also clamp to a non-zero
   floor, mirroring the existing dashboard-cache `.max(..)` zero-guard.
 - Consolidated all secret comparison into a single constant-time helper and closed two
-  non-constant-time compares (PLAN §P8 / Appendix I). New crate-internal `security::constant_time_eq`
+  non-constant-time compares. New crate-internal `security::constant_time_eq`
   (over `subtle`) is now the sole secret-comparison implementation, replacing two prior copies
   (`auth::middleware` and `security::token_binding`). The reconnection-token check
   (`reconnection::{validate,claim}_reconnection`) and the metrics bearer-token check

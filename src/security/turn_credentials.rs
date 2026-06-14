@@ -1,4 +1,4 @@
-//! Ephemeral TURN credential minting (Protocol v3, PLAN §P4, Appendix F).
+//! Ephemeral TURN credential minting (Protocol v3).
 //!
 //! Implements the coturn REST API (a.k.a. "long-term credential") scheme: the
 //! static authentication secret (`turnserver --use-auth-secret

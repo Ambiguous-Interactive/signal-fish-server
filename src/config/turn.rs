@@ -1,4 +1,4 @@
-//! TURN / STUN ICE-server configuration (Protocol v3, PLAN §P4, Appendix C/F).
+//! TURN / STUN ICE-server configuration (Protocol v3).
 //!
 //! Drives the ICE servers emitted into a WebRTC `SessionPlan`. TURN is **fully
 //! self-hosted**: the server self-mints short-lived, per-player coturn REST

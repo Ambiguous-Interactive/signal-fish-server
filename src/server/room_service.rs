@@ -210,7 +210,7 @@ impl EnhancedGameServer {
                             ready_players: ready_players.clone(),
                             relay_type: room.relay_type.clone(),
                             current_spectators: room.get_spectators(),
-                            // v3 ICE pre-gather (PLAN §P4 deferred refinement):
+                            // v3 ICE pre-gather (deferred refinement):
                             // empty — and skipped on the wire — unless this
                             // joiner passes the pre-gather gate, so v2 bytes
                             // are untouched. A join into a Finalized room gets

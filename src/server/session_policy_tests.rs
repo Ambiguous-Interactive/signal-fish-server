@@ -3846,7 +3846,7 @@ mod properties {
 }
 
 // ---------------------------------------------------------------------------
-// ICE pre-gather on RoomJoined / Reconnected (PLAN §P4's deferred refinement).
+// ICE pre-gather on RoomJoined / Reconnected (the deferred refinement).
 //
 // Pure-logic tests pin the eligibility predicate's full gating matrix (every
 // conjunct flipped independently) and the desired-topology lookup; server-based
