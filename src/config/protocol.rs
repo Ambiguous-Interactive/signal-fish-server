@@ -405,6 +405,37 @@ mod protocol_version_tests {
     }
 
     #[test]
+    fn supported_game_data_formats_follow_runtime_negotiation_policy() {
+        let enabled = ProtocolConfig {
+            enable_message_pack_game_data: true,
+            ..ProtocolConfig::default()
+        };
+        assert_eq!(
+            enabled.supported_game_data_formats(),
+            vec![GameDataEncoding::Json, GameDataEncoding::MessagePack],
+            "default advertised formats are exactly the negotiable client formats"
+        );
+
+        let disabled = ProtocolConfig {
+            enable_message_pack_game_data: false,
+            ..ProtocolConfig::default()
+        };
+        assert_eq!(
+            disabled.supported_game_data_formats(),
+            vec![GameDataEncoding::Json],
+            "JSON remains the floor when MessagePack negotiation is disabled"
+        );
+
+        for cfg in [enabled, disabled] {
+            assert!(
+                !cfg.supported_game_data_formats()
+                    .contains(&GameDataEncoding::Rkyv),
+                "Rkyv is a reserved/internal enum variant, not a ProtocolInfo-advertised format"
+            );
+        }
+    }
+
+    #[test]
     fn negotiate_with_server_max_two_clamps_v3_client() {
         let cfg = ProtocolConfig {
             min_protocol_version: 2,

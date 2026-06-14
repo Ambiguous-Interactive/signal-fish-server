@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 /// Per-application rate limit information returned to clients.
@@ -69,11 +68,11 @@ fn deterministic_uuid(key: &str) -> Uuid {
 }
 
 /// Constant-time secret comparison to prevent timing attacks.
+///
+/// Delegates to the crate-wide [`crate::security::constant_time_eq`] so every
+/// secret comparison shares one constant-time implementation.
 fn secrets_match(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.as_bytes().ct_eq(b.as_bytes()).into()
+    crate::security::constant_time_eq(a, b)
 }
 
 /// In-memory authentication middleware backed by a `HashMap` of configured

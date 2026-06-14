@@ -21,8 +21,8 @@
   </a>
 </p>
 
-A lightweight, zero-dependency WebSocket signaling server for peer-to-peer
-game networking. Run locally with Rust or Docker -- no database, no cloud
+A lightweight, zero-external-dependency WebSocket signaling server for
+peer-to-peer game networking. Run locally with Rust or Docker -- no database, no cloud
 services required.
 
 Built by [Ambiguous Interactive](https://github.com/Ambiguous-Interactive).
@@ -134,7 +134,9 @@ On startup the server looks for `config.json` in the working directory. See
     "room_code_length": 6,
     "max_player_name_length": 32,
     "max_players_limit": 100,
-    "enable_message_pack_game_data": true
+    "enable_message_pack_game_data": true,
+    "min_protocol_version": 2,
+    "max_protocol_version": 3
   },
   "logging": {
     "dir": "logs",
@@ -181,6 +183,21 @@ On startup the server looks for `config.json` in the working directory. See
   "relay_types": {
     "default_relay_type": "matchbox",
     "game_relay_mappings": {}
+  },
+  "session": {
+    "default_topology": "relay",
+    "game_topology_mappings": {},
+    "enable_webrtc": true,
+    "enable_direct": true,
+    "enable_ice_pregather": true,
+    "ice_servers": []
+  },
+  "turn": {
+    "enabled": false,
+    "static_auth_secret": "",
+    "urls": [],
+    "stun_urls": ["stun:stun.l.google.com:19302"],
+    "credential_ttl_secs": 3600
   },
   "websocket": {
     "enable_batching": true,
@@ -248,7 +265,7 @@ complete reference.
 signal-fish-server [OPTIONS]
 
 Options:
-      --validate-config    Validate config and exit
+  -c, --validate-config    Validate config and exit
       --print-config       Print resolved config as JSON and exit
   -h, --help               Print help
   -V, --version            Print version
@@ -263,6 +280,11 @@ configuration values.
 Signal Fish Server uses a JSON-based WebSocket protocol (v2). Messages are JSON
 objects with a `type` field and an optional `data` field. MessagePack encoding
 is also supported for game data when `enable_message_pack_game_data` is enabled.
+
+Building a client? See the [Platform Integration Guide](docs/guides/platform-integration.md)
+for which WebRTC stack to use per platform (browser, native, mobile, Steam, Godot,
+Unity, Unreal), and the [Rust Client Guide](docs/guides/rust-client.md) for a complete
+relay-floor client walkthrough.
 
 ### Client Messages
 
@@ -346,7 +368,10 @@ Client                              Server
   |<-- GameData (from other player) ---|
   |                                    |
   |--- LeaveRoom --------------------->|
-  |<-- PlayerLeft ---------------------|
+  |<-- RoomLeft -----------------------|
+  |                                    |
+  |        (other clients receive      |
+  |         PlayerLeft)                |
 ```
 
 ## Optional Features
@@ -413,6 +438,8 @@ async fn main() -> anyhow::Result<()> {
         server_config,
         cfg.protocol.clone(),
         cfg.relay_types.clone(),
+        cfg.session.clone(),
+        cfg.turn.clone(),
         DatabaseConfig::InMemory,
         cfg.metrics.clone(),
         cfg.auth.clone(),

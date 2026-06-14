@@ -37,3 +37,9 @@ binary game-data transport.
 - The negotiated binary WebSocket frame is the private `websocket::sending` bare
   MessagePack frame.
 - Do not re-export the binary frame encoder or frame struct as public API.
+- `ProtocolInfo.game_data_formats` comes from
+  `ProtocolConfig::supported_game_data_formats()`: `json` is always advertised
+  and `message_pack` is advertised only when enabled. `rkyv` is a reserved /
+  internal enum token and must not be documented as a negotiated or advertised
+  client game-data format unless runtime support and negotiation are added in
+  the same change.

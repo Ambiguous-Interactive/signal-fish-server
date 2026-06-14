@@ -31,7 +31,16 @@ impl EnhancedGameServer {
     /// application mapping cleanup) only happen once per room, even if multiple
     /// instances attempt cleanup simultaneously.
     pub async fn cleanup_task(&self) {
-        let mut interval = tokio::time::interval(self.config.room_cleanup_interval);
+        // Clamp to a 1s floor: `room_cleanup_interval` is validated `> 0` at
+        // startup (`validate_config_security`), but guard here too because the
+        // server is constructible directly via the public API, and
+        // `tokio::time::interval` panics on a zero period (mirrors the
+        // dashboard-cache `.max(..)` zero-guard).
+        let mut interval = tokio::time::interval(
+            self.config
+                .room_cleanup_interval
+                .max(std::time::Duration::from_secs(1)),
+        );
         let empty_timeout = chrono_duration_from_std(self.config.empty_room_timeout);
         let inactive_timeout = chrono_duration_from_std(self.config.inactive_room_timeout);
 

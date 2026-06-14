@@ -365,6 +365,72 @@ validate_protocol_sample_reference() {
     fi
 }
 
+validate_rust_client_game_data_formats() {
+    local file="docs/guides/rust-client.md"
+    if [ ! -f "$file" ]; then
+        action_error "Missing required file: $file"
+        return
+    fi
+
+    local enum_count
+    enum_count=$(grep -c 'pub enum GameDataEncoding' "$file" || true)
+    if [ "$enum_count" -eq 0 ]; then
+        action_error "$file must define GameDataEncoding in its Rust samples"
+        return
+    fi
+
+    local diagnostics
+    diagnostics=$(awk '
+        /pub enum GameDataEncoding[[:space:]]*\{/ {
+            in_enum = 1
+            depth = 1
+            block += 1
+            has_json = 0
+            has_message_pack = 0
+            has_rkyv = 0
+            next
+        }
+        in_enum {
+            if ($0 ~ /^[[:space:]]*[A-Z][A-Za-z0-9_]*[[:space:],]*$/) {
+                line = $0
+                sub(/^[[:space:]]*/, "", line)
+                sub(/[[:space:],]*$/, "", line)
+                if (line == "Json") {
+                    has_json = 1
+                } else if (line == "MessagePack") {
+                    has_message_pack = 1
+                } else if (line == "Rkyv") {
+                    has_rkyv = 1
+                }
+            }
+
+            text = $0
+            opens = gsub(/\{/, "{", text)
+            text = $0
+            closes = gsub(/\}/, "}", text)
+            depth += opens - closes
+            if (depth <= 0) {
+                if (has_rkyv) {
+                    print "GameDataEncoding sample " block " must not list Rkyv; ProtocolInfo.game_data_formats only advertises json and optional message_pack"
+                }
+                if (!has_json) {
+                    print "GameDataEncoding sample " block " must include Json"
+                }
+                if (!has_message_pack) {
+                    print "GameDataEncoding sample " block " must include MessagePack"
+                }
+                in_enum = 0
+            }
+        }
+    ' "$file")
+
+    while IFS= read -r diagnostic; do
+        if [ -n "$diagnostic" ]; then
+            action_error "$file $diagnostic"
+        fi
+    done <<< "$diagnostics"
+}
+
 PROTOCOL_SAMPLE_CLIENT=".llm/code-samples/protocol/v2-client-messages.jsonl"
 PROTOCOL_SAMPLE_SERVER=".llm/code-samples/protocol/v2-server-messages.jsonl"
 PROTOCOL_SAMPLE_FILES=(
@@ -380,6 +446,7 @@ for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
 done
 
 validate_protocol_authenticated_payload_shape "$PROTOCOL_SAMPLE_SERVER"
+validate_rust_client_game_data_formats
 
 for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
     validate_protocol_sample_reference "README.md" "$sample_file"

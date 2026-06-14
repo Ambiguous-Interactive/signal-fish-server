@@ -25,7 +25,9 @@ async fn enforce_metrics_auth(
     };
 
     if let Some(expected) = config.metrics_auth_token.as_deref() {
-        if token == expected {
+        // Constant-time compare so the bearer token is not recoverable via a
+        // timing side-channel (shared crate-wide secret-comparison helper).
+        if crate::security::constant_time_eq(token, expected) {
             tracing::debug!("Metrics access authorized via bearer token");
             return Ok(());
         }

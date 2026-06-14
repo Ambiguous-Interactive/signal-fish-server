@@ -55,12 +55,17 @@ ws.onmessage = (event) => {
     // Now you can create/join rooms
   }
 
-  if (message.type === 'Error' && message.data.error_code === 'AUTHENTICATION_REQUIRED') {
-    console.error('Authentication failed');
+  if (message.type === 'AuthenticationError') {
+    // e.g. INVALID_APP_ID for an unknown app_id
+    console.error('Authentication failed:', message.data.error_code);
   }
 };
 
 ```
+
+A failed `Authenticate` is reported as a dedicated `AuthenticationError` message. If the
+client instead sends any other message before authenticating, the server replies with a
+generic `Error` carrying `error_code === 'MISSING_APP_ID'` and closes the connection.
 
 ## Per-App Settings
 
@@ -84,7 +89,8 @@ Each authorized app has its own limits:
 - `app_name` - Human-readable name (for logging/metrics)
 - `max_rooms` - Maximum concurrent rooms for this app
 - `max_players_per_room` - Max players per room for this app
-- `rate_limit_per_minute` - Max requests per minute per IP for this app
+- `rate_limit_per_minute` - Max requests per minute for this app (counted per
+  `app_id`, across all of its connections), not per IP
 
 ## Auth Timeout
 
@@ -104,15 +110,27 @@ If the client doesn't send `Authenticate` within this window, the connection is 
 
 ## Metrics Authentication
 
-Protect the `/metrics` endpoints:
+Protect the `/metrics` endpoints with a single shared bearer token:
 
 ```json
 
 {
   "security": {
-    "require_metrics_auth": true
+    "require_metrics_auth": true,
+    "metrics_auth_token": "<generated-token>"
   }
 }
+
+```
+
+`metrics_auth_token` is one static token shared by every metrics caller; it is not tied to
+any app's `app_id`/`app_secret`. Enabling `require_metrics_auth` without also setting
+`metrics_auth_token` is a hard startup error. Generate a strong token, ideally via an
+environment variable:
+
+```bash
+
+SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=$(openssl rand -hex 32)
 
 ```
 
@@ -120,12 +138,13 @@ When enabled, metrics endpoints require an `Authorization` header:
 
 ```bash
 
-curl -H "Authorization: Bearer my-game:your-secret-here" \
+curl -H "Authorization: Bearer <your-metrics-token>" \
   http://localhost:3536/metrics
 
 ```
 
-Format: `Bearer <app_id>:<app_secret>`
+Format: `Bearer <metrics_auth_token>` - a single shared static token compared in constant
+time, not per-app `app_id:app_secret` credentials.
 
 ## Error Codes
 
@@ -190,7 +209,6 @@ Better approaches for production secrets management:
 
 ```yaml
 # docker-compose.yml
-version: '3.8'
 services:
   signal-fish:
     image: ghcr.io/ambiguous-interactive/signal-fish-server:latest

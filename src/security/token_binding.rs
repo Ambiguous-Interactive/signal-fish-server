@@ -114,7 +114,7 @@ impl ActiveTokenBinding {
                 .fingerprint
                 .as_deref()
                 .ok_or(TokenBindingError::MissingClientFingerprint)?;
-            if !constant_time_eq(expected, provided) {
+            if !super::constant_time_eq(expected, provided) {
                 return Err(TokenBindingError::FingerprintMismatch);
             }
         }
@@ -149,18 +149,6 @@ fn verify_hmac(
         .map_err(|err| TokenBindingError::InvalidSignatureEncoding(err.to_string()))?;
     mac.verify_slice(&signature)
         .map_err(|_| TokenBindingError::InvalidSignature)
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    // Simple constant-time comparison over ASCII hex strings.
-    let mut diff = 0u8;
-    for (a, b) in left.bytes().zip(right.bytes()) {
-        diff |= a ^ b;
-    }
-    diff == 0
 }
 
 /// Derive the per-connection secret from the WebSocket handshake key.

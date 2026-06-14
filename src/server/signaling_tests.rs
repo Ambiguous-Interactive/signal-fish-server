@@ -11,7 +11,7 @@ use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
-use crate::database::DatabaseConfig;
+use crate::database::{DatabaseConfig, InMemoryDatabase};
 use crate::protocol::{
     ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo, Room, ServerMessage,
     Topology, Transport,
@@ -374,6 +374,14 @@ async fn assert_silent(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
         Ok(Some(message)) => panic!("expected no message to be delivered, got {message:?}"),
         Ok(None) => panic!("channel closed while checking for silence"),
     }
+}
+
+async fn valid_signal_budget_used(server: &EnhancedGameServer, player_id: &PlayerId) -> u32 {
+    server
+        .rate_limiter
+        .get_player_stats(player_id)
+        .await
+        .map_or(0, |stats| stats.signals)
 }
 
 fn error_code(message: &ServerMessage) -> Option<ErrorCode> {
@@ -2324,13 +2332,10 @@ async fn late_join_counts_plan_and_turn_credentials() {
     // session_replans_emitted (departure-only).
     let turn = TurnConfig {
         enabled: true,
-        mode: crate::config::TurnMode::StaticSecret,
         static_auth_secret: "super-secret".to_string(),
         urls: vec![TURN_URL.to_string()],
         stun_urls: vec![TURN_STUN_URL.to_string()],
         credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
-        managed_provider: None,
-        managed_api_token: None,
     };
     let server = create_test_server_with_session_and_turn(mesh_session_config(), turn).await;
     let (existing, mut existing_rx) = register_client(&server).await;
@@ -3531,6 +3536,164 @@ async fn transport_status_flap_fans_out_each_transition() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn transport_status_fanout_is_bounded_by_signal_budget() {
+    // `TransportStatus` is v3 WebRTC control-plane traffic, and an accepted state
+    // change triggers a 1→N `PeerTransportStatus` fan-out to the room. A client
+    // that alternates `connected` to force a `Changed` on every frame (defeating
+    // the dedup gate) must not be able to use the tiny message as an unbounded
+    // room amplifier: the accepted-change path consumes the same per-connection
+    // budget as `Signal` (`max_signals`). Over-budget changes are dropped
+    // SILENTLY (no error frame — `TransportStatus` is informational), but the
+    // per-connection state is still recorded. Budget = 2 here.
+    let server = create_test_server_with_signals(2).await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    // Five real transitions, but only two fit the budget.
+    for connected in [true, false, true, false, true] {
+        server
+            .handle_client_message(
+                &alice,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected,
+                },
+            )
+            .await;
+    }
+
+    // Bob sees exactly the two budgeted transitions, in order, then nothing.
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, false).await;
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        2,
+        "fan-out events are capped at the per-connection control-plane budget"
+    );
+    // Only the 1→N fan-out is budget-bounded. The O(1) local bookkeeping is NOT:
+    // every accepted transition still updates the per-connection state and the
+    // p2p/relay observability counters, so the budget cannot distort metrics.
+    // The five transitions are [true, false, true, false, true] over WebRtc:
+    // three `true` ⇒ p2p_established += 3, two `false` ⇒ relay_fallback += 2.
+    assert_eq!(
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        3,
+        "every accepted P2P-up transition is counted, even when its fan-out is dropped"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        2,
+        "every accepted fallback transition is counted, even when its fan-out is dropped"
+    );
+    // The latest reported state is still recorded even though its fan-out was
+    // dropped (per-connection truth is never rate-limited).
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, true)),
+        "the connection's own transport state tracks the last report regardless of fan-out budget"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn over_budget_transport_status_does_not_load_room_members() {
+    // Once the sender is already over the fan-out budget, the handler should
+    // drop the informational peer notice before taking the fallible/O(room)
+    // membership snapshot. The local state/metrics still update because they
+    // are O(1) bookkeeping, not fan-out work.
+    let server = create_test_server_with_signals(1).await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, true).await;
+    assert_eq!(valid_signal_budget_used(&server, &alice).await, 1);
+
+    let db = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    let member_lookups_after_budgeted_fanout = db.get_room_players_calls_for_test();
+    db.fail_get_room_players_for_test(true);
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: false,
+            },
+        )
+        .await;
+
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        db.get_room_players_calls_for_test(),
+        member_lookups_after_budgeted_fanout,
+        "over-budget fan-out must be dropped before loading room members"
+    );
+    assert_eq!(
+        valid_signal_budget_used(&server, &alice).await,
+        1,
+        "over-budget preflight must not consume an additional slot"
+    );
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, false)),
+        "local transport truth still tracks the over-budget report"
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        1,
+        "over-budget reports still update O(1) observability"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn transport_status_without_room_records_state_but_fans_out_nothing() {
     // A room-less reporter still gets its per-connection state recorded (the
     // pre-fan-out behavior is preserved), but there is no room to notify.
@@ -3576,6 +3739,190 @@ async fn transport_status_without_room_records_state_but_fans_out_nothing() {
         server.metrics.p2p_established.load(Ordering::Relaxed),
         1,
         "the accepted report still moves p2p_established"
+    );
+    // The fan-out rate-limit gate sits AFTER the no-room early return, so a
+    // room-less reporter spends no signal budget on a fan-out that can't happen.
+    assert_eq!(
+        valid_signal_budget_used(&server, &alice).await,
+        0,
+        "a room-less TransportStatus must not consume the sender's signal budget"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_room_member_lookup_failure_does_not_consume_signal_budget() {
+    // Regression for the budget-before-membership bug: if the room snapshot
+    // cannot be loaded, the accepted local state and observability counters are
+    // kept, but no fan-out can be attempted, so the sender's valid-signal
+    // budget must remain available for the next real fan-out.
+    let server = create_test_server_with_signals(1).await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "bob"))
+        .await
+        .expect("add bob");
+    for id in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    let db = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    db.fail_get_room_players_for_test(true);
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        valid_signal_budget_used(&server, &alice).await,
+        0,
+        "failed membership lookup must not consume the valid-signal budget"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        0,
+        "failed membership lookup is not a fan-out event"
+    );
+    assert_eq!(
+        server.client_transport_status(&alice),
+        Some((Transport::WebRtc, true)),
+        "the local transport state is still recorded before the failed fan-out"
+    );
+
+    db.fail_get_room_players_for_test(false);
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: false,
+            },
+        )
+        .await;
+
+    expect_peer_transport_status(&mut bob_rx, alice, Transport::WebRtc, false).await;
+    assert_eq!(
+        valid_signal_budget_used(&server, &alice).await,
+        1,
+        "the single budget slot remains available for the next deliverable fan-out"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1,
+        "only the successful fan-out is counted"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_sender_only_room_does_not_consume_signal_budget() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_silent(&mut alice_rx).await;
+    assert_eq!(
+        valid_signal_budget_used(&server, &alice).await,
+        0,
+        "a sender-only room has no fan-out recipients to charge for"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        0,
+        "a sender-only room is not a fan-out event"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_room_with_only_v2_peers_does_not_consume_signal_budget() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (legacy, mut legacy_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&legacy, v2_with_webrtc_transport());
+
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(legacy, "legacy"))
+        .await
+        .expect("add legacy peer");
+    for id in [alice, legacy] {
+        server
+            .connection_manager
+            .assign_client_to_room(&id, room_id)
+            .await;
+    }
+
+    server
+        .handle_client_message(
+            &alice,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+
+    assert_silent(&mut legacy_rx).await;
+    assert_eq!(
+        valid_signal_budget_used(&server, &alice).await,
+        0,
+        "legacy-only recipient sets must not consume v3 control-plane budget"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        0,
+        "no eligible v3 recipients means no fan-out event"
     );
 }
 

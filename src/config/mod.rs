@@ -67,7 +67,7 @@ pub use server::{RateLimitConfig, ServerConfig};
 
 pub use session::SessionConfig;
 
-pub use turn::{TurnConfig, TurnMode};
+pub use turn::TurnConfig;
 
 pub use types::{Config, REDACTED_SECRET};
 

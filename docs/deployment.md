@@ -86,8 +86,8 @@ docker compose --profile turn up -d
 
 A plain `docker compose up` is unchanged. See the
 [TURN deployment guide](deployment-turn.md) for the matching server `[turn]`
-configuration, the ephemeral credential scheme, secret rotation, and managed
-alternatives.
+configuration, the ephemeral credential scheme, secret rotation, and why TURN is
+self-hosted only.
 
 ## Production Configuration
 

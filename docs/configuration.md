@@ -111,7 +111,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__PORT` | `port` | `3536` | Server listen port |
 | `SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS` | `server.default_max_players` | `8` | Default max players per room |
 | `SIGNAL_FISH__SERVER__PING_TIMEOUT` | `server.ping_timeout` | `30` | Seconds before a silent client is dropped |
-| `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL` | `server.room_cleanup_interval` | `60` | Seconds between room cleanup sweeps |
+| `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL` | `server.room_cleanup_interval` | `60` | Seconds between room cleanup sweeps (must be > 0) |
 | `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME` | `server.max_rooms_per_game` | `1000` | Max rooms allowed per game name |
 | `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT` | `server.empty_room_timeout` | `300` | Seconds before an empty room is removed |
 | `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT` | `server.inactive_room_timeout` | `3600` | Seconds before an inactive room is removed |
@@ -119,10 +119,10 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE` | `server.event_buffer_size` | `100` | Max events buffered for reconnection replay |
 | `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION` | `server.enable_reconnection` | `true` | Enable reconnection support |
 | `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS` | `server.heartbeat_throttle_secs` | `30` | Min seconds between `last_seen` heartbeat writes |
-| `SIGNAL_FISH__SERVER__REGION_ID` | `server.region_id` | `default` | Region identifier for metrics and room codes |
+| `SIGNAL_FISH__SERVER__REGION_ID` | `server.region_id` | `default` | Deployment region identifier; recorded in internal player and room state (not serialized to clients) |
 | `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX` | `server.room_code_prefix` | `null` | Optional prefix for generated room codes |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS` | `rate_limit.max_room_creations` | `5` | Max room creations per player per window |
-| `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds |
+| `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Max join attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Max rejected WebRTC signal attempts per player per window |
@@ -186,17 +186,14 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SESSION__ENABLE_DIRECT` | `session.enable_direct` | `true` | Permit the Direct (LAN/routable) transport for `host` upgrades |
 | `SIGNAL_FISH__SESSION__ENABLE_ICE_PREGATHER` | `session.enable_ice_pregather` | `true` | Surface the composed ICE list on `RoomJoined`/`Reconnected` for eligible v3 WebRTC clients |
 | `SIGNAL_FISH__SESSION__ICE_SERVERS` | `session.ice_servers` | `[]` | JSON array of static ICE servers advertised in a WebRTC plan |
-| `SIGNAL_FISH__TURN__ENABLED` | `turn.enabled` | `false` | Mint and advertise TURN credentials |
-| `SIGNAL_FISH__TURN__MODE` | `turn.mode` | `static_secret` | TURN credential source (`static_secret`, `managed`) |
+| `SIGNAL_FISH__TURN__ENABLED` | `turn.enabled` | `false` | Mint and advertise self-hosted TURN credentials |
 | `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET` | `turn.static_auth_secret` | `""` | coturn `--static-auth-secret` (server-only; never sent to clients) |
 | `SIGNAL_FISH__TURN__URLS` | `turn.urls` | `[]` | JSON array of TURN server URLs (e.g. `turn:turn.example.com:3478`) |
 | `SIGNAL_FISH__TURN__STUN_URLS` | `turn.stun_urls` | `["stun:stun.l.google.com:19302"]` | JSON array of STUN URLs advertised on WebRTC plans |
 | `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential |
-| `SIGNAL_FISH__TURN__MANAGED_PROVIDER` | `turn.managed_provider` | `null` | Managed-mode provider name (required when `mode = managed`) |
-| `SIGNAL_FISH__TURN__MANAGED_API_TOKEN` | `turn.managed_api_token` | `null` | Managed-mode API token (required when `mode = managed`) |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `true` | Enable outbound message batching |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch |
-| `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds |
+| `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
@@ -362,14 +359,17 @@ WebRTC-capable members of non-relay-desired games still in the lobby; under the
 default `relay` topology no `SessionPlan` is emitted and no ICE is pre-gathered
 at all.
 
-## TURN / STUN (ICE Credentials) (Protocol v3)
+## TURN and STUN (ICE Credentials) (Protocol v3)
+
+TURN is **fully self-hosted**: when enabled, the server self-mints short-lived
+coturn REST credentials for a TURN server **you** run. No third-party cloud is
+ever contacted and no external credentials are required.
 
 ```json
 
 {
   "turn": {
     "enabled": false,
-    "mode": "static_secret",
     "static_auth_secret": "",
     "urls": [],
     "stun_urls": ["stun:stun.l.google.com:19302"],
@@ -379,17 +379,12 @@ at all.
 
 ```
 
-- `enabled` - Mint and advertise TURN credentials (default: false). When false,
-  the block is inert and only `stun_urls` is advertised
-- `mode` - How credentials are obtained: `static_secret` (server self-mints
-  short-lived coturn REST credentials) or `managed` (defers to a managed
-  provider; STUN-only stub today; default: `static_secret`)
-- `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled` with `mode = static_secret`
-- `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled` with `mode = static_secret`
+- `enabled` - Mint and advertise self-hosted TURN credentials (default: false).
+  When false, the block is inert and only `stun_urls` is advertised
+- `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled`
+- `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled`
 - `stun_urls` - Public STUN URLs advertised on WebRTC plans regardless of `enabled` (default: `["stun:stun.l.google.com:19302"]`)
 - `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` when enabled (default: 3600)
-- `managed_provider` - Managed-mode provider name (e.g. `"cloudflare"`). Required when `mode = managed`
-- `managed_api_token` - Managed-mode API token. Required when `mode = managed`
 
 ### Security: `static_auth_secret` is server-only
 

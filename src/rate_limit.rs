@@ -102,6 +102,12 @@ impl RateLimitEntry {
         }
     }
 
+    /// Check if a signaling message would be allowed without incrementing.
+    fn signal_available(&mut self, config: &RateLimitConfig) -> bool {
+        self.maybe_reset_window(config);
+        self.signals < config.max_signals
+    }
+
     /// Check if a rejected signaling attempt is allowed and increment counter
     fn try_signal_error(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
@@ -187,6 +193,27 @@ impl RoomRateLimiter {
         }
     }
 
+    /// Check if a WebRTC signaling message would be allowed without consuming a slot.
+    ///
+    /// This is only a preflight; callers must still use [`Self::check_signal`]
+    /// immediately before dispatch because another task can consume the final
+    /// slot between the preflight and the send.
+    pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
+
+        if entry.signal_available(&self.config) {
+            Ok(())
+        } else {
+            let reset_time = entry.time_until_reset(&self.config);
+            Err(RateLimitError::SignalLimitExceeded {
+                retry_after: reset_time,
+            })
+        }
+    }
+
     /// Check if a rejected WebRTC signaling attempt is allowed for the given player
     pub async fn check_signal_error(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.entries.write().await;
@@ -214,11 +241,22 @@ impl RoomRateLimiter {
         entries.retain(|_, entry| now.duration_since(entry.window_start) < cleanup_threshold);
     }
 
+    /// Period of the background cleanup sweep.
+    ///
+    /// Clamped to a 1-second floor. `time_window` is validated `> 0` at startup
+    /// (`validate_config_security`), but `RoomRateLimiter` is part of the public
+    /// API and may be constructed directly (tests, library embedders) with a
+    /// zero window, and `tokio::time::interval` panics on a zero period. Mirrors
+    /// the dashboard-cache `.max(..)` zero-guard.
+    fn cleanup_interval(&self) -> Duration {
+        self.config.time_window.max(Duration::from_secs(1))
+    }
+
     /// Start a background task to periodically clean up old entries
     pub fn start_cleanup_task(self: Arc<Self>) {
         let rate_limiter = Arc::clone(&self);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(rate_limiter.config.time_window);
+            let mut interval = tokio::time::interval(rate_limiter.cleanup_interval());
             loop {
                 interval.tick().await;
                 rate_limiter.cleanup_old_entries().await;
@@ -360,6 +398,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_signal_available_preflight_does_not_consume_signal_budget() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player_id = Uuid::new_v4();
+
+        assert!(limiter.check_signal_available(&player_id).await.is_ok());
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("preflight creates stats entry")
+                .signals,
+            0,
+            "preflight must not consume a valid-signal slot"
+        );
+
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal_available(&player_id).await.is_err());
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("stats remain available")
+                .signals,
+            2,
+            "over-budget preflight must still leave consumed count unchanged"
+        );
+    }
+
+    #[tokio::test]
     async fn test_signal_limit_independent_per_player() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player1 = Uuid::new_v4();
@@ -461,6 +529,22 @@ mod tests {
 
         // Entry should be cleaned up
         assert!(limiter.get_player_stats(&player_id).await.is_none());
+    }
+
+    #[test]
+    fn cleanup_interval_clamps_zero_window_to_nonzero() {
+        // A zero `time_window` is rejected by config validation, but the limiter
+        // is publicly constructible; the cleanup interval must still be non-zero
+        // so the background `tokio::time::interval` can never panic.
+        let config = RateLimitConfig {
+            time_window: Duration::ZERO,
+            ..create_test_config()
+        };
+        let limiter = RoomRateLimiter::new(config);
+        assert!(
+            !limiter.cleanup_interval().is_zero(),
+            "a zero rate-limit window must clamp to a non-zero cleanup interval"
+        );
     }
 
     #[tokio::test]

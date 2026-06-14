@@ -80,7 +80,6 @@ impl Config {
     /// - `security.authorized_apps[*].app_secret`
     /// - `session.ice_servers[*].credential` (static TURN credentials)
     /// - `turn.static_auth_secret`
-    /// - `turn.managed_api_token`
     ///
     /// TLS *paths* (`security.transport.tls.*_path`) are file locations, not
     /// secrets, and stay visible.
@@ -95,7 +94,6 @@ impl Config {
             redact_optional(&mut ice_server.credential);
         }
         redact(&mut redacted.turn.static_auth_secret);
-        redact_optional(&mut redacted.turn.managed_api_token);
         redacted
     }
 }
@@ -123,12 +121,11 @@ mod tests {
     use crate::protocol::IceServer;
 
     /// Sentinel secret literals that must never survive redaction.
-    const SECRETS: [&str; 5] = [
+    const SECRETS: [&str; 4] = [
         "metrics-token-sentinel",
         "app-secret-sentinel",
         "ice-credential-sentinel",
         "turn-static-secret-sentinel",
-        "managed-api-token-sentinel",
     ];
 
     /// A config with every known secret field populated with a sentinel value.
@@ -151,8 +148,6 @@ mod tests {
         config.turn.enabled = true;
         config.turn.static_auth_secret = SECRETS[3].to_string();
         config.turn.urls = vec!["turn:turn.example.com:3478".to_string()];
-        config.turn.managed_provider = Some("cloudflare".to_string());
-        config.turn.managed_api_token = Some(SECRETS[4].to_string());
         config
     }
 
@@ -190,10 +185,6 @@ mod tests {
             Some(REDACTED_SECRET)
         );
         assert_eq!(redacted.turn.static_auth_secret, REDACTED_SECRET);
-        assert_eq!(
-            redacted.turn.managed_api_token.as_deref(),
-            Some(REDACTED_SECRET)
-        );
     }
 
     #[test]
@@ -217,10 +208,6 @@ mod tests {
             Some("ice-username")
         );
         assert_eq!(redacted.turn.urls, original.turn.urls);
-        assert_eq!(
-            redacted.turn.managed_provider.as_deref(),
-            Some("cloudflare")
-        );
     }
 
     #[test]
@@ -232,7 +219,6 @@ mod tests {
         assert!(redacted.security.metrics_auth_token.is_none());
         assert!(redacted.security.authorized_apps.is_empty());
         assert!(redacted.turn.static_auth_secret.is_empty());
-        assert!(redacted.turn.managed_api_token.is_none());
 
         let json = serde_json::to_string(&redacted).expect("default config serializes");
         assert!(
@@ -243,10 +229,8 @@ mod tests {
         // Empty-but-present values also stay as-is ("" is unset, not a secret).
         let mut config = Config::default();
         config.security.metrics_auth_token = Some(String::new());
-        config.turn.managed_api_token = Some(String::new());
         let redacted = config.redacted_for_display();
         assert_eq!(redacted.security.metrics_auth_token.as_deref(), Some(""));
-        assert_eq!(redacted.turn.managed_api_token.as_deref(), Some(""));
     }
 
     /// Future-proofing sweep: walk the serialized JSON of a fully-populated,
@@ -300,7 +284,7 @@ mod tests {
         walk("", &redacted, &mut hits);
 
         assert!(
-            hits.len() >= 5,
+            hits.len() >= 4,
             "the sweep must visit every known secret field (found only {hits:?})"
         );
         for (path, value) in hits {

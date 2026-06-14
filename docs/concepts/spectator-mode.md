@@ -1,10 +1,10 @@
 # Spectator Mode
 
-Spectators are read-only observers who watch a game room without
-participating. They see everything that happens -- player joins, lobby
-state changes, game data broadcasts -- but they cannot affect the game
-in any way. Spectators do not count toward the room's `max_players`
-limit, so they never block a real player from joining.
+Spectators are read-only observers who attach to a game room without
+participating. They receive a one-time room snapshot when they join, but
+they cannot affect the game in any way. Spectators do not count toward
+the room's `max_players` limit, so they never block a real player from
+joining.
 
 ## Joining as a Spectator
 
@@ -61,7 +61,8 @@ room state:
         "connected_at": "2025-01-15T10:35:00Z"
       }
     ],
-    "lobby_state": "lobby"
+    "lobby_state": "lobby",
+    "reason": "joined"
   }
 }
 ```
@@ -71,19 +72,22 @@ what state the lobby is in, and who else is spectating.
 
 ## What Spectators Receive
 
-Once joined, spectators receive the same broadcast messages that players
-receive:
+A spectator receives only two direct messages tied to its own spectator
+session:
 
-- `PlayerJoined` -- A new player entered the room.
-- `PlayerLeft` -- A player left the room.
-- `LobbyStateChanged` -- The lobby state transitioned (Waiting, Lobby, or
-  Finalized).
-- `GameData` -- Game data sent between players.
-- `AuthorityChanged` -- The room's authority player changed.
-- `GameStarting` -- The game has been finalized with legacy, self-declared
-  peer metadata.
-- `NewSpectatorJoined` -- Another spectator joined.
-- `SpectatorDisconnected` -- Another spectator left.
+- `SpectatorJoined` -- the room snapshot delivered once on a successful
+  join (current players, current spectators, and lobby state).
+- `SpectatorLeft` -- the confirmation delivered when the spectator leaves
+  or disconnects.
+
+> **Known limitation:** In the current server, spectators are not added
+> to the room's broadcast set. Room broadcasts -- `PlayerJoined`,
+> `PlayerLeft`, `LobbyStateChanged`, `GameData`, `AuthorityChanged`,
+> `GameStarting` -- and peer spectator notifications
+> (`NewSpectatorJoined`, `SpectatorDisconnected`) are delivered to the
+> room's **players**, not to spectators. A spectator that needs live room
+> updates must re-fetch or rely on out-of-band data; it will not receive
+> these events over its WebSocket today.
 
 ## What Spectators Cannot Do
 
@@ -99,8 +103,9 @@ available** to spectators:
 
 ## Spectator Notifications
 
-When a spectator joins, all players and other spectators in the room
-receive a `NewSpectatorJoined` broadcast:
+When a spectator joins, all players in the room receive a
+`NewSpectatorJoined` broadcast (spectators do not receive this
+notification):
 
 ```json
 {
@@ -117,7 +122,8 @@ receive a `NewSpectatorJoined` broadcast:
         "name": "Observer1",
         "connected_at": "2025-01-15T10:35:00Z"
       }
-    ]
+    ],
+    "reason": "joined"
   }
 }
 ```
@@ -181,18 +187,20 @@ responds with `SpectatorJoinFailed`:
   real time without interfering with gameplay.
 - **Coaching** -- A coach observes a student's game to provide feedback
   after the session.
-- **Debugging** -- During development, connect a spectator client to
-  watch the raw message flow and room state transitions without
-  disrupting the game under test.
+- **Debugging** -- During development, attach a spectator to capture the
+  `SpectatorJoined` room snapshot (current players, spectators, and lobby
+  state) without disrupting the game under test. Live room updates are
+  not delivered to spectators today (see the limitation above).
 - **Streaming** -- Feed spectator data into a broadcast overlay or
   streaming tool that renders game state for viewers.
 
 ## Spectator Limits
 
-By default, rooms accept an unlimited number of spectators. Server
-operators can configure a maximum spectator count per room if needed.
-When the limit is reached, new spectators receive a `SpectatorJoinFailed`
-response with the `TOO_MANY_SPECTATORS` error code.
+Rooms accept an unlimited number of spectators -- there is currently no
+configuration option to cap spectator count per room. The protocol does
+reserve a `TOO_MANY_SPECTATORS` error code: if a per-room limit is ever
+introduced, a spectator exceeding it would receive a `SpectatorJoinFailed`
+response carrying that code. Until then, the limit is never reached.
 
 ## Next Steps
 

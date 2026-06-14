@@ -234,6 +234,73 @@ async fn authenticate_for_message_pack(sender: &mut WsSink, receiver: &mut WsRec
     }
 }
 
+#[tokio::test]
+async fn test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advertised() {
+    let addr = start_test_server().await;
+    let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+
+    let auth = ClientMessage::Authenticate {
+        app_id: "rkyv-negotiation-app".to_string(),
+        sdk_version: Some("1.0.0".to_string()),
+        platform: Some("test".to_string()),
+        game_data_format: Some(GameDataEncoding::Rkyv),
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+    };
+
+    sender
+        .send(Message::Text(
+            serde_json::to_string(&auth)
+                .expect("auth serializes")
+                .into(),
+        ))
+        .await
+        .expect("send auth");
+
+    match receive_server_message(&mut receiver).await {
+        ServerMessage::Error {
+            message,
+            error_code,
+        } => {
+            assert_eq!(error_code, Some(ErrorCode::UnsupportedGameDataFormat));
+            assert!(
+                message.contains("rkyv"),
+                "unsupported-format diagnostic should use the requested wire token: {message}"
+            );
+            assert!(
+                message.contains("json, message_pack"),
+                "supported-format diagnostic should use advertised wire tokens: {message}"
+            );
+            assert!(
+                !message.contains("Rkyv") && !message.contains("MessagePack"),
+                "diagnostic must not leak Rust variant names: {message}"
+            );
+        }
+        other => panic!("expected UnsupportedGameDataFormat error first, got {other:?}"),
+    }
+
+    match receive_server_message(&mut receiver).await {
+        ServerMessage::Authenticated { .. } => {}
+        other => panic!("expected Authenticated after unsupported-format warning, got {other:?}"),
+    }
+
+    match receive_server_message(&mut receiver).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(
+                info.game_data_formats,
+                vec![GameDataEncoding::Json, GameDataEncoding::MessagePack],
+                "ProtocolInfo advertises only negotiable game-data encodings"
+            );
+            assert!(
+                !info.game_data_formats.contains(&GameDataEncoding::Rkyv),
+                "Rkyv is reserved/internal and must not be advertised"
+            );
+        }
+        other => panic!("expected ProtocolInfo after auth, got {other:?}"),
+    }
+}
+
 async fn receive_binary_game_data_wire_frame(receiver: &mut WsReceiver) -> Vec<u8> {
     tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
         loop {

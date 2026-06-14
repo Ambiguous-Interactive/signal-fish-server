@@ -46,7 +46,7 @@
 
 use proptest::prelude::*;
 use serde_json::{json, Value};
-use signal_fish_server::config::{TurnConfig, TurnMode};
+use signal_fish_server::config::TurnConfig;
 use signal_fish_server::protocol::{
     ClientMessage, GameDataEncoding, IceServer, ServerMessage, SessionPeer, SessionPlanPayload,
     Topology, Transport,
@@ -527,13 +527,10 @@ proptest! {
     ) {
         let turn = TurnConfig {
             enabled: true,
-            mode: TurnMode::StaticSecret,
             static_auth_secret: secret.clone(),
             urls: vec!["turn:turn.example.com:3478".to_string()],
             stun_urls: vec!["stun:stun.example.com:19302".to_string()],
             credential_ttl_secs: ttl,
-            managed_provider: None,
-            managed_api_token: None,
         };
 
         let servers = build_ice_servers(&turn, player, now);

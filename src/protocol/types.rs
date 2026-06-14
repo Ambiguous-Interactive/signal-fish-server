@@ -75,10 +75,24 @@ pub enum GameDataEncoding {
     /// MessagePack payloads delivered over binary frames.
     #[serde(rename = "message_pack")]
     MessagePack,
-    /// Rkyv zero-copy binary format for maximum performance.
-    /// Recommended for: High-frequency updates, large player counts, latency-sensitive games.
+    /// Reserved/internal rkyv token.
+    ///
+    /// This server build does not advertise or negotiate rkyv in
+    /// `ProtocolInfo.game_data_formats`; clients requesting it during
+    /// authentication fall back to JSON until full runtime negotiation exists.
     #[serde(rename = "rkyv")]
     Rkyv,
+}
+
+impl GameDataEncoding {
+    /// Canonical serde wire token for this encoding.
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::MessagePack => "message_pack",
+            Self::Rkyv => "rkyv",
+        }
+    }
 }
 
 /// Data-path transport a client can use for game traffic.

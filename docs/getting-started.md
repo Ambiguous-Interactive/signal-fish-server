@@ -8,7 +8,6 @@ Quick guide to get Signal Fish Server running and connect your first client.
 
 ```bash
 cargo run
-
 ```
 
 The server starts on port 3536 by default.
@@ -16,17 +15,13 @@ The server starts on port 3536 by default.
 ### Using Docker
 
 ```bash
-
 docker run -p 3536:3536 ghcr.io/ambiguous-interactive/signal-fish-server:latest
-
 ```
 
 ### Using Docker Compose
 
 ```bash
-
 docker compose up
-
 ```
 
 ## First Connection
@@ -34,17 +29,17 @@ docker compose up
 Connect your WebSocket client to:
 
 ```text
-
 ws://localhost:3536/v2/ws
-
 ```
+
+> A `ws://localhost:3536/v3/ws` endpoint is also available. Protocol v3 is purely additive over v2 (this v2 flow
+> works unchanged) and adds optional capability negotiation — see the [Protocol Reference](protocol.md) for details.
 
 ## Basic Client Flow
 
 Here's a minimal example showing a complete session:
 
 ```javascript
-
 const ws = new WebSocket('ws://localhost:3536/v2/ws');
 
 ws.onopen = () => {
@@ -75,13 +70,11 @@ ws.onmessage = (event) => {
     console.log('Received game data:', message.data.data);
   }
 };
-
 ```
 
 ## Joining an Existing Room
 
 ```javascript
-
 ws.send(JSON.stringify({
   type: 'JoinRoom',
   data: {
@@ -90,22 +83,23 @@ ws.send(JSON.stringify({
     player_name: 'Player2'
   }
 }));
-
 ```
 
 ## Sending Game Data
 
 ```javascript
-
 ws.send(JSON.stringify({
   type: 'GameData',
   data: {
-    action: 'move',
-    x: 100,
-    y: 200
+    // The outer `data` is the serde content tag; the inner `data`
+    // is the GameData variant's field name.
+    data: {
+      action: 'move',
+      x: 100,
+      y: 200
+    }
   }
 }));
-
 ```
 
 ## Health Check
@@ -113,9 +107,7 @@ ws.send(JSON.stringify({
 Verify the server is running:
 
 ```bash
-
 curl http://localhost:3536/v2/health
-
 ```
 
 ## Next Steps

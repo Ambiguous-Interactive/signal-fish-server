@@ -2,8 +2,10 @@
 
 This guide walks through building a Rust client for Signal Fish Server using
 `tokio-tungstenite`. Every section includes working code examples that
-demonstrate the full lifecycle: connecting, creating and joining rooms,
-exchanging game data, readying up, reconnecting, and spectating.
+demonstrate the full v2 relay-floor lifecycle: connecting, creating and joining
+rooms, exchanging game data, readying up, reconnecting, and spectating.
+Peer-to-peer/WebRTC (protocol v3) is a separate opt-in upgrade covered in the
+[Platform Integration Guide](platform-integration.md).
 
 ## Dependencies
 
@@ -12,12 +14,13 @@ Add the following to your `Cargo.toml`:
 ```toml
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
 url = "2"
+chrono = { version = "0.4", features = ["serde"] }
 ```
 
 - **tokio** -- async runtime
@@ -26,6 +29,9 @@ url = "2"
 - **serde + serde_json** -- JSON serialization matching the server protocol
 - **uuid** -- player and room identifiers are UUIDs
 - **url** -- URL parsing for the WebSocket endpoint
+- **chrono** -- timestamps (`connected_at` on `PlayerInfo`/`SpectatorInfo`); the
+  `serde` feature is required so the `DateTime<Utc>` fields round-trip with the
+  server protocol
 
 ## Connecting
 
@@ -59,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Message Types
 
 The server protocol uses JSON messages with a `type` field and an optional
-`data` field. Define matching Rust types with serde's externally tagged
+`data` field. Define matching Rust types with serde's adjacently tagged
 representation.
 
 ### Client Messages
@@ -183,6 +189,58 @@ pub struct RateLimitInfo {
     pub per_day: u32,
 }
 
+/// Game-data wire encoding currently advertised in `ProtocolInfo`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameDataEncoding {
+    Json,
+    MessagePack,
+}
+
+/// Server-advertised `player_name` validation rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerNameRulesPayload {
+    pub max_length: usize,
+    pub min_length: usize,
+    pub allow_unicode_alphanumeric: bool,
+    pub allow_spaces: bool,
+    pub allow_leading_trailing_whitespace: bool,
+    #[serde(default)]
+    pub allowed_symbols: Vec<char>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_allowed_characters: Option<String>,
+}
+
+/// Capability/version info sent in the `ProtocolInfo` frame that immediately
+/// follows `Authenticated`. The `protocol_version` fields are `None` (and
+/// omitted on the wire) on a negotiated v2 connection so the v2 frame stays
+/// byte-identical; they carry values only on v3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolInfoPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub game_data_formats: Vec<GameDataEncoding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_name_rules: Option<PlayerNameRulesPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_protocol_version: Option<u16>,
+}
+
 /// Messages sent from the server to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -194,6 +252,8 @@ pub enum ServerMessage {
         organization: Option<String>,
         rate_limits: RateLimitInfo,
     },
+    /// Protocol/capability info sent immediately after `Authenticated`.
+    ProtocolInfo(ProtocolInfoPayload),
     /// Authentication failed.
     AuthenticationError {
         error: String,
@@ -368,7 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay_transport: None,
     };
     let json = serde_json::to_string(&join)?;
-    write.send(Message::Text(json)).await?;
+    write.send(Message::Text(json.into())).await?;
 
     // Wait for RoomJoined response
     if let Some(Ok(Message::Text(text))) = read.next().await {
@@ -418,7 +478,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay_transport: None,
     };
     let json = serde_json::to_string(&join)?;
-    write.send(Message::Text(json)).await?;
+    write.send(Message::Text(json.into())).await?;
 
     // Wait for response
     if let Some(Ok(Message::Text(text))) = read.next().await {
@@ -608,7 +668,7 @@ async fn send_move(
         }),
     };
     let json = serde_json::to_string(&msg)?;
-    write.send(Message::Text(json)).await?;
+    write.send(Message::Text(json.into())).await?;
     Ok(())
 }
 ```
@@ -663,7 +723,11 @@ let msg = ClientMessage::GameData {
 
 Players toggle readiness by sending `PlayerReady`. In `lobby` state, the first
 send marks a player ready and the next send marks them unready. The lobby
-transitions through three states: `waiting`, `lobby`, and `finalized`.
+transitions through three states: `waiting`, `lobby`, and `finalized`. Note that
+`LobbyStateChanged` is only ever broadcast with `lobby_state` `lobby` (the
+`waiting` and `finalized` values appear only in the `lobby_state` field of
+`RoomJoined`/`Reconnected`); the move into `finalized` is signaled by a
+`GameStarting` frame, not by a `LobbyStateChanged` carrying `finalized`.
 
 ```rust
 use futures_util::{SinkExt, StreamExt};
@@ -689,12 +753,10 @@ fn handle_ready_up_message(
                 ready_players.len(),
                 if all_ready { "all" } else { "waiting" }
             );
-            if lobby_state == "finalized" {
-                println!("Game has started");
-                ReadyUpLoopControl::Break
-            } else {
-                ReadyUpLoopControl::Continue
-            }
+            // The server only ever broadcasts LobbyStateChanged with
+            // lobby_state "lobby"; finalization is signaled separately
+            // via GameStarting (handled below).
+            ReadyUpLoopControl::Continue
         }
         ServerMessage::GameStarting {
             peer_connections,
@@ -709,6 +771,7 @@ fn handle_ready_up_message(
             ReadyUpLoopControl::Break
         }
         ServerMessage::Authenticated { .. }
+        | ServerMessage::ProtocolInfo(..)
         | ServerMessage::AuthenticationError { .. }
         | ServerMessage::RoomJoined { .. }
         | ServerMessage::RoomJoinFailed { .. }
@@ -753,7 +816,7 @@ async fn ready_up_and_wait(
     // Toggle ready state (first send typically marks ready)
     let ready = ClientMessage::PlayerReady;
     let json = serde_json::to_string(&ready)?;
-    write.send(Message::Text(json)).await?;
+    write.send(Message::Text(json.into())).await?;
     println!("Toggled ready state");
 
     // Listen for lobby state transitions
@@ -820,7 +883,7 @@ async fn reconnect(
     write
         .send(
             tokio_tungstenite::tungstenite::Message::Text(
-                json,
+                json.into(),
             ),
         )
         .await?;
@@ -927,6 +990,7 @@ fn handle_spectator_stream_message(msg: ServerMessage) {
             );
         }
         ServerMessage::Authenticated { .. }
+        | ServerMessage::ProtocolInfo(..)
         | ServerMessage::AuthenticationError { .. }
         | ServerMessage::RoomJoined { .. }
         | ServerMessage::RoomJoinFailed { .. }
@@ -961,7 +1025,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spectator_name: "Observer1".to_string(),
     };
     let json = serde_json::to_string(&spectate)?;
-    write.send(Message::Text(json)).await?;
+    write.send(Message::Text(json.into())).await?;
 
     // Wait for confirmation
     if let Some(Ok(Message::Text(text))) = read.next().await {
@@ -1024,7 +1088,7 @@ let leave = ClientMessage::LeaveSpectator;
 let json = serde_json::to_string(&leave)?;
 write
     .send(
-        tokio_tungstenite::tungstenite::Message::Text(json),
+        tokio_tungstenite::tungstenite::Message::Text(json.into()),
     )
     .await?;
 ```
@@ -1109,6 +1173,7 @@ fn handle_server_message(msg: &ServerMessage) {
             );
         }
         ServerMessage::Authenticated { .. }
+        | ServerMessage::ProtocolInfo(..)
         | ServerMessage::AuthenticationError { .. }
         | ServerMessage::RoomJoined { .. }
         | ServerMessage::RoomLeft
@@ -1245,6 +1310,52 @@ pub struct RateLimitInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameDataEncoding {
+    Json,
+    MessagePack,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerNameRulesPayload {
+    pub max_length: usize,
+    pub min_length: usize,
+    pub allow_unicode_alphanumeric: bool,
+    pub allow_spaces: bool,
+    pub allow_leading_trailing_whitespace: bool,
+    #[serde(default)]
+    pub allowed_symbols: Vec<char>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_allowed_characters: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolInfoPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub game_data_formats: Vec<GameDataEncoding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_name_rules: Option<PlayerNameRulesPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_protocol_version: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
     Authenticated {
@@ -1253,6 +1364,7 @@ pub enum ServerMessage {
         organization: Option<String>,
         rate_limits: RateLimitInfo,
     },
+    ProtocolInfo(ProtocolInfoPayload),
     AuthenticationError {
         error: String,
         error_code: String,
@@ -1415,7 +1527,7 @@ impl SignalFishClient {
         self.write
             .lock()
             .await
-            .send(Message::Text(json))
+            .send(Message::Text(json.into()))
             .await?;
         Ok(())
     }
@@ -1678,7 +1790,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         game_data_format: None,
     };
     let json = serde_json::to_string(&auth)?;
-    write.send(Message::Text(json)).await?;
+    write.send(Message::Text(json.into())).await?;
 
     // Wait for authentication response
     if let Some(Ok(Message::Text(text))) = read.next().await {
@@ -1711,6 +1823,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Err(error.into());
             }
+            ServerMessage::ProtocolInfo(info) => {
+                // Sent immediately after `Authenticated`; read or skip it.
+                println!(
+                    "Protocol info: {:?}",
+                    info.capabilities
+                );
+            }
             other => {
                 eprintln!(
                     "Unexpected: {other:?}"
@@ -1723,6 +1842,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+On a successful authentication the server sends `Authenticated` and then,
+immediately after, a `ProtocolInfo` frame on every authenticated connection
+(both v2 and v3; only the `protocol_version` fields differ -- they are omitted
+on v2). Read and handle (or intentionally skip) the `ProtocolInfo` frame rather
+than treating it as unexpected.
+
 The `app_id` is a public identifier, not a secret. It is safe to embed in
 game builds. The server matches it against the `authorized_apps` list in the
 server configuration.
@@ -1732,3 +1857,5 @@ server configuration.
 - [Protocol](../protocol.md) -- complete message documentation
 - [Features](../features.md) -- full feature overview
 - [Authentication](../authentication.md) -- server-side auth configuration
+- [Platform Integration](platform-integration.md) -- upgrade this relay-floor client to peer-to-peer (protocol v3)
+- [Protocol v3 additions](../protocol.md#protocol-v3-additions) -- v3 wire messages (`Signal`, `SessionPlan`)

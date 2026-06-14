@@ -207,6 +207,8 @@ to. The full client-side state machine, including timeouts and the
 - [Protocol v3 additions](../protocol.md#protocol-v3-additions) — the wire messages
   (`Signal`, `NewPeer`, `SessionPlan`, `TransportStatus`, `PeerTransportStatus`),
   the selection ladder, the glare rule, and ICE/TURN.
-- [TURN / STUN configuration](../configuration.md#turn--stun-ice-credentials-protocol-v3)
+- [TURN and STUN configuration](../configuration.md#turn-and-stun-ice-credentials-protocol-v3)
   — enabling ephemeral TURN credentials.
+- [Platform Integration Guide](../guides/platform-integration.md) — which WebRTC stack
+  to use per platform and the cross-stack interop traps.
 - [ADR-0001: Protocol v3 two-axis design](../adr/0001-protocol-v3-two-axis.md).

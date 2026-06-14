@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `tests/docs_site_consistency.rs`, a documentation-accuracy regression guard that ties the
+  published docs to source: it asserts `docs/reference/error-codes.md` documents every `ErrorCode`
+  variant, `docs/protocol.md` documents every `ClientMessage` / `ServerMessage` variant and the
+  user-facing wire enum tokens (all parsed from `src/protocol/`), the public docs carry no
+  stale/removed protocol tokens (including the `relay_type: "WebRTC"` value drift), and every
+  intra-`docs/` `#anchor` link resolves identically on both GitHub and the MkDocs Pages site — the
+  two renderers slugify headings containing `/` differently, so an anchor hand-written for one
+  silently 404s on the other.
+- Added a [Platform Integration Guide](docs/guides/platform-integration.md) (PLAN §P7 task 5,
+  Appendix H): per-platform WebRTC-stack guidance for browser, native desktop, mobile, Steam,
+  Godot, Unity, and Unreal, plus the universal v3 client contract (relay floor, opaque
+  matchbox-shaped signal payloads, the two-channel data layout, stateless glare resolution) and
+  the cross-stack interop traps (Chrome/Safari `.local` mDNS candidates, SCTP `a=sctp-port` vs
+  legacy `sctpmap`, DTLS/BUNDLE, the no-raw-UDP-in-browsers constraint). Wired into the MkDocs
+  nav, the docs landing page, and the Handoff & Topologies "See also". The browser and native
+  rows are demonstrated end to end by the in-repo reference clients; the mobile, Steam, and
+  engine rows are integration notes for out-of-repo builds.
 - Added ICE pre-gather on `RoomJoined` / `Reconnected` (PLAN §P4's deferred "RoomJoined ICE
   pre-gather" refinement): both payloads gain an optional `ice_servers` field carrying the same
   composed ICE list a WebRTC `SessionPlan` delivers — the operator's static `session.ice_servers`
@@ -370,9 +387,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the common production deployment (`config::should_warn_missing_signaling_tls`).
 - Removed unmaintained `rustls-pemfile` dependency (RUSTSEC-2025-0134); PEM parsing now uses
   `rustls-pki-types` built-in `PemObject` trait.
+- **Security review (PLAN §P8 acceptance) — three hardening fixes from an adversarial audit of the
+  v3 signaling surface:**
+- Bounded the v3 `TransportStatus` → `PeerTransportStatus` room fan-out (PLAN §P8 / Appendix I). An
+  accepted `TransportStatus` state change fans out 1→N to the reporter's room; it was the one
+  client-triggered v3 control-plane emit path with no rate limit (the dedup gate is trivially
+  defeated by alternating `connected`), unlike the targeted `Signal` relay. The accepted-change
+  fan-out now consumes the same per-connection WebRTC control-plane budget as `Signal`
+  (`rate_limit.max_signals`); over-budget changes are dropped silently (the message is informational
+  and defines no error reply). The gate sits after the p2p/relay observability counters, the no-room
+  early return, and recipient resolution, so accurate metrics are never suppressed and a room-less
+  reporter, failed room-member lookup, or status report with no v3 room peers spends no budget;
+  the per-connection transport state is always recorded regardless of the budget. (The dominant
+  relay-floor `GameData` fan-out is intentionally bounded by other means — `max_message_size`,
+  connection/room caps, best-effort sends — so this only closes the control-plane consistency gap
+  with `Signal`.) Covered by `transport_status_fanout_is_bounded_by_signal_budget`.
+- Reject zero-valued background-task interval configs at startup instead of silently killing the
+  task at runtime (PLAN §P8 / Appendix J resource-exhaustion). `server.room_cleanup_interval`,
+  `rate_limit.time_window`, and (when `websocket.enable_batching` is true) `websocket.batch_interval_ms`
+  each become the period of a `tokio::time::interval`, which **panics** on a zero period — previously
+  this killed the spawned task while the process kept serving, so a one-line operator typo silently
+  disabled the maintenance sweep (unbounded room/client/token/lock growth), the rate-limiter cleanup
+  (and the rate-limit windows themselves), or every connection's batch flush. `validate_config_security`
+  now rejects these at startup with a field-named error. **Behavior change:** a config with one of
+  these set to `0` that previously started (degrading silently) now fails fast at startup. As
+  defense-in-depth for direct library construction (the server is part of the public API and may be
+  built without running config validation), the three interval use sites also clamp to a non-zero
+  floor, mirroring the existing dashboard-cache `.max(..)` zero-guard.
+- Consolidated all secret comparison into a single constant-time helper and closed two
+  non-constant-time compares (PLAN §P8 / Appendix I). New crate-internal `security::constant_time_eq`
+  (over `subtle`) is now the sole secret-comparison implementation, replacing two prior copies
+  (`auth::middleware` and `security::token_binding`). The reconnection-token check
+  (`reconnection::{validate,claim}_reconnection`) and the metrics bearer-token check
+  (`websocket::metrics`) previously used short-circuiting `String`/`&str` `==`/`!=`, leaking via
+  timing how many leading bytes matched; both now route through the constant-time helper, consistent
+  with the app-secret path. (Exploitation was already impractical — the reconnect token is a
+  122-bit v4 UUID — so this is a consistency/defense-in-depth hardening, not a fixed vulnerability.)
 
 ### Fixed
 
+- Fixed the Rust client guide's `GameDataEncoding` examples to match `ProtocolInfo.game_data_formats`:
+  `rkyv` remains reserved/internal and is not advertised or negotiated by the server.
+- Fixed widespread protocol-documentation drift found while reconciling the v2/v3 docs against
+  source (a 52-finding audit). The embedded-server examples in `README.md` and
+  `docs/library-usage.md` now call `EnhancedGameServer::new` with its real 11-argument signature
+  (the v3 `session_config` / `turn_config` were missing) and read `ServerConfig` fields from the
+  correct config sub-structs (`cfg.rate_limit` / `cfg.security` / `cfg.websocket`), so they
+  compile. Corrected the `/metrics` response to its actual camelCase nested shape and documented
+  metrics auth accurately (a single shared `security.metrics_auth_token` bearer token — and a hard
+  startup error when `require_metrics_auth` is set without it — not an `app_id:app_secret` pair).
+  Fixed the `supports_authority` default (it is `true`, so a freshly created room shows the creator
+  as the authority) and the matching `is_authority` flags across the `RoomJoined` / `Reconnected` /
+  `GameStarting` examples; corrected `relay_type` example values to the real default `"matchbox"`
+  (v3 transport is carried by `SessionPlan.transport`, not `relay_type`); the `GameData` example to
+  the double-nested `{"type":"GameData","data":{"data":...}}` envelope; the clean room-code alphabet
+  to 32 characters; the per-app rate limit as per-`app_id` (not per-IP); the failed-`Authenticate`
+  handler to the `AuthenticationError` message and `INVALID_APP_ID` code; and the spectator,
+  reconnection-token, and event-buffer descriptions to match server behavior. Added the Protocol v3
+  surface (transports/topologies, `SessionPlan`, targeted `Signal` relay, ICE pre-gather,
+  self-hosted TURN credential minting, idle timeout) to the `docs/features.md` and
+  `docs/architecture.md` overviews, and fixed cross-references that resolved on GitHub but 404'd on
+  the MkDocs site by rewording the `TURN / STUN` and `ICE / TURN` headings so both renderers produce
+  the same slug.
 - Fixed CI reliability by normalizing all workflow `actions/checkout` pins to `v6.0.3`, making the
   browser interop Chromium teardown check tolerant of process-name/topology drift with better
   `/proc` diagnostics, and allowing doc-consistency version checks to read CRLF `.llm/context.md`
@@ -532,6 +608,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zerocopy`, and others via `cargo update`).
 - Normalized internal documentation link labels to human-readable text across
   troubleshooting and reference docs.
+
+### Removed
+
+- Removed the `managed` TURN mode (the third-party-cloud credential source) and
+  its entire config surface — `turn.mode`, `turn.managed_provider`,
+  `turn.managed_api_token` — along with the `TurnMode` type. TURN is now
+  **self-hosted only**: when `turn.enabled`, the server self-mints coturn REST
+  credentials locally from `turn.static_auth_secret` for a TURN server the
+  operator runs, and never contacts a third-party cloud or uses external
+  credentials. `managed` was only ever a STUN-only stub, so no working
+  functionality is lost. The `[turn]` block is otherwise unchanged (`enabled`,
+  `static_auth_secret`, `urls`, `stun_urls`, `credential_ttl_secs`), and because
+  the config structs do not use `deny_unknown_fields`, a legacy config still
+  carrying `mode` / `managed_*` keys continues to load (the stale keys are
+  ignored). Updated `config.example.json`, `docs/configuration.md`, and
+  `docs/deployment-turn.md` to describe the self-hosted-only model.
 
 ## [0.2.0] - 2026-02-24
 

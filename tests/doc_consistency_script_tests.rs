@@ -70,6 +70,19 @@ signal-fish-server = { version = "0.1.1", features = ["tls"] }
             .to_string(),
         ),
         (
+            "docs/guides/rust-client.md",
+            r#"# Rust Client Guide
+
+```rust
+pub enum GameDataEncoding {
+    Json,
+    MessagePack,
+}
+```
+"#
+            .to_string(),
+        ),
+        (
             "CHANGELOG.md",
             r#"# Changelog
 
@@ -397,6 +410,56 @@ fn test_doc_consistency_script_data_driven_cases() {
             args: vec![],
             expected_exit: 1,
             must_contain: vec!["stale protocol token 'server_version'"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_rust_client_guide_lists_reserved_rkyv_as_advertised_format",
+            overrides: vec![(
+                "docs/guides/rust-client.md",
+                r#"# Rust Client Guide
+
+```rust
+pub enum GameDataEncoding {
+    Json,
+    MessagePack,
+    Rkyv,
+}
+```
+"#,
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec![
+                "GameDataEncoding sample 1 must not list Rkyv",
+                "ProtocolInfo.game_data_formats only advertises json and optional message_pack",
+            ],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_each_rust_client_game_data_encoding_sample_is_individually_incomplete",
+            overrides: vec![(
+                "docs/guides/rust-client.md",
+                r#"# Rust Client Guide
+
+```rust
+pub enum GameDataEncoding {
+    Json,
+}
+```
+
+```rust
+pub enum GameDataEncoding {
+    MessagePack,
+}
+```
+"#,
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec![
+                "GameDataEncoding sample 1 must include MessagePack",
+                "GameDataEncoding sample 2 must include Json",
+            ],
             must_not_contain: vec![],
         },
         ScriptCase {

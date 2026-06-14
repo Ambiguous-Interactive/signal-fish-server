@@ -78,5 +78,7 @@ Ready to build multiplayer into your game? Start here:
   talking in under 5 minutes
 - **[Rust Client Guide](guides/rust-client.md)** -- build a complete
   game client with room management, lobby flow, and data exchange
+- **[Platform Integration Guide](guides/platform-integration.md)** -- which WebRTC
+  stack to use per platform (browser, native, mobile, Steam, Godot, Unity, Unreal)
 - **[Protocol Reference](protocol.md)** -- every message type, field,
   and flow documented

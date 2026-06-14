@@ -179,6 +179,27 @@ impl EnhancedGameServer {
         let Some(room_id) = self.get_client_room(player_id).await else {
             return;
         };
+
+        // Cheap non-consuming preflight before the fallible/O(room) membership
+        // snapshot below. The consuming check still happens after recipient
+        // resolution, immediately before dispatch, so failed lookups and empty
+        // fan-outs do not burn a slot while already-over-budget clients cannot
+        // keep forcing room scans.
+        if self
+            .rate_limiter
+            .check_signal_available(player_id)
+            .await
+            .is_err()
+        {
+            tracing::debug!(
+                %player_id,
+                ?transport,
+                connected,
+                "Dropping TransportStatus fan-out: per-connection signal rate limit exceeded"
+            );
+            return;
+        }
+
         let members = match self.database.get_room_players(&room_id).await {
             Ok(members) => members,
             Err(err) => {
@@ -192,17 +213,67 @@ impl EnhancedGameServer {
             }
         };
 
+        // Resolve the exact v3 recipients before charging the sender's
+        // control-plane budget. A failed membership lookup, sender-only room,
+        // or room with only legacy recipients is not a fan-out event.
+        let recipients: Vec<PlayerId> = members
+            .iter()
+            .filter_map(|member| {
+                if member.id != *player_id && self.client_supports_v3(&member.id) {
+                    Some(member.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if recipients.is_empty() {
+            tracing::trace!(
+                %player_id,
+                %room_id,
+                ?transport,
+                connected,
+                "Skipping TransportStatus fan-out: no eligible v3 room peers"
+            );
+            return;
+        }
+
+        // The room fan-out below is the only 1→N amplifier on this path (the
+        // per-connection state update and the p2p/relay counters above are O(1)
+        // local bookkeeping), so consume the same per-connection WebRTC
+        // control-plane budget as `Signal` (`rate_limiter.check_signal`). A
+        // client that alternates `connected` to force a `Changed` on every frame
+        // (defeating the dedup gate above) therefore cannot use the tiny status
+        // message as an unbounded room amplifier. This consuming gate is placed
+        // after membership resolution and recipient filtering so a room-less
+        // reporter, failed room snapshot, or empty eligible recipient set
+        // consumes no budget for a fan-out that cannot happen. It is repeated
+        // despite the preflight above because another task can consume the last
+        // slot between preflight and dispatch. Over-budget changes are dropped
+        // SILENTLY: `TransportStatus` is informational and defines no error
+        // reply, and the per-connection state was already recorded above, so
+        // the connection's own transport truth stays current regardless of the
+        // fan-out budget. (The dominant relay-floor `GameData` fan-out is
+        // bounded by other means — size cap, connection/room caps, best-effort
+        // sends — so this only closes the control-plane consistency gap with
+        // `Signal`.)
+        if self.rate_limiter.check_signal(player_id).await.is_err() {
+            tracing::debug!(
+                %player_id,
+                ?transport,
+                connected,
+                "Dropping TransportStatus fan-out: per-connection signal rate limit exceeded"
+            );
+            return;
+        }
+
         let message = Arc::new(ServerMessage::PeerTransportStatus {
             peer_id: *player_id,
             transport,
             connected,
         });
-        for member in &members {
-            // The reporter never hears its own status echoed back.
-            if member.id == *player_id {
-                continue;
-            }
-            // Deliver only to recipients that negotiated v3 (defense-in-depth,
+        for recipient in recipients {
+            // Deliver only to peers that negotiated v3 (defense-in-depth,
             // Appendix K — the same per-recipient guard `Signal` / `NewPeer` /
             // `SessionPlan` apply: a v2 member must never observe a v3-only
             // message). Deliberately NOT gated on the recipient's own transport
@@ -210,16 +281,14 @@ impl EnhancedGameServer {
             // (`SessionPlanDecision::recipient_pairable`) — because this is
             // informational status about a PEER's data path, useful to any v3
             // client (a relay-only member still wants to know the host fell
-            // back to the relay), not an instruction to use that transport.
-            if !self.client_supports_v3(&member.id) {
-                continue;
-            }
+            // back to the relay), not an instruction to use that transport. The
+            // filtering happened above before the sender's budget was charged.
             // Best-effort delivery, mirroring `Signal` / `NewPeer`: a
             // backpressured peer may miss the notice; the relay floor (and the
             // next state change) is unaffected.
             let _ = self
                 .message_coordinator
-                .send_to_player(&member.id, Arc::clone(&message))
+                .send_to_player(&recipient, Arc::clone(&message))
                 .await;
         }
 

@@ -214,3 +214,4 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
 - [Protocol reference](../protocol.md)
 - [Configuration reference](../configuration.md)
 - [Handoff and topologies](handoff-and-topologies.md)
+- [Platform Integration Guide](../guides/platform-integration.md) — which WebRTC stack to use per platform

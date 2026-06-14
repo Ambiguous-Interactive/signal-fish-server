@@ -146,8 +146,12 @@ pub(super) async fn handle_socket(
         if batching_enabled {
             // Batching mode: collect multiple messages and send together
             let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
+            // Clamp to a 1ms floor: `batch_interval_ms` is validated `> 0` (when
+            // batching is enabled) at startup, but `tokio::time::interval`
+            // panics on a zero period, so guard the timer regardless of how this
+            // config was constructed.
             let mut flush_interval =
-                tokio::time::interval(Duration::from_millis(batch_interval_ms));
+                tokio::time::interval(Duration::from_millis(batch_interval_ms.max(1)));
             flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -460,17 +464,17 @@ pub(super) async fn handle_socket(
                                         Some(format) => {
                                             let supported_list: Vec<String> = supported_formats
                                                 .iter()
-                                                .map(|f| format!("{f:?}"))
+                                                .map(|format| format.as_wire_str().to_string())
                                                 .collect();
                                             let error_message = format!(
-                                                "Requested game data format {:?} is not supported. Server supports: {}. Falling back to JSON.",
-                                                format,
+                                                "Requested game data format '{}' is not supported. Server supports: {}. Falling back to JSON.",
+                                                format.as_wire_str(),
                                                 supported_list.join(", ")
                                             );
                                             tracing::warn!(
                                                 %active_player_id,
-                                                ?format,
-                                                ?supported_formats,
+                                                requested_format = format.as_wire_str(),
+                                                supported_formats = %supported_list.join(", "),
                                                 "Client requested unsupported game_data_format"
                                             );
                                             // Send error message to client about capability mismatch
