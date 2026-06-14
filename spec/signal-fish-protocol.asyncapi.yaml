@@ -1,0 +1,1132 @@
+# Signal Fish Protocol — machine-readable AsyncAPI 3.0 spec
+# ===========================================================
+#
+# This is the SOURCE-OF-TRUTH, codegen-friendly description of the Signal Fish
+# WebSocket signaling protocol. The wire format is JSON over WebSocket; every
+# message is a `{ "type": <Variant>, "data": <payload> }` envelope (serde
+# `#[serde(tag = "type", content = "data")]`). Variants WITHOUT a payload
+# (e.g. LeaveRoom, Ping, RoomLeft, Pong) are sent as `{ "type": <Variant> }`
+# with no `data` field.
+#
+# It models EVERY `ClientMessage` (send / client -> server) and `ServerMessage`
+# (receive / server -> client) variant from `src/protocol/messages.rs`, plus the
+# full `ErrorCode` enum from `src/protocol/error_codes.rs`. A Rust consistency
+# test — `tests/protocol_spec_consistency.rs` — fails the build if this file
+# drifts from those Rust types, so codegen consumers can trust it.
+#
+# ---------------------------------------------------------------------------
+# HOW TO USE FOR CODEGEN
+# ---------------------------------------------------------------------------
+# * AsyncAPI generator (TypeScript / Java / Python / etc. models + clients):
+#       npx @asyncapi/generator spec/signal-fish-protocol.asyncapi.yaml \
+#         @asyncapi/typescript-template -o ./generated
+#   See https://www.asyncapi.com/tools/generator for the template list.
+#
+# * Pure JSON-Schema model generators: every message `payload` below is a plain
+#   JSON Schema (the `components.schemas.*` subtree is self-contained). Point a
+#   JSON-Schema-based generator (quicktype, json-schema-to-typescript, schemafy
+#   for Rust, etc.) at the `components/schemas` block, e.g.:
+#       npx quicktype --src-lang schema --lang rust \
+#         <(yq '.components.schemas' spec/signal-fish-protocol.asyncapi.yaml)
+#
+# * Discriminator: the `type` field is the discriminator on both the
+#   `ClientMessage` and `ServerMessage` unions (see `components.messages.*` and
+#   the `oneOf` wrappers `ClientMessageEnvelope` / `ServerMessageEnvelope`).
+#
+# ---------------------------------------------------------------------------
+# PROTOCOL VERSION FLOOR (v2) vs CAPABILITY UPGRADE (v3)
+# ---------------------------------------------------------------------------
+# * v2 is the RELAY FLOOR every client MUST implement. The mandatory flow is
+#   Authenticate -> JoinRoom -> PlayerReady -> StartGame -> GameStarting ->
+#   GameData -> LeaveRoom. The server relays GameData through the WebSocket.
+# * v3 is an OPTIONAL upgrade that adds capability negotiation
+#   (`supported_transports` / `supported_topologies` / `protocol_version` on
+#   Authenticate) plus the peer-to-peer messages: Signal, SessionPlan, NewPeer,
+#   TransportStatus, PeerTransportStatus. v3 messages are tagged `x-protocol: v3`
+#   below. A relay-only room never emits SessionPlan, so a v2 client never sees
+#   v3 messages.
+# See docs/concepts/protocol-versions.md and docs/guides/building-a-client.md.
+
+asyncapi: 3.0.0
+
+info:
+  title: Signal Fish Signaling Protocol
+  version: 0.2.0
+  description: |
+    JSON-over-WebSocket signaling protocol for peer-to-peer game networking.
+    v2 relay floor + optional v3 capability negotiation / WebRTC signaling.
+  license:
+    name: MIT
+
+defaultContentType: application/json
+
+servers:
+  v2:
+    host: 'localhost:8080'
+    pathname: /v2/ws
+    protocol: ws
+    description: v2 relay-floor endpoint. Default negotiated protocol version is 2.
+  v3:
+    host: 'localhost:8080'
+    pathname: /v3/ws
+    protocol: ws
+    description: |
+      v3 endpoint. Defaults the omitted Authenticate.protocol_version to 3, but a
+      client is relay-only unless it also advertises supported_transports /
+      supported_topologies. Server clamps to its configured protocol range.
+
+channels:
+  signaling:
+    address: /
+    description: The single bidirectional WebSocket channel carrying all messages.
+    messages:
+      # ----- send: client -> server -----
+      Authenticate: { $ref: '#/components/messages/Authenticate' }
+      JoinRoom: { $ref: '#/components/messages/JoinRoom' }
+      LeaveRoom: { $ref: '#/components/messages/LeaveRoom' }
+      ClientGameData: { $ref: '#/components/messages/ClientGameData' }
+      ClientSignal: { $ref: '#/components/messages/ClientSignal' }
+      AuthorityRequest: { $ref: '#/components/messages/AuthorityRequest' }
+      PlayerReady: { $ref: '#/components/messages/PlayerReady' }
+      StartGame: { $ref: '#/components/messages/StartGame' }
+      ProvideConnectionInfo: { $ref: '#/components/messages/ProvideConnectionInfo' }
+      Ping: { $ref: '#/components/messages/Ping' }
+      Reconnect: { $ref: '#/components/messages/Reconnect' }
+      JoinAsSpectator: { $ref: '#/components/messages/JoinAsSpectator' }
+      LeaveSpectator: { $ref: '#/components/messages/LeaveSpectator' }
+      TransportStatus: { $ref: '#/components/messages/TransportStatus' }
+      # ----- receive: server -> client -----
+      Authenticated: { $ref: '#/components/messages/Authenticated' }
+      ProtocolInfo: { $ref: '#/components/messages/ProtocolInfo' }
+      AuthenticationError: { $ref: '#/components/messages/AuthenticationError' }
+      RoomJoined: { $ref: '#/components/messages/RoomJoined' }
+      RoomJoinFailed: { $ref: '#/components/messages/RoomJoinFailed' }
+      RoomLeft: { $ref: '#/components/messages/RoomLeft' }
+      PlayerJoined: { $ref: '#/components/messages/PlayerJoined' }
+      PlayerLeft: { $ref: '#/components/messages/PlayerLeft' }
+      ServerGameData: { $ref: '#/components/messages/ServerGameData' }
+      GameDataBinary: { $ref: '#/components/messages/GameDataBinary' }
+      AuthorityChanged: { $ref: '#/components/messages/AuthorityChanged' }
+      AuthorityResponse: { $ref: '#/components/messages/AuthorityResponse' }
+      LobbyStateChanged: { $ref: '#/components/messages/LobbyStateChanged' }
+      GameStarting: { $ref: '#/components/messages/GameStarting' }
+      ServerSignal: { $ref: '#/components/messages/ServerSignal' }
+      NewPeer: { $ref: '#/components/messages/NewPeer' }
+      SessionPlan: { $ref: '#/components/messages/SessionPlan' }
+      Pong: { $ref: '#/components/messages/Pong' }
+      Reconnected: { $ref: '#/components/messages/Reconnected' }
+      ReconnectionFailed: { $ref: '#/components/messages/ReconnectionFailed' }
+      PlayerReconnected: { $ref: '#/components/messages/PlayerReconnected' }
+      SpectatorJoined: { $ref: '#/components/messages/SpectatorJoined' }
+      SpectatorJoinFailed: { $ref: '#/components/messages/SpectatorJoinFailed' }
+      SpectatorLeft: { $ref: '#/components/messages/SpectatorLeft' }
+      NewSpectatorJoined: { $ref: '#/components/messages/NewSpectatorJoined' }
+      SpectatorDisconnected: { $ref: '#/components/messages/SpectatorDisconnected' }
+      Error: { $ref: '#/components/messages/Error' }
+      PeerTransportStatus: { $ref: '#/components/messages/PeerTransportStatus' }
+
+operations:
+  sendToServer:
+    action: send
+    channel: { $ref: '#/channels/signaling' }
+    title: Client -> Server messages (ClientMessage)
+    messages:
+      - { $ref: '#/channels/signaling/messages/Authenticate' }
+      - { $ref: '#/channels/signaling/messages/JoinRoom' }
+      - { $ref: '#/channels/signaling/messages/LeaveRoom' }
+      - { $ref: '#/channels/signaling/messages/ClientGameData' }
+      - { $ref: '#/channels/signaling/messages/ClientSignal' }
+      - { $ref: '#/channels/signaling/messages/AuthorityRequest' }
+      - { $ref: '#/channels/signaling/messages/PlayerReady' }
+      - { $ref: '#/channels/signaling/messages/StartGame' }
+      - { $ref: '#/channels/signaling/messages/ProvideConnectionInfo' }
+      - { $ref: '#/channels/signaling/messages/Ping' }
+      - { $ref: '#/channels/signaling/messages/Reconnect' }
+      - { $ref: '#/channels/signaling/messages/JoinAsSpectator' }
+      - { $ref: '#/channels/signaling/messages/LeaveSpectator' }
+      - { $ref: '#/channels/signaling/messages/TransportStatus' }
+  receiveFromServer:
+    action: receive
+    channel: { $ref: '#/channels/signaling' }
+    title: Server -> Client messages (ServerMessage)
+    messages:
+      - { $ref: '#/channels/signaling/messages/Authenticated' }
+      - { $ref: '#/channels/signaling/messages/ProtocolInfo' }
+      - { $ref: '#/channels/signaling/messages/AuthenticationError' }
+      - { $ref: '#/channels/signaling/messages/RoomJoined' }
+      - { $ref: '#/channels/signaling/messages/RoomJoinFailed' }
+      - { $ref: '#/channels/signaling/messages/RoomLeft' }
+      - { $ref: '#/channels/signaling/messages/PlayerJoined' }
+      - { $ref: '#/channels/signaling/messages/PlayerLeft' }
+      - { $ref: '#/channels/signaling/messages/ServerGameData' }
+      - { $ref: '#/channels/signaling/messages/GameDataBinary' }
+      - { $ref: '#/channels/signaling/messages/AuthorityChanged' }
+      - { $ref: '#/channels/signaling/messages/AuthorityResponse' }
+      - { $ref: '#/channels/signaling/messages/LobbyStateChanged' }
+      - { $ref: '#/channels/signaling/messages/GameStarting' }
+      - { $ref: '#/channels/signaling/messages/ServerSignal' }
+      - { $ref: '#/channels/signaling/messages/NewPeer' }
+      - { $ref: '#/channels/signaling/messages/SessionPlan' }
+      - { $ref: '#/channels/signaling/messages/Pong' }
+      - { $ref: '#/channels/signaling/messages/Reconnected' }
+      - { $ref: '#/channels/signaling/messages/ReconnectionFailed' }
+      - { $ref: '#/channels/signaling/messages/PlayerReconnected' }
+      - { $ref: '#/channels/signaling/messages/SpectatorJoined' }
+      - { $ref: '#/channels/signaling/messages/SpectatorJoinFailed' }
+      - { $ref: '#/channels/signaling/messages/SpectatorLeft' }
+      - { $ref: '#/channels/signaling/messages/NewSpectatorJoined' }
+      - { $ref: '#/channels/signaling/messages/SpectatorDisconnected' }
+      - { $ref: '#/channels/signaling/messages/Error' }
+      - { $ref: '#/channels/signaling/messages/PeerTransportStatus' }
+
+components:
+  messages:
+    # =====================================================================
+    # CLIENT -> SERVER (ClientMessage)
+    # =====================================================================
+    Authenticate:
+      title: Authenticate
+      summary: MUST be the first message. App ID is a public identifier, not a secret.
+      payload: { $ref: '#/components/schemas/Authenticate' }
+    JoinRoom:
+      title: JoinRoom
+      summary: Join an existing room (room_code) or create one (room_code omitted).
+      payload: { $ref: '#/components/schemas/JoinRoom' }
+    LeaveRoom:
+      title: LeaveRoom
+      summary: Leave the current room. No data payload.
+      payload: { $ref: '#/components/schemas/LeaveRoom' }
+    ClientGameData:
+      title: GameData
+      summary: Send opaque game data to other players in the room (relay floor).
+      payload: { $ref: '#/components/schemas/ClientGameData' }
+    ClientSignal:
+      title: Signal
+      summary: 'v3: relay an opaque WebRTC signal to a specific peer. Forwarded verbatim.'
+      payload: { $ref: '#/components/schemas/ClientSignal' }
+    AuthorityRequest:
+      title: AuthorityRequest
+      summary: Request to become / connect to the authoritative peer.
+      payload: { $ref: '#/components/schemas/AuthorityRequest' }
+    PlayerReady:
+      title: PlayerReady
+      summary: Toggle this player's lobby readiness. No data payload.
+      payload: { $ref: '#/components/schemas/PlayerReady' }
+    StartGame:
+      title: StartGame
+      summary: >-
+        Explicitly finalize the lobby and start. Accepted only when all_ready; if
+        the room has an authority only that authority may start, else any player
+        may. No data payload.
+      payload: { $ref: '#/components/schemas/StartGame' }
+    ProvideConnectionInfo:
+      title: ProvideConnectionInfo
+      summary: Legacy self-declared v2 connection metadata for GameStarting.
+      payload: { $ref: '#/components/schemas/ProvideConnectionInfo' }
+    Ping:
+      title: Ping
+      summary: Heartbeat. No data payload.
+      payload: { $ref: '#/components/schemas/Ping' }
+    Reconnect:
+      title: Reconnect
+      summary: Reconnect to a room after disconnection using the join auth_token.
+      payload: { $ref: '#/components/schemas/Reconnect' }
+    JoinAsSpectator:
+      title: JoinAsSpectator
+      summary: Join a room as a read-only observer.
+      payload: { $ref: '#/components/schemas/JoinAsSpectator' }
+    LeaveSpectator:
+      title: LeaveSpectator
+      summary: Leave spectator mode. No data payload.
+      payload: { $ref: '#/components/schemas/LeaveSpectator' }
+    TransportStatus:
+      title: TransportStatus
+      summary: 'v3: report this client''s data-path transport state (informational).'
+      payload: { $ref: '#/components/schemas/TransportStatus' }
+
+    # =====================================================================
+    # SERVER -> CLIENT (ServerMessage)
+    # =====================================================================
+    Authenticated:
+      title: Authenticated
+      payload: { $ref: '#/components/schemas/Authenticated' }
+    ProtocolInfo:
+      title: ProtocolInfo
+      summary: SDK/protocol compatibility + negotiated version range.
+      payload: { $ref: '#/components/schemas/ProtocolInfo' }
+    AuthenticationError:
+      title: AuthenticationError
+      payload: { $ref: '#/components/schemas/AuthenticationError' }
+    RoomJoined:
+      title: RoomJoined
+      payload: { $ref: '#/components/schemas/RoomJoined' }
+    RoomJoinFailed:
+      title: RoomJoinFailed
+      payload: { $ref: '#/components/schemas/RoomJoinFailed' }
+    RoomLeft:
+      title: RoomLeft
+      summary: Successfully left the room. No data payload.
+      payload: { $ref: '#/components/schemas/RoomLeft' }
+    PlayerJoined:
+      title: PlayerJoined
+      payload: { $ref: '#/components/schemas/PlayerJoined' }
+    PlayerLeft:
+      title: PlayerLeft
+      payload: { $ref: '#/components/schemas/PlayerLeft' }
+    ServerGameData:
+      title: GameData
+      summary: Game data forwarded from another player.
+      payload: { $ref: '#/components/schemas/ServerGameData' }
+    GameDataBinary:
+      title: GameDataBinary
+      summary: >-
+        In-memory broadcast carrier. Negotiated MessagePack clients receive a bare
+        binary WebSocket frame, not this enveloped variant.
+      payload: { $ref: '#/components/schemas/GameDataBinary' }
+    AuthorityChanged:
+      title: AuthorityChanged
+      payload: { $ref: '#/components/schemas/AuthorityChanged' }
+    AuthorityResponse:
+      title: AuthorityResponse
+      payload: { $ref: '#/components/schemas/AuthorityResponse' }
+    LobbyStateChanged:
+      title: LobbyStateChanged
+      payload: { $ref: '#/components/schemas/LobbyStateChanged' }
+    GameStarting:
+      title: GameStarting
+      summary: >-
+        Game is starting with legacy peer metadata. v3 topology/transport/ICE
+        directives are carried by SessionPlan, not here.
+      payload: { $ref: '#/components/schemas/GameStarting' }
+    ServerSignal:
+      title: Signal
+      summary: 'v3: relayed opaque WebRTC signal from another peer. Verbatim.'
+      payload: { $ref: '#/components/schemas/ServerSignal' }
+    NewPeer:
+      title: NewPeer
+      summary: >-
+        v3: a new peer is available for a WebRTC connection. you_initiate
+        designates the single offerer (server-driven glare resolution).
+      payload: { $ref: '#/components/schemas/NewPeer' }
+    SessionPlan:
+      title: SessionPlan
+      summary: >-
+        v3: per-recipient session directive at lobby finalization. Latest
+        SessionPlan wins. A relay-only room emits none.
+      payload: { $ref: '#/components/schemas/SessionPlan' }
+    Pong:
+      title: Pong
+      summary: Pong response to Ping. No data payload.
+      payload: { $ref: '#/components/schemas/Pong' }
+    Reconnected:
+      title: Reconnected
+      payload: { $ref: '#/components/schemas/Reconnected' }
+    ReconnectionFailed:
+      title: ReconnectionFailed
+      payload: { $ref: '#/components/schemas/ReconnectionFailed' }
+    PlayerReconnected:
+      title: PlayerReconnected
+      payload: { $ref: '#/components/schemas/PlayerReconnected' }
+    SpectatorJoined:
+      title: SpectatorJoined
+      payload: { $ref: '#/components/schemas/SpectatorJoined' }
+    SpectatorJoinFailed:
+      title: SpectatorJoinFailed
+      payload: { $ref: '#/components/schemas/SpectatorJoinFailed' }
+    SpectatorLeft:
+      title: SpectatorLeft
+      payload: { $ref: '#/components/schemas/SpectatorLeft' }
+    NewSpectatorJoined:
+      title: NewSpectatorJoined
+      payload: { $ref: '#/components/schemas/NewSpectatorJoined' }
+    SpectatorDisconnected:
+      title: SpectatorDisconnected
+      payload: { $ref: '#/components/schemas/SpectatorDisconnected' }
+    Error:
+      title: Error
+      payload: { $ref: '#/components/schemas/Error' }
+    PeerTransportStatus:
+      title: PeerTransportStatus
+      summary: 'v3: a same-room peer''s reported data-path transport state changed.'
+      payload: { $ref: '#/components/schemas/PeerTransportStatus' }
+
+  schemas:
+    # ---------------------------------------------------------------------
+    # Shared token enums (Appendix A wire tokens)
+    # ---------------------------------------------------------------------
+    Transport:
+      type: string
+      description: Data-path transport. relay is the universal floor.
+      enum: [relay, direct, webrtc]
+    Topology:
+      type: string
+      description: Session topology negotiated for a room.
+      enum: [relay, host, mesh]
+    RelayTransport:
+      type: string
+      description: Preferred relay transport protocol for GameData fan-out.
+      enum: [tcp, udp, websocket, auto]
+    GameDataEncoding:
+      type: string
+      description: Game data encoding. rkyv is reserved/internal and not advertised.
+      enum: [json, message_pack, rkyv]
+    LobbyState:
+      type: string
+      enum: [waiting, lobby, finalized]
+    SpectatorStateChangeReason:
+      type: string
+      enum: [joined, voluntary_leave, disconnected, removed, room_closed]
+    PlayerId:
+      type: string
+      format: uuid
+      description: Player UUID.
+    RoomId:
+      type: string
+      format: uuid
+      description: Room UUID.
+    ErrorCode:
+      type: string
+      description: >-
+        Structured error code (SCREAMING_SNAKE_CASE). Mirrors the ErrorCode enum
+        in src/protocol/error_codes.rs; guarded by tests/protocol_spec_consistency.rs.
+      enum:
+        - UNAUTHORIZED
+        - INVALID_TOKEN
+        - AUTHENTICATION_REQUIRED
+        - INVALID_APP_ID
+        - APP_ID_EXPIRED
+        - APP_ID_REVOKED
+        - APP_ID_SUSPENDED
+        - MISSING_APP_ID
+        - AUTHENTICATION_TIMEOUT
+        - SDK_VERSION_UNSUPPORTED
+        - UNSUPPORTED_GAME_DATA_FORMAT
+        - INVALID_INPUT
+        - INVALID_GAME_NAME
+        - INVALID_ROOM_CODE
+        - INVALID_PLAYER_NAME
+        - INVALID_MAX_PLAYERS
+        - MESSAGE_TOO_LARGE
+        - ROOM_NOT_FOUND
+        - ROOM_FULL
+        - ALREADY_IN_ROOM
+        - NOT_IN_ROOM
+        - ROOM_CREATION_FAILED
+        - MAX_ROOMS_PER_GAME_EXCEEDED
+        - INVALID_ROOM_STATE
+        - AUTHORITY_NOT_SUPPORTED
+        - AUTHORITY_CONFLICT
+        - AUTHORITY_DENIED
+        - RATE_LIMIT_EXCEEDED
+        - TOO_MANY_CONNECTIONS
+        - RECONNECTION_FAILED
+        - RECONNECTION_TOKEN_INVALID
+        - RECONNECTION_EXPIRED
+        - PLAYER_ALREADY_CONNECTED
+        - SPECTATOR_NOT_ALLOWED
+        - TOO_MANY_SPECTATORS
+        - NOT_A_SPECTATOR
+        - SPECTATOR_JOIN_FAILED
+        - INTERNAL_ERROR
+        - STORAGE_ERROR
+        - SERVICE_UNAVAILABLE
+        - CROSS_ROOM_SIGNAL
+        - UNSUPPORTED_TRANSPORT
+        - SIGNAL_TARGET_NOT_FOUND
+        - SIGNAL_RATE_LIMITED
+        - SIGNAL_TOO_LARGE
+        - CONNECTION_IDLE_TIMEOUT
+        - GAME_START_NOT_READY
+        - GAME_START_FORBIDDEN
+
+    # ---------------------------------------------------------------------
+    # Shared object schemas
+    # ---------------------------------------------------------------------
+    RateLimitInfo:
+      type: object
+      required: [per_minute, per_hour, per_day]
+      properties:
+        per_minute: { type: integer }
+        per_hour: { type: integer }
+        per_day: { type: integer }
+    IceServer:
+      type: object
+      description: Mirrors RTCIceServer. STUN needs no credentials.
+      required: [urls]
+      properties:
+        urls:
+          type: array
+          items: { type: string }
+        username: { type: string }
+        credential: { type: string }
+    PlayerInfo:
+      type: object
+      required: [id, name, is_authority, is_ready, connected_at]
+      properties:
+        id: { $ref: '#/components/schemas/PlayerId' }
+        name: { type: string }
+        is_authority: { type: boolean }
+        is_ready: { type: boolean }
+        connected_at: { type: string, format: date-time }
+        connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
+    SpectatorInfo:
+      type: object
+      required: [id, name, connected_at]
+      properties:
+        id: { $ref: '#/components/schemas/PlayerId' }
+        name: { type: string }
+        connected_at: { type: string, format: date-time }
+    SessionPeer:
+      type: object
+      required: [player_id, player_name, is_authority, initiate]
+      properties:
+        player_id: { $ref: '#/components/schemas/PlayerId' }
+        player_name: { type: string }
+        is_authority: { type: boolean }
+        initiate:
+          type: boolean
+          description: >-
+            True if the recipient sends the WebRTC offer to this peer. Server
+            decides this (glare resolution); clients MUST NOT recompute it.
+    PeerConnectionInfo:
+      type: object
+      required: [player_id, player_name, is_authority, relay_type]
+      properties:
+        player_id: { $ref: '#/components/schemas/PlayerId' }
+        player_name: { type: string }
+        is_authority: { type: boolean }
+        relay_type: { type: string }
+        connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
+    ConnectionInfo:
+      type: object
+      description: >-
+        Legacy self-declared peer metadata (tagged by an inner `type` field:
+        direct | unity_relay | relay | webrtc | custom). Not v3 negotiation.
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [direct, unity_relay, relay, webrtc, custom]
+      additionalProperties: true
+    PlayerNameRulesPayload:
+      type: object
+      required:
+        - max_length
+        - min_length
+        - allow_unicode_alphanumeric
+        - allow_spaces
+        - allow_leading_trailing_whitespace
+      properties:
+        max_length: { type: integer }
+        min_length: { type: integer }
+        allow_unicode_alphanumeric: { type: boolean }
+        allow_spaces: { type: boolean }
+        allow_leading_trailing_whitespace: { type: boolean }
+        allowed_symbols:
+          type: array
+          items: { type: string }
+        additional_allowed_characters: { type: string }
+
+    # ---------------------------------------------------------------------
+    # ClientMessage payloads
+    # ---------------------------------------------------------------------
+    Authenticate:
+      type: object
+      properties:
+        type: { const: Authenticate }
+        data:
+          type: object
+          required: [app_id]
+          properties:
+            app_id:
+              type: string
+              description: Public App ID (safe to embed in builds).
+            sdk_version: { type: string }
+            platform: { type: string }
+            game_data_format: { $ref: '#/components/schemas/GameDataEncoding' }
+            protocol_version:
+              type: integer
+              description: 'v3: highest protocol version the client speaks.'
+            supported_transports:
+              type: array
+              description: 'v3: data-path transports the client supports (absent => relay-only).'
+              items: { $ref: '#/components/schemas/Transport' }
+            supported_topologies:
+              type: array
+              description: 'v3: session topologies the client supports (absent => relay-only).'
+              items: { $ref: '#/components/schemas/Topology' }
+      required: [type, data]
+    JoinRoom:
+      type: object
+      properties:
+        type: { const: JoinRoom }
+        data:
+          type: object
+          required: [game_name, player_name]
+          properties:
+            game_name: { type: string }
+            room_code:
+              type: string
+              description: Omit to create a new room; provide to join/create by code.
+            player_name: { type: string }
+            max_players: { type: integer, description: Ceiling, not a required count. }
+            supports_authority: { type: boolean }
+            relay_transport: { $ref: '#/components/schemas/RelayTransport' }
+      required: [type, data]
+    LeaveRoom:
+      type: object
+      description: No data payload.
+      properties:
+        type: { const: LeaveRoom }
+      required: [type]
+    ClientGameData:
+      type: object
+      properties:
+        type: { const: GameData }
+        data:
+          type: object
+          required: [data]
+          properties:
+            data:
+              description: Opaque application game data (any JSON value).
+      required: [type, data]
+    ClientSignal:
+      type: object
+      description: 'v3 only.'
+      properties:
+        type: { const: Signal }
+        data:
+          type: object
+          required: [to, signal]
+          properties:
+            to: { $ref: '#/components/schemas/PlayerId' }
+            signal:
+              description: >-
+                Opaque, forwarded verbatim. By convention matchbox-compatible:
+                {"Offer":..} | {"Answer":..} | {"IceCandidate":..}.
+      required: [type, data]
+    AuthorityRequest:
+      type: object
+      properties:
+        type: { const: AuthorityRequest }
+        data:
+          type: object
+          required: [become_authority]
+          properties:
+            become_authority: { type: boolean }
+      required: [type, data]
+    PlayerReady:
+      type: object
+      description: No data payload. Toggles readiness.
+      properties:
+        type: { const: PlayerReady }
+      required: [type]
+    StartGame:
+      type: object
+      description: >-
+        No data payload. Accepted only when all_ready. Authorization: if the room
+        has a designated authority only that authority may start; otherwise any
+        player may. Rejected with GAME_START_NOT_READY / GAME_START_FORBIDDEN.
+      properties:
+        type: { const: StartGame }
+      required: [type]
+    ProvideConnectionInfo:
+      type: object
+      properties:
+        type: { const: ProvideConnectionInfo }
+        data:
+          type: object
+          required: [connection_info]
+          properties:
+            connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
+      required: [type, data]
+    Ping:
+      type: object
+      description: No data payload.
+      properties:
+        type: { const: Ping }
+      required: [type]
+    Reconnect:
+      type: object
+      properties:
+        type: { const: Reconnect }
+        data:
+          type: object
+          required: [player_id, room_id, auth_token]
+          properties:
+            player_id: { $ref: '#/components/schemas/PlayerId' }
+            room_id: { $ref: '#/components/schemas/RoomId' }
+            auth_token: { type: string, description: Token issued at initial join. }
+      required: [type, data]
+    JoinAsSpectator:
+      type: object
+      properties:
+        type: { const: JoinAsSpectator }
+        data:
+          type: object
+          required: [game_name, room_code, spectator_name]
+          properties:
+            game_name: { type: string }
+            room_code: { type: string }
+            spectator_name: { type: string }
+      required: [type, data]
+    LeaveSpectator:
+      type: object
+      description: No data payload.
+      properties:
+        type: { const: LeaveSpectator }
+      required: [type]
+    TransportStatus:
+      type: object
+      description: 'v3 only. Purely informational; the relay floor never closes.'
+      properties:
+        type: { const: TransportStatus }
+        data:
+          type: object
+          required: [transport, connected]
+          properties:
+            transport: { $ref: '#/components/schemas/Transport' }
+            connected: { type: boolean }
+      required: [type, data]
+
+    # ---------------------------------------------------------------------
+    # ServerMessage payloads
+    # ---------------------------------------------------------------------
+    Authenticated:
+      type: object
+      properties:
+        type: { const: Authenticated }
+        data:
+          type: object
+          required: [app_name, rate_limits]
+          properties:
+            app_name: { type: string }
+            organization: { type: string }
+            rate_limits: { $ref: '#/components/schemas/RateLimitInfo' }
+      required: [type, data]
+    ProtocolInfo:
+      type: object
+      description: >-
+        Payload is a flattened ProtocolInfoPayload (newtype variant). v3 fields
+        protocol_version / min_protocol_version / max_protocol_version are absent
+        on negotiated v2 connections.
+      properties:
+        type: { const: ProtocolInfo }
+        data:
+          type: object
+          properties:
+            platform: { type: string }
+            sdk_version: { type: string }
+            minimum_version: { type: string }
+            recommended_version: { type: string }
+            capabilities:
+              type: array
+              items: { type: string }
+            notes: { type: string }
+            game_data_formats:
+              type: array
+              items: { $ref: '#/components/schemas/GameDataEncoding' }
+            player_name_rules: { $ref: '#/components/schemas/PlayerNameRulesPayload' }
+            protocol_version: { type: integer }
+            min_protocol_version: { type: integer }
+            max_protocol_version: { type: integer }
+      required: [type, data]
+    AuthenticationError:
+      type: object
+      properties:
+        type: { const: AuthenticationError }
+        data:
+          type: object
+          required: [error, error_code]
+          properties:
+            error: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    RoomJoined:
+      type: object
+      description: Payload is a flattened RoomJoinedPayload (boxed newtype variant).
+      properties:
+        type: { const: RoomJoined }
+        data:
+          type: object
+          required:
+            - room_id
+            - room_code
+            - player_id
+            - game_name
+            - max_players
+            - supports_authority
+            - current_players
+            - is_authority
+            - lobby_state
+            - ready_players
+            - relay_type
+          properties:
+            room_id: { $ref: '#/components/schemas/RoomId' }
+            room_code: { type: string }
+            player_id: { $ref: '#/components/schemas/PlayerId' }
+            game_name: { type: string }
+            max_players: { type: integer }
+            supports_authority: { type: boolean }
+            current_players:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerInfo' }
+            is_authority: { type: boolean }
+            lobby_state: { $ref: '#/components/schemas/LobbyState' }
+            ready_players:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerId' }
+            relay_type: { type: string }
+            current_spectators:
+              type: array
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
+            ice_servers:
+              type: array
+              description: 'v3 pre-gather only; superseded by SessionPlan.ice_servers.'
+              items: { $ref: '#/components/schemas/IceServer' }
+      required: [type, data]
+    RoomJoinFailed:
+      type: object
+      properties:
+        type: { const: RoomJoinFailed }
+        data:
+          type: object
+          required: [reason]
+          properties:
+            reason: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    RoomLeft:
+      type: object
+      description: No data payload.
+      properties:
+        type: { const: RoomLeft }
+      required: [type]
+    PlayerJoined:
+      type: object
+      properties:
+        type: { const: PlayerJoined }
+        data:
+          type: object
+          required: [player]
+          properties:
+            player: { $ref: '#/components/schemas/PlayerInfo' }
+      required: [type, data]
+    PlayerLeft:
+      type: object
+      properties:
+        type: { const: PlayerLeft }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { $ref: '#/components/schemas/PlayerId' }
+      required: [type, data]
+    ServerGameData:
+      type: object
+      properties:
+        type: { const: GameData }
+        data:
+          type: object
+          required: [from_player, data]
+          properties:
+            from_player: { $ref: '#/components/schemas/PlayerId' }
+            data:
+              description: Opaque application game data (any JSON value).
+      required: [type, data]
+    GameDataBinary:
+      type: object
+      properties:
+        type: { const: GameDataBinary }
+        data:
+          type: object
+          required: [from_player, encoding, payload]
+          properties:
+            from_player: { $ref: '#/components/schemas/PlayerId' }
+            encoding: { $ref: '#/components/schemas/GameDataEncoding' }
+            payload: { type: string, description: Byte payload (serde_bytes). }
+      required: [type, data]
+    AuthorityChanged:
+      type: object
+      properties:
+        type: { const: AuthorityChanged }
+        data:
+          type: object
+          required: [you_are_authority]
+          properties:
+            authority_player: { $ref: '#/components/schemas/PlayerId' }
+            you_are_authority: { type: boolean }
+      required: [type, data]
+    AuthorityResponse:
+      type: object
+      properties:
+        type: { const: AuthorityResponse }
+        data:
+          type: object
+          required: [granted]
+          properties:
+            granted: { type: boolean }
+            reason: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    LobbyStateChanged:
+      type: object
+      properties:
+        type: { const: LobbyStateChanged }
+        data:
+          type: object
+          required: [lobby_state, ready_players, all_ready]
+          properties:
+            lobby_state: { $ref: '#/components/schemas/LobbyState' }
+            ready_players:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerId' }
+            all_ready: { type: boolean }
+      required: [type, data]
+    GameStarting:
+      type: object
+      properties:
+        type: { const: GameStarting }
+        data:
+          type: object
+          required: [peer_connections]
+          properties:
+            peer_connections:
+              type: array
+              items: { $ref: '#/components/schemas/PeerConnectionInfo' }
+      required: [type, data]
+    ServerSignal:
+      type: object
+      description: 'v3 only.'
+      properties:
+        type: { const: Signal }
+        data:
+          type: object
+          required: [from, signal]
+          properties:
+            from: { $ref: '#/components/schemas/PlayerId' }
+            signal:
+              description: Opaque WebRTC signal forwarded verbatim from a peer.
+      required: [type, data]
+    NewPeer:
+      type: object
+      description: 'v3 only.'
+      properties:
+        type: { const: NewPeer }
+        data:
+          type: object
+          required: [peer_id, you_initiate]
+          properties:
+            peer_id: { $ref: '#/components/schemas/PlayerId' }
+            you_initiate:
+              type: boolean
+              description: >-
+                Server-decided offerer flag (glare resolution). Clients MUST NOT
+                recompute it. On NewPeer, additively connect to the new peer.
+      required: [type, data]
+    SessionPlan:
+      type: object
+      description: >-
+        v3 only. Per-recipient. Payload is a flattened SessionPlanPayload (boxed
+        newtype variant). Latest SessionPlan wins.
+      properties:
+        type: { const: SessionPlan }
+        data:
+          type: object
+          required: [topology, transport, peers, fallback]
+          properties:
+            topology: { $ref: '#/components/schemas/Topology' }
+            transport: { $ref: '#/components/schemas/Transport' }
+            host:
+              allOf: [{ $ref: '#/components/schemas/PlayerId' }]
+              description: Present only for host topology.
+            peers:
+              type: array
+              items: { $ref: '#/components/schemas/SessionPeer' }
+            ice_servers:
+              type: array
+              items: { $ref: '#/components/schemas/IceServer' }
+            fallback:
+              allOf: [{ $ref: '#/components/schemas/Transport' }]
+              description: Universal fallback transport; always relay (the floor).
+      required: [type, data]
+    Pong:
+      type: object
+      description: No data payload.
+      properties:
+        type: { const: Pong }
+      required: [type]
+    Reconnected:
+      type: object
+      description: Payload is a flattened ReconnectedPayload (boxed newtype variant).
+      properties:
+        type: { const: Reconnected }
+        data:
+          type: object
+          required:
+            - room_id
+            - room_code
+            - player_id
+            - game_name
+            - max_players
+            - supports_authority
+            - current_players
+            - is_authority
+            - lobby_state
+            - ready_players
+            - relay_type
+            - missed_events
+          properties:
+            room_id: { $ref: '#/components/schemas/RoomId' }
+            room_code: { type: string }
+            player_id: { $ref: '#/components/schemas/PlayerId' }
+            game_name: { type: string }
+            max_players: { type: integer }
+            supports_authority: { type: boolean }
+            current_players:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerInfo' }
+            is_authority: { type: boolean }
+            lobby_state: { $ref: '#/components/schemas/LobbyState' }
+            ready_players:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerId' }
+            relay_type: { type: string }
+            current_spectators:
+              type: array
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
+            ice_servers:
+              type: array
+              items: { $ref: '#/components/schemas/IceServer' }
+            missed_events:
+              type: array
+              description: Events that occurred while disconnected (ServerMessage values).
+              items: { type: object }
+      required: [type, data]
+    ReconnectionFailed:
+      type: object
+      properties:
+        type: { const: ReconnectionFailed }
+        data:
+          type: object
+          required: [reason, error_code]
+          properties:
+            reason: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    PlayerReconnected:
+      type: object
+      properties:
+        type: { const: PlayerReconnected }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { $ref: '#/components/schemas/PlayerId' }
+      required: [type, data]
+    SpectatorJoined:
+      type: object
+      description: Payload is a flattened SpectatorJoinedPayload (boxed newtype variant).
+      properties:
+        type: { const: SpectatorJoined }
+        data:
+          type: object
+          required:
+            - room_id
+            - room_code
+            - spectator_id
+            - game_name
+            - current_players
+            - current_spectators
+            - lobby_state
+          properties:
+            room_id: { $ref: '#/components/schemas/RoomId' }
+            room_code: { type: string }
+            spectator_id: { $ref: '#/components/schemas/PlayerId' }
+            game_name: { type: string }
+            current_players:
+              type: array
+              items: { $ref: '#/components/schemas/PlayerInfo' }
+            current_spectators:
+              type: array
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
+            lobby_state: { $ref: '#/components/schemas/LobbyState' }
+            reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
+      required: [type, data]
+    SpectatorJoinFailed:
+      type: object
+      properties:
+        type: { const: SpectatorJoinFailed }
+        data:
+          type: object
+          required: [reason]
+          properties:
+            reason: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    SpectatorLeft:
+      type: object
+      properties:
+        type: { const: SpectatorLeft }
+        data:
+          type: object
+          properties:
+            room_id: { $ref: '#/components/schemas/RoomId' }
+            room_code: { type: string }
+            reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
+            current_spectators:
+              type: array
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
+      required: [type, data]
+    NewSpectatorJoined:
+      type: object
+      properties:
+        type: { const: NewSpectatorJoined }
+        data:
+          type: object
+          required: [spectator]
+          properties:
+            spectator: { $ref: '#/components/schemas/SpectatorInfo' }
+            current_spectators:
+              type: array
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
+            reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
+      required: [type, data]
+    SpectatorDisconnected:
+      type: object
+      properties:
+        type: { const: SpectatorDisconnected }
+        data:
+          type: object
+          required: [spectator_id]
+          properties:
+            spectator_id: { $ref: '#/components/schemas/PlayerId' }
+            reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
+            current_spectators:
+              type: array
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
+      required: [type, data]
+    Error:
+      type: object
+      properties:
+        type: { const: Error }
+        data:
+          type: object
+          required: [message]
+          properties:
+            message: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    PeerTransportStatus:
+      type: object
+      description: 'v3 only. Informational fan-out of an accepted TransportStatus.'
+      properties:
+        type: { const: PeerTransportStatus }
+        data:
+          type: object
+          required: [peer_id, transport, connected]
+          properties:
+            peer_id: { $ref: '#/components/schemas/PlayerId' }
+            transport: { $ref: '#/components/schemas/Transport' }
+            connected: { type: boolean }
+      required: [type, data]

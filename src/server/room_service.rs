@@ -173,13 +173,23 @@ impl EnhancedGameServer {
                     .await;
 
                 // Get current players from database
-                let current_players = match self.database.get_room_players(&room.id).await {
+                let mut current_players = match self.database.get_room_players(&room.id).await {
                     Ok(players) => players,
                     Err(e) => {
                         tracing::error!("Failed to get room players: {}", e);
                         Vec::new()
                     }
                 };
+
+                // The live ready set is held by the coordinator (the room record
+                // only syncs `ready_players` / `is_ready` at finalize), so read it
+                // from there to report an accurate ready set to a player joining a
+                // lobby that already has ready members; reflect it on each player's
+                // `is_ready` too.
+                let ready_players = self.room_coordinator.current_ready_players(&room.id).await;
+                for player in current_players.iter_mut() {
+                    player.is_ready = ready_players.contains(&player.id);
+                }
 
                 // Send success response
                 let is_authority = room.authority_player == Some(*player_id);
@@ -197,7 +207,7 @@ impl EnhancedGameServer {
                             current_players: current_players.clone(),
                             is_authority,
                             lobby_state: room.lobby_state.clone(),
-                            ready_players: room.ready_players.clone(),
+                            ready_players: ready_players.clone(),
                             relay_type: room.relay_type.clone(),
                             current_spectators: room.get_spectators(),
                             // v3 ICE pre-gather (PLAN §P4 deferred refinement):

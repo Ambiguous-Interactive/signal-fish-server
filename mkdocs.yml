@@ -125,6 +125,7 @@ nav:
       - Reconnection: concepts/reconnection.md
       - Spectator Mode: concepts/spectator-mode.md
   - Guides:
+      - Building a Client: guides/building-a-client.md
       - Rust Client: guides/rust-client.md
       - Platform Integration: guides/platform-integration.md
   - Examples:
@@ -138,6 +139,9 @@ nav:
       - Error Handling: scenarios/error-handling.md
   - Configuration:
       - Server Config: configuration.md
+      - Run Modes: run-modes.md
+      - Configuration Recipes: configuration-recipes.md
+      - Pre-deployment Checklist: pre-deployment-checklist.md
       - Authentication: authentication.md
       - Deployment: deployment.md
       - TURN Deployment: deployment-turn.md

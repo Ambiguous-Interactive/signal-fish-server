@@ -145,6 +145,14 @@ member. For a negotiated v3 non-relay room it additionally emits the
 per-recipient [`SessionPlan`](#sessionplan). Sending `StartGame` to an already
 `finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
 
+!!! note "Authority and start liveness"
+    In an authority room, only the authority may start, so the game does not
+    begin until the authority sends `StartGame` — design your client so the
+    authority's UI offers a "Start" action once `all_ready` is reported. If the
+    authority **leaves** the room, the server clears the authority designation,
+    after which any remaining member may start (the room is never locked into
+    `GAME_START_FORBIDDEN` by an authority departure).
+
 ### AuthorityRequest
 
 Request or release game authority.
