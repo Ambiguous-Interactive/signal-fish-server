@@ -261,6 +261,10 @@ pub struct InMemoryDatabase {
     room_codes: std::sync::Arc<tokio::sync::RwLock<HashMap<(String, String), RoomId>>>,
     /// Tracks claimed cleanup operations for idempotency (cleanup_id -> entry)
     cleanup_events: std::sync::Arc<tokio::sync::RwLock<HashMap<String, CleanupEventEntry>>>,
+    #[cfg(test)]
+    fail_get_room_players: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    get_room_players_calls: std::sync::atomic::AtomicU32,
 }
 
 impl InMemoryDatabase {
@@ -269,7 +273,23 @@ impl InMemoryDatabase {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cleanup_events: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            fail_get_room_players: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_room_players_calls: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_get_room_players_for_test(&self, fail: bool) {
+        self.fail_get_room_players
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_room_players_calls_for_test(&self) -> u32 {
+        self.get_room_players_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -573,6 +593,18 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>> {
+        #[cfg(test)]
+        self.get_room_players_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        #[cfg(test)]
+        if self
+            .fail_get_room_players
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected get_room_players failure for test");
+        }
+
         let rooms = self.rooms.read().await;
         if let Some(room) = rooms.get(room_id) {
             Ok(room.players.values().cloned().collect())

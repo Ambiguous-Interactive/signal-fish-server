@@ -102,6 +102,12 @@ impl RateLimitEntry {
         }
     }
 
+    /// Check if a signaling message would be allowed without incrementing.
+    fn signal_available(&mut self, config: &RateLimitConfig) -> bool {
+        self.maybe_reset_window(config);
+        self.signals < config.max_signals
+    }
+
     /// Check if a rejected signaling attempt is allowed and increment counter
     fn try_signal_error(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
@@ -178,6 +184,27 @@ impl RoomRateLimiter {
             .or_insert_with(RateLimitEntry::new);
 
         if entry.try_signal(&self.config) {
+            Ok(())
+        } else {
+            let reset_time = entry.time_until_reset(&self.config);
+            Err(RateLimitError::SignalLimitExceeded {
+                retry_after: reset_time,
+            })
+        }
+    }
+
+    /// Check if a WebRTC signaling message would be allowed without consuming a slot.
+    ///
+    /// This is only a preflight; callers must still use [`Self::check_signal`]
+    /// immediately before dispatch because another task can consume the final
+    /// slot between the preflight and the send.
+    pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
+
+        if entry.signal_available(&self.config) {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
@@ -368,6 +395,36 @@ mod tests {
         // Wait for window to reset, then it should work again.
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(limiter.check_signal(&player_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_signal_available_preflight_does_not_consume_signal_budget() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player_id = Uuid::new_v4();
+
+        assert!(limiter.check_signal_available(&player_id).await.is_ok());
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("preflight creates stats entry")
+                .signals,
+            0,
+            "preflight must not consume a valid-signal slot"
+        );
+
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal_available(&player_id).await.is_err());
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("stats remain available")
+                .signals,
+            2,
+            "over-budget preflight must still leave consumed count unchanged"
+        );
     }
 
     #[tokio::test]

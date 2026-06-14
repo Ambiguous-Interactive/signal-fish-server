@@ -189,13 +189,12 @@ pub struct RateLimitInfo {
     pub per_day: u32,
 }
 
-/// Game-data wire encoding advertised in `ProtocolInfo`.
+/// Game-data wire encoding currently advertised in `ProtocolInfo`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GameDataEncoding {
     Json,
     MessagePack,
-    Rkyv,
 }
 
 /// Server-advertised `player_name` validation rules.
@@ -1315,7 +1314,6 @@ pub struct RateLimitInfo {
 pub enum GameDataEncoding {
     Json,
     MessagePack,
-    Rkyv,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

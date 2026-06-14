@@ -1021,6 +1021,9 @@ fn golden_enum_game_data_encoding_all_variants() {
     assert_json_str(&GameDataEncoding::Json, r#""json""#);
     assert_json_str(&GameDataEncoding::MessagePack, r#""message_pack""#);
     assert_json_str(&GameDataEncoding::Rkyv, r#""rkyv""#);
+    assert_eq!(GameDataEncoding::Json.as_wire_str(), "json");
+    assert_eq!(GameDataEncoding::MessagePack.as_wire_str(), "message_pack");
+    assert_eq!(GameDataEncoding::Rkyv.as_wire_str(), "rkyv");
 }
 
 #[test]

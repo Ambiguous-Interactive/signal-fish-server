@@ -32,6 +32,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{read_file, repo_root};
+use signal_fish_server::config::ProtocolConfig;
+use signal_fish_server::protocol::GameDataEncoding;
 
 fn docs_dir() -> PathBuf {
     repo_root().join("docs")
@@ -100,6 +102,38 @@ fn enum_variants(src: &str, enum_name: &str) -> Vec<String> {
         }
     }
     variants
+}
+
+fn enum_variants_from_all_blocks(src: &str, enum_name: &str) -> Vec<Vec<String>> {
+    let needle = format!("enum {enum_name} {{");
+    let mut blocks = Vec::new();
+    let mut search_offset = 0usize;
+
+    while let Some(relative_start) = src[search_offset..].find(&needle) {
+        let start = search_offset + relative_start;
+        let body_start = src[start..].find('{').expect("enum opening brace") + start + 1;
+
+        let mut depth = 1usize;
+        let mut end = body_start;
+        for (i, c) in src[body_start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        blocks.push(enum_variants(&src[start..end], enum_name));
+        search_offset = end;
+    }
+
+    blocks
 }
 
 /// Convert a PascalCase identifier to serde's `SCREAMING_SNAKE_CASE` wire token
@@ -340,6 +374,35 @@ fn protocol_reference_documents_user_facing_wire_tokens() {
         missing.is_empty(),
         "docs/protocol.md is missing user-facing wire token(s): {missing:?}",
     );
+}
+
+#[test]
+fn rust_client_guide_game_data_encoding_matches_advertised_protocol_formats() {
+    let guide = read_file(&docs_dir().join("guides/rust-client.md"));
+    let enum_blocks = enum_variants_from_all_blocks(&guide, "GameDataEncoding");
+    assert!(
+        !enum_blocks.is_empty(),
+        "docs/guides/rust-client.md must define GameDataEncoding in its Rust samples"
+    );
+
+    let expected: Vec<String> = ProtocolConfig::default()
+        .supported_game_data_formats()
+        .into_iter()
+        .map(|format| format!("{format:?}"))
+        .collect();
+    assert_eq!(
+        expected,
+        vec!["Json".to_string(), "MessagePack".to_string()],
+        "this guard assumes the default ProtocolInfo formats remain json + message_pack"
+    );
+
+    let reserved = format!("{:?}", GameDataEncoding::Rkyv);
+    for variants in enum_blocks {
+        assert_eq!(
+            variants, expected,
+            "Rust guide GameDataEncoding samples must mirror ProtocolConfig::supported_game_data_formats(); reserved/internal variants such as {reserved} must not be presented as ProtocolInfo-advertised formats"
+        );
+    }
 }
 
 #[test]

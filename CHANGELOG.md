@@ -395,10 +395,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defeated by alternating `connected`), unlike the targeted `Signal` relay. The accepted-change
   fan-out now consumes the same per-connection WebRTC control-plane budget as `Signal`
   (`rate_limit.max_signals`); over-budget changes are dropped silently (the message is informational
-  and defines no error reply). The gate sits after the p2p/relay observability counters and the
-  no-room early return, so accurate metrics are never suppressed and a room-less reporter spends no
-  budget; the per-connection transport state is always recorded regardless of the budget. (The
-  dominant relay-floor `GameData` fan-out is intentionally bounded by other means — `max_message_size`,
+  and defines no error reply). The gate sits after the p2p/relay observability counters, the no-room
+  early return, and recipient resolution, so accurate metrics are never suppressed and a room-less
+  reporter, failed room-member lookup, or status report with no v3 room peers spends no budget;
+  the per-connection transport state is always recorded regardless of the budget. (The dominant
+  relay-floor `GameData` fan-out is intentionally bounded by other means — `max_message_size`,
   connection/room caps, best-effort sends — so this only closes the control-plane consistency gap
   with `Signal`.) Covered by `transport_status_fanout_is_bounded_by_signal_budget`.
 - Reject zero-valued background-task interval configs at startup instead of silently killing the
@@ -425,6 +426,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the Rust client guide's `GameDataEncoding` examples to match `ProtocolInfo.game_data_formats`:
+  `rkyv` remains reserved/internal and is not advertised or negotiated by the server.
 - Fixed widespread protocol-documentation drift found while reconciling the v2/v3 docs against
   source (a 52-finding audit). The embedded-server examples in `README.md` and
   `docs/library-usage.md` now call `EnhancedGameServer::new` with its real 11-argument signature
