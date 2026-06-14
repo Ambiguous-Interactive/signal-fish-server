@@ -60,7 +60,7 @@ Optional fields:
 - `room_code` - Code used to join/create a room for this `game_name`
 - `max_players` - Maximum players (applied only when a new room is created)
 - `supports_authority` - Authority support (applied only when a new room is created)
-- `relay_transport` - Preferred relay transport protocol (TCP, UDP, or Auto)
+- `relay_transport` - Preferred relay transport protocol (`tcp`, `udp`, `websocket`, or `auto`; default `auto`)
 
 ### GameData
 
@@ -316,7 +316,7 @@ room-created response type.
     "is_authority": false,
     "lobby_state": "waiting",
     "ready_players": [],
-    "relay_type": "WebRTC",
+    "relay_type": "matchbox",
     "current_spectators": []
   }
 }
@@ -502,7 +502,7 @@ Game is starting with legacy peer metadata.
         "player_id": "player-id-1",
         "player_name": "Player 1",
         "is_authority": false,
-        "relay_type": "WebRTC"
+        "relay_type": "matchbox"
       }
     ]
   }
@@ -582,7 +582,7 @@ Reconnection successful. Includes current room state and missed events.
     "is_authority": false,
     "lobby_state": "lobby",
     "ready_players": ["player-id-1"],
-    "relay_type": "WebRTC",
+    "relay_type": "matchbox",
     "current_spectators": [],
     "missed_events": [
       {
@@ -703,7 +703,8 @@ Successfully left spectator mode.
 
 ```
 
-Note: All fields are optional.
+Note: `room_id`, `room_code`, and `reason` are optional (omitted when absent).
+`current_spectators` is always present (serialized as `[]` when empty).
 
 ### NewSpectatorJoined
 
@@ -1127,7 +1128,7 @@ For any WebRTC pair, exactly one side must send the offer. Which side is encoded
 - **Host:** the direction is fixed regardless of UUID order — each **client initiates to the host**, and the host
   answers every client. Clients never signal each other in a star topology.
 
-### ICE / TURN credentials
+### ICE and TURN credentials
 
 Every WebRTC `SessionPlan` carries an `ice_servers` list:
 
@@ -1141,7 +1142,7 @@ Every WebRTC `SessionPlan` carries an `ice_servers` list:
   **illustrative placeholders, not a real credential** (the sample `credential` is not the actual HMAC of the
   shown `username`).
 
-See the [TURN / STUN configuration](configuration.md#turn--stun-ice-credentials-protocol-v3) section and the
+See the [TURN and STUN configuration](configuration.md#turn-and-stun-ice-credentials-protocol-v3) section and the
 [Transport Fallback Contract](architecture/transport-fallback.md) for the full ICE/fallback behavior.
 
 ### ICE pre-gather

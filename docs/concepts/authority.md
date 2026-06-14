@@ -21,9 +21,11 @@ when it changes. Your game code decides how to use it.
 
 ## Enabling Authority
 
-Authority support is set at room creation time. Include
-`supports_authority: true` in the `JoinRoom` message when creating a new
-room:
+Authority is enabled by default. It is configured at room creation time
+via the optional `supports_authority` field in the `JoinRoom` message:
+omit it (or set `true`) to enable authority, set `false` to disable it.
+The example below sets the field explicitly, which is equivalent to the
+default:
 
 ```json
 {
@@ -37,9 +39,11 @@ room:
 }
 ```
 
-If `supports_authority` is `false` (the default) or omitted, authority
-requests in that room are rejected with the `AUTHORITY_NOT_SUPPORTED`
-error code.
+`supports_authority` defaults to `true` when omitted, so authority is
+enabled and the creating player becomes the initial authority unless you
+explicitly set `supports_authority: false`. In a room created with
+`supports_authority: false`, `AuthorityRequest` messages are rejected
+with the `AUTHORITY_NOT_SUPPORTED` error code.
 
 ## How Authority Works
 
@@ -157,7 +161,8 @@ claim authority or by pausing the game until someone does.
 ## Key Rules
 
 - Only **one player** can hold authority at a time per room.
-- Authority must be **enabled at room creation** via `supports_authority`.
+- Authority is **enabled by default** (`supports_authority: true`); pass
+  `supports_authority: false` at room creation to disable it.
 - The **first player** to join becomes authority by default.
 - Authority **transfers** are explicit via `AuthorityRequest`.
 - **Disconnection clears** authority with no auto-reassignment.

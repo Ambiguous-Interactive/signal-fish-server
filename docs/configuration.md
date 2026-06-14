@@ -119,7 +119,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE` | `server.event_buffer_size` | `100` | Max events buffered for reconnection replay |
 | `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION` | `server.enable_reconnection` | `true` | Enable reconnection support |
 | `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS` | `server.heartbeat_throttle_secs` | `30` | Min seconds between `last_seen` heartbeat writes |
-| `SIGNAL_FISH__SERVER__REGION_ID` | `server.region_id` | `default` | Region identifier for metrics and room codes |
+| `SIGNAL_FISH__SERVER__REGION_ID` | `server.region_id` | `default` | Deployment region identifier; recorded in internal player and room state (not serialized to clients) |
 | `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX` | `server.room_code_prefix` | `null` | Optional prefix for generated room codes |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS` | `rate_limit.max_room_creations` | `5` | Max room creations per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
@@ -359,7 +359,7 @@ WebRTC-capable members of non-relay-desired games still in the lobby; under the
 default `relay` topology no `SessionPlan` is emitted and no ICE is pre-gathered
 at all.
 
-## TURN / STUN (ICE Credentials) (Protocol v3)
+## TURN and STUN (ICE Credentials) (Protocol v3)
 
 TURN is **fully self-hosted**: when enabled, the server self-mints short-lived
 coturn REST credentials for a TURN server **you** run. No third-party cloud is

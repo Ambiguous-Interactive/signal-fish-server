@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `tests/docs_site_consistency.rs`, a documentation-accuracy regression guard that ties the
+  published docs to source: it asserts `docs/reference/error-codes.md` documents every `ErrorCode`
+  variant, `docs/protocol.md` documents every `ClientMessage` / `ServerMessage` variant and the
+  user-facing wire enum tokens (all parsed from `src/protocol/`), the public docs carry no
+  stale/removed protocol tokens (including the `relay_type: "WebRTC"` value drift), and every
+  intra-`docs/` `#anchor` link resolves identically on both GitHub and the MkDocs Pages site — the
+  two renderers slugify headings containing `/` differently, so an anchor hand-written for one
+  silently 404s on the other.
 - Added a [Platform Integration Guide](docs/guides/platform-integration.md) (PLAN §P7 task 5,
   Appendix H): per-platform WebRTC-stack guidance for browser, native desktop, mobile, Steam,
   Godot, Unity, and Unreal, plus the universal v3 client contract (relay floor, opaque
@@ -417,6 +425,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed widespread protocol-documentation drift found while reconciling the v2/v3 docs against
+  source (a 52-finding audit). The embedded-server examples in `README.md` and
+  `docs/library-usage.md` now call `EnhancedGameServer::new` with its real 11-argument signature
+  (the v3 `session_config` / `turn_config` were missing) and read `ServerConfig` fields from the
+  correct config sub-structs (`cfg.rate_limit` / `cfg.security` / `cfg.websocket`), so they
+  compile. Corrected the `/metrics` response to its actual camelCase nested shape and documented
+  metrics auth accurately (a single shared `security.metrics_auth_token` bearer token — and a hard
+  startup error when `require_metrics_auth` is set without it — not an `app_id:app_secret` pair).
+  Fixed the `supports_authority` default (it is `true`, so a freshly created room shows the creator
+  as the authority) and the matching `is_authority` flags across the `RoomJoined` / `Reconnected` /
+  `GameStarting` examples; corrected `relay_type` example values to the real default `"matchbox"`
+  (v3 transport is carried by `SessionPlan.transport`, not `relay_type`); the `GameData` example to
+  the double-nested `{"type":"GameData","data":{"data":...}}` envelope; the clean room-code alphabet
+  to 32 characters; the per-app rate limit as per-`app_id` (not per-IP); the failed-`Authenticate`
+  handler to the `AuthenticationError` message and `INVALID_APP_ID` code; and the spectator,
+  reconnection-token, and event-buffer descriptions to match server behavior. Added the Protocol v3
+  surface (transports/topologies, `SessionPlan`, targeted `Signal` relay, ICE pre-gather,
+  self-hosted TURN credential minting, idle timeout) to the `docs/features.md` and
+  `docs/architecture.md` overviews, and fixed cross-references that resolved on GitHub but 404'd on
+  the MkDocs site by rewording the `TURN / STUN` and `ICE / TURN` headings so both renderers produce
+  the same slug.
 - Fixed CI reliability by normalizing all workflow `actions/checkout` pins to `v6.0.3`, making the
   browser interop Chromium teardown check tolerant of process-name/topology drift with better
   `/proc` diagnostics, and allowing doc-consistency version checks to read CRLF `.llm/context.md`

@@ -50,7 +50,7 @@ source of truth both sides derive credentials from:
 export SIGNAL_FISH__TURN__STATIC_AUTH_SECRET="$TURN_STATIC_AUTH_SECRET"
 ```
 
-See the [TURN / STUN configuration reference](configuration.md#turn--stun-ice-credentials-protocol-v3)
+See the [TURN and STUN configuration reference](configuration.md#turn-and-stun-ice-credentials-protocol-v3)
 for every `[turn]` key.
 
 Three production notes on the compose profile:
@@ -182,8 +182,8 @@ hardening items in the [security checklist](deployment.md#security-checklist).
 ## Related documents
 
 - [Deployment guide](deployment.md) — Docker, reverse proxies, cloud providers
-- [TURN / STUN configuration reference](configuration.md#turn--stun-ice-credentials-protocol-v3)
+- [TURN and STUN configuration reference](configuration.md#turn-and-stun-ice-credentials-protocol-v3)
 - [Transport Fallback Contract](architecture/transport-fallback.md) — the relay floor
 - [Scaling architecture notes](architecture/scaling.md) — multi-node signaling
-- [Protocol v3 ICE / TURN credentials](protocol.md#ice--turn-credentials)
+- [Protocol v3 ICE and TURN credentials](protocol.md#ice-and-turn-credentials)
 - [Platform Integration Guide](guides/platform-integration.md) — which client stacks consume these credentials

@@ -47,7 +47,7 @@ Response:
     "is_authority": false,
     "lobby_state": "waiting",
     "ready_players": [],
-    "relay_type": "WebRTC",
+    "relay_type": "matchbox",
     "current_spectators": []
   }
 }
@@ -212,7 +212,7 @@ Spectators:
 
 - Don't count toward max_players
 - Can't send `PlayerReady` (cannot toggle readiness)
-- Receive all game data
+- Receive a room snapshot on join, not live game-data broadcasts
 - Don't participate in authority decisions
 
 ## Reconnection
@@ -259,6 +259,85 @@ events that occurred during the disconnection window.
 }
 
 ```
+
+## Peer-to-Peer Transports (Protocol v3)
+
+Protocol v3 is purely additive over v2: every v2 client keeps working unchanged
+on the server relay floor, while v3-capable clients can negotiate a peer-to-peer
+data path. A non-relay session is only chosen when _every_ room member is
+v3-capable and supports the selected topology/transport; otherwise the whole
+room stays on the relay floor.
+
+### Transports and Topologies
+
+The negotiated data-path transport is one of three wire tokens:
+
+- `relay` - server WebSocket fan-out (the mandatory floor, always available)
+- `direct` - LAN / routable host IP:port path
+- `webrtc` - peer-to-peer WebRTC data channel
+
+The session topology is likewise one of:
+
+- `relay` - the v2 server-relay hub
+- `host` - a star around a single authoritative host
+- `mesh` - full peer-to-peer mesh
+
+The preferred topology is configured per deployment, with optional per-game
+overrides, and each transport is independently gated:
+
+```json
+
+{
+  "session": {
+    "default_topology": "relay",
+    "game_topology_mappings": { "FastFPS": "mesh" },
+    "enable_webrtc": true,
+    "enable_direct": true,
+    "enable_ice_pregather": true
+  }
+}
+
+```
+
+### WebRTC Signaling
+
+When a WebRTC plan is in play, peers exchange connection setup over a targeted
+`Signal` relay. A client sends `Signal` with a `to` (peer id) and an opaque
+`signal` payload; the server forwards it verbatim to that one peer and never
+parses it (by convention the payload is matchbox-compatible: `Offer`, `Answer`,
+or `IceCandidate`). Signal relay is gated by `session.enable_webrtc`. Signal
+dispatch and rejected-signal attempts are rate limited (see
+[Rate Limiting](#rate-limiting)).
+
+### Session Plans
+
+At lobby finalization, each v3-capable member of a non-relay room receives a
+per-recipient `SessionPlan` alongside the unchanged `GameStarting`. The plan
+carries the chosen `topology` and `transport`, the elected `host` (for `host`
+topology), the `peers` this recipient should connect to (each with an `initiate`
+flag so exactly one side of every pair sends the offer), the `ice_servers` to
+gather against, and a universal `fallback` transport that is always `relay`.
+
+### ICE Pre-Gather
+
+When `session.enable_ice_pregather` is enabled, the composed ICE server list is
+advertised on `RoomJoined` and `Reconnected` so WebRTC-capable clients can
+pre-gather candidates during the lobby wait. The `SessionPlan` ICE list always
+supersedes it, and the gate never fires for v2 clients, relay-only clients,
+relay-desired games, or finalized rooms.
+
+### TURN and STUN
+
+TURN is _self-hosted only_. When `turn.enabled` is set, the server mints
+short-lived coturn REST credentials (from the operator's
+`turn.static_auth_secret`, the coturn `--static-auth-secret`) for an
+operator-run TURN server and advertises them in the ICE list; the secret never
+leaves the server. STUN URLs are advertised regardless. There is no managed,
+built-in, or automatic TURN provisioning.
+
+See [Handoff & Topologies](architecture/handoff-and-topologies.md),
+[Transport Fallback](architecture/transport-fallback.md), and
+[TURN Deployment](deployment-turn.md) for the full design.
 
 ## Message Batching
 
@@ -333,19 +412,48 @@ curl http://localhost:3536/metrics
 
 ```
 
-Returns:
+Returns a camelCase, nested JSON document:
 
 ```json
 
 {
-  "active_rooms": 42,
-  "active_players": 156,
-  "total_rooms_created": 1024,
-  "total_messages_sent": 50000,
-  "uptime_seconds": 3600
+  "timeRange": "1h",
+  "timestamp": "2026-06-13T12:00:00Z",
+  "activeRooms": 42,
+  "roomsByGame": { "my-game": 12 },
+  "playerPercentiles": { "p50": 4, "p95": 16 },
+  "gamePercentiles": { "p50": 1, "p95": 5 },
+  "dashboardCache": {
+    "fetchedAt": "2026-06-13T11:59:30Z",
+    "ageSeconds": 30,
+    "stale": false,
+    "lastError": null,
+    "refreshIntervalSeconds": 60,
+    "history": []
+  },
+  "serverMetrics": {
+    "connections": { "total": 1024, "active": 156, "disconnections": 868 },
+    "rooms": { "created": 1024, "joined": 4096, "deleted": 982 },
+    "performance": { "queries": 0, "room_creation_latency": 0, "room_join_latency": 0, "query_latency": 0 },
+    "errors": { "internal": 0, "websocket": 0, "total": 0 },
+    "rateLimiting": {
+      "minute": { "limit": 0, "used": 0, "checks": 0, "rejections": 0 },
+      "hour": { "limit": 0, "used": 0, "checks": 0, "rejections": 0 },
+      "day": { "limit": 0, "used": 0, "checks": 0, "rejections": 0 },
+      "total_rejections": 0,
+      "resets": 0
+    }
+  }
 }
 
 ```
+
+Room and connection counters live under `serverMetrics.connections`
+(`total` / `active` / `disconnections`) and `serverMetrics.rooms`
+(`created` / `joined` / `deleted`). The endpoint accepts two optional query
+parameters: `?time_range=<range>` selects the dashboard window (echoed back as
+`timeRange`, default `1h`), and `?includeSnapshot=true` adds a `metricsSnapshot`
+object with the raw counter snapshot.
 
 ### Prometheus Metrics
 
@@ -365,17 +473,24 @@ Protect metrics endpoints:
 
 {
   "security": {
-    "require_metrics_auth": true
+    "require_metrics_auth": true,
+    "metrics_auth_token": "your-secret-token"
   }
 }
 
 ```
 
+`metrics_auth_token` must be set — it defaults to `null`, and when
+`require_metrics_auth` is `true` but no token is configured, every request is
+rejected with HTTP 401. The server compares the bearer token against
+`metrics_auth_token` as a single opaque string (constant-time), not against an
+`app_id:app_secret` pair.
+
 Access with:
 
 ```bash
 
-curl -H "Authorization: Bearer app_id:app_secret" \
+curl -H "Authorization: Bearer your-secret-token" \
   http://localhost:3536/metrics
 
 ```
@@ -420,6 +535,12 @@ Enable MessagePack encoding for game data:
 ```
 
 Game data messages can be sent in MessagePack format for reduced bandwidth.
+
+Negotiated binary frames are delivered as a `GameDataBinary` carrier whose
+`encoding` field tags the wire format (`json` | `message_pack`). The server
+advertises its accepted formats in `ProtocolInfo.game_data_formats`; requesting
+an unsupported format yields `UNSUPPORTED_GAME_DATA_FORMAT` and falls back to
+JSON.
 
 ## CORS Support
 
@@ -524,6 +645,30 @@ Keep-alive mechanism to detect dead connections:
 ```
 
 Clients should send periodic `Ping` messages. Server disconnects clients that are silent for longer than `ping_timeout`.
+
+## Idle Timeout
+
+A separate, socket-level idle cap closes authenticated connections that go
+quiet, independent of `server.ping_timeout`:
+
+```json
+
+{
+  "websocket": {
+    "idle_timeout_secs": 300
+  }
+}
+
+```
+
+`idle_timeout_secs` (default 300; `0` disables) closes an authenticated
+connection that produces no inbound WebSocket frame of any kind (including
+Ping/Pong) for that long, surfacing the
+[`CONNECTION_IDLE_TIMEOUT`](reference/error-codes.md) error and disconnecting
+through the normal path (so the reconnection grace period still applies). This
+is distinct from `server.ping_timeout` (the server-side activity reaper, default
+30s): clients that heartbeat as `server.ping_timeout` already requires are never
+affected by the 300s default, which only reclaims zombie sockets.
 
 ## Structured Logging
 

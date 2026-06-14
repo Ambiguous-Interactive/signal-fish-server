@@ -30,30 +30,29 @@ reconnect later.
     "player_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "game_name": "my-game",
     "max_players": 4,
-    "supports_authority": false,
+    "supports_authority": true,
     "current_players": [
       {
         "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "name": "Alice",
-        "is_authority": false,
+        "is_authority": true,
         "is_ready": false,
         "connected_at": "2025-01-15T10:30:00Z"
       }
     ],
-    "is_authority": false,
+    "is_authority": true,
     "lobby_state": "waiting",
     "ready_players": [],
-    "relay_type": "WebRTC",
+    "relay_type": "matchbox",
     "current_spectators": []
   }
 }
 ```
 
 When a player disconnects, the server generates a reconnection token
-(a server-generated UUID) bound to the player ID, room ID, and
-authority status. The token is created at disconnect time and provided
-to the client through the reconnection mechanism. Treat it like a
-session credential.
+(a server-generated UUID) bound to the player ID and room ID. It is the
+`auth_token` value the client supplies when sending a `Reconnect`
+message. Treat it like a session credential.
 
 ### Phase 2: Reconnect After a Disconnect
 
@@ -85,12 +84,12 @@ you missed while disconnected:
     "player_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "game_name": "my-game",
     "max_players": 4,
-    "supports_authority": false,
+    "supports_authority": true,
     "current_players": [
       {
         "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "name": "Alice",
-        "is_authority": false,
+        "is_authority": true,
         "is_ready": false,
         "connected_at": "2025-01-15T10:30:00Z"
       },
@@ -102,12 +101,12 @@ you missed while disconnected:
         "connected_at": "2025-01-15T10:31:00Z"
       }
     ],
-    "is_authority": false,
+    "is_authority": true,
     "lobby_state": "lobby",
     "ready_players": [
       "b2c3d4e5-f6a7-8901-bcde-f12345678901"
     ],
-    "relay_type": "WebRTC",
+    "relay_type": "matchbox",
     "current_spectators": [],
     "missed_events": [
       {
@@ -191,10 +190,12 @@ invalid and the player's slot is freed.
 ## Event Buffer
 
 While a player is disconnected, the server buffers events that occur in
-their room. The default buffer size is **100 events** per disconnected
-player. The buffer uses a ring structure -- if more than 100 events occur,
-the oldest events are evicted. When the last disconnected player in a room
-reconnects or their token expires, the buffer is cleared.
+their room. The default buffer size is **100 events** per room. The buffer
+uses a ring structure -- if more than 100 events occur,
+the oldest events are evicted. The buffer is cleared when the last
+disconnected player in a room reconnects; if a player's token instead
+expires, the pending record is dropped and the buffer is released when
+the room itself is cleaned up.
 
 ## When Reconnection Fails
 
@@ -227,8 +228,8 @@ Reconnection is enabled by default. Relevant server settings:
   to disable reconnection entirely.
 - `reconnection_window` -- Seconds before a disconnected player's token
   expires. Default: `300` (5 minutes).
-- `event_buffer_size` -- Maximum number of events buffered per
-  disconnected player. Default: `100`.
+- `event_buffer_size` -- Maximum number of events buffered per room.
+  Default: `100`.
 
 ```json
 {

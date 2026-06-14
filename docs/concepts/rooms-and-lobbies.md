@@ -35,20 +35,20 @@ A room is created when a player sends a `JoinRoom` message **without** a
     "player_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "game_name": "my-game",
     "max_players": 4,
-    "supports_authority": false,
+    "supports_authority": true,
     "current_players": [
       {
         "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "name": "Alice",
-        "is_authority": false,
+        "is_authority": true,
         "is_ready": false,
         "connected_at": "2025-01-15T10:30:00Z"
       }
     ],
-    "is_authority": false,
+    "is_authority": true,
     "lobby_state": "waiting",
     "ready_players": [],
-    "relay_type": "WebRTC",
+    "relay_type": "matchbox",
     "current_spectators": []
   }
 }
@@ -115,7 +115,7 @@ characters that are visually confusing:
 - `0` (zero) and `O` (letter O)
 - `1` (one) and `I` (letter I)
 
-This leaves 30 unambiguous characters: `2-9` and `A-H, J-N, P-Z`.
+This leaves 32 unambiguous characters: `2-9` and `A-H, J-N, P-Z`.
 
 The code length is configurable via the `room_code_length` protocol setting
 (default: 6).
@@ -210,14 +210,14 @@ All players in the lobby are ready. The server finalizes the game:
       {
         "player_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "player_name": "Alice",
-        "is_authority": false,
-        "relay_type": "WebRTC"
+        "is_authority": true,
+        "relay_type": "matchbox"
       },
       {
         "player_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
         "player_name": "Bob",
         "is_authority": false,
-        "relay_type": "WebRTC"
+        "relay_type": "matchbox"
       }
     ]
   }

@@ -37,7 +37,7 @@ The server maintains per-room event buffers using a ring buffer (VecDeque) that:
 - Stores recent ServerMessage events with sequence numbers and timestamps
 - Has configurable maximum size (default 100 events)
 - Automatically evicts oldest events when full
-- Clears when the last disconnected player from a room reconnects or expires
+- Clears when the last disconnected player in a room reconnects (expiry drops only the record, not the buffer)
 
 ### 3. Reconnection Flow
 
@@ -66,8 +66,11 @@ Expiration       → Background cleanup task removes expired tokens
 
 ### 4. Security Considerations
 
-- Tokens are single-use and expire after the reconnection window
-- Tokens are validated against player_id and room_id to prevent token reuse
+- Tokens are single-use on success and expire after the reconnection window; a
+  failed restore attempt releases the claim so the client may retry with the same
+  token until the window expires
+- Tokens are validated against player_id and room_id, so a successfully consumed
+  token cannot be replayed against a different player or room
 - Prevents players from reconnecting while already connected (duplicate connection guard)
 - Room state validation ensures room still exists before allowing reconnection
 
@@ -90,11 +93,11 @@ Reconnection is optional and can be disabled via:
 
 The implementation exposes comprehensive metrics:
 
-- `reconnection_tokens_issued` - Total tokens generated
-- `reconnection_sessions_active` - Current pending reconnections
-- `reconnection_completions` - Successful reconnections
-- `reconnection_validation_failure` - Failed token validations
-- `reconnection_events_buffered` - Total events buffered
+- `signal_fish_reconnection_tokens_issued_total` - Total tokens generated
+- `signal_fish_reconnection_sessions_active` - Current pending reconnections
+- `signal_fish_reconnection_completions_total` - Successful reconnections
+- `signal_fish_reconnection_validation_failures_total` - Failed token validations
+- `signal_fish_reconnection_events_buffered_total` - Total events buffered
 
 ## Implementation
 

@@ -83,6 +83,29 @@ Key modules:
 - `room_state.rs` - `Room`, `Player`, `LobbyState`
 - `validation.rs` - Input validation functions
 - `room_codes.rs` - Room code generation
+- `error_codes.rs` - `ErrorCode` enum
+
+### Protocol v3 Session Layer (Topology + Transport)
+
+**Location:** `src/server/session_policy.rs`, `src/server/signaling.rs`
+
+On `/v3/ws` (the default v3 endpoint), the server negotiates a peer-to-peer
+session plan instead of pure relay: a two-axis ladder
+(`mesh+webrtc -> host+webrtc -> host+direct -> relay`) with a per-recipient
+`SessionPlan`, plus `NewPeer` and `Signal` messages for WebRTC signaling
+brokering and host-failover / late-join re-planning. A single v2 or relay-only
+member forces the whole room to the relay floor (no v3 session messages are
+emitted). The server also mints ephemeral coturn-REST TURN credentials for
+operator-configured external TURN URLs and advertises STUN; optional
+`ice_servers` are attached to `RoomJoined` / `Reconnected` for v3
+WebRTC-capable clients when ICE pre-gather is enabled.
+
+See:
+
+- [Transport Fallback (v3)](architecture/transport-fallback.md)
+- [Handoff & Topologies (v3)](architecture/handoff-and-topologies.md)
+- [Formal Verification (v3)](architecture/formal-verification.md)
+- [Scaling (Multi-Node)](architecture/scaling.md)
 
 ### Configuration
 
@@ -262,6 +285,8 @@ main.rs
        │    ├── server/reconnection_service.rs
        │    ├── server/relay_policy.rs
        │    ├── server/room_service.rs
+       │    ├── server/session_policy.rs (Protocol v3 session-plan selection/emission/re-planning)
+       │    ├── server/signaling.rs (Protocol v3 WebRTC signal relay + late-join/NewPeer)
        │    ├── server/spectator_handlers.rs
        │    └── server/spectator_service.rs
        ├── protocol/
@@ -298,6 +323,9 @@ main.rs
        │    ├── websocket.rs (WebSocketConfig)
        │    ├── logging.rs (LoggingConfig)
        │    ├── relay.rs (RelayTypeConfig)
+       │    ├── session.rs (SessionConfig: topology/transport policy, ICE pre-gather)
+       │    ├── turn.rs (TurnConfig: ephemeral coturn-REST TURN credentials + STUN)
+       │    ├── ice_url.rs (ICE URL scheme validation)
        │    ├── coordination.rs (CoordinationConfig)
        │    ├── metrics.rs (MetricsConfig)
        │    ├── defaults.rs (Default values)
@@ -306,7 +334,8 @@ main.rs
        ├── security/
        │    ├── tls.rs (TLS support, feature-gated)
        │    ├── crypto.rs (AES-GCM envelope encryption)
-       │    └── token_binding.rs (Channel-bound tokens)
+       │    ├── token_binding.rs (Channel-bound tokens)
+       │    └── turn_credentials.rs (ephemeral coturn-REST TURN credential minting)
        ├── metrics.rs (AtomicU64 + HDR histograms)
        ├── logging.rs (Structured logging init)
        ├── distributed.rs (InMemoryDistributedLock)
@@ -320,11 +349,13 @@ main.rs
 
 ## Architecture Decision Records
 
-Key architectural decisions are documented in [Architecture Decision Records (ADRs)](adr/).
+Key architectural decisions are documented in [Architecture Decision Records (ADRs)](adr/README.md).
 
 Current ADRs:
 
 - [ADR-001: Reconnection Protocol](adr/reconnection-protocol.md) - WebSocket reconnection and event replay
+- [ADR-0001: Protocol v3 Two-Axis (Topology + Transport)](adr/0001-protocol-v3-two-axis.md) - Capability-gated signaling
+- [ADR-0003: Formal Verification and Fuzzing](adr/0003-formal-verification-and-fuzzing.md) - Verifying the v3 session core
 
 ## Design Principles
 
