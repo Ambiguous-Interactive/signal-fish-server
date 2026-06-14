@@ -24,7 +24,8 @@
 (*   HostInvalid                     <-> ActiveSessionPlan::host_invalid              *)
 (*   PlanFor                         <-> SessionPlanDecision::plan_for                *)
 (*   ReplanResult                    <-> EnhancedGameServer::replan_host_session      *)
-(*   Finalize                        <-> EnhancedGameServer::emit_session_plan        *)
+(*   Finalize trigger                <-> RoomOperationCoordinator::handle_start_game *)
+(*   Finalize emission               <-> EnhancedGameServer::emit_session_plan        *)
 (*   DepartureEffects                <-> handle_session_member_departure              *)
 (*                                       (run from room_service.rs leave_room)        *)
 (*   LateJoinEffects / NewPeersFor   <-> src/server/signaling.rs                      *)
@@ -76,10 +77,13 @@ VARIABLES
     \* the elect_host UUID tie-break for equal joined_at is structurally
     \* unreachable here — it is covered by the Rust property tests instead).
     members,
-    \* "waiting" or "finalized". The v2 Waiting<->Lobby readiness shuffle is
+    \* "waiting" or "finalized". The Waiting<->Lobby readiness shuffle is
     \* abstracted away: what matters to session policy is that finalize fires
-    \* from a FULL room (Room::should_enter_lobby requires fullness) and that
-    \* Finalized is terminal (no definalization flow exists).
+    \* from a NON-EMPTY room via an explicit StartGame (coordinator
+    \* handle_start_game; Room::should_enter_lobby now requires only non-empty,
+    \* and max_players is a ceiling, not a required count) and that Finalized is
+    \* terminal (no definalization flow exists — the leave path no longer
+    \* regresses a partial lobby back to Waiting).
     lobbyState,
     \* The room's designated authority (Room::authority_player), or NoPlayer.
     authority,
@@ -445,15 +449,32 @@ GrantAuthority(p) ==
     /\ UNCHANGED <<members, lobbyState, storedPlan, delivered>>
     /\ churn' = churn - 1
 
-\* Lobby finalization (coordinator finalize -> emit_session_plan): runs the
-\* ladder ONCE over the full room, stores a non-relay decision (the relay
-\* floor stores and emits nothing — v3 relay-only and v2 members observe pure
-\* v2 behavior), and delivers per-recipient plans to every v3 member.
-\* Fullness is required because Room::should_enter_lobby gates the lobby (and
-\* hence readiness and finalize) on a full room.
+\* Lobby finalization (coordinator handle_start_game -> emit_session_plan):
+\* runs the ladder ONCE over the current room, stores a non-relay decision
+\* (the relay floor stores and emits nothing — v3 relay-only and v2 members
+\* observe pure v2 behavior), and delivers per-recipient plans to every v3
+\* member.
+\*
+\* TRIGGER (changed): finalization is now driven by an EXPLICIT StartGame, not
+\* by the room becoming full. The OLD `Len(members) = MAX_PLAYERS` fullness
+\* gate is GONE: Room::should_enter_lobby now returns true for any non-empty
+\* Waiting room, and max_players is a CEILING, not a required count.
+\* handle_start_game finalizes when the room is not already Finalized, every
+\* current player is ready, and the sender is authorized — the room's
+\* authority_player if one is set, else ANY member. Minimum 1 player (solo is
+\* allowed). The precondition here therefore models only what is observable in
+\* this abstraction: the room is non-empty and a finalize is explicitly
+\* triggered. Readiness and the identity of the triggering member are
+\* abstracted away — the authorization rule (authority-if-set, else any
+\* member) places no constraint on WHICH non-empty rooms can finalize, because
+\* an authorized starter always exists (AuthorityIsCurrentMember: a set
+\* authority is a current member; with no authority, any of the >=1 members
+\* qualifies). So the only reachability change versus the old gate is dropping
+\* fullness: finalize may now fire below MAX_PLAYERS, on any non-empty Waiting
+\* room.
 Finalize ==
     /\ lobbyState = "waiting"
-    /\ Len(members) = MAX_PLAYERS
+    /\ members # <<>>
     /\ lobbyState' = "finalized"
     /\ LET pair == ChoosePair(MemberSet)
        IN IF pair = RelayPair THEN

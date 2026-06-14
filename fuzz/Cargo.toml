@@ -1,0 +1,47 @@
+# Coverage-guided fuzzing crate (cargo-fuzz / libFuzzer).
+#
+# This is the NIGHTLY, out-of-workspace extension of the stable in-suite
+# proptest fuzzer (tests/protocol_fuzz_hardening.rs). ADR-0003 records why the
+# primary fuzzer is proptest-on-stable (pinned-toolchain parity) and named the
+# conditions for adding a coverage-guided fuzzer "later"; this crate is that
+# addition. It is intentionally a SEPARATE package with its own `[workspace]`
+# table so it never perturbs the pinned-stable build of the main crate, and it
+# is exercised only by the dedicated nightly `fuzz` CI job — never by
+# `cargo build` / `cargo test` on the stable toolchain.
+[package]
+name = "signal-fish-server-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+rmp-serde = "1.3"
+
+[dependencies.signal-fish-server]
+path = ".."
+
+# Detach from the parent crate so the nightly fuzz build is fully independent of
+# the pinned-stable workspace.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode_protocol"
+path = "fuzz_targets/decode_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_inputs"
+path = "fuzz_targets/validate_inputs.rs"
+test = false
+doc = false
+bench = false

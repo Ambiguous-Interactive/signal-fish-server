@@ -339,12 +339,16 @@ impl Room {
         self.set_authority(None)
     }
 
-    /// Check if room should transition to lobby state
+    /// Check if room should transition to lobby (ready-coordination) state.
+    ///
+    /// `max_players` is a *ceiling*, not a required count: a room enters the
+    /// lobby as soon as it has at least one player (the creator), so players can
+    /// ready up while the room continues to fill up to `max_players`. The game
+    /// does not start automatically when all are ready — an explicit `StartGame`
+    /// from the authority (or any member if no authority is set) finalizes it.
     #[allow(dead_code)]
     pub fn should_enter_lobby(&self) -> bool {
-        self.lobby_state == LobbyState::Waiting
-            && self.players.len() == self.max_players as usize
-            && self.max_players > 1
+        self.lobby_state == LobbyState::Waiting && !self.players.is_empty()
     }
 
     /// Transition room to lobby state
@@ -360,10 +364,13 @@ impl Room {
         }
     }
 
-    /// Mark a player as ready in lobby
+    /// Mark a player as ready in the lobby.
+    ///
+    /// Readiness can be toggled at any time before the game is `Finalized`; the
+    /// room need not be full.
     #[allow(dead_code)]
     pub fn set_player_ready(&mut self, player_id: &PlayerId, ready: bool) -> bool {
-        if self.lobby_state != LobbyState::Lobby || !self.players.contains_key(player_id) {
+        if self.lobby_state == LobbyState::Finalized || !self.players.contains_key(player_id) {
             return false;
         }
 
@@ -381,19 +388,27 @@ impl Room {
         true
     }
 
-    /// Check if all players are ready in lobby
+    /// Check if all current players are ready (the `StartGame` precondition).
+    ///
+    /// True when the room is not yet `Finalized`, has at least one player, and
+    /// every current player is ready. `max_players` is not consulted — a room
+    /// can be all-ready (and so startable) before it is full.
     #[allow(dead_code)]
     pub fn all_players_ready(&self) -> bool {
-        if self.lobby_state != LobbyState::Lobby {
+        if self.lobby_state == LobbyState::Finalized {
             return false;
         }
         self.ready_players.len() == self.players.len() && !self.players.is_empty()
     }
 
     /// Finalize the game and prepare legacy peer metadata.
+    ///
+    /// Finalization is driven by an explicit `StartGame` (whose authorization is
+    /// enforced by the handler); this transition only requires that the room is
+    /// not already `Finalized` and that every current player is ready.
     #[allow(dead_code)]
     pub fn finalize_game(&mut self) -> bool {
-        if self.lobby_state == LobbyState::Lobby && self.all_players_ready() {
+        if self.lobby_state != LobbyState::Finalized && self.all_players_ready() {
             self.lobby_state = LobbyState::Finalized;
             self.game_finalized_at = Some(chrono::Utc::now());
             true

@@ -426,6 +426,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `JoinRoom` validation to report dedicated error codes for player-name and capacity failures:
+  an invalid `player_name` now returns `INVALID_PLAYER_NAME` and an invalid `max_players` now returns
+  `INVALID_MAX_PLAYERS`, instead of the generic `INVALID_INPUT`. Both codes were already defined and
+  documented but never emitted, so a client switching on `error_code` could not distinguish a bad
+  player name or capacity from any other malformed input (the sibling `game_name` / `room_code`
+  validators already used their dedicated codes). Surfaced by a new red-green edge-case suite
+  (`tests/v3_edge_cases_e2e.rs`).
 - Fixed the Rust client guide's `GameDataEncoding` examples to match `ProtocolInfo.game_data_formats`:
   `rkyv` remains reserved/internal and is not advertised or negotiated by the server.
 - Fixed widespread protocol-documentation drift found while reconciling the v2/v3 docs against
@@ -561,6 +568,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Lobby start is now explicit and `max_players` is a ceiling, not a required count.** In both
+  protocol v2 and v3 the game no longer starts automatically when every player is ready, and a room
+  no longer needs to be full to start. Players may `PlayerReady` / unready at any time while the room
+  is open (any non-`Finalized` state), and the room is finalized only by a new explicit
+  [`StartGame`](docs/protocol.md) client message. `StartGame` is accepted only when **every current
+  player is ready** and the sender is authorized: the room's authority player if the room has one,
+  otherwise **any** member. A single ready player may start (solo is allowed). On success the server
+  broadcasts the unchanged `GameStarting` (and, for a negotiated v3 non-relay room, the per-recipient
+  `SessionPlan`) exactly as before — only the trigger changed. A departure no longer regresses a
+  partially-full lobby back to `Waiting`; the remaining players keep their readiness and can still
+  start. Rejected `StartGame`s return the new `GAME_START_NOT_READY` / `GAME_START_FORBIDDEN` error
+  codes (an already-started room returns `INVALID_ROOM_STATE`).
 - Tightened ICE URL validation in the `[session]` and `[turn]` config blocks (closing the
   scheme/deduplication check deferred from P4): every `session.ice_servers[].urls` entry must now
   start with one of the four ICE schemes (`stun:`, `stuns:`, `turn:`, `turns:`), every `turn.urls`

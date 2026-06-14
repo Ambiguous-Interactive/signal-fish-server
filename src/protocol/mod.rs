@@ -482,7 +482,8 @@ mod tests {
             "matchbox".to_string(),
         );
 
-        // Initially in waiting state
+        // Initially in waiting state with no players: an empty room never enters
+        // the lobby (nothing to coordinate).
         assert_eq!(room.lobby_state, LobbyState::Waiting);
         assert!(!room.should_enter_lobby());
         assert!(!room.all_players_ready());
@@ -500,12 +501,21 @@ mod tests {
         };
         room.add_player(player1);
 
-        // Still shouldn't enter lobby with only one player
-        assert!(!room.should_enter_lobby());
-        assert!(!room.enter_lobby());
-        assert_eq!(room.lobby_state, LobbyState::Waiting);
+        // `max_players` is a ceiling, not a required count: a room enters the
+        // lobby (ready-coordination) as soon as it has a player, while it keeps
+        // filling up to `max_players`.
+        assert!(room.should_enter_lobby());
+        assert!(room.enter_lobby());
+        assert_eq!(room.lobby_state, LobbyState::Lobby);
+        assert!(room.lobby_started_at.is_some());
 
-        // Add second player (room is now full)
+        // The sole player can already ready up and, when every current player is
+        // ready, the room is startable (solo is allowed).
+        assert!(room.set_player_ready(&player1_id, true));
+        assert!(room.all_players_ready());
+
+        // A second player joins the still-open lobby; readiness resets the
+        // all-ready condition until they ready up too.
         let player2_id = Uuid::new_v4();
         let player2 = PlayerInfo {
             id: player2_id,
@@ -517,15 +527,6 @@ mod tests {
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         room.add_player(player2);
-
-        // Now should transition to lobby
-        assert!(room.should_enter_lobby());
-        assert!(room.enter_lobby());
-        assert_eq!(room.lobby_state, LobbyState::Lobby);
-        assert!(room.lobby_started_at.is_some());
-
-        // Players should be able to mark themselves ready
-        assert!(room.set_player_ready(&player1_id, true));
         assert_eq!(room.ready_players.len(), 1);
         assert!(room.players[&player1_id].is_ready);
         assert!(!room.all_players_ready());
@@ -535,7 +536,8 @@ mod tests {
         assert_eq!(room.ready_players.len(), 2);
         assert!(room.all_players_ready());
 
-        // Should be able to finalize game
+        // Should be able to finalize game (an explicit StartGame in production;
+        // here the in-Room transition once all current players are ready).
         assert!(room.finalize_game());
         assert_eq!(room.lobby_state, LobbyState::Finalized);
         assert!(room.game_finalized_at.is_some());
@@ -672,9 +674,12 @@ mod tests {
         room.set_player_ready(&player1_id, true);
         assert!(!room.finalize_game());
 
-        // Can't set ready when not in lobby state
+        // Readiness can be toggled in the open lobby (Waiting or Lobby) — only a
+        // Finalized room rejects further ready toggles.
         room.lobby_state = LobbyState::Waiting;
-        assert!(!room.set_player_ready(&player1_id, false));
+        assert!(room.set_player_ready(&player1_id, false));
+        room.lobby_state = LobbyState::Finalized;
+        assert!(!room.set_player_ready(&player1_id, true));
     }
 
     fn expected_game_name_ok(name: &str, config: &ProtocolConfig) -> bool {

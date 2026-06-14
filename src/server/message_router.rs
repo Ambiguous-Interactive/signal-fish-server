@@ -51,6 +51,9 @@ impl EnhancedGameServer {
             ClientMessage::PlayerReady => {
                 self.handle_player_ready(player_id).await;
             }
+            ClientMessage::StartGame => {
+                self.handle_start_game(player_id).await;
+            }
             ClientMessage::ProvideConnectionInfo { connection_info } => {
                 self.handle_provide_connection_info(player_id, connection_info)
                     .await;

@@ -2,7 +2,7 @@ use super::{EnhancedGameServer, MaxRoomsPerGameExceededError};
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
-    LobbyState, PlayerId, PlayerInfo, RelayTransport, Room, RoomJoinedPayload, ServerMessage,
+    PlayerId, PlayerInfo, RelayTransport, Room, RoomJoinedPayload, ServerMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,7 +89,7 @@ impl EnhancedGameServer {
                     player_id,
                     Arc::new(ServerMessage::RoomJoinFailed {
                         reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidInput),
+                        error_code: Some(crate::protocol::ErrorCode::InvalidPlayerName),
                     }),
                 )
                 .await;
@@ -106,7 +106,7 @@ impl EnhancedGameServer {
                     player_id,
                     Arc::new(ServerMessage::RoomJoinFailed {
                         reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidInput),
+                        error_code: Some(crate::protocol::ErrorCode::InvalidMaxPlayers),
                     }),
                 )
                 .await;
@@ -357,24 +357,15 @@ impl EnhancedGameServer {
         self.handle_session_member_departure(&room_id, player_id)
             .await;
 
-        // Check if room should transition out of lobby state after player left
+        // A departure no longer regresses the lobby. `max_players` is a ceiling,
+        // not a required count, so a partially-full room stays a valid lobby:
+        // the remaining players keep their readiness and can still start the game
+        // (an explicit `StartGame`, once all current players are ready). A
+        // `Finalized` room likewise stays finalized (the running session is
+        // re-planned by `handle_session_member_departure` above, not regressed).
         let mut latest_room_code: Option<String> = None;
         if let Ok(Some(room)) = self.database.get_room_by_id(&room_id).await {
             latest_room_code = Some(room.code.clone());
-            if room.lobby_state == LobbyState::Lobby && !room.should_enter_lobby() {
-                if let Err(e) = self.database.transition_room_to_waiting(&room_id).await {
-                    tracing::warn!("Failed to transition room back to waiting state: {}", e);
-                } else {
-                    tracing::info!(
-                        %room_id,
-                        "Room transitioned from lobby back to waiting state after player left"
-                    );
-
-                    if let Err(e) = self.room_coordinator.clear_ready_players(&room_id).await {
-                        tracing::warn!("Failed to clear ready players from coordinator: {}", e);
-                    }
-                }
-            }
         }
         if let Some(code) = &latest_room_code {
             leave_span.record("room_code", tracing::field::display(code));

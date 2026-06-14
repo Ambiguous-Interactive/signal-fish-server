@@ -10,7 +10,7 @@ ADR-0005 - Accepted
 client (webrtc-rs), proving native↔native sessions end to end. But the primary production consumer of a
 browser-facing signaling server is a **browser**: `RTCPeerConnection` as shipped in Chromium, with behaviors no
 native stack reproduces — mDNS host-candidate obfuscation (`.local` hostnames), browser SDP dialects, the
-`ondatachannel` adoption path, page-lifecycle teardown. PLAN P7 explicitly calls for browser↔native interop
+`ondatachannel` adoption path, page-lifecycle teardown. Full coverage requires browser↔native interop
 matrix cells, including the mDNS `.local` trap. Until this ADR, the `clients/README.md` browser row was
 "planned" and every browser cell in the matrix was pending.
 

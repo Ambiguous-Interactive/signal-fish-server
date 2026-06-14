@@ -13,9 +13,9 @@ no message broker, no cloud services required.
 Signal Fish Server is a WebSocket signaling server purpose-built for
 multiplayer games. Players connect over WebSocket, create or join rooms
 using shareable 6-character room codes, and coordinate through a built-in
-lobby system with ready-up state management. Once all players are ready,
-the server facilitates peer-to-peer connection establishment so your game
-clients can communicate directly. Everything runs in-memory in a single
+lobby system with ready-up state management. Once every player is ready, a
+member explicitly starts the game and the server facilitates peer-to-peer
+connection establishment so your game clients can communicate directly. Everything runs in-memory in a single
 binary -- deploy it anywhere and start matchmaking in seconds.
 
 ## Key Features

@@ -196,16 +196,23 @@ async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
             .await;
     }
 
-    // Real finalize flow: first toggle broadcasts a non-final lobby update...
+    // Real finalize flow: ready toggles broadcast lobby updates but NEVER start
+    // the game on their own. The first toggle is a non-final update...
     server.handle_player_ready(&player_a).await;
     for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
         expect_lobby_state_changed(rx, false, who).await;
     }
-    // ...and the last toggle finalizes: final lobby update, GameStarting, then
-    // the per-recipient mesh SessionPlan (both members are v3+webrtc).
+    // ...the second toggle makes every player ready (`all_ready: true`) but the
+    // game still does not start — no GameStarting/SessionPlan yet.
     server.handle_player_ready(&player_b).await;
     for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
         expect_lobby_state_changed(rx, true, who).await;
+    }
+    // An explicit StartGame finalizes: GameStarting, then the per-recipient mesh
+    // SessionPlan (both members are v3+webrtc). No authority is set, so any
+    // member may start.
+    server.handle_start_game(&player_a).await;
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
         match recv(rx).await.as_ref() {
             ServerMessage::GameStarting { .. } => {}
             other => panic!("{who} expected GameStarting, got {other:?}"),
@@ -243,8 +250,8 @@ async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
                 "post-finalize ready toggles must be rejected with INVALID_ROOM_STATE"
             );
             assert!(
-                message.contains("lobby state"),
-                "the rejection should explain the lobby-state requirement: {message}"
+                message.contains("already started"),
+                "the rejection should explain the game already started: {message}"
             );
         }
         other => panic!("expected Error after a post-finalize ready toggle, got {other:?}"),

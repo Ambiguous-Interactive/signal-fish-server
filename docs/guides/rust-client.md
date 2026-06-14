@@ -114,8 +114,11 @@ pub enum ClientMessage {
     GameData {
         data: serde_json::Value,
     },
-    /// Signal readiness to start the game.
+    /// Toggle readiness in the lobby (no longer auto-starts the game).
     PlayerReady,
+    /// Explicitly finalize the lobby once every current player is ready
+    /// (the room's authority if it has one, else any member).
+    StartGame,
     /// Request or release game authority.
     AuthorityRequest {
         become_authority: bool,
@@ -838,11 +841,15 @@ async fn ready_up_and_wait(
 
 The state machine flow:
 
-1. **waiting** -- room is open, waiting for players to fill it
-2. **lobby** -- room is full, players are coordinating readiness
-3. **finalized** -- all players are ready, game is starting
+1. **waiting** -- room is empty, waiting for the first player
+2. **lobby** -- players are present and coordinating readiness (`max_players`
+   is a ceiling; the room need not be full)
+3. **finalized** -- a member sent `StartGame` while every current player was
+   ready, and the game is starting
 
-If a player leaves during `lobby`, the room returns to `waiting`.
+Readiness alone does not start the game: once every current player is ready
+(`all_ready: true`), a member sends `StartGame` to finalize the lobby. A player
+leaving during `lobby` no longer regresses the room to `waiting`.
 
 ## Reconnection Handling
 
@@ -1256,6 +1263,7 @@ pub enum ClientMessage {
         data: serde_json::Value,
     },
     PlayerReady,
+    StartGame,
     AuthorityRequest {
         become_authority: bool,
     },
@@ -1588,6 +1596,14 @@ impl SignalFishClient {
         &self,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.send(&ClientMessage::PlayerReady).await
+    }
+
+    /// Finalize the lobby once every current player is ready. Accepted only
+    /// from the room's authority (if it has one) or any member otherwise.
+    pub async fn start_game(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.send(&ClientMessage::StartGame).await
     }
 
     /// Request or release authority.

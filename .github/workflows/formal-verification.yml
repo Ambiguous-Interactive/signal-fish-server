@@ -1,16 +1,23 @@
 # Formal Verification Workflow
 #
-# Model-checks the Protocol v3 session-lifecycle TLA+ specification
-# (formal/tla/SignalFishSession.tla) with TLC across every model
-# configuration (desired=mesh, desired=host, desired=host with WebRTC
-# disabled, and the relay-floor model with both upgrade transports
-# disabled). The spec mirrors the modeled source files action-for-action
-# (the full correspondence table in formal/README.md spans
-# session_policy.rs, signaling.rs, room_service.rs, database/mod.rs,
-# protocol/room_state.rs, and reconnection_service.rs), so this workflow
-# triggers on changes to those files as well: a behavioral change there
-# must keep the spec (and its invariants) green or update them
-# deliberately.
+# Two complementary formal checks of the Protocol v3 session lifecycle:
+#
+#   * TLC model-checks the TLA+ specification
+#     (formal/tla/SignalFishSession.tla) across every model configuration
+#     (desired=mesh, desired=host, desired=host with WebRTC disabled, and the
+#     relay-floor model with both upgrade transports disabled) — exploring
+#     reachable states.
+#   * Z3 discharges universally quantified SMT proofs of the pure decision
+#     functions (formal/z3/protocol_invariants.py): the ladder selector, the
+#     all_support relay-floor invariant, the glare/offerer rule, and host
+#     election — over unbounded inputs an explicit-state checker only samples.
+#
+# Both mirror the modeled source files action-for-action (the full
+# correspondence table in formal/README.md spans session_policy.rs,
+# signaling.rs, room_service.rs, database/mod.rs, protocol/room_state.rs, and
+# reconnection_service.rs), so this workflow triggers on changes to those files
+# as well: a behavioral change there must keep the spec and the proofs green or
+# update them deliberately.
 #
 # The TLA+ tools jar is version-pinned and SHA256-verified by
 # scripts/run-tla-model-check.sh; the verified jar is cached between runs.
@@ -24,6 +31,7 @@ on:
     paths:
       - "formal/**"
       - "scripts/run-tla-model-check.sh"
+      - "scripts/run-z3-proofs.sh"
       - "src/server/session_policy.rs"
       - "src/server/signaling.rs"
       - "src/server/room_service.rs"
@@ -36,6 +44,7 @@ on:
     paths:
       - "formal/**"
       - "scripts/run-tla-model-check.sh"
+      - "scripts/run-z3-proofs.sh"
       - "src/server/session_policy.rs"
       - "src/server/signaling.rs"
       - "src/server/room_service.rs"
@@ -78,3 +87,22 @@ jobs:
 
       - name: Run TLC model check (all configurations)
         run: bash scripts/run-tla-model-check.sh
+
+  z3:
+    name: Z3 SMT Proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install z3
+        run: pip install z3-solver
+
+      - name: Run Z3 protocol-invariant proofs
+        run: bash scripts/run-z3-proofs.sh

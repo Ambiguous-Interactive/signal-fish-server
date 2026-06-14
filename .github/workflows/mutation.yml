@@ -1,0 +1,83 @@
+# Mutation Testing Workflow
+#
+# Runs cargo-mutants over the protocol DECISION logic (the session-plan
+# selection ladder, signaling glare/size/gating, input validation, room-code
+# generation — see .cargo/mutants.toml) to measure TEST STRENGTH: a surviving
+# mutant marks a behavioral change the test suite does not catch, i.e. a place a
+# real bug of that shape could ship undetected.
+#
+# This is a periodic health check (weekly + manual), not a per-PR gate: a fresh
+# survivor is a signal to add a test, not necessarily a blocking regression. The
+# full mutant report is always uploaded; the job fails when any mutant survives
+# so the survivors are triaged deliberately.
+#
+# Scope and the fast `--lib` oracle are configured in .cargo/mutants.toml.
+
+name: Mutation Testing
+
+on:
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".cargo/mutants.toml"
+      - ".github/workflows/mutation.yml"
+      - "src/server/session_policy.rs"
+      - "src/server/signaling.rs"
+      - "src/server/relay_policy.rs"
+      - "src/protocol/validation.rs"
+      - "src/protocol/room_codes.rs"
+      - "src/protocol/error_codes.rs"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: cargo-mutants (protocol logic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2.81.8
+        with:
+          tool: cargo-mutants
+
+      - name: Run mutation testing (config-scoped)
+        run: cargo mutants --no-shuffle -j 2
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: mutants-report
+          path: mutants.out/
+          if-no-files-found: ignore

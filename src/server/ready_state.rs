@@ -1,11 +1,70 @@
+use crate::coordination::StartGameOutcome;
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
-    /// Handle player ready with distributed coordination.
+    /// Handle a player ready-state toggle with distributed coordination.
+    ///
+    /// Readiness can be toggled at any time while the room is open; it no longer
+    /// starts the game. The server broadcasts the updated lobby snapshot (with
+    /// `all_ready`); finalization is driven by an explicit `StartGame`
+    /// ([`Self::handle_start_game`]).
     pub async fn handle_player_ready(&self, player_id: &PlayerId) {
+        let Some(room_id) = self.get_client_room(player_id).await else {
+            let _ = self
+                .message_coordinator
+                .send_to_player(
+                    player_id,
+                    Arc::new(ServerMessage::Error {
+                        message: "Not in a room".to_string(),
+                        error_code: Some(ErrorCode::NotInRoom),
+                    }),
+                )
+                .await;
+            return;
+        };
+
+        if let Err(e) = self
+            .room_coordinator
+            .handle_player_ready(&room_id, player_id, self.client_app_id(player_id))
+            .await
+        {
+            tracing::debug!(
+                "Player {:?} attempted to change ready status: {}",
+                player_id,
+                e
+            );
+            // The only business rejection is a `Finalized` room (the game has
+            // already started); everything else is an infra failure.
+            let message = if e.to_string().contains("Finalized") {
+                "Cannot change ready status: the game has already started.".to_string()
+            } else {
+                "Failed to update ready state".to_string()
+            };
+            let _ = self
+                .message_coordinator
+                .send_to_player(
+                    player_id,
+                    Arc::new(ServerMessage::Error {
+                        message,
+                        error_code: Some(ErrorCode::InvalidRoomState),
+                    }),
+                )
+                .await;
+        }
+    }
+
+    /// Handle an explicit `StartGame`: finalize the lobby with its current
+    /// members when every current player is ready and the sender is authorized.
+    ///
+    /// `max_players` is a ceiling, not a required count, so a partially-full
+    /// room may start. Authorization: a designated authority may start;
+    /// otherwise any member may. On success the coordinator has already
+    /// broadcast `GameStarting`, so we only emit the per-recipient v3
+    /// `SessionPlan` (gated to v3 clients) here.
+    pub async fn handle_start_game(&self, player_id: &PlayerId) {
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
                 .message_coordinator
@@ -22,34 +81,49 @@ impl EnhancedGameServer {
 
         match self
             .room_coordinator
-            .handle_player_ready(&room_id, player_id, self.client_app_id(player_id))
+            .handle_start_game(&room_id, player_id)
             .await
         {
-            // The room finalized on this toggle: emit the per-recipient v3
-            // SessionPlan AFTER GameStarting was broadcast (gated to v3 clients).
-            Ok(Some(finalized)) => {
+            Ok(StartGameOutcome::Started(finalized)) => {
                 self.emit_session_plan(&room_id, &finalized).await;
             }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::debug!(
-                    "Player {:?} attempted to change ready status: {}",
-                    player_id,
-                    e
-                );
-                let error_message = if e.to_string().contains("room may not be in lobby state") {
-                    "Cannot change ready status. Room must be in lobby state (full with all players joined)."
-                        .to_string()
-                } else {
-                    "Failed to update ready state".to_string()
+            Ok(rejection) => {
+                let (message, error_code) = match rejection {
+                    StartGameOutcome::NotReady => (
+                        "Cannot start the game: every player must be ready first.".to_string(),
+                        ErrorCode::GameStartNotReady,
+                    ),
+                    StartGameOutcome::Forbidden => (
+                        "Only the room's authority player may start the game.".to_string(),
+                        ErrorCode::GameStartForbidden,
+                    ),
+                    StartGameOutcome::AlreadyStarted => (
+                        "The game has already started.".to_string(),
+                        ErrorCode::InvalidRoomState,
+                    ),
+                    // Unreachable: the success arm is handled above.
+                    StartGameOutcome::Started(_) => return,
                 };
                 let _ = self
                     .message_coordinator
                     .send_to_player(
                         player_id,
                         Arc::new(ServerMessage::Error {
-                            message: error_message,
-                            error_code: Some(ErrorCode::InvalidRoomState),
+                            message,
+                            error_code: Some(error_code),
+                        }),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                tracing::debug!("Player {:?} attempted to start the game: {}", player_id, e);
+                let _ = self
+                    .message_coordinator
+                    .send_to_player(
+                        player_id,
+                        Arc::new(ServerMessage::Error {
+                            message: "Failed to start the game".to_string(),
+                            error_code: Some(ErrorCode::InternalError),
                         }),
                     )
                     .await;

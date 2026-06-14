@@ -8,7 +8,7 @@ ADR-0004 - Accepted
 
 Protocol v3 ([ADR-0001](0001-protocol-v3-two-axis.md)) gives the server a complete signaling story — capability
 negotiation, the topology/transport ladder, per-recipient `SessionPlan`s, opaque `Signal` relay, late-join
-`NewPeer`, transport-status reporting — but until PLAN P7 nothing in this repository ever ran that story against a
+`NewPeer`, transport-status reporting — but until this ADR nothing in this repository ever ran that story against a
 **real WebRTC implementation**. The in-repo conformance suites drive real sockets and assert exact wire bytes, yet
 their "clients" are test harness code: SDP strings are fabricated, ICE candidates are never gathered, and no DTLS
 handshake or SCTP data channel ever opens. That leaves the most important claim — _a real client following
@@ -90,7 +90,7 @@ the harness pins `ice_servers_count == 0` to keep it that way.
 ### Positive
 
 - **End-to-end proof:** server-brokered offer/answer/trickle-ICE produces live DTLS+SCTP data channels between
-  real processes — PLAN P7's core claim is now demonstrated and regression-tested in-repo.
+  real processes — the end-to-end interop claim is now demonstrated and regression-tested in-repo.
 - **Zero wire drift:** the path dependency makes the reference client track every protocol change at compile time.
 - **Root package untouched:** MSRV, lockfile, coverage, and policy gates of the server crate are unaffected.
 - **Matchbox-shape fidelity:** the candidate payload convention of ADR-0002 is exercised by a real ICE agent.

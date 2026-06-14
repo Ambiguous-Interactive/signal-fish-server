@@ -119,6 +119,7 @@ nav:
       - Installation & Running: getting-started.md
   - Concepts:
       - What is Signal Fish?: concepts/overview.md
+      - Protocol v2 vs v3: concepts/protocol-versions.md
       - Rooms & Lobbies: concepts/rooms-and-lobbies.md
       - Authority System: concepts/authority.md
       - Reconnection: concepts/reconnection.md
@@ -126,6 +127,15 @@ nav:
   - Guides:
       - Rust Client: guides/rust-client.md
       - Platform Integration: guides/platform-integration.md
+  - Examples:
+      - Overview: scenarios/index.md
+      - "v2: Two-Player Relay": scenarios/v2-two-player-relay.md
+      - "v3: Mesh + WebRTC": scenarios/v3-mesh-webrtc.md
+      - "v3: Host Topology": scenarios/v3-host-topology.md
+      - "v3: Host Failover": scenarios/v3-host-failover.md
+      - Reconnection: scenarios/reconnection.md
+      - Spectator: scenarios/spectator.md
+      - Error Handling: scenarios/error-handling.md
   - Configuration:
       - Server Config: configuration.md
       - Authentication: authentication.md
@@ -134,6 +144,7 @@ nav:
   - Reference:
       - Protocol Messages: protocol.md
       - Error Codes: reference/error-codes.md
+      - Feature Matrix: reference/feature-matrix.md
       - Features: features.md
       - Architecture: architecture.md
       - Transport Fallback (v3): architecture/transport-fallback.md

@@ -78,6 +78,15 @@ async fn test_multi_player_room_scenario() {
         _ => panic!("Expected RoomJoined message for player 2"),
     }
 
+    // The room enters the lobby as soon as player 1 joins (`max_players` is a
+    // ceiling, not a required count), so player 1 first sees a LobbyStateChanged
+    // from its own join before the PlayerJoined for player 2.
+    let own_join_update = rx1.try_recv().unwrap();
+    match own_join_update.as_ref() {
+        ServerMessage::LobbyStateChanged { .. } => {}
+        _ => panic!("Expected LobbyStateChanged on player 1 lobby entry"),
+    }
+
     // Player 1 should receive a PlayerJoined notification
     let notification = rx1.try_recv().unwrap();
     match notification.as_ref() {
@@ -143,11 +152,15 @@ async fn test_game_data_exchange() {
 
     println!("Players joined room");
 
+    // The room enters the lobby EXACTLY ONCE, on player 1's join (`max_players`
+    // is a ceiling, not a required count): player 1 sees its own-join lobby
+    // update, then a PlayerJoined for player 2. Player 2 joins an already-Lobby
+    // room, so its RoomJoined already reports `lobby_state: Lobby` and no further
+    // LobbyStateChanged is broadcast.
     expect_room_joined(&mut rx1, "data player 1 room join");
+    expect_lobby_state_changed(&mut rx1, "data player 1 own-join lobby update");
     expect_player_joined(&mut rx1, player2_id, "data player 1 sees player 2 join");
-    expect_lobby_state_changed(&mut rx1, "data player 1 full-lobby update");
     expect_room_joined(&mut rx2, "data player 2 room join");
-    expect_lobby_state_changed(&mut rx2, "data player 2 full-lobby update");
     assert_no_pending_message(&mut rx1, "data player 1 post-join drain");
     assert_no_pending_message(&mut rx2, "data player 2 post-join drain");
 
@@ -310,14 +323,16 @@ async fn test_authority_transfer() {
     println!("Players joined room");
 
     expect_room_joined(&mut rx1, "authority player 1 room join");
+    // The room enters the lobby EXACTLY ONCE, on player 1's join: player 1 sees
+    // its own-join lobby update, then a PlayerJoined for player 2. Player 2 joins
+    // an already-Lobby room, so no further LobbyStateChanged is broadcast.
+    expect_lobby_state_changed(&mut rx1, "authority player 1 own-join lobby update");
     expect_player_joined(
         &mut rx1,
         player2_id,
         "authority player 1 sees player 2 join",
     );
-    expect_lobby_state_changed(&mut rx1, "authority player 1 full-lobby update");
     expect_room_joined(&mut rx2, "authority player 2 room join");
-    expect_lobby_state_changed(&mut rx2, "authority player 2 full-lobby update");
     assert_no_pending_message(&mut rx1, "authority player 1 post-join drain");
     assert_no_pending_message(&mut rx2, "authority player 2 post-join drain");
 
@@ -877,6 +892,14 @@ async fn test_custom_rate_limiting() {
             // Expected
         }
         _ => panic!("Expected first room creation to succeed"),
+    }
+
+    // The room enters the lobby as soon as the creator joins (`max_players` is a
+    // ceiling, not a required count), so a LobbyStateChanged follows RoomJoined.
+    let lobby_update = rx.try_recv().unwrap();
+    match lobby_update.as_ref() {
+        ServerMessage::LobbyStateChanged { .. } => {}
+        _ => panic!("Expected LobbyStateChanged on lobby entry, got: {lobby_update:?}"),
     }
 
     // Leave the room to attempt another creation

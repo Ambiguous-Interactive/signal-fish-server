@@ -5,7 +5,7 @@ use serde_json::json;
 use signal_fish_server::protocol::{LobbyState, RoomJoinedPayload, ServerMessage};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use websocket_test_helpers::{expect_no_server_message_within, next_server_message_within};
+use websocket_test_helpers::next_server_message_within;
 
 const SERVER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -45,6 +45,11 @@ async fn test_lobby_e2e_websocket_flow() {
     assert_eq!(payload.lobby_state, LobbyState::Waiting);
     assert_eq!(payload.ready_players.len(), 0);
 
+    // The room enters the lobby as soon as player 1 joins (`max_players` is a
+    // ceiling, not a required count), so player 1 receives an own-join lobby
+    // update before player 2 has even joined.
+    expect_lobby_state_changed(&mut read1, "player 1 sees own-join lobby", 0, false).await;
+
     // Client 2 joins the same room
     let join_msg2 = json!({
         "type": "JoinRoom",
@@ -66,9 +71,9 @@ async fn test_lobby_e2e_websocket_flow() {
 
     expect_player_joined(&mut read1, "player 1 sees player 2 join").await;
 
-    // Both clients should receive LobbyStateChanged (room is now full)
-    expect_lobby_state_changed(&mut read1, "player 1 sees full lobby", 0, false).await;
-    expect_lobby_state_changed(&mut read2, "player 2 sees full lobby", 0, false).await;
+    // Player 2's join re-broadcasts the lobby snapshot to both members.
+    expect_lobby_state_changed(&mut read1, "player 1 sees player 2 lobby", 0, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees lobby on join", 0, false).await;
 
     // Client 1 signals ready
     let ready_msg = json!({
@@ -91,6 +96,15 @@ async fn test_lobby_e2e_websocket_flow() {
 
     expect_lobby_state_changed(&mut read1, "player 1 sees all ready", 2, true).await;
     expect_lobby_state_changed(&mut read2, "player 2 sees all ready", 2, true).await;
+
+    // Readiness no longer auto-starts the game: with every player ready, the
+    // room creator (client 1, the authority) sends an explicit StartGame to
+    // finalize the lobby and trigger the GameStarting broadcast.
+    let start_msg = json!({ "type": "StartGame" });
+    write1
+        .send(Message::Text(start_msg.to_string().into()))
+        .await
+        .unwrap();
 
     // Both clients should receive GameStarting message
     expect_game_starting(&mut read1, "player 1 game start").await;
@@ -137,6 +151,9 @@ async fn test_lobby_e2e_ready_toggle() {
         .await
         .unwrap();
     expect_room_joined(&mut read1, "player 1 initial room join").await;
+    // The room enters the lobby on player 1's join, so player 1 sees an own-join
+    // lobby update before player 2 joins.
+    expect_lobby_state_changed(&mut read1, "player 1 sees own-join lobby", 0, false).await;
 
     write2
         .send(Message::Text(join_msg2.to_string().into()))
@@ -144,8 +161,8 @@ async fn test_lobby_e2e_ready_toggle() {
         .unwrap();
     expect_room_joined(&mut read2, "player 2 initial room join").await;
     expect_player_joined(&mut read1, "player 1 sees player 2 join").await;
-    expect_lobby_state_changed(&mut read1, "player 1 sees full lobby", 0, false).await;
-    expect_lobby_state_changed(&mut read2, "player 2 sees full lobby", 0, false).await;
+    expect_lobby_state_changed(&mut read1, "player 1 sees player 2 lobby", 0, false).await;
+    expect_lobby_state_changed(&mut read2, "player 2 sees lobby on join", 0, false).await;
 
     // Player 1 signals ready
     let ready_msg = json!({"type": "PlayerReady"});
@@ -203,20 +220,25 @@ async fn test_lobby_e2e_error_cases() {
         .unwrap();
 
     let payload = expect_room_joined(&mut read, "single player room join").await;
+    // The RoomJoined snapshot is taken before the lobby transition, so it still
+    // reports Waiting.
     assert_eq!(payload.lobby_state, LobbyState::Waiting);
 
-    // Try to signal ready in non-lobby room
+    // `max_players` is now a ceiling, not a required count: a one-player room
+    // enters the lobby immediately, so the joiner receives an own-join lobby
+    // update (no ready players yet).
+    expect_lobby_state_changed(&mut read, "solo player lobby entry", 0, false).await;
+
+    // Readiness can be toggled in this solo lobby (solo is allowed). The toggle
+    // marks the lone player ready, so the broadcast reports `all_ready: true`.
+    // Readiness still does NOT auto-start the game — an explicit StartGame is
+    // required (covered by the websocket-flow test).
     write
         .send(Message::Text(ready_msg.to_string().into()))
         .await
         .unwrap();
 
-    expect_no_server_message_within(
-        &mut read,
-        Duration::from_secs(2),
-        "single-player ready should not emit a server message",
-    )
-    .await;
+    expect_lobby_state_changed(&mut read, "solo player marks ready", 1, true).await;
 }
 
 async fn expect_room_joined<S>(read: &mut S, context: &str) -> Box<RoomJoinedPayload>

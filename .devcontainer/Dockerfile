@@ -44,6 +44,8 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     tzdata \
     yamllint \
     zlib1g \
+    default-jre-headless \
+    python3-z3 \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && apt-get autoremove -y && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
@@ -115,6 +117,8 @@ RUN set -eux; \
     yamllint --version; \
     gawk --version; \
     awk 'BEGIN { print "awk ok" }'; \
+    java -version; \
+    python3 -c 'import z3; print("z3", z3.get_version_string())'; \
     pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSEdition; $PSVersionTable.PSVersion.ToString()'
 
 # Rust components
@@ -124,7 +128,15 @@ RUN rustup component add \
     rust-src \
     llvm-tools-preview
 
-# Cargo tools (installed globally, available to all users)
+# Nightly toolchain — required only to RUN the coverage-guided fuzz crate
+# (fuzz/, libFuzzer needs -Zsanitizer). Kept minimal and out of the pinned
+# stable build path; see ADR-0003 and fuzz/README.md.
+RUN rustup toolchain install nightly --profile minimal --component rust-src
+
+# Cargo tools (installed globally, available to all users). Heavy tools go on
+# the cargo-binstall path (prebuilt binaries) to keep no-cache rebuilds fast.
+# cargo-mutants (mutation testing) and cargo-fuzz (coverage-guided fuzzing) back
+# the mutation.yml / fuzz.yml CI jobs; keep them in dev/CI parity.
 RUN cargo install --locked cargo-binstall \
     && cargo binstall --no-confirm --locked \
     cargo-deny \
@@ -133,6 +145,8 @@ RUN cargo install --locked cargo-binstall \
     cargo-expand \
     cargo-llvm-cov \
     cargo-nextest \
+    cargo-mutants \
+    cargo-fuzz \
     && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \
     && taplo --version \
     && cargo-deny --version \
@@ -141,6 +155,8 @@ RUN cargo install --locked cargo-binstall \
     && cargo-expand --version \
     && cargo llvm-cov --version \
     && cargo-nextest --version \
+    && cargo-mutants --version \
+    && cargo-fuzz --version \
     && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
 
 # Fix ownership so the non-root "vscode" user (set via remoteUser in

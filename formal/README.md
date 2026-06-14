@@ -26,23 +26,56 @@ path filters in `.github/workflows/formal-verification.yml`.
 | `tla/SignalFishSession_Host.cfg`      | Model: `desired = host`, both upgrade transports enabled, a v2 member |
 | `tla/SignalFishSession_HostDirect.cfg` | Model: `desired = host`, WebRTC transport disabled (host+direct rung) |
 | `tla/SignalFishSession_Floor.cfg`     | Model: `desired = mesh`, BOTH upgrade transports disabled (relay-floor denial)  |
+| `z3/protocol_invariants.py`           | Z3 SMT proofs of the pure decision functions (selector, glare, host election)   |
+
+This directory holds **two complementary** formal checks:
+
+- **TLA+ / TLC** (`tla/`) explores the reachable *states* of the per-room session
+  lifecycle (join / depart / finalize / replan / late-join / reconnect) and checks
+  invariants and temporal properties over them.
+- **Z3 / SMT** (`z3/`) proves *universally quantified* properties of the pure
+  decision functions — the ladder selector, the `all_support` relay-floor
+  invariant, the glare/offerer rule, and host election — over **unbounded** inputs
+  (any member count, any capability mix, any id space) that an explicit-state
+  checker can only sample. See [Z3 proofs](#z3-proofs) below.
 
 ## How to run
 
 ```bash
-# All four configurations (downloads + verifies the pinned tla2tools.jar once):
+# TLA+: all four configurations (downloads + verifies the pinned tla2tools.jar once):
 bash scripts/run-tla-model-check.sh
 
 # One configuration / full TLC output:
 bash scripts/run-tla-model-check.sh --config Mesh
 bash scripts/run-tla-model-check.sh --config Host --verbose
+
+# Z3: all SMT proofs (needs the python `z3` module — `python3-z3` or `pip install z3-solver`):
+bash scripts/run-z3-proofs.sh
 ```
 
-Requirements: a Java runtime (11+). The script downloads `tla2tools.jar` pinned by
+Requirements (TLA+): a Java runtime (11+). The script downloads `tla2tools.jar` pinned by
 version **and** SHA256 into `${XDG_CACHE_HOME:-~/.cache}/signal-fish/tla` (override with
 `SIGNAL_FISH_TLA_CACHE_DIR`) and re-verifies the checksum on every run, so a corrupted or
-tampered jar never executes. CI runs the same script via
-`.github/workflows/formal-verification.yml`.
+tampered jar never executes. CI runs both scripts via
+`.github/workflows/formal-verification.yml` (a `tlc` job and a `z3` job).
+
+## Z3 proofs
+
+`z3/protocol_invariants.py` discharges 14 proof obligations across four sets, each by
+asserting the **negation** of a property and checking it is `unsat` (no counterexample
+exists, so the property holds for every input):
+
+| Set | Models | Proves |
+| --- | ------ | ------ |
+| **A** | the ladder walk in `choose_session_plan` (`session_policy.rs:338`) | the selector is total and legal, never exceeds the `desired` ceiling, falls to the relay floor when no transport is enabled, is sound (a chosen rung genuinely fits), is richest-first (mesh+webrtc is never skipped when it fits), and never enables WebRTC signaling for a `host+direct` plan |
+| **B** | `all_support` over an unbounded member set (`session_policy.rs:175`) | a single non-v3 member denies every upgrade rung (the relay-floor back-compat invariant), `all_support` implies pointwise support, and an empty room never upgrades |
+| **C** | `local_initiates` glare rule (`signaling.rs:60`) | exactly one peer offers per distinct pair, no peer self-initiates, and the offer orientation is acyclic (no glare deadlock) |
+| **D** | `elect_host` (`session_policy.rs:372`) | `(joined_at, id)` totally orders members (a unique host), and a seated authority is the unambiguous host |
+
+The proofs are deliberately *decomposed from member counting* where it sharpens decidability
+(set A abstracts each rung's `all_support` to a free boolean; set B re-attaches it), and the
+harness is self-checking: a deliberately wrong selector produces a `sat` counterexample, so a
+`PASS` is never vacuous.
 
 ## Correspondence table (spec ⇄ code)
 
@@ -69,11 +102,12 @@ this table and may drift a few lines.
 | `ReplanResult`                           | `replan_host_session` — `src/server/session_policy.rs:793`                                     |
 | `LateJoinResult` (inside `Join`)         | `handle_active_session_late_join` — `src/server/signaling.rs:246`                              |
 | `DepartureResult` (inside `Depart`)      | `handle_session_member_departure` — `src/server/session_policy.rs:692`                         |
-| `Finalize`                               | `emit_session_plan` (after coordinator finalize) — `src/server/session_policy.rs:544`          |
+| `Finalize` trigger                       | `RoomOperationCoordinator::handle_start_game` — `src/coordination/room_coordinator.rs:568` (explicit `StartGame`: not already `Finalized`, every current player ready, sender authorized — the room's `authority_player` if set, else any member; min 1 player) |
+| `Finalize` emission                      | `emit_session_plan` (after coordinator finalize) — `src/server/session_policy.rs:544`          |
 | `Join` fullness-only gate                | `add_player_to_room` — `src/database/mod.rs:398` (seat-fill into `Finalized` non-full is legal) |
 | `Depart` + authority clearing            | `leave_room` — `src/server/room_service.rs:279`; `remove_player_from_room` — `database/mod.rs:412` |
 | `GrantAuthority`                         | `request_room_authority` — `src/database/mod.rs:477` (no version gate; only while unheld)      |
-| `Finalize` fullness precondition         | `Room::should_enter_lobby` — `src/protocol/room_state.rs:344` (lobby — and so readiness/finalize — requires a full room) |
+| `Finalize` membership precondition (`members # <<>>`) | `Room::should_enter_lobby` — `src/protocol/room_state.rs:350` (lobby is now entered by any **non-empty** `Waiting` room; `max_players` is a **ceiling**, not a required count — the old fullness gate is gone, so finalize may fire below `max_players`) |
 | `r < q` (glare rule, election tie-break) | `local_initiates` — `src/server/signaling.rs:60`; UUID order via integer player ids            |
 
 ### Invariants and properties
@@ -100,8 +134,12 @@ this table and may drift a few lines.
 ## Model configurations
 
 `MAX_PLAYERS` is smaller than the player universe in every model, so finalize-time
-membership varies per behavior and post-finalize **seat-fill** joins (the fullness-only
-gate) bring capability-mismatched players into live sessions.
+membership varies per behavior. Finalization is now driven by an **explicit
+`StartGame`** (`handle_start_game`), not by the room becoming full, so a room can
+finalize at **any non-empty membership** from 1 up to `MAX_PLAYERS` — `max_players`
+is a ceiling, not a required count. Post-finalize **seat-fill** joins (the
+`add_player_to_room` fullness-only gate) then bring capability-mismatched players into
+live sessions, up to that same ceiling.
 
 | Configuration | Players (profiles)                                                       | Reaches                                                                                                       |
 | ------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
@@ -125,10 +163,19 @@ gate) is additionally covered by the randomized-config proptests
 
 | Configuration | States generated | Distinct states | Graph depth | Wall time |
 | ------------- | ---------------- | --------------- | ----------- | --------- |
-| `Mesh`        | 159,466          | 56,786          | 12          | ~2 s      |
-| `Host`        | 49,078           | 16,709          | 12          | ~1 s      |
-| `HostDirect`  | 60,382           | 21,485          | 12          | ~1 s      |
-| `Floor`       | 16,593           | 3,975           | 12          | ~1 s      |
+| `Mesh`        | 896,259          | 286,344         | 12          | ~3 s      |
+| `Host`        | 165,525          | 51,593          | 12          | ~1 s      |
+| `HostDirect`  | 240,567          | 78,167          | 12          | ~1 s      |
+| `Floor`       | 17,643           | 4,069           | 12          | ~1 s      |
+
+The reachable state space **widened** when the finalize trigger changed from "the room
+is full" to "an explicit `StartGame` on any non-empty room": a room can now store and
+emit a session plan at 1 or 2 members (below `MAX_PLAYERS = 3`), so finalize-time
+membership ranges over every non-empty subset rather than only the full ones. Every
+invariant and property still holds across all four models — no invariant had to be
+relaxed; the additional states are sub-ceiling finalized sessions (and their late-join /
+departure / replan continuations), which the existing contracts already covered for any
+membership size.
 
 Reachability of the interesting states was confirmed with temporary negated "sanity"
 invariants during development (each must be _violated_): mesh and host plans stored, the

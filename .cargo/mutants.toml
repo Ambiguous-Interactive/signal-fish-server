@@ -1,0 +1,49 @@
+# cargo-mutants configuration — mutation testing of the protocol decision logic.
+#
+# Mutation testing answers "do our tests actually catch bugs?": cargo-mutants
+# injects small behavioral mutations (flip a comparison, drop a `!`, replace a
+# return value) into the source and re-runs the tests. A mutant that survives
+# (tests still pass) marks a gap in test strength — a place where a real bug of
+# that shape would ship undetected.
+#
+# Scope: the pure decision logic where mutation has the highest signal and the
+# cheapest oracle — the session-plan selection ladder, the signaling glare /
+# size / gating logic, input validation, and room-code generation. These are
+# all exercised by fast in-crate `#[cfg(test)]` unit tests, so the oracle is
+# `--lib` (no slow WebSocket e2e per mutant). Broaden `examine_globs` for a
+# wider sweep when running locally with more time.
+#
+# Run:  cargo mutants            (uses this config)
+#       cargo mutants --list     (enumerate mutants without testing)
+# CI:   .github/workflows/mutation.yml (scheduled + workflow_dispatch)
+
+# Only the in-crate unit tests are the oracle — fast and deterministic. A mutant
+# in code reachable ONLY from WebSocket e2e tests is out of this config's scope
+# by design (the e2e suites are the regression net there); keep mutation focused
+# where unit tests give a tight, quick verdict.
+test_tool = "cargo"
+additional_cargo_test_args = ["--lib", "--all-features"]
+
+# High-signal pure-logic modules.
+examine_globs = [
+    "src/server/session_policy.rs",
+    "src/server/signaling.rs",
+    "src/server/relay_policy.rs",
+    "src/protocol/validation.rs",
+    "src/protocol/room_codes.rs",
+    "src/protocol/error_codes.rs",
+]
+
+# Never mutate test code or generated/build files.
+exclude_globs = [
+    "**/*_tests.rs",
+    "build.rs",
+    "benches/**",
+    "tests/**",
+    "fuzz/**",
+]
+
+# The unit-test oracle is quick; give a generous floor so a loaded CI runner
+# never spuriously times out a surviving-mutant build.
+minimum_test_timeout = 120
+timeout_multiplier = 3.0

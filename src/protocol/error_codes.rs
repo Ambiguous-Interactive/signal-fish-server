@@ -80,6 +80,15 @@ pub enum ErrorCode {
     // Connection lifecycle errors (1xxx category, appended at the END for rkyv
     // discriminant stability — see the signaling-errors note above).
     ConnectionIdleTimeout,
+
+    // Game-start errors (3xxx category, appended at the END for rkyv
+    // discriminant stability — see the signaling-errors note above). Raised by
+    // the explicit `StartGame` flow.
+    /// `StartGame` was sent before every current player was ready.
+    GameStartNotReady,
+    /// `StartGame` was sent by a player not permitted to start the game (the
+    /// room has a designated authority and the sender is not it).
+    GameStartForbidden,
 }
 
 impl ErrorCode {
@@ -246,6 +255,14 @@ impl ErrorCode {
             Self::ServiceUnavailable => {
                 "The service is temporarily unavailable. Please try again in a few moments."
             }
+
+            // Game-start errors (3xxx)
+            Self::GameStartNotReady => {
+                "The game cannot start yet. Every current player must be ready before StartGame is accepted."
+            }
+            Self::GameStartForbidden => {
+                "You are not permitted to start the game. Only the room's authority player may start it."
+            }
         }
     }
 }
@@ -310,6 +327,8 @@ mod tests {
             ErrorCode::SignalRateLimited,
             ErrorCode::SignalTooLarge,
             ErrorCode::ConnectionIdleTimeout,
+            ErrorCode::GameStartNotReady,
+            ErrorCode::GameStartForbidden,
         ];
 
         for error_code in &error_codes {

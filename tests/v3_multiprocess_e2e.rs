@@ -63,7 +63,7 @@ use signal_fish_server::protocol::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use v3_conformance_helpers::{
     assert_full_mesh_glare_matrix, await_ready_count, expect_finalize_plan, ordered_pairs, ready,
-    relay_one_signal, send, SERVER_MESSAGE_TIMEOUT,
+    relay_one_signal, send, start_game, SERVER_MESSAGE_TIMEOUT,
 };
 use websocket_test_helpers::{deadline_after, next_matching_server_message_within, WsStream};
 
@@ -426,6 +426,13 @@ async fn multiprocess_mesh_n3_full_session_over_real_tcp() {
         await_ready_count(socket, 2).await;
     }
     ready(&mut sockets[2]).await;
+    for socket in sockets.iter_mut() {
+        await_ready_count(socket, 3).await;
+    }
+
+    // Readiness no longer auto-starts: the creator sends an explicit StartGame
+    // (any member may start; the room is supports_authority: false).
+    start_game(&mut sockets[0]).await;
 
     // Full lobby -> GameStarting -> SessionPlan x3 with the glare matrix.
     let mut plans = Vec::new();
@@ -483,6 +490,12 @@ async fn multiprocess_server_restart_invalidates_reconnect_tokens() {
     await_ready_count(&mut peer_a, 1).await;
     await_ready_count(&mut peer_b, 1).await;
     ready(&mut peer_b).await;
+    await_ready_count(&mut peer_a, 2).await;
+    await_ready_count(&mut peer_b, 2).await;
+
+    // Readiness no longer auto-starts: an explicit StartGame finalizes.
+    start_game(&mut peer_a).await;
+
     for (ws, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
         let plan = expect_finalize_plan(ws, who).await;
         assert_eq!(plan.topology, Topology::Mesh);

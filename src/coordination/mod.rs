@@ -14,6 +14,7 @@ pub mod room_coordinator;
 pub use dedup::DedupCacheSettings;
 pub use room_coordinator::{
     FinalizedRoom, InMemoryRoomOperationCoordinator, RoomOperationCoordinatorTrait,
+    StartGameOutcome,
 };
 
 // MessageCoordinator trait (defined in server.rs as InMemoryMessageCoordinator)

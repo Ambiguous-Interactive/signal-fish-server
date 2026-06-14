@@ -237,11 +237,13 @@ application needs.
 
 Signal Fish Server includes a lobby system that tracks when players are
 ready. `PlayerReady` is a toggle (ready/unready for the sending player). Once
-all players are ready at the same time, the lobby transitions through
-`Lobby` to `Finalized` and the server sends a `GameStarting` event
-with legacy peer metadata. Negotiated v3 non-relay rooms also receive
-per-recipient `SessionPlan` messages with topology, transport, peer, relay
-fallback, and ICE only when the selected transport is WebRTC.
+every current player is ready, a member sends `StartGame` to finalize the
+lobby (`max_players` is a ceiling, so the room need not be full; the room's
+authority starts it if it has one, else any member). The lobby then
+transitions to `Finalized` and the server sends a `GameStarting` event with
+legacy peer metadata. Negotiated v3 non-relay rooms also receive per-recipient
+`SessionPlan` messages with topology, transport, peer, relay fallback, and ICE
+only when the selected transport is WebRTC.
 
 After both clients have joined the room, send the ready signal:
 
@@ -265,7 +267,19 @@ while let Some(Ok(Message::Text(text))) = ws.next().await {
             let state = msg["data"]["lobby_state"]
                 .as_str()
                 .unwrap_or("unknown");
+            let all_ready = msg["data"]["all_ready"].as_bool().unwrap_or(false);
             println!("Lobby state: {state}");
+
+            // Readiness no longer auto-starts. Once every current player is
+            // ready, a member finalizes the lobby with StartGame (the room's
+            // authority if it has one, else any member). max_players is a
+            // ceiling, so the room need not be full.
+            if all_ready {
+                let start_msg = serde_json::json!({ "type": "StartGame" });
+                ws.send(Message::Text(start_msg.to_string().into()))
+                    .await
+                    .expect("Failed to send StartGame");
+            }
         }
         "GameStarting" => {
             println!("Game is starting!");
@@ -277,8 +291,8 @@ while let Some(Ok(Message::Text(text))) = ws.next().await {
 }
 ```
 
-When both players send `PlayerReady` once (becoming ready), you will see the
-lobby transition:
+When both players send `PlayerReady` once (becoming ready) and a member then
+sends `StartGame`, you will see the lobby transition:
 
 ```text
 Lobby state: lobby

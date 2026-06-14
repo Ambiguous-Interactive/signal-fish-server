@@ -5,7 +5,7 @@ checks, how to run it, and what it can and cannot catch. The design rationale �
 why TLA+/TLC, proptest on stable, and not cargo-fuzz / SMT / Kani / Loom today —
 lives in [ADR-0003](../adr/0003-formal-verification-and-fuzzing.md); the
 spec ⇄ code correspondence table lives in
-[`formal/README.md`](../../formal/README.md).
+[`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md).
 
 ## The five layers
 
@@ -29,8 +29,9 @@ re-planning). Each TLA+ action models one membership-touching event **atomically
 — the event handler plus all of its session side effects as one step. That is a
 deliberate sequential abstraction: the server runs one event's side effects on one
 task but does not serialize distinct events on the same room against each other
-(see the Atomicity argument in [`formal/README.md`](../../formal/README.md) for
-what the abstraction proves and what the heal-on-next-event mechanism covers
+(see the Atomicity argument in
+[`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md)
+for what the abstraction proves and what the heal-on-next-event mechanism covers
 instead). TLC then enumerates **every** reachable state of the bounded model and
 checks the named invariants and action properties in each one:
 
@@ -112,7 +113,9 @@ cargo-fuzz here).
 
 The boundary TLC intentionally does not model (rate limits, opaque-payload relay,
 reconnection tokens, TURN minting, multi-room, storage-error wedges) is enumerated
-in [`formal/README.md`](../../formal/README.md), each with the suite that covers
+in
+[`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md),
+each with the suite that covers
 it instead.
 
 ## Correspondence-maintenance rule
@@ -131,7 +134,8 @@ weakening either.
 
 - [ADR-0003: Formal verification and fuzzing](../adr/0003-formal-verification-and-fuzzing.md)
   — the decision record and tool-choice rationale.
-- [`formal/README.md`](../../formal/README.md) — spec ⇄ code correspondence,
+- [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md)
+  — spec ⇄ code correspondence,
   reachability evidence, modeling boundary, state-space sizes.
 - [Handoff and Topologies](handoff-and-topologies.md) — the documented protocol
   contract the spec checks.

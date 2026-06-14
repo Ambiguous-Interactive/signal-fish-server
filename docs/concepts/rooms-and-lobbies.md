@@ -134,48 +134,47 @@ shows the three states and the transitions between them.
              |
              v
       +-----------+
-      |  Waiting  | <--- Players joining, fewer than max_players
+      |  Waiting  | <--- Empty room, waiting for the first player
       +-----------+
              |
-             | Room fills up (players == max_players)
+             | First player joins
              v
       +-----------+
       |   Lobby   | <--- Players toggle ready/unready via PlayerReady
+      +-----------+      (max_players is a ceiling; room need not be full)
+             |
+             | Every current player ready, a member sends StartGame
+             v
       +-----------+
-         |     |
-         |     | All players ready
-         |     v
-         |  +-----------+
-         |  | Finalized | ---> GameStarting sent to all players
-         |  +-----------+
-         |
-         | Player leaves (drops below max_players)
-         | Ready states cleared
-         v
-      +-----------+
-      |  Waiting  |
+      | Finalized | ---> GameStarting sent to all players
       +-----------+
 ```
 
+A player leaving during the lobby no longer regresses a partial room to
+Waiting; the remaining members stay in the lobby.
+
 ### Waiting
 
-The initial state. The room is open and accepting players.
+The initial state. The room exists but is empty, awaiting its first player.
 
-- Player count is below `max_players`.
+- No players are present yet.
 - No ready-state tracking happens in this state.
-- The room stays here until it fills up or expires from inactivity.
+- The room stays here until a player joins or it expires from inactivity.
 
 ### Lobby
 
-The room is full. All `max_players` slots are occupied and players can
-coordinate readiness.
+Players are present and can coordinate readiness. `max_players` is a
+**ceiling**, not a required count — the room enters the lobby with one or
+more players and need not be full to start.
 
 - Players send `PlayerReady` to toggle their ready/unready status.
 - Each readiness change triggers a `LobbyStateChanged` broadcast so
-  everyone sees who is ready.
-- If a player **leaves** during the Lobby state, the room reverts to
-  Waiting and **all ready states are cleared**.
-- New players cannot join (the room is full).
+  everyone sees who is ready; `all_ready` is set once every current player
+  is ready.
+- Readiness **does not** start the game on its own. Once every current
+  player is ready, a member finalizes the lobby with an explicit
+  [`StartGame`](../protocol.md#startgame).
+- More players may keep joining until the room reaches `max_players`.
 
 **LobbyStateChanged example (one player ready):**
 
@@ -194,7 +193,13 @@ coordinate readiness.
 
 ### Finalized
 
-All players in the lobby are ready. The server finalizes the game:
+A member has sent [`StartGame`](../protocol.md#startgame) while every current
+player was ready. The server finalizes the game:
+
+`StartGame` is accepted only when every current player is ready
+(`GAME_START_NOT_READY` otherwise) and the sender is permitted to start — the
+room's authority player if it has one, else any member (`GAME_START_FORBIDDEN`
+otherwise). On finalization the server:
 
 - Records a finalization timestamp.
 - Sends a `GameStarting` message to every player with legacy peer metadata.
@@ -250,15 +255,28 @@ Alice (Client)             Server              Bob (Client)
      |<-- LobbyStateChanged --|-- LobbyStateChanged ->|
      |   (all_ready: true)    |   (all_ready: true)   |
      |                        |                       |
+     |-- StartGame ---------->|                       |
      |<-- GameStarting -------|--- GameStarting ----->|
      |   (legacy metadata)    |   (legacy metadata)   |
 ```
 
-## Single-Player Rooms
+The move into `finalized` is signaled by `GameStarting` itself — the server
+never broadcasts a `LobbyStateChanged` carrying `finalized`. The `finalized`
+value appears only in the `lobby_state` field of a later `RoomJoined` /
+`Reconnected` snapshot.
 
-If `max_players` is set to `1`, the room does **not** enter the Lobby
-state. The single player receives legacy `GameStarting` peer metadata
-immediately without needing to go through the ready-up flow.
+Once both players are ready, either member may send `StartGame` (this room has
+no claimed authority, so any member may start). The game does not start until
+that explicit message arrives.
+
+## Single-Player and Solo Starts
+
+`max_players` is a ceiling, so a room can start with fewer players than its
+limit — including a single player. The lone member sends `PlayerReady` and
+then `StartGame` to finalize a solo session and receive legacy `GameStarting`
+peer metadata. A single ready member is always permitted to start (it is the
+only member, so the "any member" authorization rule applies when no authority
+is set).
 
 ## Configuration
 
