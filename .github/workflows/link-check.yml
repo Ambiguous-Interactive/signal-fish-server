@@ -70,9 +70,30 @@ jobs:
           # exclude_path does not apply to glob-expanded paths (known bug).
           # Keep these in sync with exclude_path in .lychee.toml (defense-in-depth).
           # The -- separator prevents --exclude-path from consuming positional args.
+          #
+          # --remap: validate in-repo /blob/main/ self-links against THIS checkout
+          # instead of github.com/.../main. Files added or moved on a branch do not
+          # exist on main until merged, so those self-URLs 404 transiently in CI even
+          # though they are correct. The remap rewrites them to file://<workspace>/<path>
+          # so they are checked against the working tree, while genuinely broken
+          # self-links (wrong path) still fail because the local file is absent.
+          # The capture strips any #anchor / ?query before mapping to a filesystem path.
+          # lychee's remap target must be an absolute URL with a scheme, hence the
+          # absolute file:// using ${{ github.workspace }} (config TOML can't interpolate
+          # env, so this lives on the CLI). NOTE: the backreference MUST be written
+          # `\$1` (escaped): lychee-action runs the args through `eval` under `set -u`,
+          # so a bare `$1` is expanded as the shell's positional param (unbound -> the
+          # job aborts; or empty -> every self-link masks to the workspace dir). The
+          # `\$1` survives the single eval pass and reaches lychee as the literal `$1`.
+          # Local-dev parity: run the same check with
+          #   lychee --config .lychee.toml \
+          #     --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://$PWD/\$1" \
+          #     <files...>
+          # (substitute $PWD for ${{ github.workspace }}); add --offline to skip external URLs.
           args: >-
             --verbose --no-progress --cache --max-cache-age 7d
             --config .lychee.toml
+            --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
             --exclude-path tests/
             --exclude-path target/
             --exclude-path third_party/

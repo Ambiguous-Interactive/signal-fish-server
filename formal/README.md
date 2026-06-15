@@ -30,10 +30,10 @@ path filters in `.github/workflows/formal-verification.yml`.
 
 This directory holds **two complementary** formal checks:
 
-- **TLA+ / TLC** (`tla/`) explores the reachable *states* of the per-room session
+- **TLA+ / TLC** (`tla/`) explores the reachable _states_ of the per-room session
   lifecycle (join / depart / finalize / replan / late-join / reconnect) and checks
   invariants and temporal properties over them.
-- **Z3 / SMT** (`z3/`) proves *universally quantified* properties of the pure
+- **Z3 / SMT** (`z3/`) proves _universally quantified_ properties of the pure
   decision functions — the ladder selector, the `all_support` relay-floor
   invariant, the glare/offerer rule, and host election — over **unbounded** inputs
   (any member count, any capability mix, any id space) that an explicit-state
@@ -72,7 +72,7 @@ exists, so the property holds for every input):
 | **C** | `local_initiates` glare rule (`signaling.rs:60`) | exactly one peer offers per distinct pair, no peer self-initiates, and the offer orientation is acyclic (no glare deadlock) |
 | **D** | `elect_host` (`session_policy.rs:372`) | `(joined_at, id)` totally orders members (a unique host), and a seated authority is the unambiguous host |
 
-The proofs are deliberately *decomposed from member counting* where it sharpens decidability
+The proofs are deliberately _decomposed from member counting_ where it sharpens decidability
 (set A abstracts each rung's `all_support` to a free boolean; set B re-attaches it), and the
 harness is self-checking: a deliberately wrong selector produces a `sat` counterexample, so a
 `PASS` is never vacuous.

@@ -285,7 +285,7 @@ surface and anchored to function names in `src/server/session_policy.rs` /
 `signaling.rs`.
 
 See [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md#z3-proofs)
-for the proof catalogue and the TLA+ ⇄ Z3 division of labour.
+for the proof catalog and the TLA+ ⇄ Z3 division of labour.
 
 ## References
 

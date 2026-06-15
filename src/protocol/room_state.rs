@@ -20,9 +20,9 @@ use super::types::{
 // ```text
 // [*] --> Waiting: Room Created
 //
-// Waiting --> Lobby: Room Full (players == max_players)
-// Lobby --> Waiting: Player Leaves (players < max_players)
-// Lobby --> Finalized: All Players Ready
+// Waiting --> Lobby: First player present (max_players is a ceiling, not a gate)
+// Lobby --> Waiting: Room empties before finalize
+// Lobby --> Finalized: Explicit StartGame (all current players ready)
 //
 // Finalized --> [*]: Game Started (Room Cleanup)
 // Waiting --> [*]: Room Expired (Empty/Inactive Timeout)
@@ -41,15 +41,16 @@ use super::types::{
 //
 // ### 2. Lobby State
 //
-// - **Description**: Room is full and players are coordinating readiness to
-//   start the game.
+// - **Description**: Room has at least one player and players are coordinating
+//   readiness to start the game.
 // - **Characteristics**:
-//   - Room has exactly `max_players` players
+//   - Room has ≥1 player; `max_players` is a ceiling, not a required count, so
+//     the room keeps accepting players (up to `max_players`) while in Lobby
 //   - Players can mark themselves ready/unready via `PlayerReady` messages
 //   - `ready_players` list tracks who is ready
-//   - Cannot accept new players (room is full)
-//   - Transitions to Finalized when all players ready
-//   - Broadcasts `LobbyStateChanged` when ready state changes
+//   - Transitions to Finalized on an explicit `StartGame` (all current players
+//     ready); a full all-ready room does NOT auto-start
+//   - Broadcasts `LobbyStateChanged` (with `all_ready`) when ready state changes
 //
 // ### 3. Finalized State
 //
@@ -71,20 +72,25 @@ use super::types::{
 // ## Key State Transitions and Protocol Messages
 //
 // ### Waiting → Lobby
-// - **Trigger**: Room becomes full (player count reaches `max_players`)
-// - **Condition**: `should_enter_lobby()` returns true
+// - **Trigger**: The first player is present (the creator). `max_players` is a
+//   ceiling, not a gate — the room enters Lobby immediately and keeps filling.
+// - **Condition**: `should_enter_lobby()` returns true (Waiting and non-empty)
 // - **Action**: Calls `enter_lobby()`, sets `lobby_started_at` timestamp
 // - **Message**: Broadcasts `LobbyStateChanged` with `lobby_state: "lobby"`
 //
 // ### Lobby → Waiting
-// - **Trigger**: A player leaves, bringing player count below `max_players`
+// - **Trigger**: A lobby-phase departure regresses the room (e.g. it empties
+//   before finalize); a Finalized room never regresses
 // - **Action**: Revert to Waiting state, clear `ready_players` list
 // - **Messages**: Broadcasts `PlayerLeft` and `LobbyStateChanged`
 //
 // ### Lobby → Finalized
-// - **Trigger**: All players in lobby mark themselves ready
-// - **Condition**: The room coordinator's `handle_player_ready` (holding the
-//   room-operation lock) observes every member ready in its own ready map
+// - **Trigger**: An explicit `StartGame` from the authority — or any member when
+//   no authority is set. Readiness alone does NOT finalize: `handle_player_ready`
+//   only records readiness and broadcasts `all_ready` so clients know `StartGame`
+//   is now permitted.
+// - **Condition**: The room coordinator's `handle_start_game` (holding the
+//   room-operation lock) re-checks that every current member is ready
 // - **Action**: The coordinator persists the decision via the storage trait's
 //   `finalize_room_game`, which sets `lobby_state = Finalized`, synchronizes
 //   the per-player ready flags / `ready_players`, and records the
@@ -107,6 +113,8 @@ use super::types::{
 //   |<-- LobbyStateChanged-|--- LobbyStateChanged --->|
 //   |                      |<------- PlayerReady -----|
 //   |<-- LobbyStateChanged-|--- LobbyStateChanged --->|
+//   |                      |   (all_ready: true)      |
+//   |-- StartGame -------->|   (creator finalizes)    |
 //   |<-- GameStarting -----|--- GameStarting -------->|
 // ```
 //
@@ -114,6 +122,8 @@ use super::types::{
 //
 // - `JoinRoom`: Join or create a room (triggers room creation or player join)
 // - `PlayerReady`: Toggle player ready state in lobby
+// - `StartGame`: Finalize the lobby (authority, or any member if none set); the
+//   server requires every current player ready, then broadcasts `GameStarting`
 // - `LeaveRoom`: Leave a room (may trigger Lobby → Waiting transition)
 // - `Reconnect`: Reconnect to a room after disconnection
 //
@@ -127,12 +137,13 @@ use super::types::{
 //
 // ## Edge Cases
 //
-// - **Single Player Rooms** (`max_players = 1`): Room does NOT enter Lobby
-//   state per `should_enter_lobby()`. Player immediately receives legacy peer metadata.
+// - **Single Player Rooms** (`max_players = 1`): The room enters Lobby as soon
+//   as the lone player joins (`should_enter_lobby()` requires only ≥1 player).
+//   The player readies and sends `StartGame`; the server permits a solo start
+//   (min 1 ready), finalizing the room.
 //
-// - **Player Disconnection in Lobby**: If player disconnects and room drops
-//   below `max_players`, room reverts to Waiting state and all ready states
-//   are cleared.
+// - **Player Disconnection in Lobby**: A lobby-phase disconnect that regresses
+//   the room reverts it to Waiting state and clears all ready states.
 //
 // - **Authority Player Leaves**: If the authority player disconnects, authority
 //   is cleared (`authority_player = None`) with no automatic reassignment.

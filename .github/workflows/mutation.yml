@@ -41,9 +41,33 @@ permissions:
 
 jobs:
   mutants:
-    name: cargo-mutants (protocol logic)
+    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/6
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Per-shard timeout. The full single-job run was ~20 min under
+    # timeout-minutes 45. Each shard tests ~1/6 of the mutants (~33) plus one
+    # baseline build (rust-cache accelerated), so ~5-8 min is realistic; 20 min
+    # leaves generous headroom for a cold cache or a loaded runner.
+    timeout-minutes: 20
+    strategy:
+      # Run every shard even if one finds a survivor (or fails), so a single
+      # surviving mutant never masks survivors in other shards and all gaps
+      # surface in one workflow run.
+      fail-fast: false
+      matrix:
+        # cargo-mutants shard indices are 0-BASED: --shard k/N spans k = 0..N-1
+        # (verified locally on cargo-mutants 27.1.0 — `--shard 0/6` is accepted
+        # and `--shard 6/6` yields 0 mutants). Shards 0/6..5/6 are an exact,
+        # non-overlapping partition of `cargo mutants --list` (199 mutants:
+        # 34+34+34+34+34+29 = 199; sorted union == full list, no overlap), so no
+        # mutant is skipped or double-counted.
+        #
+        # N=6 chosen for the 4-vCPU/16 GB ubuntu-latest runner: it cuts
+        # wall-clock ~6x (each shard ~33 mutants vs ~199) while keeping the
+        # redundant per-shard baseline rebuild cost modest (6 baseline builds
+        # total, each rust-cache-warmed). Going much higher (e.g. >8) makes the
+        # one-time baseline build dominate each shard's runtime for diminishing
+        # returns.
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.3
@@ -65,6 +89,10 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          # Skip cache writes on untrusted fork PRs (restore still works), so a
+          # fork cannot poison the shared cache. Same gate as webrtc-interop.yml.
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2.81.8
@@ -72,12 +100,15 @@ jobs:
           tool: cargo-mutants
 
       - name: Run mutation testing (config-scoped)
-        run: cargo mutants --no-shuffle -j 2
+        # -j 4 uses the runner's 4 vCPUs. --cargo-arg=--locked forwards --locked
+        # to the inner cargo build/test (cargo-mutants itself rejects a bare
+        # --locked), pinning the resolve to Cargo.lock for reproducibility.
+        run: cargo mutants --no-shuffle --shard ${{ matrix.shard }}/6 -j 4 --cargo-arg=--locked
 
       - name: Upload mutants report
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: mutants-report
+          name: mutants-report-shard-${{ matrix.shard }}
           path: mutants.out/
           if-no-files-found: ignore

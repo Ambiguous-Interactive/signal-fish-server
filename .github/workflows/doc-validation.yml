@@ -634,11 +634,16 @@ jobs:
           # Accept HTTP status codes: 200 (OK), 204 (No Content),
           # 301/302/307/308 (Redirects), 429 (Rate Limit).
           # Keep CLI --exclude-path entries in sync with .lychee.toml (defense-in-depth).
+          # --remap: validate in-repo /blob/main/ self-links against THIS checkout
+          # instead of github.com/.../main (files new/moved on a branch 404 until
+          # merged, though they are correct). Kept in sync with link-check.yml — see
+          # that workflow for the full rationale and the local-dev parity invocation.
           args: >-
             --verbose
             --no-progress
             --accept 200,204,301,302,307,308,429
             --config .lychee.toml
+            --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
             --timeout 30
             --max-retries 3
             --exclude-path './target/*'

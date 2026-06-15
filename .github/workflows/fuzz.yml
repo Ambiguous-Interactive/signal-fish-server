@@ -50,15 +50,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.3
 
+      # Nightly Toolchain Strategy:
+      #   cargo-fuzz/libFuzzer requires NIGHTLY Rust: the sanitizer instrumentation
+      #   is driven by unstable `-Z` compiler flags (e.g. -Zsanitizer=address) that
+      #   are not available on the pinned stable MSRV. Production artifacts are never
+      #   built with nightly (ADR-0003); this nightly is CI-only, for the fuzz crate.
+      #
+      #   Nightly Version: nightly-2026-02-01 (kept in sync with unused-deps.yml)
+      #
+      #   Update Criteria (when to bump this pin):
+      #     - If the nightly version is >6 months old
+      #     - If security advisories affect this version
+      #     - If cargo-fuzz/libFuzzer requires newer nightly sanitizer features
+      #     - If the nightly version becomes unavailable or broken
+      #
+      #   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
       - name: Install nightly Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-02-01
+          # Explicitly add the gnu std target for this nightly. The runner is a
+          # gnu host (so gnu std is already present via the host toolchain), but
+          # pin it here so the `--target x86_64-unknown-linux-gnu` build below is
+          # robust regardless of how cargo-fuzz was installed. See the Fuzz step.
+          targets: x86_64-unknown-linux-gnu
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: fuzz
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2.81.8
@@ -82,8 +103,17 @@ jobs:
       - name: Fuzz ${{ matrix.target }}
         env:
           MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '120' }}
+        # `--target x86_64-unknown-linux-gnu` is REQUIRED, not cosmetic. cargo-fuzz
+        # derives its DEFAULT build target from its OWN binary's host triple, and
+        # taiki-e/install-action installs the musl-built cargo-fuzz (cargo-binstall
+        # fallback), so the default target becomes x86_64-unknown-linux-musl. On a
+        # gnu runner that build fails: ASan is incompatible with musl's static crt
+        # and musl std is not installed (cargo-fuzz#398). Pinning the gnu target
+        # makes the instrumented build use gnu std + a working sanitizer. Do not
+        # remove. (No --locked: cargo-fuzz rejects it.)
         run: |
-          cargo +nightly-2026-02-01 fuzz run ${{ matrix.target }} -- \
+          cargo +nightly-2026-02-01 fuzz run ${{ matrix.target }} \
+            --target x86_64-unknown-linux-gnu -- \
             -max_total_time="${MAX_TOTAL_TIME}" -max_len=65536
 
       - name: Upload crash artifacts

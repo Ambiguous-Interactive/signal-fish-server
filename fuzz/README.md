@@ -5,7 +5,7 @@ in-suite** proptest fuzzer in
 [`tests/protocol_fuzz_hardening.rs`](../tests/protocol_fuzz_hardening.rs).
 
 [ADR-0003](../docs/adr/0003-formal-verification-and-fuzzing.md) explains why the
-*primary* fuzzer is proptest-on-stable — the repository pins a stable toolchain
+_primary_ fuzzer is proptest-on-stable — the repository pins a stable toolchain
 (`rust-toolchain.toml`) with strict CI/local parity, and libFuzzer needs a
 nightly compiler and a separate out-of-workspace crate. That ADR named the
 conditions for adding a coverage-guided fuzzer later; this crate is that
@@ -60,8 +60,8 @@ done
 A crash artifact lands in `artifacts/<target>/`. Reproduce and minimize:
 
 ```bash
-cargo +nightly fuzz run decode_protocol artifacts/decode_protocol/crash-<hash>
-cargo +nightly fuzz tmin decode_protocol artifacts/decode_protocol/crash-<hash>
+cargo +nightly fuzz run decode_protocol "artifacts/decode_protocol/crash-<hash>"
+cargo +nightly fuzz tmin decode_protocol "artifacts/decode_protocol/crash-<hash>"
 ```
 
 Any reproducible finding should be added as a regression case to the **stable**

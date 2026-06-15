@@ -10,7 +10,11 @@
 //!    `room_created` stdout event carries the code for sibling processes);
 //!    `--join-code` joins by code.
 //! 3. **Ready barrier** — once `--peers N` members are present, send
-//!    `PlayerReady`; when every member is ready the server finalizes the lobby.
+//!    `PlayerReady`. The lobby no longer auto-starts on a full ready set:
+//!    finalization is driven by an explicit `StartGame`. When the server
+//!    reports every current member ready (`LobbyStateChanged.all_ready`), the
+//!    room creator sends that `StartGame`; joiners just await the broadcast it
+//!    produces.
 //! 4. **Finalize** — `GameStarting` (note our own `is_authority`), then, for
 //!    non-relay rooms, the per-recipient `SessionPlan`.
 //! 5. **P2P** — pair per `peers[].initiate` (and `NewPeer.you_initiate` for
@@ -141,6 +145,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         // late-join SessionPlan carries everything else we need).
         in_lobby: lobby_state == LobbyState::Lobby,
         ready_sent: false,
+        start_game_sent: false,
         game_started: lobby_state == LobbyState::Finalized,
         late_joined: lobby_state == LobbyState::Finalized,
         webrtc_plan_seen: false,
@@ -291,6 +296,9 @@ struct Orchestrator<'a> {
     /// so counting members alone would race the transition.
     in_lobby: bool,
     ready_sent: bool,
+    /// The explicit `StartGame` has been sent (room creator only, once). Guards
+    /// against re-sending on subsequent `LobbyStateChanged` broadcasts.
+    start_game_sent: bool,
     game_started: bool,
     /// This client entered an already-Finalized room (a late join / seat
     /// fill). Late joiners waive the peer-status wait: siblings' reports may
@@ -556,15 +564,22 @@ impl Orchestrator<'_> {
                 ready_players,
                 all_ready,
             } => {
-                tracing::debug!(
+                // Info-level so the harness's stderr capture records the lobby
+                // progression (state, ready count, all_ready) for any later
+                // "GameStarting not received" diagnosis.
+                tracing::info!(
                     ?lobby_state,
                     ready = ready_players.len(),
                     all_ready,
-                    "lobby"
+                    "lobby state changed"
                 );
                 if lobby_state == LobbyState::Lobby {
                     self.in_lobby = true;
                     self.maybe_send_ready().await?;
+                    // The lobby no longer auto-starts: the room creator issues
+                    // the explicit StartGame that produces GameStarting once the
+                    // server reports the full ready set.
+                    self.maybe_send_start_game(all_ready).await?;
                 }
             }
             ServerMessage::Pong => {}
@@ -814,6 +829,38 @@ impl Orchestrator<'_> {
         if !self.ready_sent && self.in_lobby && self.present.len() >= self.cli.peers {
             self.send_message(&ClientMessage::PlayerReady).await?;
             self.ready_sent = true;
+        }
+        Ok(())
+    }
+
+    /// Send the explicit `StartGame` that finalizes the lobby, exactly once,
+    /// when this client created the room AND the server reports every current
+    /// member ready (`LobbyStateChanged.all_ready`).
+    ///
+    /// The protocol no longer auto-starts a full, all-ready room: finalization
+    /// is driven by an explicit `StartGame` from the authority — or, when no
+    /// authority is designated (the interop rooms never set one), any member.
+    /// The room creator is elected as that member here: it is always a v3
+    /// participant that is present through finalization, so the choice is
+    /// deterministic and needs no cross-client coordination. Joiners send no
+    /// `StartGame`; they simply await the `GameStarting` the creator's call
+    /// produces. `all_ready` already implies a full, seated, ready room (every
+    /// client gates `PlayerReady` on having seen all `--peers` members), and the
+    /// server re-checks readiness under its room lock, so this never races a
+    /// late joiner. The send is idempotent-guarded by `start_game_sent`.
+    ///
+    /// Assumption: readiness is monotonic until finalize — no member leaves or
+    /// un-readies between `all_ready` and the server processing this `StartGame`.
+    /// That holds for every interop scenario (rooms cap at `--peers`, so no late
+    /// joiner can un-ready the set, and the only departures are AFTER
+    /// `GameStarting`). A pre-finalize departure is a deliberate non-goal: it
+    /// could leave the latch set after a `NotReady`, and a production game client
+    /// (not this test driver) would re-issue `StartGame` on the next ready set.
+    async fn maybe_send_start_game(&mut self, all_ready: bool) -> Result<(), FatalError> {
+        if self.cli.create_room && all_ready && !self.start_game_sent && !self.game_started {
+            self.send_message(&ClientMessage::StartGame).await?;
+            self.start_game_sent = true;
+            tracing::info!("all members ready; sent StartGame to finalize the lobby");
         }
         Ok(())
     }

@@ -242,6 +242,87 @@ jobs:
 }
 
 #[test]
+fn test_workflow_hygiene_exempts_cargo_fuzz_from_locked_warning() {
+    // cargo-fuzz (0.12/0.13) rejects --locked on `cargo fuzz run`, so the
+    // checker must not warn that `cargo fuzz` is missing --locked.
+    let workflow = r#"name: Fuzz Workflow
+on: [push]
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-fuzz
+        run: cargo fuzz run target -- -runs=1000
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("fuzz.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed for cargo-fuzz.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("missing --locked flag"),
+        "cargo-fuzz rejects --locked and should be exempt from the requirement.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_still_requires_locked_for_cargo_mutants() {
+    // cargo-mutants is NOT exempt: it forwards --locked via --cargo-arg=--locked,
+    // so a bare `cargo mutants` must still warn.
+    let workflow = r#"name: Mutants Workflow
+on: [push]
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-mutants
+        run: cargo mutants --no-shuffle --shard 0/6 -j 4
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("mutants-missing-locked.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should exit success for warning-only cases.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("'cargo mutants' missing --locked flag"),
+        "cargo mutants must still require --locked (forwarded via --cargo-arg=--locked).\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_accepts_cargo_mutants_with_cargo_arg_locked() {
+    // --cargo-arg=--locked satisfies the substring check and is the correct way
+    // to pin cargo-mutants to Cargo.lock (a bare --locked is rejected by the tool).
+    let workflow = r#"name: Mutants Workflow
+on: [push]
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-mutants
+        run: cargo mutants --no-shuffle --shard 0/6 -j 4 --cargo-arg=--locked
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("mutants-with-locked.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed when cargo mutants pins --locked.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("'cargo mutants' missing --locked flag"),
+        "Did not expect a missing --locked warning when --cargo-arg=--locked is present.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_workflow_hygiene_flags_multiline_cargo_sbom_locked_as_error() {
     let workflow = r#"name: SBOM Workflow
 on: [push]

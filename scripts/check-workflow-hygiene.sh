@@ -664,7 +664,13 @@ split_shell_statements() {
 #   - cargo init/new/search/login/owner/yank: Registry or scaffolding commands,
 #     not project builds (unlikely in CI but listed for completeness)
 #   - cargo bench: Benchmarking, not a correctness gate
-LOCKED_EXEMPT_PATTERNS="audit|fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench"
+#   - cargo fuzz: cargo-fuzz (0.12/0.13) rejects --locked on `cargo fuzz run`
+#     ("Found argument '--locked' which wasn't expected"); there is no supported
+#     way to forward --locked, so requiring it would force an invalid flag.
+#     NOTE: cargo-mutants is NOT exempt — it forwards --locked correctly via
+#     `--cargo-arg=--locked` (the substring satisfies the check below), so the
+#     mutation workflow stays lockfile-pinned.
+LOCKED_EXEMPT_PATTERNS="audit|fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench|fuzz"
 
 MISSING_LOCKED=0
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
