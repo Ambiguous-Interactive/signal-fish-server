@@ -426,6 +426,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the noisy `##[error]ENOENT` annotations that every full-test-suite CI job emitted (the
+  `nextest`, `msrv`, and `coverage` jobs in `ci.yml`, plus `asan` in `ci-safety.yml`). Those jobs
+  compile the `trybuild` UI test, which materializes a nested `<target>/tests` cargo workspace at
+  test-run time; `Swatinem/rust-cache`'s restore-time cleanup then probes `<target>/tests/target`
+  (a path trybuild never creates — it only writes `<target>/tests/trybuild`) in a non-awaited call,
+  so the `opendir` rejection surfaces as an unhandled-promise `##[error]ENOENT` whenever a restored
+  cache contains that directory. Each such job now drops `<target>/tests` before the post-run cache
+  save, keeping the trigger out of the cache. This replaces the prior ineffective workaround (a
+  `ci-safety` target-dir relocation and cache-epoch bump that never removed the trigger, so the
+  noise persisted) and corrects the comment and test that falsely credited that epoch with
+  preventing it. A new structural guard,
+  `test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir`, parses every workflow and
+  fails if any job that combines a `Swatinem/rust-cache` step with a full-suite test run omits the
+  cleanup, so the whole class cannot silently regress as jobs are added.
 - Fixed `JoinRoom` validation to report dedicated error codes for player-name and capacity failures:
   an invalid `player_name` now returns `INVALID_PLAYER_NAME` and an invalid `max_players` now returns
   `INVALID_MAX_PLAYERS`, instead of the generic `INVALID_INPUT`. Both codes were already defined and

@@ -164,6 +164,17 @@ jobs:
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: cargo nextest run --profile ci --locked --all-features
 
+      - name: Drop trybuild artifacts before cache save
+        # trybuild builds nested cargo projects under `<target>/tests`. Swatinem/rust-cache's
+        # restore-time cleanup probes `<target>/tests/target` (a path trybuild never creates) in a
+        # non-awaited call, surfacing a benign but noisy `##[error]ENOENT` whenever a restored
+        # cache contains that dir. Dropping it before the post-run cache save keeps it out of
+        # future caches; the noise self-clears after one save cycle (a cache saved before this
+        # step still shows it once on restore).
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+
   doc-consistency:
     name: Doc Consistency
     if: github.event_name != 'schedule'
@@ -368,6 +379,12 @@ jobs:
           cargo test --locked --all-features --no-fail-fast
           echo "✓ Build and tests successful with MSRV ${{ steps.msrv.outputs.msrv }}"
 
+      - name: Drop trybuild artifacts before cache save
+        # See the nextest job: prevents the trybuild/rust-cache `##[error]ENOENT` noise.
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+
   docker:
     name: Docker Build
     if: github.event_name != 'schedule'
@@ -451,6 +468,12 @@ jobs:
           name: coverage-report
           path: lcov.info
           retention-days: 14
+
+      - name: Drop trybuild artifacts before cache save
+        # See the nextest job: prevents the trybuild/rust-cache `##[error]ENOENT` noise.
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
 
   panic-policy:
     name: Panic Policy

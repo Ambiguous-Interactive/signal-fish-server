@@ -14249,6 +14249,12 @@ fn test_ci_safety_runs_miri_with_isolation_disabled() {
 
 #[test]
 fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
+    // The nightly safety jobs build with distinct toolchains/RUSTFLAGS (Miri and
+    // `-Zsanitizer=address`), so they isolate their target dirs and cache epoch from the
+    // stable CI caches to avoid cross-contaminating fingerprints and forcing rebuilds.
+    // The separate trybuild/rust-cache `ENOENT` noise is prevented elsewhere by dropping
+    // `<target>/tests` before the cache save — see
+    // `test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir`.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
@@ -14263,12 +14269,218 @@ fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
     ] {
         assert!(
             content.contains(required),
-            "ci-safety.yml must isolate advanced-safety target directories and \
-             use a fresh cache epoch so stale trybuild target caches cannot \
-             cause rust-cache ENOENT noise.\n\
+            "ci-safety.yml must isolate the nightly safety target directories and cache \
+             epoch from the stable CI caches so their distinct toolchain/RUSTFLAGS builds \
+             do not invalidate each other.\n\
              Missing required marker: `{required}`\n\
              File: {}",
             workflow_path.display()
+        );
+    }
+}
+
+/// Does a single shell command segment invoke a cargo subcommand that EXECUTES the
+/// root integration test suite — and therefore triggers `trybuild`, which
+/// materializes a nested `<target>/tests` cargo workspace? Restricted runs do not:
+/// `--lib` (unit only), `--doc` (doc-tests only), `--test <name>` (a single,
+/// non-trybuild target), and `--no-run` (compile only); nor do non-test subcommands
+/// (`build`, `clippy`, `udeps`, ...).
+fn cargo_segment_runs_full_test_suite(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cargo_idx) = tokens.iter().position(|&t| t == "cargo") else {
+        return false;
+    };
+    // Step over `+toolchain` selectors and the `miri` driver to reach the subcommand.
+    let mut i = cargo_idx + 1;
+    while tokens.get(i).is_some_and(|t| t.starts_with('+')) {
+        i += 1;
+    }
+    if tokens.get(i) == Some(&"miri") {
+        i += 1;
+    }
+    let Some(&subcommand) = tokens.get(i) else {
+        return false;
+    };
+    let args = &tokens[i + 1..];
+    let has = |flag: &str| args.contains(&flag);
+    match subcommand {
+        // `cargo nextest run` executes every test binary unless explicitly narrowed.
+        "nextest" => {
+            args.first() == Some(&"run") && !has("--no-run") && !has("--lib") && !has("--test")
+        }
+        // `cargo test`, including `cargo +toolchain test` and `cargo miri test`.
+        "test" => !has("--no-run") && !has("--lib") && !has("--doc") && !has("--test"),
+        // `cargo llvm-cov` runs the suite except for its reporting/util subcommands.
+        "llvm-cov" => !matches!(args.first().copied(), Some("report" | "show-env" | "clean")),
+        _ => false,
+    }
+}
+
+/// Whether a `run:` script runs the full integration suite in any of its commands.
+/// Shell line-continuations (`\` + newline) are joined first so a flag on a continued
+/// line stays with its command; the script is then split into command segments so
+/// flags from one command cannot bleed into the classification of another
+/// (e.g. `cargo test && cargo build --lib`).
+fn run_step_executes_full_test_suite(run: &str) -> bool {
+    run.replace("\\\n", " ")
+        .split(['\n', ';', '|', '&'])
+        .any(cargo_segment_runs_full_test_suite)
+}
+
+/// Whether a `run:` script drops trybuild's nested `<target>/tests` directory. Kept
+/// deliberately loose (any `rm -rf ... /tests`) so it is robust to quote style and
+/// to how `CARGO_TARGET_DIR` is spelled.
+fn run_step_drops_trybuild_tests_dir(run: &str) -> bool {
+    run.contains("rm -rf") && run.contains("/tests")
+}
+
+#[test]
+fn test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir() {
+    // CLASS GUARD for the trybuild/rust-cache `##[error]ENOENT` noise (root cause and
+    // remedy are documented at ci.yml's nextest "Drop trybuild artifacts" step): any job
+    // that RUNS the root integration suite materializes trybuild's `<target>/tests`
+    // workspace, and Swatinem/rust-cache then trips over it on restore. Rather than hard-
+    // code the affected jobs (which silently misses ones added later), this structurally
+    // parses every workflow and enforces the invariant: a job that combines a
+    // `Swatinem/rust-cache` step with a full-suite test run MUST also drop `<target>/tests`
+    // before the post-run cache save. Jobs that only run `--lib`/`--doc` tests, compile
+    // without running (clippy/udeps), or cache a different workspace are correctly exempt.
+    // (It classifies inline `run:` commands; a job that reaches the suite only through a
+    // called script is not traced. None do today: the scripts that run `cargo test` either
+    // run it from a non-trybuild crate or narrow it to a specific `--test` target.)
+    let root = repo_root();
+    let workflow_files = collect_workflow_files(&root.join(".github/workflows"));
+    assert!(
+        !workflow_files.is_empty(),
+        "expected workflow files under .github/workflows"
+    );
+
+    let mut classified_as_needing_cleanup: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut violations: Vec<String> = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let raw = read_file(&path);
+        let content = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+
+        let Ok(docs) = Yaml::load_from_str(content) else {
+            continue; // YAML validity is enforced by test_workflow_files_are_valid_yaml.
+        };
+        let Some(jobs) = docs.first().and_then(|doc| doc.as_mapping_get("jobs")) else {
+            continue;
+        };
+        let Yaml::Mapping(jobs) = jobs else {
+            continue;
+        };
+
+        for (job_key, job) in jobs.iter() {
+            let job_name = job_key.as_str().unwrap_or("<job>");
+            let Some(Yaml::Sequence(steps)) = job.as_mapping_get("steps") else {
+                continue;
+            };
+
+            let mut uses_rust_cache = false;
+            let mut runs_full_suite = false;
+            let mut drops_tests_dir = false;
+            for step in steps {
+                if let Some(uses) = step.as_mapping_get("uses").and_then(|v| v.as_str()) {
+                    uses_rust_cache |= uses.contains("Swatinem/rust-cache");
+                }
+                if let Some(run) = step.as_mapping_get("run").and_then(|v| v.as_str()) {
+                    runs_full_suite |= run_step_executes_full_test_suite(run);
+                    drops_tests_dir |= run_step_drops_trybuild_tests_dir(run);
+                }
+            }
+
+            if uses_rust_cache && runs_full_suite {
+                classified_as_needing_cleanup.insert(format!("{filename}:{job_name}"));
+                if !drops_tests_dir {
+                    violations.push(format!("  - {filename}: job `{job_name}`"));
+                }
+            }
+        }
+    }
+
+    // Sanity floor: the four jobs known to run the full suite under rust-cache must be
+    // detected. This keeps the invariant above from silently passing as a no-op if the
+    // YAML traversal or the command classifier ever regresses.
+    for known in [
+        "ci.yml:nextest",
+        "ci.yml:msrv",
+        "ci.yml:coverage",
+        "ci-safety.yml:asan",
+    ] {
+        assert!(
+            classified_as_needing_cleanup.contains(known),
+            "structural detection regressed: expected `{known}` to be classified as a job that \
+             runs the full test suite under rust-cache, but it was not. The workflow YAML \
+             traversal or cargo command classifier is broken.\nDetected: {classified_as_needing_cleanup:?}"
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Every job that runs the root integration test suite under Swatinem/rust-cache must drop \
+         trybuild's nested `<target>/tests` directory before the post-run cache save, or rust-cache \
+         emits a noisy `##[error]ENOENT` on restore (see ci.yml's nextest \"Drop trybuild artifacts\" \
+         step for the full rationale).\nJobs missing the cleanup:\n{}\n\n\
+         Add a final step to each:\n  \
+         - name: Drop trybuild artifacts before cache save\n    if: always()\n    shell: bash\n    \
+         run: rm -rf \"${{CARGO_TARGET_DIR:-target}}/tests\"",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_run_step_full_suite_classifier() {
+    // Data-driven guard for the cargo-command classifier behind the trybuild cleanup
+    // invariant above. Each case is (run script, expected: does it run the full
+    // integration suite — i.e. trigger trybuild?). These pin the subtle cases:
+    // `+toolchain`/`miri` prefixes, the `--lib`/`--doc`/`--test`/`--no-run` exclusions,
+    // shell line-continuations, pipes, and per-segment flag isolation.
+    let cases: &[(&str, bool)] = &[
+        // Runners that execute every test target → DO trigger trybuild.
+        ("cargo nextest run --profile ci --locked --all-features", true),
+        ("cargo test --locked --all-features --no-fail-fast", true),
+        ("cargo +nightly-2026-02-01 test --locked --all-features", true),
+        (
+            "cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info",
+            true,
+        ),
+        // Line-continuation: a narrowing flag on the continued line must still count.
+        ("cargo test --locked --all-features \\\n  --lib --no-fail-fast", false),
+        (
+            "RUSTFLAGS=-Zx \\\n  cargo +nightly-2026-02-01 test --locked \\\n  --all-features 2>&1 | tee out.txt",
+            true,
+        ),
+        // Restricted runs that do NOT execute the integration tests → no trybuild.
+        ("cargo test --locked --lib", false),
+        ("cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast", false),
+        ("cargo test --locked --doc --all-features", false),
+        ("cargo test --locked --test browser_interop_e2e", false),
+        ("cargo test --locked --all-features --no-run", false),
+        ("cargo llvm-cov report --fail-under-lines 70", false),
+        ("cargo nextest run --no-run", false),
+        // Non-test subcommands.
+        ("cargo build --lib --locked --all-features", false),
+        ("cargo clippy --locked --all-targets --all-features -- -D warnings", false),
+        ("cargo +nightly-2026-02-01 udeps --locked --all-targets", false),
+        ("cargo machete", false),
+        ("cargo fmt --check", false),
+        ("cargo +nightly-2026-02-01 fuzz run protocol_target", false),
+        ("bash scripts/run-webrtc-interop.sh", false),
+        // Per-segment flag isolation: a flag from one command must not bleed into another.
+        ("cargo build && cargo test --all-features", true),
+        ("cargo test --lib && cargo build", false),
+    ];
+
+    for (run, expected) in cases {
+        assert_eq!(
+            run_step_executes_full_test_suite(run),
+            *expected,
+            "trybuild full-suite classifier mismatch for run script:\n{run}"
         );
     }
 }
@@ -20051,18 +20263,26 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
     let required_fragments = [
         "cargo install --locked cargo-binstall",
         "cargo binstall --no-confirm --locked",
+        "Acquire::Retries=5",
+        "curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)",
+        "ENV CARGO_NET_RETRY=10",
+        "ENV CARGO_HTTP_TIMEOUT=120",
         "cargo-deny",
         "cargo-tarpaulin",
         "cargo-watch",
         "cargo-expand",
         "cargo-llvm-cov",
         "cargo-nextest",
+        "cargo-mutants",
+        "cargo-fuzz",
         "cargo-deny --version",
         "cargo-tarpaulin --version",
         "cargo-watch --version",
         "cargo-expand --version",
         "cargo llvm-cov --version",
         "cargo-nextest --version",
+        "cargo mutants --version",
+        "cargo fuzz --help",
     ];
 
     for fragment in required_fragments {
@@ -20071,6 +20291,12 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
             ".devcontainer/Dockerfile must include fast heavy-tool install fragment: {fragment}"
         );
     }
+
+    assert!(
+        !dockerfile_content.contains("cargo-mutants --version"),
+        ".devcontainer/Dockerfile must not use direct 'cargo-mutants --version' because
+         cargo-mutants is a cargo plugin entrypoint and should be invoked as 'cargo mutants ...'."
+    );
 }
 
 #[test]
@@ -20080,9 +20306,16 @@ fn test_post_create_verifies_required_rust_tools() {
 
     let required_fragments = [
         "verify_required_rust_tools",
+        "if ! install_codex_cli; then",
+        "run_with_retries 3 5 cargo fetch",
+        "is_truthy",
+        "cargo-mutants",
+        "cargo-fuzz",
         "cargo-deny --version",
         "cargo-nextest --version",
         "cargo llvm-cov --version",
+        "cargo mutants --version",
+        "cargo fuzz --help",
         "taplo --version",
     ];
 
@@ -20102,6 +20335,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     assert!(
         post_create_content.contains("SIGNAL_FISH_WARM_CARGO_CHECK"),
         ".devcontainer/post-create.sh must gate cargo check warm-up behind SIGNAL_FISH_WARM_CARGO_CHECK."
+    );
+    assert!(
+        post_create_content.contains("is_truthy"),
+        ".devcontainer/post-create.sh should parse standard truthy values for warm-up toggles."
     );
     assert!(
         post_create_content.contains("Skipping cargo check warm-up"),

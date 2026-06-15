@@ -24,8 +24,9 @@ ARG TAPLO_CLI_VERSION=0.10.0
 
 # System dependencies for building with mold linker, TLS, validation tooling,
 # and the native libraries required by the PowerShell/.NET runtime on Debian 12.
-RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=5 \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
     mold \
     clang \
     pkg-config \
@@ -79,25 +80,26 @@ RUN set -eux; \
     exit 1; \
     ;; \
     esac; \
+    curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20); \
     tmp_dir="$(mktemp -d)"; \
     cd "$tmp_dir"; \
     actionlint_archive="actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz"; \
-    curl -fsSL -o "$actionlint_archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${actionlint_archive}"; \
+    curl -fsSL "${curl_retry_args[@]}" -o "$actionlint_archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${actionlint_archive}"; \
     echo "${actionlint_sha256}  ${actionlint_archive}" | sha256sum -c -; \
     tar -xzf "$actionlint_archive" actionlint; \
     install -m 0755 actionlint /usr/local/bin/actionlint; \
     lychee_archive="lychee-${lychee_target}.tar.gz"; \
     lychee_dir="lychee-${lychee_target}"; \
-    curl -fsSL -o "$lychee_archive" "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/${lychee_archive}"; \
+    curl -fsSL "${curl_retry_args[@]}" -o "$lychee_archive" "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/${lychee_archive}"; \
     echo "${lychee_sha256}  ${lychee_archive}" | sha256sum -c -; \
     tar -xzf "$lychee_archive" "${lychee_dir}/lychee"; \
     install -m 0755 "${lychee_dir}/lychee" /usr/local/bin/lychee; \
     yq_binary="yq_linux_${yq_arch}"; \
-    curl -fsSL -o "$yq_binary" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq_binary}"; \
+    curl -fsSL "${curl_retry_args[@]}" -o "$yq_binary" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq_binary}"; \
     echo "${yq_sha256}  ${yq_binary}" | sha256sum -c -; \
     install -m 0755 "$yq_binary" /usr/local/bin/yq; \
     powershell_archive="powershell-${POWERSHELL_VERSION}-linux-${powershell_arch}.tar.gz"; \
-    curl -fsSL -o "$powershell_archive" "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershell_archive}"; \
+    curl -fsSL "${curl_retry_args[@]}" -o "$powershell_archive" "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershell_archive}"; \
     echo "${powershell_sha256}  ${powershell_archive}" | sha256sum -c -; \
     mkdir -p /opt/microsoft/powershell/7; \
     tar -xzf "$powershell_archive" -C /opt/microsoft/powershell/7; \
@@ -133,6 +135,10 @@ RUN rustup component add \
 # stable build path; see ADR-0003 and fuzz/README.md.
 RUN rustup toolchain install nightly --profile minimal --component rust-src
 
+# Increase Cargo resilience for transient network failures during no-cache image builds.
+ENV CARGO_NET_RETRY=10
+ENV CARGO_HTTP_TIMEOUT=120
+
 # Cargo tools (installed globally, available to all users). Heavy tools go on
 # the cargo-binstall path (prebuilt binaries) to keep no-cache rebuilds fast.
 # cargo-mutants (mutation testing) and cargo-fuzz (coverage-guided fuzzing) back
@@ -155,8 +161,8 @@ RUN cargo install --locked cargo-binstall \
     && cargo-expand --version \
     && cargo llvm-cov --version \
     && cargo-nextest --version \
-    && cargo-mutants --version \
-    && cargo-fuzz --version \
+    && cargo mutants --version \
+    && cargo fuzz --help >/dev/null \
     && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
 
 # Fix ownership so the non-root "vscode" user (set via remoteUser in

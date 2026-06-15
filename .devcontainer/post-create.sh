@@ -12,10 +12,11 @@ echo ""
 # This keeps the CLI current even when Docker reuses cached image layers.
 run_with_retries() {
     local max_attempts="$1"
-    local delay_seconds="$2"
+    local initial_delay_seconds="$2"
     shift 2
 
     local attempt=1
+    local delay_seconds="$initial_delay_seconds"
     while true; do
         if "$@"; then
             return 0
@@ -29,7 +30,24 @@ run_with_retries() {
         echo "[setup] Command failed (attempt $attempt/$max_attempts); retrying in ${delay_seconds}s..."
         sleep "$delay_seconds"
         attempt=$((attempt + 1))
+        if ((delay_seconds < 30)); then
+            delay_seconds=$((delay_seconds * 2))
+            if ((delay_seconds > 30)); then
+                delay_seconds=30
+            fi
+        fi
     done
+}
+
+is_truthy() {
+    case "${1:-}" in
+    1 | true | TRUE | yes | YES | on | ON)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
 }
 
 remove_user_npm_prefix_config() {
@@ -148,7 +166,7 @@ install_codex_cli() {
     load_node_toolchain
 
     echo "[setup] Installing OpenAI Codex CLI from npm: $codex_npm_spec"
-    run_with_retries 3 5 npm install --global --include=optional "$codex_npm_spec"
+    run_with_retries 5 3 npm install --global --include=optional "$codex_npm_spec"
 
     if ! command -v codex >/dev/null 2>&1; then
         echo "[setup] ERROR: Codex CLI install completed, but 'codex' is not on PATH."
@@ -169,6 +187,8 @@ verify_required_rust_tools() {
         cargo-expand
         cargo-llvm-cov
         cargo-nextest
+        cargo-mutants
+        cargo-fuzz
         taplo
     )
 
@@ -185,6 +205,8 @@ verify_required_rust_tools() {
     cargo-deny --version >/dev/null
     cargo-nextest --version >/dev/null
     cargo llvm-cov --version >/dev/null
+    cargo mutants --version >/dev/null
+    cargo fuzz --help >/dev/null 2>&1
     taplo --version >/dev/null
     echo "[setup] Rust tooling verified."
 }
@@ -229,15 +251,22 @@ make_project_scripts_executable() {
     rm -f "$chmod_log"
 }
 
-install_codex_cli
+if ! install_codex_cli; then
+    echo "[setup] Warning: Codex CLI installation failed after retries; continuing setup."
+    echo "[setup] You can retry later with: npm install --global --include=optional ${CODEX_NPM_SPEC:-@openai/codex@latest}"
+fi
 verify_required_rust_tools
 
 # Pre-download all dependencies
 echo "[setup] Fetching cargo dependencies..."
-cargo fetch
-echo "[setup] Dependencies fetched."
+if run_with_retries 3 5 cargo fetch; then
+    echo "[setup] Dependencies fetched."
+else
+    echo "[setup] Warning: cargo fetch failed after retries; continuing."
+    echo "[setup] You can retry manually with: cargo fetch"
+fi
 
-if [ "${SIGNAL_FISH_WARM_CARGO_CHECK:-0}" = "1" ]; then
+if is_truthy "${SIGNAL_FISH_WARM_CARGO_CHECK:-0}"; then
     echo "[setup] Pre-building (cargo check --all-features)..."
     cargo check --all-features 2>&1 || echo "[setup] Warning: cargo check failed, continuing..."
     echo "[setup] Build cache warmed."

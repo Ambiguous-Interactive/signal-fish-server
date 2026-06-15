@@ -126,8 +126,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          # v2 invalidates stale target caches that included trybuild's
-          # target/tests workspaces, which produced noisy rust-cache ENOENTs.
+          # Isolate the nightly safety build cache (distinct toolchain/RUSTFLAGS) from the
+          # stable CI caches; the "-v2" epoch busted older caches that predate this split.
+          # (trybuild/rust-cache ENOENT noise is handled by dropping `<target>/tests`, not here.)
           prefix-key: "ci-safety-nightly-v2"
           workspaces: ". -> target/miri"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -224,8 +225,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          # v2 invalidates stale target caches that included trybuild's
-          # target/tests workspaces, which produced noisy rust-cache ENOENTs.
+          # Isolate the nightly safety build cache (distinct toolchain/RUSTFLAGS) from the
+          # stable CI caches; the "-v2" epoch busted older caches that predate this split.
+          # (trybuild/rust-cache ENOENT noise is handled by dropping `<target>/tests`, not here.)
           prefix-key: "ci-safety-nightly-v2"
           workspaces: ". -> target/asan"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -270,3 +272,14 @@ jobs:
           name: asan-output
           path: asan-output.txt
           retention-days: 14
+
+      - name: Drop trybuild artifacts before cache save
+        # The ASan job runs the full test suite, so trybuild builds nested cargo projects
+        # under `${CARGO_TARGET_DIR}/tests`. Swatinem/rust-cache's restore-time cleanup probes
+        # `<target>/tests/target` (a path trybuild never creates) in a non-awaited call,
+        # surfacing a benign but noisy `##[error]ENOENT` on every restore. Dropping the dir
+        # before the post-run cache save keeps the trigger out of the cache. Miri runs
+        # `--lib` only, so it never creates this directory and needs no cleanup.
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
