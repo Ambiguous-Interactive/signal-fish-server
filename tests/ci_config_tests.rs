@@ -23,6 +23,7 @@ use common::bash_command;
 use common::{read_file, repo_root};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
+use saphyr::{LoadableYamlNode, Yaml};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -1930,111 +1931,171 @@ fn test_workflow_files_are_valid_yaml() {
         let content = read_file(&path);
         let filename = path.file_name().unwrap().to_string_lossy();
 
-        // Basic YAML validation checks
-        // Note: This is not a full YAML parser, but catches common errors
-
-        // Check for balanced quotes, but only on YAML-level lines (not inside
-        // multiline scalar blocks). Shell scripts embedded via `run: |` and
-        // folded scalars like `args: >-` can legitimately have odd quote
-        // counts (AWK programs, glob patterns, etc.), so we skip lines
-        // inside any YAML multiline scalar block.
-        let mut single_quotes = 0;
-        let mut double_quotes = 0;
-        let mut in_multiline_block = false;
-        let mut block_indent = 0;
-
-        for line in content.lines() {
-            let stripped = line.trim();
-            let indent = line.len() - line.trim_start().len();
-
-            // Detect start of any YAML multiline scalar block.
-            // Matches patterns like: "key: |", "key: >-", "key: |+", etc.
-            // The scalar indicator (|, >, |-, >-, |+, >+) after a colon
-            // signals that subsequent indented lines are scalar content.
-            if stripped.contains(": |") || stripped.contains(": >") {
-                // Verify this looks like a YAML key: value with a block scalar indicator
-                // (not just any line that happens to contain ": |")
-                let after_colon = stripped
-                    .split_once(": ")
-                    .map(|(_, rest)| rest.trim())
-                    .unwrap_or("");
-                if after_colon == "|"
-                    || after_colon == "|-"
-                    || after_colon == "|+"
-                    || after_colon == ">"
-                    || after_colon == ">-"
-                    || after_colon == ">+"
-                {
-                    in_multiline_block = true;
-                    block_indent = indent;
-                    continue;
-                }
-            }
-
-            // Detect end of multiline block (line at same or lesser indent, non-empty)
-            if in_multiline_block && !stripped.is_empty() && indent <= block_indent {
-                in_multiline_block = false;
-            }
-
-            // Only count quotes on YAML-level lines, not multiline scalar content
-            if !in_multiline_block {
-                single_quotes += line.matches('\'').count();
-                double_quotes += line.matches('"').count();
-            }
+        if let Some(error) = workflow_yaml_error(&filename, &content) {
+            errors.push(error);
         }
+    }
 
-        if single_quotes % 2 != 0 {
-            errors.push(format!(
-                "{filename}: Unbalanced single quotes in YAML lines (found {single_quotes} quotes)\n  \
-                 Check for missing closing quotes in strings (shell script blocks excluded)"
-            ));
-        }
+    assert!(
+        errors.is_empty(),
+        "Workflow files failed YAML validation:\n\n{}\n\n\
+         Each workflow must parse as a YAML 1.2 mapping with `name`, `on`, and `jobs` \
+         top-level keys. For full style diagnostics run:\n    yamllint .github/workflows/",
+        errors.join("\n")
+    );
+}
 
-        if double_quotes % 2 != 0 {
-            errors.push(format!(
-                "{filename}: Unbalanced double quotes in YAML lines (found {double_quotes} quotes)\n  \
-                 Check for missing closing quotes in strings (shell script blocks excluded)"
-            ));
-        }
+/// Validate one workflow file's YAML, returning a human-readable error string if
+/// it is not a structurally valid GitHub Actions workflow, or `None` if it is.
+///
+/// This parses the file as YAML 1.2 (via `saphyr`) rather than approximating a
+/// parser with quote/indent/substring heuristics. A real parser is both simpler
+/// and immune to the false positives those heuristics produce — apostrophes in
+/// `#` comments, regex metacharacters inside `run:`/`args:` scalar blocks, `#`
+/// inside quoted scalars, etc. Style concerns (2-space indentation, trailing
+/// newline) are enforced authoritatively by yamllint in
+/// `.github/workflows/yaml-lint.yml`, so they are intentionally not re-checked
+/// here. Parsing as YAML 1.2 also keeps `on` a string key (YAML 1.1 parsers
+/// coerce the bare `on`/`off`/`yes`/`no` tokens to booleans).
+fn workflow_yaml_error(filename: &str, content: &str) -> Option<String> {
+    // Tolerate a leading UTF-8 BOM, which a parser otherwise folds into the first
+    // key (turning `name` into `\u{feff}name`).
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
-        // Check for required GitHub Actions fields
-        let mut missing_fields = Vec::new();
+    let docs = match Yaml::load_from_str(content) {
+        Ok(docs) => docs,
+        Err(e) => return Some(format!("{filename}: invalid YAML: {e}")),
+    };
 
-        if !content.contains("name:") {
-            missing_fields.push("name:");
-        }
-        if !content.contains("on:") && !content.contains("'on':") {
-            missing_fields.push("on:");
-        }
-        if !content.contains("jobs:") {
-            missing_fields.push("jobs:");
-        }
+    // An empty/comment-only file parses to zero documents — a workflow must have
+    // actual content, so treat that as an error rather than silently passing.
+    let Some(doc) = docs.first() else {
+        return Some(format!(
+            "{filename}: contains no YAML document (file is empty or only comments)"
+        ));
+    };
+    let Yaml::Mapping(mapping) = doc else {
+        return Some(format!(
+            "{filename}: top-level YAML value must be a mapping (key: value pairs)"
+        ));
+    };
 
-        if !missing_fields.is_empty() {
-            errors.push(format!(
-                "{}: Missing required fields: {}\n  \
-                 GitHub Actions workflows must have: name, on, jobs",
-                filename,
-                missing_fields.join(", ")
+    let missing: Vec<&str> = ["name", "on", "jobs"]
+        .into_iter()
+        .filter(|key| !mapping.contains_key(&Yaml::value_from_str(key)))
+        .collect();
+    if !missing.is_empty() {
+        return Some(format!(
+            "{filename}: missing required top-level field(s): {}",
+            missing.join(", ")
+        ));
+    }
+
+    None
+}
+
+#[test]
+fn test_workflow_yaml_validator_behavior() {
+    // Data-driven guard for `workflow_yaml_error` — the parser-based replacement
+    // for the old quote-counting heuristic that false-failed on apostrophes in
+    // comments. Each case is (description, content, expects_error). The accepted
+    // cases are exactly the inputs the old heuristic mis-flagged; the rejected
+    // cases are the genuinely broken YAML a syntax check must still catch.
+    let minimal = "name: CI\non:\n  push:\njobs:\n  build:\n    runs-on: ubuntu-latest\n";
+
+    struct Case {
+        description: &'static str,
+        content: String,
+        expects_error: bool,
+    }
+
+    let cases = [
+        Case {
+            description: "valid workflow",
+            content: minimal.to_string(),
+            expects_error: false,
+        },
+        Case {
+            description: "odd number of apostrophes in comments (the original false positive)",
+            // The old heuristic counted single quotes file-wide and flagged an odd
+            // total as "unbalanced". Three apostrophes (lychee's, can't, shell's) —
+            // exactly the comment words that broke link-check.yml in CI — make the
+            // count odd. The YAML is valid, so the parser-based validator accepts it.
+            content: format!("# lychee's remap can't use the shell's positional param\n{minimal}"),
+            expects_error: false,
+        },
+        Case {
+            description: "leading UTF-8 BOM is tolerated",
+            content: format!("\u{feff}{minimal}"),
+            expects_error: false,
+        },
+        Case {
+            description: "empty file (no YAML document)",
+            content: String::new(),
+            expects_error: true,
+        },
+        Case {
+            description: "comment-only file (no YAML document)",
+            content: "# just a comment, no workflow\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "odd single quote inside a block scalar (regex/AWK in run:)",
+            content: format!(
+                "{minimal}    steps:\n      - run: |\n          awk '/^```/ {{ print }}'\n"
+            ),
+            expects_error: false,
+        },
+        Case {
+            description: "`#` inside a quoted scalar is not a comment",
+            content: "name: 'C# build'\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+                .to_string(),
+            expects_error: false,
+        },
+        Case {
+            description: "`on` stays a string key under YAML 1.2 (not coerced to bool)",
+            content: minimal.to_string(),
+            expects_error: false,
+        },
+        Case {
+            description: "genuinely malformed YAML (unclosed flow sequence)",
+            content: "name: CI\non: push\njobs: [build\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "unbalanced quote that truly breaks parsing",
+            content: "name: \"unterminated\non: push\njobs: {}\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "missing required top-level field (jobs)",
+            content: "name: CI\non: push\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "top-level value is not a mapping",
+            content: "- just\n- a\n- list\n".to_string(),
+            expects_error: true,
+        },
+    ];
+
+    let mut failures = Vec::new();
+    for case in &cases {
+        let result = workflow_yaml_error("fixture.yml", &case.content);
+        if result.is_some() != case.expects_error {
+            failures.push(format!(
+                "  - case {:?}: expected error = {}, got {:?}",
+                case.description, case.expects_error, result
             ));
         }
     }
 
-    if !errors.is_empty() {
-        panic!(
-            "Workflow files have YAML validation errors:\n\n{}\n\n\
-             To fix:\n\
-             1. Use a YAML validator/linter (yamllint, prettier, or IDE plugin)\n\
-             2. Check for missing quotes, colons, or indentation errors\n\
-             3. Ensure all required fields (name, on, jobs) are present\n\
-             4. Verify quotes are balanced (each opening quote has a closing quote)\n\n\
-             Common issues:\n\
-             - Missing closing quote: name: \"My Workflow\n\
-             - Missing colon: name My Workflow\n\
-             - Wrong indentation: jobs should be at root level, not nested",
-            errors.join("\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "workflow_yaml_error misclassified {} case(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -5043,8 +5104,9 @@ fn test_lychee_excludes_placeholder_urls() {
         ("https://github", "Truncated URL without trailing slash"),
         ("https://lib/", "Truncated URL from .lychee.toml regex"),
         ("https://lib", "Truncated URL without trailing slash"),
-        // file:// protocol for local file links
-        ("file:///tmp/foo", "Local file URLs should be excluded"),
+        // NOTE: file:// URLs are intentionally NOT excluded — lychee validates
+        // in-repo file references against the checkout (see .lychee.toml comment
+        // and the --remap rule in .github/workflows/link-check.yml).
         // Anchor-only links (same-page references)
         ("#section-heading", "Anchor-only links should be excluded"),
         // lib.rs returns 403 for automated checks
