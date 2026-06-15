@@ -6,6 +6,20 @@
 # Applied automatically when running `cargo nextest run` in this workspace.
 # CI workflows (ci.yml nextest job) inherit these settings.
 
+# Concurrency-isolated test groups (zero-flakiness policy: isolate resource-heavy
+# tests rather than retry them — see .llm/context-testing.md). The true
+# multi-process suite (`tests/v3_multiprocess_e2e.rs`) spawns the real
+# `signal-fish-server` binary as child OS processes that bind ports and compete
+# for CPU; on an oversubscribed runner that starvation could push a child past
+# its readiness deadline. This was the one flake observed during the v2/v3
+# production-readiness pass — green in isolation, a single timeout under
+# 48-binary saturation. Capping the group to one test at a time and reserving
+# several global thread slots per test keeps the child server from being
+# CPU-starved, deterministically — together with the generous, saturation-tolerant
+# deadlines now in tests/v3_multiprocess_e2e.rs.
+[test-groups]
+process-spawning = { max-threads = 1 }
+
 [profile.default]
 # Fail-fast: stop on first test failure for faster feedback in CI.
 # Individual OS matrix lanes already provide independent failure reporting
@@ -19,9 +33,31 @@ failure-output = "immediate-final"
 success-output = "never"
 
 # No automatic retries. Every test failure is treated as a real bug per
-# project policy (see .llm/context.md: "Zero tolerance for flaky tests").
-# If flakes appear in the future, targeted per-test overrides can be added
-# via [[profile.default.overrides]] rather than blanket retries.
+# project policy (see .llm/context-testing.md: "Zero-Flakiness Policy").
+# Flakes are fixed deterministically (root-caused) or isolated via test-groups
+# below — never masked with blanket retries.
+
+# Per-test override: route the true multi-process suite into the bounded
+# `process-spawning` group and reserve thread slots so it cannot be CPU-starved.
+[[profile.default.overrides]]
+filter = 'binary(v3_multiprocess_e2e)'
+test-group = 'process-spawning'
+threads-required = 4
+
+# Per-test override: serialize the two heavy CPU/IO tests that otherwise starve
+# each other under a loaded runner — the trybuild / compile-fail UI test
+# (`tests/public_api_privacy_tests.rs`), whose "runtime" is a full crate
+# (re)compile in trybuild's own target dir (cold whenever source changed, several
+# minutes under load — legitimate compile time, not a hang), and the docs
+# internal-link checker (`ci_config_tests::test_docs_relative_links_*`), which
+# shells out to a ~17s repo script. Routing both through the bounded
+# `process-spawning` group (max-threads = 1) guarantees they never co-schedule,
+# so the link checker is never starved by the trybuild compile; the generous
+# slow-timeout absorbs the compile itself.
+[[profile.default.overrides]]
+filter = 'binary(public_api_privacy_tests) or test(test_docs_relative_links_resolve_to_existing_files)'
+test-group = 'process-spawning'
+slow-timeout = { period = "300s", terminate-after = 3 }
 
 # CI-specific profile — reserved for future per-job tuning.
 # Activate with: cargo nextest run --profile ci
@@ -30,5 +66,8 @@ success-output = "never"
 fail-fast = true
 failure-output = "immediate-final"
 success-output = "never"
-# Slightly longer per-test timeout for CI runners which may be slower
-slow-timeout = { period = "120s", terminate-after = 2 }
+# Per-test slow-timeout: warn at 120s, terminate after 3 periods (360s). The
+# headroom is a safety net so a subprocess/script test that is merely starved
+# under a loaded runner (not hung) is not spuriously killed; the genuinely heavy
+# tests get their own larger override above.
+slow-timeout = { period = "120s", terminate-after = 3 }

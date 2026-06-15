@@ -938,25 +938,30 @@ mod tests {
             }
         });
 
-        // Give server time to start (longer timeout for CI environments)
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
-        // Connect to WebSocket with timeout
+        // Poll the server until it accepts a WebSocket connection, rather than a
+        // fixed startup sleep (zero-flakiness policy, .llm/context-testing.md): a
+        // fixed sleep flakes when an oversubscribed runner has not bound the
+        // listener yet. The happy path connects on the first attempt (typically
+        // within a few ms of the spawn); the generous deadline only bites under
+        // pathological load.
         let url = format!("ws://{addr}/ws");
-        let (ws_stream, _) =
-            match tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
+        let ready_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+        let ws_stream = loop {
+            match tokio::time::timeout(tokio::time::Duration::from_secs(5), connect_async(&url))
                 .await
             {
-                Ok(Ok((stream, response))) => (stream, response),
-                Ok(Err(e)) => {
-                    tracing::error!("Failed to connect to WebSocket: {}", e);
-                    return;
+                Ok(Ok((stream, _response))) => break stream,
+                outcome => {
+                    if tokio::time::Instant::now() >= ready_deadline {
+                        tracing::error!(
+                            "WebSocket server did not become ready within 30s: {outcome:?}"
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
-                Err(_) => {
-                    tracing::error!("WebSocket connection timed out after 10 seconds");
-                    return;
-                }
-            };
+            }
+        };
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
         // Send join room message

@@ -104,9 +104,9 @@ your "Start" affordance when both conditions allow it.
 | `Authenticate`, `JoinRoom`, `PlayerReady`, `StartGame`, `GameStarting`, `GameData`, `LeaveRoom` | **Mandatory** (v2 floor) |
 | `Ping` / `Pong` heartbeat | **Mandatory** (avoid idle timeout) |
 | Handling `Error` and the `*Failed` messages with `error_code` | **Mandatory** |
-| `Reconnect` after a drop | Optional ([reconnection](../concepts/reconnection.md)) |
-| `JoinAsSpectator` / `LeaveSpectator` | Optional ([spectator mode](../concepts/spectator-mode.md)) |
-| `AuthorityRequest` | Optional ([authority](../concepts/authority.md)) |
+| `Reconnect` after a drop | Optional (see [Reconnection](../concepts/reconnection.md)) |
+| `JoinAsSpectator` / `LeaveSpectator` | Optional (see [Spectator Mode](../concepts/spectator-mode.md)) |
+| `AuthorityRequest` | Optional (see [Authority System](../concepts/authority.md)) |
 | `ProvideConnectionInfo` | Optional legacy peer metadata |
 | `Signal`, `SessionPlan`, `NewPeer`, `TransportStatus`, `PeerTransportStatus` | Optional (**v3 only**) |
 

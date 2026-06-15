@@ -69,10 +69,18 @@ use websocket_test_helpers::{deadline_after, next_matching_server_message_within
 
 /// Arbitrary app id: the spawned server runs with WebSocket auth disabled.
 const APP_ID: &str = "multiprocess-conformance-app";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// These are saturation-tolerant CEILINGS, not expected waits (zero-flakiness
+// policy, .llm/context-testing.md). Each spawns/drives a REAL child server
+// process; on an oversubscribed runner the child can be CPU-starved and merely
+// slow, so the deadlines are generous enough that a starved-but-progressing
+// child still completes. They only bite under pathological load — the happy path
+// returns the instant the socket connects / the health check passes / the close
+// is observed, so large ceilings never slow a passing run. (nextest also runs
+// this binary in a bounded `process-spawning` test-group; see .config/nextest.toml.)
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a client socket may take to observe the death of the server.
-const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
-const HEALTH_DEADLINE: Duration = Duration::from_secs(15);
+const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SPAWN_ATTEMPTS: usize = 3;
 

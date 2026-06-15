@@ -6,6 +6,7 @@ See [Core Testing Patterns](skills/testing-core-patterns.md) and
 - Every feature/bugfix requires exhaustive tests (happy, negative, edge, concurrent, recovery)
 - Data-driven/table-driven tests preferred for validation functions
 - **Zero tolerance for flaky tests** -- every failure is a real bug to fix
+  (full policy below: [Zero-Flakiness Policy](#zero-flakiness-policy-zero-tolerance))
 - Test "the impossible" -- corrupted state, unknown message types, future compatibility
 - Tests must pass: `cargo test --all-features` validates all changes before handoff
 - Do not discard `tokio::time::timeout(...).await` results in async tests. For expected
@@ -30,3 +31,53 @@ See [Core Testing Patterns](skills/testing-core-patterns.md) and
   source-distinguishable sentinel fixture values and assert the exact ordered
   sequence. If a test relies on defaults, add a fixture invariant so a future
   default/static value collision fails before it weakens the ordering assertion.
+
+## Zero-Flakiness Policy (zero tolerance)
+
+A **flaky test** is any test whose pass/fail outcome can change without a change
+to the system under test — it depends on timing, ordering, scheduling, resource
+contention, available CPU/ports, wall-clock, randomness, or test-execution order.
+**A flake is a bug** (in the test or in the system), and this repository has
+**zero tolerance** for them.
+
+**Non-resolutions (forbidden).** None of these "fix" a flake — they hide it:
+
+- Re-running until green, or relying on "it passes on retry".
+- "It passes in isolation / on my machine" — a test that only passes when not
+  contended is flaky. Every test MUST pass deterministically under BOTH
+  `cargo nextest run` and a raw, **oversubscribed** `cargo test --all-features`
+  (more concurrent tests than cores), because CI and developer machines run
+  loaded.
+- Adding nextest `retries`, `#[ignore]`, sprinkling `sleep`, or loosening an
+  assertion to "make it pass".
+
+**Resolution (required) — root-cause the non-determinism and eliminate it:**
+
+- Replace fixed `sleep`s with **condition polling against a generous deadline**
+  (a ceiling, not an expected wait): poll the actual readiness/state, return the
+  instant it holds. Generous ceilings only bite under pathological load and do
+  not slow the happy path.
+- No ordering assumptions on concurrent producers; assert exact sequences or use
+  the deadline-driven helpers in `tests/websocket_test_helpers` (never silent
+  drains).
+- **Resource-heavy / process-spawning / port-binding tests** (e.g. the
+  multi-process suites that spawn the real server binary) must be (a) isolated
+  from concurrency contention so a loaded runner cannot CPU/port-starve them past
+  a deadline — use a nextest **test-group** with a bounded `max-threads`
+  (`.config/nextest.toml`), not retries — and (b) written with
+  saturation-tolerant ceilings (readiness/connect/message deadlines large enough
+  that a starved-but-progressing process still completes). Allocate a unique
+  ephemeral port / temp dir / id per test; never share mutable global state.
+- No `Math.random` / `Instant::now`-derived values in assertions; pin fixtures.
+
+**If a flake cannot be eliminated conclusively in the same change**, it is
+**never left silent**: record it in `PLAN.md` with (1) the observed symptom and
+exact reproduction conditions, (2) the root-cause hypothesis, (3) the mitigation
+applied so far, and (4) the remaining research/fix items — and keep it open until
+it is closed deterministically. A "known flaky" test without a tracked PLAN item
+is a policy violation.
+
+**Runner settings.** `.config/nextest.toml` sets `retries = 0` (implicitly — no
+`retries` key) on purpose; do not add blanket retries. Use
+`[[profile.*.overrides]]` + `[test-groups]` for per-test concurrency isolation
+of resource-heavy tests instead.
