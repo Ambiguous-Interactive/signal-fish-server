@@ -1,4 +1,4 @@
-use crate::coordination::StartGameOutcome;
+use crate::coordination::{PlayerReadyError, StartGameOutcome};
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
@@ -26,30 +26,38 @@ impl EnhancedGameServer {
             return;
         };
 
-        if let Err(e) = self
+        if let Err(error) = self
             .room_coordinator
             .handle_player_ready(&room_id, player_id, self.client_app_id(player_id))
             .await
         {
+            // The variant's own `error_code()` is the single source of truth for
+            // classification (compiler-checked, unit-tested). Only a `Finalized`
+            // room is a business rejection (`INVALID_ROOM_STATE`); every other
+            // case is an infrastructure failure that MUST NOT masquerade as a
+            // room-state error, or clients mishandle transient internal faults
+            // as terminal business state. The message is presentation only.
+            let error_code = error.error_code();
+            let message = match &error {
+                PlayerReadyError::Finalized => {
+                    "Cannot change ready status: the game has already started."
+                }
+                PlayerReadyError::RoomNotFound => "Room not found",
+                PlayerReadyError::Internal(_) => "Failed to update ready state",
+            }
+            .to_string();
             tracing::debug!(
-                "Player {:?} attempted to change ready status: {}",
-                player_id,
-                e
+                %player_id,
+                %error_code,
+                "Player ready toggle rejected: {error}"
             );
-            // The only business rejection is a `Finalized` room (the game has
-            // already started); everything else is an infra failure.
-            let message = if e.to_string().contains("Finalized") {
-                "Cannot change ready status: the game has already started.".to_string()
-            } else {
-                "Failed to update ready state".to_string()
-            };
             let _ = self
                 .message_coordinator
                 .send_to_player(
                     player_id,
                     Arc::new(ServerMessage::Error {
                         message,
-                        error_code: Some(ErrorCode::InvalidRoomState),
+                        error_code: Some(error_code),
                     }),
                 )
                 .await;

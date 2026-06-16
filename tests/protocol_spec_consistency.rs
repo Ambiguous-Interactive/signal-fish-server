@@ -9,13 +9,16 @@
 //! and every `ErrorCode` variant (from `src/protocol/error_codes.rs`) directly
 //! from source — no hand-kept lists — and asserts each appears in the spec.
 //!
-//! No YAML parser is available as a dev-dependency (checked Cargo.toml), and the
-//! task says to prefer whatever needs NO new dependency. The spec models each
-//! message variant's wire `type` token as a JSON-Schema `const: <Variant>` and
-//! lists every error code in the `ErrorCode` enum, so a plain substring check
-//! (the same `doc.contains` strategy `docs_site_consistency` uses) is a robust,
-//! dependency-free way to assert presence. The `const:` anchoring makes the
-//! match intentional rather than incidental.
+//! The spec is parsed as YAML 1.2 with `saphyr` (already a dev-dependency, used
+//! by `tests/ci_config_tests.rs`). Rather than scan the raw text, we collect the
+//! spec's *declared wire tokens* — every `const:` value and every `enum:` member,
+//! at any depth — and assert each Rust variant/code appears among them by EXACT
+//! whole-token match. Anchoring to the JSON-Schema declaration sites is what
+//! makes this a real drift guard: a token that only appears as a mapping KEY
+//! (e.g. a `host:` field), inside prose, or in an example does NOT satisfy the
+//! check — only a genuine `const`/`enum` declaration does. This is strictly more
+//! precise than the substring `doc.contains` scan `docs_site_consistency` uses,
+//! and parsing makes a malformed spec fail loudly rather than silently passing.
 
 #![cfg(test)]
 
@@ -24,6 +27,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::{read_file, repo_root};
+use saphyr::{LoadableYamlNode, Yaml};
 
 /// Extract the top-level variant identifiers of `enum <enum_name>` from Rust
 /// source. Variants are the brace-depth-0 lines inside the enum body whose first
@@ -103,10 +107,76 @@ fn spec_text() -> String {
     read_file(&repo_root().join("spec/signal-fish-protocol.asyncapi.yaml"))
 }
 
+/// Parse the spec as YAML 1.2 and collect its *declared wire tokens*: every
+/// `const:` value and every scalar inside an `enum:` sequence, at any depth.
+///
+/// Anchoring to the JSON-Schema declaration sites — rather than every scalar in
+/// the document — is what makes membership a real drift guard: a token that
+/// merely appears as a mapping KEY (e.g. a `host:` field) or inside prose/an
+/// example does NOT count; only an actual `const`/`enum` declaration does. This
+/// is strictly more precise than both the old substring scan AND a naive
+/// all-scalars collection. A parse failure panics — the spec must always be
+/// valid YAML.
+fn spec_declared_tokens() -> BTreeSet<String> {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).unwrap_or_else(|error| {
+        panic!("spec/signal-fish-protocol.asyncapi.yaml is not valid YAML: {error}")
+    });
+    let mut tokens = BTreeSet::new();
+    for doc in &docs {
+        collect_declared_tokens(doc, &mut tokens);
+    }
+    assert!(
+        !tokens.is_empty(),
+        "parsed spec declared no const/enum tokens — the spec is empty or failed to load"
+    );
+    tokens
+}
+
+fn collect_declared_tokens(node: &Yaml, out: &mut BTreeSet<String>) {
+    match node {
+        Yaml::Mapping(mapping) => {
+            for (key, value) in mapping.iter() {
+                match key.as_str() {
+                    Some("const") => out.extend(scalar_token(value)),
+                    Some("enum") => {
+                        if let Yaml::Sequence(items) = value {
+                            for item in items.iter() {
+                                out.extend(scalar_token(item));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                // Recurse into the value to reach nested schemas (oneOf, arrays
+                // of message objects, component schemas, …).
+                collect_declared_tokens(value, out);
+            }
+        }
+        Yaml::Sequence(items) => {
+            for item in items.iter() {
+                collect_declared_tokens(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Render a scalar `const`/`enum` value as its token string.
+///
+/// Every wire token this guard checks — message `type` discriminators, error
+/// codes, and Transport/Topology/GameDataEncoding values — is a STRING in the
+/// spec, so `as_str()` is exact and complete; a non-string scalar there would be
+/// a spec authoring error, not a token to match. (Returns `None` for non-string
+/// scalars, which simply means they are not counted as tokens.)
+fn scalar_token(node: &Yaml) -> Option<String> {
+    node.as_str().map(str::to_string)
+}
+
 #[test]
 fn spec_documents_every_client_and_server_message_variant() {
     let source = read_file(&repo_root().join("src/protocol/messages.rs"));
-    let spec = spec_text();
+    let declared = spec_declared_tokens();
 
     let mut variants = enum_variants(&source, "ClientMessage");
     variants.extend(enum_variants(&source, "ServerMessage"));
@@ -118,11 +188,12 @@ fn spec_documents_every_client_and_server_message_variant() {
     );
 
     // Each variant's wire `type` token is modeled in the spec as a JSON-Schema
-    // `const: <Variant>`. Anchoring on `const: ` keeps the match intentional
-    // (a variant name appearing only inside prose would not count).
+    // `const: <Variant>` value, so the variant name must appear as an exact
+    // scalar in the parsed spec (a name appearing only inside prose would not
+    // count).
     let missing: Vec<&String> = unique
         .iter()
-        .filter(|variant| !spec.contains(&format!("const: {variant}")))
+        .filter(|variant| !declared.contains(*variant))
         .collect();
 
     assert!(
@@ -134,7 +205,7 @@ fn spec_documents_every_client_and_server_message_variant() {
     // StartGame is the freshly added client message; assert it explicitly so a
     // regression naming it differently is unambiguous.
     assert!(
-        spec.contains("const: StartGame"),
+        declared.contains("StartGame"),
         "spec must model the StartGame client message"
     );
 }
@@ -142,7 +213,7 @@ fn spec_documents_every_client_and_server_message_variant() {
 #[test]
 fn spec_documents_every_error_code_variant() {
     let source = read_file(&repo_root().join("src/protocol/error_codes.rs"));
-    let spec = spec_text();
+    let declared = spec_declared_tokens();
 
     let variants = enum_variants(&source, "ErrorCode");
     assert!(
@@ -154,7 +225,7 @@ fn spec_documents_every_error_code_variant() {
     let missing: Vec<String> = variants
         .iter()
         .map(|v| to_screaming_snake(v))
-        .filter(|token| !spec.contains(token.as_str()))
+        .filter(|token| !declared.contains(token.as_str()))
         .collect();
 
     assert!(
@@ -166,13 +237,16 @@ fn spec_documents_every_error_code_variant() {
 
     // The new game-start codes must be present.
     for token in ["GAME_START_NOT_READY", "GAME_START_FORBIDDEN"] {
-        assert!(spec.contains(token), "spec must list error code {token}");
+        assert!(
+            declared.contains(token),
+            "spec must list error code {token}"
+        );
     }
 }
 
 #[test]
 fn spec_lists_the_wire_token_enums() {
-    let spec = spec_text();
+    let declared = spec_declared_tokens();
     // Transport / Topology / GameDataEncoding wire tokens a codegen consumer
     // needs. Guards against the spec drifting from src/protocol/types.rs.
     for token in [
@@ -185,7 +259,7 @@ fn spec_lists_the_wire_token_enums() {
         "message_pack", // GameDataEncoding
     ] {
         assert!(
-            spec.contains(token),
+            declared.contains(token),
             "spec must document wire token '{token}'"
         );
     }

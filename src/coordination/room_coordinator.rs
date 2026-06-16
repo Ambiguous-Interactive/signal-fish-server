@@ -50,6 +50,55 @@ pub enum StartGameOutcome {
     AlreadyStarted,
 }
 
+/// Why a `PlayerReady` toggle failed
+/// ([`RoomOperationCoordinatorTrait::handle_player_ready`]).
+///
+/// Typed so the caller maps each case to the correct client `ErrorCode` by an
+/// exhaustive `match` — never by inspecting an error string. Only [`Self::Finalized`]
+/// is a business rejection the client should surface as a room-state error; the
+/// other variants are infrastructure failures that must NOT masquerade as one
+/// (see `src/server/ready_state.rs`).
+#[derive(Debug)]
+pub enum PlayerReadyError {
+    /// The room is `Finalized` — the game already started, so further ready
+    /// toggles are rejected (maps to `INVALID_ROOM_STATE`).
+    Finalized,
+    /// The room no longer exists (maps to `ROOM_NOT_FOUND`).
+    RoomNotFound,
+    /// An unexpected infrastructure failure — lock acquisition, storage, or the
+    /// lobby broadcast (maps to `INTERNAL_ERROR`).
+    Internal(anyhow::Error),
+}
+
+impl PlayerReadyError {
+    /// The client-facing [`crate::protocol::ErrorCode`] for this failure.
+    ///
+    /// Only [`Self::Finalized`] is a business rejection (`INVALID_ROOM_STATE`);
+    /// the rest are infrastructure faults that must surface as `ROOM_NOT_FOUND`
+    /// or `INTERNAL_ERROR`, never as a room-state error.
+    pub fn error_code(&self) -> crate::protocol::ErrorCode {
+        match self {
+            Self::Finalized => crate::protocol::ErrorCode::InvalidRoomState,
+            Self::RoomNotFound => crate::protocol::ErrorCode::RoomNotFound,
+            Self::Internal(_) => crate::protocol::ErrorCode::InternalError,
+        }
+    }
+}
+
+impl std::fmt::Display for PlayerReadyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Finalized => {
+                write!(f, "the game has already started (room is Finalized)")
+            }
+            Self::RoomNotFound => write!(f, "room not found"),
+            Self::Internal(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PlayerReadyError {}
+
 /// Trait for room operation coordination
 #[async_trait]
 pub trait RoomOperationCoordinatorTrait: Send + Sync {
@@ -85,7 +134,7 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
         room_id: &RoomId,
         player_id: &PlayerId,
         app_id: Option<Uuid>,
-    ) -> Result<()>;
+    ) -> std::result::Result<(), PlayerReadyError>;
 
     /// Handle an explicit `StartGame` from `player_id`.
     ///
@@ -108,6 +157,13 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
 
     /// Clear ready players for a room
     async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()>;
+
+    /// Snapshot the room ids that currently hold a ready-state entry.
+    ///
+    /// The maintenance prune sweep uses this to reclaim entries for rooms that
+    /// no longer exist — the all-paths backstop to [`Self::clear_ready_players`]
+    /// (mirrors the server's `prune_active_session_plans`).
+    async fn ready_player_room_ids(&self) -> Vec<RoomId>;
 }
 
 /// In-memory room operation coordinator
@@ -486,7 +542,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         room_id: &RoomId,
         player_id: &PlayerId,
         _app_id: Option<Uuid>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), PlayerReadyError> {
         // For in-memory implementation, simulate player ready toggle
         let lock_key = format!("room_ready_state:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
@@ -495,17 +551,20 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             ROOM_OPERATION_LOCK_TTL,
             "handle_player_ready",
         )
-        .await?;
+        .await
+        .map_err(PlayerReadyError::Internal)?;
 
         let result = async {
             // Get current room state to check if it has enough players for lobby actions
             let room = match self.database.get_room_by_id(room_id).await {
                 Ok(Some(room)) => room,
                 Ok(None) => {
-                    return Err(anyhow::anyhow!("Room not found"));
+                    return Err(PlayerReadyError::RoomNotFound);
                 }
                 Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to get room: {e}"));
+                    return Err(PlayerReadyError::Internal(
+                        e.context("failed to load room for ready toggle"),
+                    ));
                 }
             };
 
@@ -513,9 +572,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             // is a ceiling, not a required count); only a `Finalized` room — the
             // game already started — rejects further ready toggles.
             if room.lobby_state == crate::protocol::LobbyState::Finalized {
-                return Err(anyhow::anyhow!(
-                    "Player ready failed: the game has already started (room is Finalized)"
-                ));
+                return Err(PlayerReadyError::Finalized);
             }
 
             // Fetch the live membership first so readiness is computed over the
@@ -563,7 +620,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
             self.coordinator
                 .broadcast_to_room(room_id, Arc::new(message))
-                .await?;
+                .await
+                .map_err(PlayerReadyError::Internal)?;
 
             // Readiness no longer starts the game. `max_players` is a ceiling,
             // not a required count, and the game begins only on an explicit
@@ -728,6 +786,11 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         tracing::info!(%room_id, "Cleared ready players from coordinator (in-memory)");
         Ok(())
     }
+
+    async fn ready_player_room_ids(&self) -> Vec<RoomId> {
+        // Snapshot keys without holding the lock across any caller `.await`.
+        self.ready_players.read().await.keys().copied().collect()
+    }
 }
 
 #[cfg(test)]
@@ -744,6 +807,78 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, Mutex, Notify};
     use tokio::time::{sleep, timeout};
+
+    use crate::protocol::ErrorCode;
+
+    #[test]
+    fn player_ready_error_maps_each_variant_to_its_client_code() {
+        // Only a Finalized room is a business rejection; the rest are infra
+        // faults that must NOT surface as INVALID_ROOM_STATE.
+        assert_eq!(
+            PlayerReadyError::Finalized.error_code(),
+            ErrorCode::InvalidRoomState
+        );
+        assert_eq!(
+            PlayerReadyError::RoomNotFound.error_code(),
+            ErrorCode::RoomNotFound
+        );
+        assert_eq!(
+            PlayerReadyError::Internal(anyhow::anyhow!("lock busy")).error_code(),
+            ErrorCode::InternalError
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_ready_players_removes_the_rooms_coordinator_entry() {
+        // Leak guard: a `PlayerReady` toggle creates a per-room ready entry in
+        // the coordinator's in-memory map; that entry is pure garbage once the
+        // room empties/deletes and must be removable. `leave_room` (last member
+        // departs) and empty-room cleanup both call `clear_ready_players`; this
+        // verifies the mechanism they rely on actually drops the entry.
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let coord = InMemoryRoomOperationCoordinator::new(coordinator, lock, database.clone());
+
+        let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let room = database
+            .create_room(
+                "clear-ready-game".to_string(),
+                None,
+                2,
+                true,
+                player,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+
+        coord
+            .handle_player_ready(&room.id, &player, None)
+            .await
+            .expect("ready toggle succeeds");
+        assert!(
+            coord.ready_players.read().await.contains_key(&room.id),
+            "a ready toggle must create the room's coordinator entry"
+        );
+
+        coord
+            .clear_ready_players(&room.id)
+            .await
+            .expect("clear succeeds");
+        assert!(
+            !coord.ready_players.read().await.contains_key(&room.id),
+            "the coordinator entry must be gone after clear (no stale retention)"
+        );
+
+        // Idempotent: clearing an already-absent room is a harmless no-op.
+        coord
+            .clear_ready_players(&room.id)
+            .await
+            .expect("repeat clear is a no-op");
+    }
 
     #[derive(Debug, Clone)]
     struct BroadcastEvent {

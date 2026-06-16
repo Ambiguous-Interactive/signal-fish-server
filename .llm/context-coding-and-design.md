@@ -31,3 +31,14 @@ Key rules:
 - Use `Bytes` for network data, `SmallVec` for small collections, `DashMap` for concurrent access
 - Never hold a sync `Mutex` across `.await`; use bounded channels with backpressure
 - Use structured logging with `tracing` -- no string interpolation in log macros
+- Classify our OWN errors with types, never by matching error strings. When a
+  server/coordinator/manager failure must be mapped to a client `ErrorCode` (or
+  otherwise branched on), the failing function returns a typed error enum and the
+  caller maps it with an exhaustive `match` (or a `fn error_code(&self) ->
+  ErrorCode` on the type). `e.to_string().contains("...")` on an error we
+  constructed is forbidden -- it is fragile and silently misclassifies (see the
+  `PlayerReadyError` and `ReconnectionError` enums). String matching is acceptable
+  ONLY for opaque EXTERNAL errors with no typed representation (e.g. sqlx/db/lock
+  backends in `src/retry.rs`, `src/distributed.rs`). When a typed error also
+  carries the wire-facing `reason`, make `Display` reproduce it so the type is the
+  single source of truth for both code and text.

@@ -18,6 +18,14 @@ See [Core Testing Patterns](skills/testing-core-patterns.md) and
   Ok(_) = rx.try_recv()`, or `rx.try_recv().is_ok()` before later assertions.
   Assert each expected setup message by type/content, or use an explicit helper
   that distinguishes empty channels from disconnected channels.
+- Test code must fail **loudly**. An error logged with `tracing::error!` must never
+  be followed by a silent `return;`/`return Ok(());` (which lets CI pass while the
+  setup/exchange actually failed). Use `panic!`/`assert!`/`.expect()`, or make the
+  helper return `Result` and propagate with `?` (the wrapper panics on `Err`).
+  Enforced repo-wide by `tests/loud_test_failures_scan.rs` — a `syn`-AST scan,
+  self-tested with flags/allows fixtures, mirroring `tests/async_timeout_policy_scan.rs`
+  (covers bare and `if`/`match`-guarded silent returns; `eprintln!` skip-notices are
+  intentionally exempt).
 - For ordered protocol flows, read and assert the exact next message at each step.
   Avoid matchers that skip nonmatching `ServerMessage`s when stale or unexpected
   frames would indicate a broken test setup; assert no pending messages at phase

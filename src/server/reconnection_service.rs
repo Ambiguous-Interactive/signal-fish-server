@@ -228,21 +228,19 @@ impl EnhancedGameServer {
             .await
         {
             Ok(claim) => claim,
-            Err(reason) => {
+            Err(error) => {
+                // Typed classification: the error variant maps to its own
+                // `ErrorCode` and wire `reason` (see [`ReconnectionError`]); no
+                // error-string matching, so a token failure can never be
+                // mislabeled as an expired window (and vice versa).
+                let error_code = error.error_code();
+                let reason = error.to_string();
                 tracing::warn!(
                     %reconnect_player_id,
                     %room_id,
-                    %reason,
-                    "Reconnection validation failed"
+                    %error_code,
+                    "Reconnection validation failed: {reason}"
                 );
-                let error_code = if reason.contains("expired") {
-                    ErrorCode::ReconnectionExpired
-                } else if reason.contains("token") {
-                    ErrorCode::ReconnectionTokenInvalid
-                } else {
-                    ErrorCode::ReconnectionFailed
-                };
-
                 let _ = self
                     .message_coordinator
                     .send_to_player(

@@ -873,43 +873,37 @@ mod tests {
         .await;
 
         match test_result {
-            Ok(_) => {} // Test completed successfully
+            Ok(Ok(())) => {} // Test completed successfully
+            // A failed setup/exchange MUST fail the test loudly — never a silent
+            // `return` that lets CI pass while the server never became reachable.
+            Ok(Err(error)) => panic!("websocket connection test failed: {error:#}"),
             Err(_) => panic!("Test timed out after 30 seconds"),
         }
     }
 
-    async fn test_websocket_connection_impl() {
-        // Start test server
-        let addr: SocketAddr = match "127.0.0.1:0".parse() {
-            Ok(addr) => addr,
-            Err(e) => {
-                tracing::error!("Failed to parse test address: {}", e);
-                return;
-            }
-        };
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                tracing::error!("Failed to bind test listener: {}", e);
-                return;
-            }
-        };
-        let addr = match listener.local_addr() {
-            Ok(addr) => addr,
-            Err(e) => {
-                tracing::error!("Failed to get local address: {}", e);
-                return;
-            }
-        };
+    // Returns `Result` so EVERY setup/exchange failure propagates and fails the
+    // test (the wrapper panics on `Err`). A bare `return` here would let a broken
+    // server silently pass CI — the exact regression this shape prevents (and the
+    // `tests/loud_test_failures_scan.rs` guard enforces repo-wide).
+    async fn test_websocket_connection_impl() -> anyhow::Result<()> {
+        use anyhow::Context as _;
 
-        let database_config = DatabaseConfig::InMemory;
-        let game_server = match EnhancedGameServer::new(
+        // Start test server
+        let addr: SocketAddr = "127.0.0.1:0".parse().context("parse test address")?;
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .context("bind test listener")?;
+        let addr = listener
+            .local_addr()
+            .context("read local listener address")?;
+
+        let game_server = EnhancedGameServer::new(
             ServerConfig::default(),
             crate::config::ProtocolConfig::default(),
             crate::config::RelayTypeConfig::default(),
             crate::config::SessionConfig::default(),
             crate::config::TurnConfig::default(),
-            database_config,
+            DatabaseConfig::InMemory,
             crate::config::MetricsConfig::default(),
             crate::config::AuthMaintenanceConfig::default(),
             crate::config::CoordinationConfig::default(),
@@ -917,13 +911,7 @@ mod tests {
             Vec::new(),
         )
         .await
-        {
-            Ok(server) => server,
-            Err(e) => {
-                tracing::error!("Failed to create game server: {}", e);
-                return;
-            }
-        };
+        .context("create game server")?;
         let app =
             super::super::routes::create_router("http://localhost:3000").with_state(game_server);
 
@@ -952,12 +940,10 @@ mod tests {
             {
                 Ok(Ok((stream, _response))) => break stream,
                 outcome => {
-                    if tokio::time::Instant::now() >= ready_deadline {
-                        tracing::error!(
-                            "WebSocket server did not become ready within 30s: {outcome:?}"
-                        );
-                        return;
-                    }
+                    anyhow::ensure!(
+                        tokio::time::Instant::now() < ready_deadline,
+                        "WebSocket server did not become ready within 30s: {outcome:?}"
+                    );
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
             }
@@ -974,66 +960,32 @@ mod tests {
             relay_transport: None,
         };
 
-        let json_message = match serde_json::to_string(&join_message) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::error!("Failed to serialize join message: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = ws_sender
+        let json_message =
+            serde_json::to_string(&join_message).context("serialize join message")?;
+        ws_sender
             .send(TungsteniteMessage::Text(json_message.into()))
             .await
-        {
-            tracing::error!("Failed to send WebSocket message: {}", e);
-            return;
-        }
+            .context("send join message")?;
 
-        // Receive response with timeout
-        let msg =
-            match tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_receiver.next())
-                .await
-            {
-                Ok(Some(msg)) => msg,
-                Ok(None) => {
-                    tracing::error!("WebSocket connection closed unexpectedly");
-                    return;
-                }
-                Err(_) => {
-                    tracing::error!("Timeout waiting for WebSocket response after 5 seconds");
-                    return;
-                }
-            };
+        // Receive response with timeout — propagate the elapsed, closed-stream,
+        // and transport-error cases instead of swallowing any of them.
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_receiver.next())
+            .await
+            .context("timed out waiting for join response after 5s")?
+            .context("websocket closed before sending a join response")?
+            .context("receive websocket message")?;
 
-        let msg = match msg {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::error!("Failed to receive WebSocket message: {}", e);
-                return;
-            }
+        let TungsteniteMessage::Text(text) = msg else {
+            anyhow::bail!("expected a Text websocket frame, got {msg:?}");
         };
-        if let TungsteniteMessage::Text(text) = msg {
-            let server_message: ServerMessage = match serde_json::from_str(&text) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    tracing::error!("Failed to deserialize server message: {}", e);
-                    return;
-                }
-            };
-            match server_message {
-                ServerMessage::RoomJoined(_) => {
-                    // Success!
-                    // Success, no action needed
-                }
-                ServerMessage::RoomJoinFailed { reason, .. } => {
-                    tracing::error!("Failed to join room: {reason}");
-                    panic!("Room join failed: {reason}");
-                }
-                _ => {
-                    tracing::error!("Unexpected message type: {:?}", server_message);
-                    panic!("Unexpected message type");
-                }
+        let server_message: ServerMessage =
+            serde_json::from_str(&text).context("deserialize server message")?;
+        match server_message {
+            ServerMessage::RoomJoined(_) => Ok(()),
+            ServerMessage::RoomJoinFailed { reason, .. } => {
+                anyhow::bail!("room join failed: {reason}")
             }
+            other => anyhow::bail!("unexpected server message: {other:?}"),
         }
     }
 }

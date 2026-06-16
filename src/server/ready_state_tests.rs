@@ -148,6 +148,110 @@ async fn handle_player_ready_without_room_returns_not_in_room_error() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn handle_player_ready_with_missing_room_returns_room_not_found_error() {
+    // Regression guard for error-code classification: a player assigned to a
+    // room that no longer exists in storage is an infrastructure/lookup failure,
+    // NOT the `Finalized` business rejection. It must surface as
+    // `ROOM_NOT_FOUND` — never `INVALID_ROOM_STATE` (which would mislead clients
+    // into treating a transient lookup miss as "the game already started").
+    let server = create_test_server().await;
+    let (player_id, mut receiver) = register_client(&server).await;
+
+    // Assign the client to a room id that was never persisted.
+    let ghost_room: crate::protocol::RoomId = uuid::Uuid::new_v4();
+    server
+        .connection_manager
+        .assign_client_to_room(&player_id, ghost_room)
+        .await;
+
+    server.handle_player_ready(&player_id).await;
+
+    match recv(&mut receiver).await.as_ref() {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::RoomNotFound),
+                "a missing room must map to ROOM_NOT_FOUND, not INVALID_ROOM_STATE"
+            );
+        }
+        other => panic!("unexpected response from handle_player_ready: {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn prune_ready_players_drops_only_dead_rooms() {
+    // The all-paths leak backstop: the maintenance sweep removes coordinator
+    // ready entries whose room no longer exists in storage (e.g. rooms reaped by
+    // `cleanup_expired_rooms`, which reports no ids) and keeps live rooms' entries.
+    let server = create_test_server().await;
+    let (live_player, _live_rx) = register_client(&server).await;
+    let (dead_player, _dead_rx) = register_client(&server).await;
+
+    let make_room = |name: &str, creator: PlayerId| {
+        let name = name.to_string();
+        let database = std::sync::Arc::clone(&server.database);
+        async move {
+            database
+                .create_room(
+                    name,
+                    None,
+                    2,
+                    true,
+                    creator,
+                    "udp".to_string(),
+                    "region-a".to_string(),
+                    None,
+                )
+                .await
+                .expect("room creation succeeds")
+        }
+    };
+
+    let live_room = make_room("prune-ready-live", live_player).await;
+    let dead_room = make_room("prune-ready-dead", dead_player).await;
+
+    // Give each room a coordinator ready entry, then delete the dead room from
+    // storage so its entry is orphaned (a room-removal path that bypasses the
+    // per-room empty-cleanup clear).
+    server
+        .room_coordinator
+        .handle_player_ready(&live_room.id, &live_player, None)
+        .await
+        .expect("ready toggle on live room");
+    server
+        .room_coordinator
+        .handle_player_ready(&dead_room.id, &dead_player, None)
+        .await
+        .expect("ready toggle on dead room");
+    assert!(
+        server
+            .database
+            .delete_room(&dead_room.id)
+            .await
+            .expect("delete dead room"),
+        "dead room should have existed before deletion"
+    );
+
+    let before = server.room_coordinator.ready_player_room_ids().await;
+    assert!(before.contains(&live_room.id) && before.contains(&dead_room.id));
+
+    let removed = server.prune_ready_players().await;
+    assert_eq!(removed, 1, "exactly the dead room's ready entry is pruned");
+
+    let after = server.room_coordinator.ready_player_room_ids().await;
+    assert!(
+        after.contains(&live_room.id),
+        "live room entry must be retained"
+    );
+    assert!(
+        !after.contains(&dead_room.id),
+        "dead room entry must be pruned"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
     // Finalized is terminal for ready toggles: drive the REAL finalize flow (a
     // full room enters the lobby, every member toggles ready through

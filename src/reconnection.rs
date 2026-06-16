@@ -6,12 +6,63 @@
 /// - Player disconnection tracking
 /// - Reconnection window management
 use crate::metrics::ServerMetrics;
-use crate::protocol::{PlayerId, PlayerInfo, RoomId, ServerMessage};
+use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Why a reconnection attempt was rejected.
+///
+/// Typed so the server maps each case to the correct client `ErrorCode` via
+/// [`Self::error_code`] — never by inspecting the human-readable reason string.
+/// `Display` yields the exact wire `reason` the client receives, so the typed
+/// representation is the single source of truth for both the code and the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconnectionError {
+    /// No disconnection record exists for the player id.
+    NoRecord,
+    /// Another socket already holds an in-flight claim on this record.
+    AlreadyInProgress,
+    /// The supplied token does not match the stored token.
+    TokenMismatch,
+    /// The token failed its own validity check (wrong binding or past its
+    /// embedded expiry).
+    TokenInvalid,
+    /// The reconnection window elapsed.
+    WindowExpired,
+}
+
+impl ReconnectionError {
+    /// The client-facing [`ErrorCode`] for this rejection.
+    ///
+    /// A bad/mismatched token is a `RECONNECTION_TOKEN_INVALID`; only an elapsed
+    /// *window* is `RECONNECTION_EXPIRED`; everything else is the generic
+    /// `RECONNECTION_FAILED`.
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::NoRecord | Self::AlreadyInProgress => ErrorCode::ReconnectionFailed,
+            Self::TokenMismatch | Self::TokenInvalid => ErrorCode::ReconnectionTokenInvalid,
+            Self::WindowExpired => ErrorCode::ReconnectionExpired,
+        }
+    }
+}
+
+impl std::fmt::Display for ReconnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::NoRecord => "No disconnection record found",
+            Self::AlreadyInProgress => "Reconnection already in progress",
+            Self::TokenMismatch => "Invalid reconnection token",
+            Self::TokenInvalid => "Reconnection token is invalid or expired",
+            Self::WindowExpired => "Reconnection window has expired",
+        };
+        f.write_str(reason)
+    }
+}
+
+impl std::error::Error for ReconnectionError {}
 
 /// Authentication token for reconnection
 #[derive(Debug, Clone)]
@@ -266,28 +317,28 @@ impl ReconnectionManager {
         player_id: &PlayerId,
         room_id: &RoomId,
         token: &str,
-    ) -> Result<DisconnectedPlayer, String> {
+    ) -> Result<DisconnectedPlayer, ReconnectionError> {
         let disconnected = self.disconnected_players.read().await;
 
         let Some(record) = disconnected.get(player_id) else {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("No disconnection record found".to_string());
+            return Err(ReconnectionError::NoRecord);
         };
         let player = &record.disconnected;
 
         if !crate::security::constant_time_eq(&player.token.token, token) {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("Invalid reconnection token".to_string());
+            return Err(ReconnectionError::TokenMismatch);
         }
 
         if !player.token.is_valid(player_id, room_id) {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("Reconnection token is invalid or expired".to_string());
+            return Err(ReconnectionError::TokenInvalid);
         }
 
         if player.is_expired(self.reconnection_window) {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("Reconnection window has expired".to_string());
+            return Err(ReconnectionError::WindowExpired);
         }
 
         Ok(player.clone())
@@ -305,12 +356,12 @@ impl ReconnectionManager {
         player_id: &PlayerId,
         room_id: &RoomId,
         token: &str,
-    ) -> Result<ClaimedReconnection, String> {
+    ) -> Result<ClaimedReconnection, ReconnectionError> {
         let mut disconnected = self.disconnected_players.write().await;
 
         let Some(record) = disconnected.get_mut(player_id) else {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("No disconnection record found".to_string());
+            return Err(ReconnectionError::NoRecord);
         };
 
         if let Some(claim) = &record.claim {
@@ -322,24 +373,24 @@ impl ReconnectionManager {
                 claimed_at = %claim.claimed_at,
                 "Reconnection claim already in progress"
             );
-            return Err("Reconnection already in progress".to_string());
+            return Err(ReconnectionError::AlreadyInProgress);
         }
 
         let player = &record.disconnected;
 
         if !crate::security::constant_time_eq(&player.token.token, token) {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("Invalid reconnection token".to_string());
+            return Err(ReconnectionError::TokenMismatch);
         }
 
         if !player.token.is_valid(player_id, room_id) {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("Reconnection token is invalid or expired".to_string());
+            return Err(ReconnectionError::TokenInvalid);
         }
 
         if player.is_expired(self.reconnection_window) {
             self.metrics.increment_reconnection_validation_failure();
-            return Err("Reconnection window has expired".to_string());
+            return Err(ReconnectionError::WindowExpired);
         }
 
         let claim = ReconnectionClaimState::new(*claimed_by);
@@ -561,6 +612,59 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::sync::Barrier;
+
+    #[test]
+    fn reconnection_error_maps_each_variant_to_its_client_code() {
+        // A bad/mismatched token is a token error; only an elapsed *window* is
+        // expired. Guards the prior latent bug where the "token is invalid or
+        // expired" reason matched `contains("expired")` and was mislabeled as
+        // RECONNECTION_EXPIRED.
+        assert_eq!(
+            ReconnectionError::NoRecord.error_code(),
+            ErrorCode::ReconnectionFailed
+        );
+        assert_eq!(
+            ReconnectionError::AlreadyInProgress.error_code(),
+            ErrorCode::ReconnectionFailed
+        );
+        assert_eq!(
+            ReconnectionError::TokenMismatch.error_code(),
+            ErrorCode::ReconnectionTokenInvalid
+        );
+        assert_eq!(
+            ReconnectionError::TokenInvalid.error_code(),
+            ErrorCode::ReconnectionTokenInvalid
+        );
+        assert_eq!(
+            ReconnectionError::WindowExpired.error_code(),
+            ErrorCode::ReconnectionExpired
+        );
+    }
+
+    #[test]
+    fn reconnection_error_display_preserves_wire_reason_strings() {
+        // The `Display` text is the client-facing wire `reason`; keep it stable.
+        assert_eq!(
+            ReconnectionError::NoRecord.to_string(),
+            "No disconnection record found"
+        );
+        assert_eq!(
+            ReconnectionError::AlreadyInProgress.to_string(),
+            "Reconnection already in progress"
+        );
+        assert_eq!(
+            ReconnectionError::TokenMismatch.to_string(),
+            "Invalid reconnection token"
+        );
+        assert_eq!(
+            ReconnectionError::TokenInvalid.to_string(),
+            "Reconnection token is invalid or expired"
+        );
+        assert_eq!(
+            ReconnectionError::WindowExpired.to_string(),
+            "Reconnection window has expired"
+        );
+    }
 
     #[test]
     fn test_reconnection_token_creation() {
