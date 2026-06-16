@@ -155,7 +155,26 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Install cargo-nextest
+      # cargo-nextest install is retried because windows-latest runner images
+      # intermittently fail install-action with a "bash startup failure" BEFORE
+      # the action's own internal retries kick in (upstream runner-image bug:
+      # https://github.com/actions/partner-runner-images/issues/169). A single
+      # transient failure should not force a manual CI re-run. GitHub Actions has
+      # no native step-level retry, so we use the repo's existing
+      # id + continue-on-error + outcome-gated retry idiom (mirrors the SBOM
+      # step in release.yml) instead of adding a new third-party action.
+      # The retry is harmless cross-OS: on non-Windows the first attempt
+      # effectively never hits this flake, so the second attempt is skipped.
+      - name: Install cargo-nextest (attempt 1)
+        id: install_nextest
+        continue-on-error: true
+        uses: taiki-e/install-action@v2.81.8
+        with:
+          tool: cargo-nextest
+      - name: Install cargo-nextest (retry on transient runner failure)
+        # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
+        # No continue-on-error here, so a second failure correctly fails the job.
+        if: steps.install_nextest.outcome == 'failure'
         uses: taiki-e/install-action@v2.81.8
         with:
           tool: cargo-nextest

@@ -11,6 +11,17 @@
 # full mutant report is always uploaded; the job fails when any mutant survives
 # so the survivors are triaged deliberately.
 #
+# PERFORMANCE (each shard must finish <5 min — see
+# .llm/skills/mutation-testing-performance.md). cargo-mutants builds in a /tmp
+# scratch dir and excludes ./target from its copy, so without help every shard
+# recompiles ALL dependencies from scratch — that cold build alone blew the old
+# 20-min timeout and got every shard cancelled. The fix, all centralised in
+# scripts/run-mutants.sh:
+#   - a `baseline` job warms a SHARED rust-cache (same profile + RUSTFLAGS the
+#     shards use) and is the green-gate for --baseline=skip;
+#   - each shard reuses that warm ./target via --in-place (no cold dep rebuild,
+#     no multi-GB target copy), with the mold linker and the `mutants` profile.
+#     --in-place runs serially, so N is sized to keep each shard <5 min.
 # Scope and the fast `--lib` oracle are configured in .cargo/mutants.toml.
 
 name: Mutation Testing
@@ -25,6 +36,7 @@ on:
     paths:
       - ".cargo/mutants.toml"
       - ".github/workflows/mutation.yml"
+      - "scripts/run-mutants.sh"
       - "src/server/session_policy.rs"
       - "src/server/signaling.rs"
       - "src/server/relay_policy.rs"
@@ -40,34 +52,23 @@ permissions:
   contents: read
 
 jobs:
-  mutants:
-    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/6
+  # Warm a SHARED rust-cache once and prove the --lib suite is green, so every
+  # sharded mutants job can (a) use --baseline=skip (this job is the green-gate)
+  # and (b) reuse the warm target/ via --in-place instead of paying a cold
+  # dependency build. The warm build uses the same profile + RUSTFLAGS (via
+  # scripts/run-mutants.sh) as the shards, so the cached build fingerprint matches.
+  baseline:
+    name: baseline (warm shared cache + green-gate)
     runs-on: ubuntu-latest
-    # Per-shard timeout. The full single-job run was ~20 min under
-    # timeout-minutes 45. Each shard tests ~1/6 of the mutants (~33) plus one
-    # baseline build (rust-cache accelerated), so ~5-8 min is realistic; 20 min
-    # leaves generous headroom for a cold cache or a loaded runner.
-    timeout-minutes: 20
-    strategy:
-      # Run every shard even if one finds a survivor (or fails), so a single
-      # surviving mutant never masks survivors in other shards and all gaps
-      # surface in one workflow run.
-      fail-fast: false
-      matrix:
-        # cargo-mutants shard indices are 0-BASED: --shard k/N spans k = 0..N-1
-        # (verified locally on cargo-mutants 27.1.0 — `--shard 0/6` is accepted
-        # and `--shard 6/6` yields 0 mutants). Shards 0/6..5/6 are an exact,
-        # non-overlapping partition of `cargo mutants --list` (199 mutants:
-        # 34+34+34+34+34+29 = 199; sorted union == full list, no overlap), so no
-        # mutant is skipped or double-counted.
-        #
-        # N=6 chosen for the 4-vCPU/16 GB ubuntu-latest runner: it cuts
-        # wall-clock ~6x (each shard ~33 mutants vs ~199) while keeping the
-        # redundant per-shard baseline rebuild cost modest (6 baseline builds
-        # total, each rust-cache-warmed). Going much higher (e.g. >8) makes the
-        # one-time baseline build dominate each shard's runtime for diminishing
-        # returns.
-        shard: [0, 1, 2, 3, 4, 5]
+    # Skip on fork PRs: a fork cannot write the shared rust-cache (the save-if
+    # gate below), so the sharded mutants would restore NOTHING and rebuild all
+    # deps cold — the exact >20-min cold-build blowup this workflow was rebuilt to
+    # eliminate. Mutation is a periodic health check (schedule + workflow_dispatch
+    # + same-repo PRs), so skipping forks loses no required gate. The mutants job
+    # carries the identical gate. Enforced by
+    # tests/ci_config_tests.rs::test_mutation_jobs_skip_on_fork_prs.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.3
@@ -87,23 +88,96 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
-      - name: Cache cargo build
+      - name: Install mold + clang linker
+        # Mirrors Dockerfile / .devcontainer (mold + clang). scripts/run-mutants.sh
+        # sets CARGO_TARGET_<triple>_LINKER=clang + RUSTFLAGS="-C link-arg=-fuse-ld=mold".
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold clang
+
+      - name: Cache cargo build (warm + save the shared mutants cache)
         uses: Swatinem/rust-cache@v2.9.1
         with:
+          # Shared with the mutants shards below so they restore THIS warm target/.
+          shared-key: "mutants"
           # Skip cache writes on untrusted fork PRs (restore still works), so a
           # fork cannot poison the shared cache. Same gate as webrtc-interop.yml.
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Warm build + green-gate (cargo test --lib, mutants profile)
+        run: bash scripts/run-mutants.sh --warm
+
+  mutants:
+    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/16
+    needs: baseline
+    runs-on: ubuntu-latest
+    # Same fork gate as the baseline job: a fork cannot restore the warm shared
+    # cache, so a cold fork shard would time out. Skip rather than blow up. (Even
+    # without this, a skipped `baseline` would cascade-skip via `needs`, but the
+    # explicit gate keeps the intent obvious and is what the policy test checks.)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Per-shard timeout. With the warm shared cache + --in-place there is no cold
+    # dependency build, so a shard is well under 5 min; 10 min is generous
+    # headroom for a loaded runner / occasional cache miss. (Was 20 min, when
+    # every shard rebuilt all deps from scratch and was cancelled.) The
+    # feasibility of {mutant-count, shard-count, this timeout, per-mutant budget}
+    # is locked by
+    # tests/ci_config_tests.rs::test_mutation_shard_budget_is_feasible_vs_timeout.
+    timeout-minutes: 10
+    strategy:
+      # Run every shard even if one finds a survivor (or fails), so a single
+      # surviving mutant never masks survivors in other shards and all gaps
+      # surface in one workflow run.
+      fail-fast: false
+      matrix:
+        # cargo-mutants shard indices are 0-BASED: --shard k/N spans k = 0..N-1.
+        # This list MUST be the complete contiguous partition 0..N-1 and N MUST
+        # match every "/N" denominator in this file (job name + the run step).
+        # Enforced by test_mutation_shard_matrix_is_complete_contiguous_partition.
+        # N=16: --in-place runs each shard's mutants SERIALLY, and a mutant costs
+        # ~20-25s (incremental lib rebuild + relink + lib test run). With ~199
+        # mutants that is ~199/16 ≈ 13 mutants/shard ≈ <5 min/shard. The feasibility
+        # of {mutant-count, N, per-mutant budget, timeout} is asserted by
+        # test_mutation_shard_budget_is_feasible_vs_timeout.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Read Rust toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Install mold + clang linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold clang
+
+      - name: Cache cargo build (restore the warm shared cache)
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: "mutants"
+          # The baseline job owns the save; shards restore only (avoids 16 shards
+          # racing to write the same key).
+          save-if: false
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2.81.8
         with:
           tool: cargo-mutants
 
-      - name: Run mutation testing (config-scoped)
-        # -j 4 uses the runner's 4 vCPUs. --cargo-arg=--locked forwards --locked
-        # to the inner cargo build/test (cargo-mutants itself rejects a bare
-        # --locked), pinning the resolve to Cargo.lock for reproducibility.
-        run: cargo mutants --no-shuffle --shard ${{ matrix.shard }}/6 -j 4 --cargo-arg=--locked
+      - name: Run mutation testing (shard ${{ matrix.shard }}/16)
+        # All flags/env (mold, --in-place, --sharding slice, --profile mutants,
+        # --baseline=skip, --timeout, --locked, no --all-features) live in the
+        # single source of truth so CI and local devs run the identical thing.
+        run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/16
 
       - name: Upload mutants report
         if: always()

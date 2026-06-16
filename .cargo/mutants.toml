@@ -22,7 +22,26 @@
 # by design (the e2e suites are the regression net there); keep mutation focused
 # where unit tests give a tight, quick verdict.
 test_tool = "cargo"
-additional_cargo_test_args = ["--lib", "--all-features"]
+# Oracle = the in-crate `--lib` unit tests ONLY, passed via `additional_cargo_args`
+# (NOT `additional_cargo_test_args`). The distinction is a major speed lever:
+# `additional_cargo_test_args` applies `--lib` to the TEST run only, so the
+# preceding `cargo test --no-run` BUILD still compiles ALL ~20 integration-test
+# binaries (each relinks the whole lib) on every mutant. `additional_cargo_args`
+# applies `--lib` to BOTH the build and the test, so each mutant only rebuilds the
+# lib + its unit-test binary — the integration suites are never built or run here.
+#
+# We also deliberately do NOT pass `--all-features`: the scoped modules below
+# contain ZERO `#[cfg(feature = ...)]` (default features = []), so enabling `tls`
+# (rustls/axum-server) and `legacy-fullmesh` (matchbox_signaling) changes neither
+# the generated mutant set (`cargo mutants --list` stays 199) nor the catch
+# outcome — it only drags those heavy deps into every per-mutant build/relink.
+#
+# Standing rules (enforced by tests/ci_config_tests.rs::
+# test_mutation_oracle_does_not_use_all_features): keep `--lib` in
+# `additional_cargo_args`; never re-add `--all-features`; if a scoped module ever
+# gains a feature gate, add the exact minimal feature here and to the test's
+# allowed set.
+additional_cargo_args = ["--lib"]
 
 # High-signal pure-logic modules.
 examine_globs = [

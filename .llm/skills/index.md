@@ -56,6 +56,7 @@
 - [Markdown Link Validation](./markdown-best-practices-links.md)
 - [Markdown Linting and CI/CD Integration](./markdown-best-practices-linting.md)
 - [MSRV Management](./msrv-management.md)
+- [Mutation Testing Performance](./mutation-testing-performance.md)
 - [Observability and Logging](./observability-and-logging.md)
 - [Protocol v3 Session-Plan Selection](./protocol-v3-session-plan.md)
 - [Review Changelog Entries](./review-changelog-entries.md)

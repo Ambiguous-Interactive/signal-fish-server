@@ -54,6 +54,7 @@ Start here:
     +-- Deployment/Containers? ------> skills/container-docker.md
     +-- CI/CD/GitHub Actions? -------> skills/github-actions-workflow-config.md
     |                                  skills/ci-cd-troubleshooting-index.md
+    +-- Mutation testing slow/timeout? -> skills/mutation-testing-performance.md
     +-- Dependencies/Supply Chain? --> skills/supply-chain-audit-policy.md
     |                                  skills/dependency-management-cargo.md
     |                                  skills/msrv-management.md

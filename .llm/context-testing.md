@@ -81,3 +81,11 @@ is a policy violation.
 `retries` key) on purpose; do not add blanket retries. Use
 `[[profile.*.overrides]]` + `[test-groups]` for per-test concurrency isolation
 of resource-heavy tests instead.
+
+**CI job timeouts are a flake source too.** A too-tight `timeout-minutes` on a
+slow job cancels a healthy-but-loaded run, which is non-determinism by the same
+definition above. This is why the mutation-testing shards keep a timeout *floor*
+(generous headroom over the measured per-shard wall-clock) rather than the
+tightest value that "usually" passes. See
+[Mutation Testing Performance](skills/mutation-testing-performance.md) for the
+feasibility contract and `MUTPERF-001` in `PLAN.md`.

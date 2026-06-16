@@ -79,3 +79,29 @@ Config and binary wire-format drift rules:
   `github.event_name != 'pull_request' ||
   github.event.pull_request.head.repo.full_name == github.repository`)
   so fork PRs cannot fail CI in `Swatinem/rust-cache` post-job save steps.
+- **`taiki-e/install-action` can hit a transient Windows "bash startup failure"** -- the
+  `windows-latest` runner image intermittently fails the install with
+  `install-action: installation failed due to bash startup failure` BEFORE the action's own
+  internal retries run (upstream runner-image bug,
+  <https://github.com/actions/partner-runner-images/issues/169>). It is transient infra, not
+  our bug. `install-action` exposes no retry input, so harden the install step with the repo's
+  `id` + `continue-on-error: true` + `if: steps.<id>.outcome == 'failure'` retry idiom (the same
+  pattern as the SBOM step in `release.yml`) rather than adding a third-party retry action — see
+  the `ci.yml` nextest job. The retry is harmless cross-OS because the first attempt succeeds on
+  non-Windows. When duplicating an action step for a retry, keep BOTH `uses:` lines on the same
+  pinned ref so `test_same_action_uses_consistent_ref_across_workflows` stays green.
+- **`cargo chef cook` emits benign `edition is set on ... which is deprecated` warnings** -- under
+  cargo 1.88 the Docker build's `cargo chef cook` step prints
+  `warning: edition is set on library/binary/benchmark signal_fish_server which is deprecated`.
+  These originate from cargo-chef's generated `recipe.json` skeleton target tables, NOT from our
+  `Cargo.toml` (which sets `edition` only in `[package]`). The build succeeds; the warnings are an
+  external cargo-chef artifact. `cargo install cargo-chef` is pinned to an explicit version in the
+  `Dockerfile` (currently `0.1.77`, the latest stable, which also trims lints from the recipe) for
+  reproducibility — bump it deliberately, not implicitly via "latest".
+- **`rustls-pemfile` (RUSTSEC-2025-0134) is banned proactively, not because it is present** --
+  `deny.toml` carries a `[[bans.deny]]` for the unmaintained `rustls-pemfile`, but the crate is
+  NOT in the dependency tree (`cargo tree -i rustls-pemfile` matches nothing) on the default build
+  or via the optional `tls` feature. Our rustls stack parses PEM through the maintained
+  `rustls-pki-types` instead. The ban exists to stop a future dependency bump from silently
+  reintroducing the advisory (e.g., via the `tls` feature's `axum-server`/`rustls` cert+key
+  loading). Keep the ban; revisit only if a needed dependency hard-requires `rustls-pemfile`.

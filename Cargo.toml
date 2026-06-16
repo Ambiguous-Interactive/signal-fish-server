@@ -152,6 +152,20 @@ debug = 0
 incremental = false
 lto = false
 
+# Build profile for cargo-mutants (see .cargo/mutants.toml + scripts/run-mutants.sh).
+# Mutation testing rebuilds the crate once per mutant (~199 mutants), so per-mutant
+# build/relink cost dominates wall-clock. This profile trims that cost:
+#   - inherits "dev" (NOT "ci"): cargo-mutants reuses the per-job target dir
+#     incrementally across mutants; profile.ci sets `incremental = false`, which
+#     would force a near-clean rebuild every mutant. Keep incremental ON.
+#   - debug = 0: debuginfo is dead weight to generate and link on every relink.
+# Standing rule: never point mutation at profile.ci, and re-measure before changing
+# these. Enforced by tests/ci_config_tests.rs::test_mutation_workflow_uses_optimized_build_profile.
+[profile.mutants]
+inherits = "dev"
+debug = 0
+incremental = true
+
 [profile.release]
 lto = "thin"
 strip = true
