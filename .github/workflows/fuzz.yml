@@ -82,7 +82,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2.81.8
+        uses: taiki-e/install-action@v2.81.10
         with:
           tool: cargo-fuzz
 

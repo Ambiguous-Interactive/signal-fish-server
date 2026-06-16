@@ -165,10 +165,12 @@ fn collect_declared_tokens(node: &Yaml, out: &mut BTreeSet<String>) {
 /// Render a scalar `const`/`enum` value as its token string.
 ///
 /// Every wire token this guard checks — message `type` discriminators, error
-/// codes, and Transport/Topology/GameDataEncoding values — is a STRING in the
-/// spec, so `as_str()` is exact and complete; a non-string scalar there would be
-/// a spec authoring error, not a token to match. (Returns `None` for non-string
-/// scalars, which simply means they are not counted as tokens.)
+/// codes, the Transport / Topology / GameDataEncoding / RelayTransport /
+/// SpectatorStateChangeReason / LobbyState values, and the `ConnectionInfo`
+/// `type` discriminators — is a STRING in the spec, so `as_str()` is exact and
+/// complete; a non-string scalar there would be a spec authoring error, not a
+/// token to match. (Returns `None` for non-string scalars, which simply means
+/// they are not counted as tokens.)
 fn scalar_token(node: &Yaml) -> Option<String> {
     node.as_str().map(str::to_string)
 }
@@ -244,23 +246,165 @@ fn spec_documents_every_error_code_variant() {
     }
 }
 
+/// Every wire-token enum's serde representation is documented in the spec.
+///
+/// Where the message / error-code guards parse Rust source, this asserts the
+/// EXACT serde wire token of every variant by SERIALIZING it — authoritative
+/// against the three different `rename_all` styles and the per-variant
+/// `#[serde(rename)]` overrides these enums use, so the guard can never
+/// miscompute a token. Each enum's variants are pinned by a compile-time
+/// exhaustiveness `match`: adding a variant fails to compile until it is listed
+/// here, and is then checked against the spec. This closes the gap a
+/// hand-maintained token list left — a new `Transport` / `Topology` /
+/// `GameDataEncoding` / `RelayTransport` / `SpectatorStateChangeReason` /
+/// `LobbyState` value, or a new internally-tagged `ConnectionInfo` `type`
+/// discriminator, can no longer ship undocumented.
 #[test]
-fn spec_lists_the_wire_token_enums() {
+fn spec_documents_every_wire_token_enum_variant() {
+    use signal_fish_server::protocol::{
+        ConnectionInfo, GameDataEncoding, LobbyState, RelayTransport, SpectatorStateChangeReason,
+        Topology, Transport,
+    };
+
     let declared = spec_declared_tokens();
-    // Transport / Topology / GameDataEncoding wire tokens a codegen consumer
-    // needs. Guards against the spec drifting from src/protocol/types.rs.
-    for token in [
-        "relay",
-        "direct",
-        "webrtc", // Transport
-        "host",
-        "mesh", // Topology (relay shared)
-        "json",
-        "message_pack", // GameDataEncoding
-    ] {
-        assert!(
-            declared.contains(token),
-            "spec must document wire token '{token}'"
-        );
+
+    {
+        use Transport::*;
+        for value in [Relay, Direct, WebRtc] {
+            assert_wire_token(&declared, value, "Transport");
+        }
+        // Compile-time exhaustiveness guard (never called): a new variant fails
+        // to compile here until it is added to the checked list above.
+        let _exhaustive = |value: Transport| match value {
+            Relay | Direct | WebRtc => {}
+        };
     }
+    {
+        use Topology::*;
+        for value in [Relay, Host, Mesh] {
+            assert_wire_token(&declared, value, "Topology");
+        }
+        let _exhaustive = |value: Topology| match value {
+            Relay | Host | Mesh => {}
+        };
+    }
+    {
+        use GameDataEncoding::*;
+        // `rkyv` is reserved/internal (not advertised in `ProtocolInfo`) but is
+        // still a declared wire value, so the spec lists it and we check it.
+        for value in [Json, MessagePack, Rkyv] {
+            assert_wire_token(&declared, value, "GameDataEncoding");
+        }
+        let _exhaustive = |value: GameDataEncoding| match value {
+            Json | MessagePack | Rkyv => {}
+        };
+    }
+    {
+        use RelayTransport::*;
+        for value in [Tcp, Udp, Websocket, Auto] {
+            assert_wire_token(&declared, value, "RelayTransport");
+        }
+        let _exhaustive = |value: RelayTransport| match value {
+            Tcp | Udp | Websocket | Auto => {}
+        };
+    }
+    {
+        use SpectatorStateChangeReason::*;
+        for value in [Joined, VoluntaryLeave, Disconnected, Removed, RoomClosed] {
+            assert_wire_token(&declared, value, "SpectatorStateChangeReason");
+        }
+        let _exhaustive = |value: SpectatorStateChangeReason| match value {
+            Joined | VoluntaryLeave | Disconnected | Removed | RoomClosed => {}
+        };
+    }
+    {
+        use LobbyState::*;
+        for value in [Waiting, Lobby, Finalized] {
+            assert_wire_token(&declared, value, "LobbyState");
+        }
+        let _exhaustive = |value: LobbyState| match value {
+            Waiting | Lobby | Finalized => {}
+        };
+    }
+    {
+        // `ConnectionInfo` is internally tagged (`#[serde(tag = "type")]`): each
+        // variant serializes to an object whose `type` field is the wire token a
+        // codegen consumer switches on. Construct one of each (the field values
+        // are irrelevant — only the discriminator is asserted) and check `type`.
+        use ConnectionInfo::*;
+        let variants = [
+            Direct {
+                host: "h".to_string(),
+                port: 1,
+            },
+            UnityRelay {
+                allocation_id: "a".to_string(),
+                connection_data: "c".to_string(),
+                key: "k".to_string(),
+            },
+            Relay {
+                host: "h".to_string(),
+                port: 1,
+                transport: RelayTransport::Auto,
+                allocation_id: "a".to_string(),
+                token: "t".to_string(),
+                client_id: None,
+            },
+            WebRTC {
+                sdp: None,
+                ice_candidates: Vec::new(),
+            },
+            Custom {
+                data: serde_json::Value::Null,
+            },
+        ];
+        for value in variants {
+            assert_tagged_wire_token(&declared, value, "ConnectionInfo");
+        }
+        let _exhaustive = |value: ConnectionInfo| match value {
+            Direct { .. } | UnityRelay { .. } | Relay { .. } | WebRTC { .. } | Custom { .. } => {}
+        };
+    }
+}
+
+/// Serialize a wire-enum variant and assert its serde token is declared as a
+/// `const`/`enum` value in the spec. Serializing — rather than recomputing the
+/// rename rule — makes the asserted token authoritative.
+fn assert_wire_token<T>(declared: &BTreeSet<String>, value: T, enum_name: &str)
+where
+    T: serde::Serialize + std::fmt::Debug,
+{
+    let json = serde_json::to_string(&value).unwrap_or_else(|error| {
+        panic!("failed to serialize {enum_name} variant {value:?}: {error}")
+    });
+    let token = json.trim_matches('"');
+    assert!(
+        declared.contains(token),
+        "spec/signal-fish-protocol.asyncapi.yaml must declare wire token '{token}' \
+         (serde form of {enum_name}::{value:?}) as a const/enum value",
+    );
+}
+
+/// Serialize an internally-tagged (`#[serde(tag = "type")]`) wire-enum variant
+/// and assert its `type` discriminator token is declared in the spec. Reading
+/// the tag off the serialized object — rather than hard-coding it — keeps the
+/// asserted token authoritative against the per-variant `#[serde(rename)]`.
+fn assert_tagged_wire_token<T>(declared: &BTreeSet<String>, value: T, enum_name: &str)
+where
+    T: serde::Serialize + std::fmt::Debug,
+{
+    let json = serde_json::to_value(&value).unwrap_or_else(|error| {
+        panic!("failed to serialize {enum_name} variant {value:?}: {error}")
+    });
+    let token = json
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("{enum_name} variant {value:?} serialized without a string `type` tag: {json}")
+        });
+    assert!(
+        declared.contains(token),
+        "spec/signal-fish-protocol.asyncapi.yaml must declare {enum_name} `type` token '{token}' \
+         (serde form of {enum_name}::{value:?}) as a const/enum value",
+    );
 }
