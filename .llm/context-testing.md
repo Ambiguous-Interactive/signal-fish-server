@@ -84,7 +84,7 @@ of resource-heavy tests instead.
 
 **CI job timeouts are a flake source too.** A too-tight `timeout-minutes` on a
 slow job cancels a healthy-but-loaded run, which is non-determinism by the same
-definition above. This is why the mutation-testing shards keep a timeout *floor*
+definition above. This is why the mutation-testing shards keep a timeout _floor_
 (generous headroom over the measured per-shard wall-clock) rather than the
 tightest value that "usually" passes. See
 [Mutation Testing Performance](skills/mutation-testing-performance.md) for the

@@ -39,7 +39,7 @@ exceeding their `timeout-minutes`, per-mutant relink cost, shard sizing, or the
 - `cargo-mutants` rebuilds the crate once per mutant; the slowness is the
   per-mutant **build + relink**, not the test run.
 - Build in the warm `./target` (`--in-place`), not a cold `/tmp` scratch dir, and
-  warm a **shared** rust-cache first (`shared-key: "mutants"`).
+  warm a **shared** `rust-cache` first (`shared-key: "mutants"`).
 - Give each shard a **contiguous** mutant range (`--sharding slice`) for
   incremental-compilation locality.
 - Use the `mold` linker, the `mutants` profile (`debug=0`, `incremental=true`),
@@ -75,8 +75,8 @@ the 20-min timeout fired before any shard finished.
 All levers are centralised in `scripts/run-mutants.sh` so CI and local runs match.
 
 1. **`--in-place` + a warm shared cache (biggest win).** Build in the
-   rust-cache-warmed `./target` so dependency rlibs are reused — measured **0 cold
-   dep recompiles**. A `baseline` job warms a SHARED rust-cache
+   `rust-cache`-warmed `./target` so dependency rlibs are reused — measured **0 cold
+   dep recompiles**. A `baseline` job warms a SHARED `rust-cache`
    (`shared-key: "mutants"`) with the **same profile + RUSTFLAGS** the shards use,
    and is the green-gate for `--baseline=skip`. **Rule:** keep `--in-place`; never
    a `/tmp` scratch build (recompiles all deps cold) and never `--copy-target`
@@ -179,5 +179,5 @@ change them once in the script (or the toml) so every runner stays in lockstep.
 
 - [Rust Performance Optimization](./rust-performance-optimization.md) — Profiles, linker, and build-time levers
 - [CI Configuration Validation Tests](./github-actions-config-tests.md) — How the guard-map tests are written
-- [GitHub Actions Caching & Action Versioning](./github-actions-caching.md) — Shared rust-cache keys, action pinning
+- [GitHub Actions Caching & Action Versioning](./github-actions-caching.md) — Shared `rust-cache` keys, action pinning
 - [Testing Core Patterns](./testing-core-patterns.md) — Mutation testing closes gaps these tests leave
