@@ -211,15 +211,23 @@ validate_changelog() {
         return
     fi
 
-    if ! grep -q "Keep a Changelog" "$file"; then
+    # Read once with carriage returns stripped, then match against this content
+    # instead of the raw file. `$`-anchored patterns (e.g. '^## \[Unreleased\]$')
+    # would otherwise fail to match a CRLF-checked-out CHANGELOG (Windows/WSL2
+    # under `* text=auto`), and we must not depend on a particular grep build's
+    # platform-specific CRLF handling. Mirrors the .llm/context.md check above.
+    local changelog
+    changelog="$(tr -d '\r' < "$file")"
+
+    if ! grep -q "Keep a Changelog" <<< "$changelog"; then
         action_error "CHANGELOG.md must reference Keep a Changelog"
     fi
 
-    if ! grep -q '^## \[Unreleased\]$' "$file"; then
+    if ! grep -q '^## \[Unreleased\]$' <<< "$changelog"; then
         action_error "CHANGELOG.md must contain an exact '## [Unreleased]' heading"
     fi
 
-    if grep -q '^## Unreleased$' "$file"; then
+    if grep -q '^## Unreleased$' <<< "$changelog"; then
         action_error "Use '## [Unreleased]' (bracketed) instead of '## Unreleased'"
     fi
 
@@ -247,25 +255,25 @@ validate_changelog() {
                     ;;
             esac
         fi
-    done < "$file"
+    done <<< "$changelog"
 
     # Disallow undated current-version headers.
     if [ -n "$CARGO_VERSION" ]; then
-        if grep -q "^## \[$CARGO_VERSION\]$" "$file"; then
+        if grep -q "^## \[$CARGO_VERSION\]$" <<< "$changelog"; then
             action_error "CHANGELOG.md has undated current-version header '## [$CARGO_VERSION]'. Use '## [$CARGO_VERSION] - YYYY-MM-DD' only at release cutover."
         fi
 
-        if grep -q "^## \[$CARGO_VERSION\][[:space:]]*-[[:space:]]*" "$file"; then
+        if grep -q "^## \[$CARGO_VERSION\][[:space:]]*-[[:space:]]*" <<< "$changelog"; then
             # Dated is acceptable.
             :
-        elif grep -q "^## \[$CARGO_VERSION\]" "$file"; then
+        elif grep -q "^## \[$CARGO_VERSION\]" <<< "$changelog"; then
             action_error "CHANGELOG.md has malformed current-version header for $CARGO_VERSION"
         fi
     fi
 
     # Collect released versions from headers.
     local versions
-    versions=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$file" \
+    versions=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' <<< "$changelog" \
         | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/' || true)
 
     if [ -z "$versions" ]; then
@@ -277,7 +285,7 @@ validate_changelog() {
     latest_version=$(printf '%s\n' "$versions" | sort -V | tail -n 1)
 
     local unreleased_ref
-    unreleased_ref=$(grep -E '^\[Unreleased\]:' "$file" | sed -E 's/^\[Unreleased\]:[[:space:]]*(\S+).*$/\1/' || true)
+    unreleased_ref=$(grep -E '^\[Unreleased\]:' <<< "$changelog" | sed -E 's/^\[Unreleased\]:[[:space:]]*(\S+).*$/\1/' || true)
     if [ -z "$unreleased_ref" ]; then
         action_error "CHANGELOG.md must define a [Unreleased]: link reference"
     else
@@ -292,7 +300,7 @@ validate_changelog() {
         [ -z "$version" ] && continue
 
         local release_ref
-        release_ref=$(grep -E "^\[$version\]:" "$file" | sed -E "s/^\[$version\]:[[:space:]]*(\\S+).*$/\\1/" || true)
+        release_ref=$(grep -E "^\[$version\]:" <<< "$changelog" | sed -E "s/^\[$version\]:[[:space:]]*(\\S+).*$/\\1/" || true)
         if [ -z "$release_ref" ]; then
             action_error "CHANGELOG.md must define a [$version]: link reference"
             continue

@@ -55,23 +55,32 @@ fn generate_index_for(skills: &[(&str, &str)]) -> String {
     read_file(&root.join(".llm/skills/index.md"))
 }
 
-/// Assert no generated link has trailing whitespace/CR in its link text — the
-/// `[Title ](...)` / `[Title\r](...)` shape markdownlint flags as MD039.
+/// Assert no generated link carries trailing whitespace or a stray carriage
+/// return *inside* its text — the `[Title ](...)` / `[Title\r](...)` shape
+/// markdownlint flags as MD039 (no-space-in-links).
+///
+/// This is line-ending agnostic by construction: `str::lines()` strips the
+/// benign trailing CR of a CRLF line ending, so a working tree checked out with
+/// CRLF (the Windows default under `* text=auto`) is treated identically to an
+/// LF one. Any `\r` that survives `lines()` is therefore a *mid-line* CR —
+/// precisely the MD039 bug a CRLF-checked-out skill heading would introduce.
 fn assert_no_trailing_space_in_link_text(index: &str, origin: &str) {
-    assert!(
-        !index.contains('\r'),
-        "{origin} contains a carriage return — a CRLF skill heading leaked `\\r` into the index \
-         link text (markdownlint MD039). Regenerate with scripts/generate-skills-index.sh.\n\
-         Raw:\n{index:?}"
-    );
     for (line_no, line) in index.lines().enumerate() {
+        assert!(
+            !line.contains('\r'),
+            "{origin} line {} has a stray carriage return inside the line — a CRLF skill heading \
+             leaked `\\r` into the generated text (markdownlint MD039). The generator must strip \
+             CR from the `# Skill:` title. Regenerate with scripts/generate-skills-index.sh.\n\
+             Line: {line:?}",
+            line_no + 1
+        );
         if let Some(pos) = line.find("](") {
             let link_text = &line[..pos];
             assert!(
                 !link_text.ends_with(char::is_whitespace),
                 "{origin} line {} has trailing whitespace inside the link text (markdownlint \
                  MD039 no-space-in-links): {line:?}\n\
-                 The generator must strip trailing whitespace/CR from the `# Skill:` title.",
+                 The generator must strip trailing whitespace from the `# Skill:` title.",
                 line_no + 1
             );
         }

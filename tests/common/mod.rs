@@ -32,8 +32,20 @@ pub fn repo_root() -> PathBuf {
 }
 
 /// Read a file to string, panicking with a descriptive message on failure.
+///
+/// Line endings are normalized to LF (`\r\n` -> `\n`). Every consumer reads
+/// committed text to assert on *content*, never on line-ending style, yet Git
+/// checks these files out with CRLF on Windows (and WSL2 mounts) under the
+/// repo's `* text=auto` attribute. Normalizing here makes the whole
+/// content-assertion test suite deterministic across platforms — a test green
+/// on Linux/macOS must not flip red on `Nextest (windows-latest)` purely
+/// because of checkout EOL. A *lone* mid-line `\r` is deliberately preserved so
+/// genuine stray-CR bugs (e.g. markdownlint MD039 link-text breakage) stay
+/// detectable.
 pub fn read_file(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()))
+    fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 /// Create a uniquely-named temporary directory with a descriptive prefix.

@@ -1,5 +1,13 @@
-* text=auto
+# Normalize all text files to LF in the repository AND on checkout for every
+# platform. Committed blobs are already LF; forcing eol=lf makes Windows/WSL2
+# working trees LF too (they default to CRLF under a bare `text=auto`), so
+# line-anchored shell scripts, git hooks, and content-asserting tests behave
+# identically everywhere — eliminating CRLF-only CI failures at the source.
+# Binary files are auto-detected and left untouched.
+* text=auto eol=lf
 
+# Scripts and hooks must always be LF and always classified as text, even if a
+# future content heuristic would misdetect them.
 .githooks/* text eol=lf
 *.sh text eol=lf
 *.ps1 text eol=lf
