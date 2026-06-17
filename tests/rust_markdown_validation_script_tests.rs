@@ -109,10 +109,32 @@ fn assert_only_repository_markdown_was_validated(output: &str, mode: &str) {
     }
 }
 
+/// Behavioral classification cases for the Rust markdown validator, driven by a
+/// single table so adding a scenario is a few data lines rather than another
+/// copy-pasted `#[test]`. That copy-paste pattern is exactly what previously let
+/// a sibling test file drift into a corrupted, non-compiling state, so keeping
+/// the repetitive cases as data (not duplicated control flow) is a deliberate
+/// fragility reduction. Each case feeds one markdown fixture to
+/// `validate-rust-markdown-blocks.sh` and asserts on the run's success plus
+/// required and forbidden output fragments.
+///
+/// `git`-backed discovery scenarios stay as dedicated tests below: they need
+/// repository setup rather than a single inline fixture, so a table would only
+/// obscure them.
 #[test]
-fn test_rust_markdown_validator_compiles_blocks_after_leading_blank_lines() {
-    let (success, output) = run_validator(
-        r#"# Rust Markdown Samples
+fn test_rust_markdown_validator_classification_cases() {
+    struct ValidatorCase {
+        name: &'static str,
+        markdown: &'static str,
+        expect_success: bool,
+        expected_substrings: &'static [&'static str],
+        forbidden_substrings: &'static [&'static str],
+    }
+
+    let cases = [
+        ValidatorCase {
+            name: "compiles_blocks_after_leading_blank_lines",
+            markdown: r#"# Rust Markdown Samples
 
 ```rust
 
@@ -139,29 +161,19 @@ let expression_only = 1;
 
 ```
 "#,
-    );
-
-    assert!(
-        success,
-        "Validator should accept complete Rust items after leading blank lines.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("Total blocks: 5")
-            && output.contains("Validated: 3")
-            && output.contains("Skipped: 2")
-            && output.contains("Failed: 0"),
-        "Unexpected validation summary for leading-blank fixture.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("partial snippet, no item-level keywords"),
-        "Expression-only block should still be classified as a partial snippet.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_does_not_skip_invalid_item_after_leading_blank_line() {
-    let (success, output) = run_validator(
-        r#"# Invalid Rust Markdown Sample
+            expect_success: true,
+            expected_substrings: &[
+                "Total blocks: 5",
+                "Validated: 3",
+                "Skipped: 2",
+                "Failed: 0",
+                "partial snippet, no item-level keywords",
+            ],
+            forbidden_substrings: &[],
+        },
+        ValidatorCase {
+            name: "does_not_skip_invalid_item_after_leading_blank_line",
+            markdown: r#"# Invalid Rust Markdown Sample
 
 ```rust
 
@@ -170,26 +182,13 @@ fn leading_blank_invalid() {
 }
 ```
 "#,
-    );
-
-    assert!(
-        !success,
-        "Validator must fail invalid Rust items after leading blank lines, not skip them.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("FAILED: Block at line") && output.contains("Failed: 1"),
-        "Expected a compilation failure diagnostic for invalid leading-blank item.\nOutput:\n{output}"
-    );
-    assert!(
-        !output.contains("partial snippet, no item-level keywords"),
-        "Invalid item was misclassified as a partial snippet.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_external_context_warning_does_not_mask_syntax_errors() {
-    let (success, output) = run_validator(
-        r#"# Mixed External Context And Syntax Error
+            expect_success: false,
+            expected_substrings: &["FAILED: Block at line", "Failed: 1"],
+            forbidden_substrings: &["partial snippet, no item-level keywords"],
+        },
+        ValidatorCase {
+            name: "external_context_warning_does_not_mask_syntax_errors",
+            markdown: r#"# Mixed External Context And Syntax Error
 
 ```rust
 
@@ -200,24 +199,13 @@ fn leading_blank_invalid(_: MissingType) {
 }
 ```
 "#,
-    );
-
-    assert!(
-        !success,
-        "Validator must fail blocks that mix missing external context with syntax errors.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("FAILED: Block at line")
-            && output.contains("Failed: 1")
-            && !output.contains("requires external context"),
-        "Expected syntax failure instead of external-context downgrade.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_does_not_skip_item_blocks_with_placeholder_markers() {
-    let (success, output) = run_validator(
-        r#"# Placeholder Marker Inside Item Block
+            expect_success: false,
+            expected_substrings: &["FAILED: Block at line", "Failed: 1"],
+            forbidden_substrings: &["requires external context"],
+        },
+        ValidatorCase {
+            name: "does_not_skip_item_blocks_with_placeholder_markers",
+            markdown: r#"# Placeholder Marker Inside Item Block
 
 ```rust
 #[derive(Default)]
@@ -233,24 +221,13 @@ fn placeholder_marker_inside_item() {
 }
 ```
 "#,
-    );
-
-    assert!(
-        !success,
-        "Item-level Rust blocks containing placeholder-looking tokens must compile or fail, not skip.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("FAILED: Block at line")
-            && output.contains("Failed: 1")
-            && !output.contains("incomplete/placeholder code"),
-        "Expected a compilation failure instead of a placeholder skip.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_does_not_skip_item_blocks_with_documentation_markers() {
-    let (success, output) = run_validator(
-        r#"# Documentation Marker Inside Item Block
+            expect_success: false,
+            expected_substrings: &["FAILED: Block at line", "Failed: 1"],
+            forbidden_substrings: &["incomplete/placeholder code"],
+        },
+        ValidatorCase {
+            name: "does_not_skip_item_blocks_with_documentation_markers",
+            markdown: r#"# Documentation Marker Inside Item Block
 
 ```rust
 fn documentation_marker_inside_item() {
@@ -259,24 +236,13 @@ fn documentation_marker_inside_item() {
 }
 ```
 "#,
-    );
-
-    assert!(
-        !success,
-        "Item-level Rust blocks containing documentation comments must compile or fail, not skip.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("FAILED: Block at line")
-            && output.contains("Failed: 1")
-            && !output.contains("documentation snippet"),
-        "Expected a compilation failure instead of a documentation snippet skip.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_still_warns_for_pure_external_context() {
-    let (success, output) = run_validator(
-        r#"# External Context Sample
+            expect_success: false,
+            expected_substrings: &["FAILED: Block at line", "Failed: 1"],
+            forbidden_substrings: &["documentation snippet"],
+        },
+        ValidatorCase {
+            name: "still_warns_for_pure_external_context",
+            markdown: r#"# External Context Sample
 
 ```rust
 
@@ -285,24 +251,17 @@ use missing_crate::MissingType;
 pub fn needs_external_context(_: MissingType) {}
 ```
 "#,
-    );
-
-    assert!(
-        success,
-        "Pure external-context failures should remain informational warnings.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("requires external context")
-            && output.contains("Warned: 1")
-            && output.contains("Failed: 0"),
-        "Expected an external-context warning, not a hard failure.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_compiles_rustdoc_style_statement_blocks() {
-    let (success, output) = run_validator(
-        r#"# Rustdoc-Style Snippet
+            expect_success: true,
+            expected_substrings: &[
+                "requires external context",
+                "Warned: 1",
+                "Failed: 0",
+            ],
+            forbidden_substrings: &[],
+        },
+        ValidatorCase {
+            name: "compiles_rustdoc_style_statement_blocks",
+            markdown: r#"# Rustdoc-Style Snippet
 
 ```rust
 use std::fmt;
@@ -317,36 +276,96 @@ let rendered = format!("{movement:?}");
 assert!(rendered.contains("42"));
 ```
 "#,
-    );
+            expect_success: true,
+            expected_substrings: &[
+                "wrapped Rustdoc-style snippet",
+                "Validated: 1",
+                "Failed: 0",
+            ],
+            forbidden_substrings: &[],
+        },
+        ValidatorCase {
+            name: "closes_fences_with_trailing_whitespace",
+            markdown: "# Trailing Space Closing Fence\n\n```rust\n\nfn trailing_space_close() {\n    let =\n}\n```   \n",
+            expect_success: false,
+            expected_substrings: &[
+                "Total blocks: 1",
+                "FAILED: Block at line",
+                "Failed: 1",
+            ],
+            forbidden_substrings: &[],
+        },
+        ValidatorCase {
+            name: "ignores_literal_rust_fences_inside_longer_fences",
+            markdown: r#"# Literal Rust Fence
 
-    assert!(
-        success,
-        "Validator should compile Rustdoc-style snippets with top-level statements via a wrapper.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("wrapped Rustdoc-style snippet")
-            && output.contains("Validated: 1")
-            && output.contains("Failed: 0"),
-        "Expected the top-level statement block to validate through the wrapper path.\nOutput:\n{output}"
-    );
+````text
+```rust
+fn literal_invalid_rust() {
+    let =
 }
+```
+````
 
-#[test]
-fn test_rust_markdown_validator_closes_fences_with_trailing_whitespace() {
-    let (success, output) = run_validator(
-        "# Trailing Space Closing Fence\n\n```rust\n\nfn trailing_space_close() {\n    let =\n}\n```   \n",
-    );
+```rust
+fn real_rust_block() {}
+```
+"#,
+            expect_success: true,
+            expected_substrings: &["Total blocks: 1", "Validated: 1", "Failed: 0"],
+            forbidden_substrings: &[],
+        },
+        ValidatorCase {
+            name: "does_not_close_long_rust_fence_on_shorter_fence",
+            markdown: r#"# Longer Rust Fence
 
-    assert!(
-        !success,
-        "Validator must extract and fail Rust blocks whose closing fence has trailing spaces.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("Total blocks: 1")
-            && output.contains("FAILED: Block at line")
-            && output.contains("Failed: 1"),
-        "Expected one extracted block and one compilation failure.\nOutput:\n{output}"
-    );
+````rust
+fn before_shorter_fence() {}
+```
+fn invalid_after_shorter_fence() {
+    let =
+}
+````
+"#,
+            expect_success: false,
+            expected_substrings: &[
+                "Total blocks: 1",
+                "FAILED: Block at line",
+                "Failed: 1",
+            ],
+            forbidden_substrings: &[],
+        },
+    ];
+
+    for case in cases {
+        let (success, output) = run_validator(case.markdown);
+
+        assert_eq!(
+            success, case.expect_success,
+            "Case '{}' run success mismatch (expected success = {}).\nOutput:\n{}",
+            case.name, case.expect_success, output
+        );
+
+        for expected in case.expected_substrings {
+            assert!(
+                output.contains(expected),
+                "Case '{}' expected output to contain '{}'.\nOutput:\n{}",
+                case.name,
+                expected,
+                output
+            );
+        }
+
+        for forbidden in case.forbidden_substrings {
+            assert!(
+                !output.contains(forbidden),
+                "Case '{}' expected output to NOT contain '{}'.\nOutput:\n{}",
+                case.name,
+                forbidden,
+                output
+            );
+        }
+    }
 }
 
 #[test]
@@ -379,64 +398,6 @@ fn invalid_user_doc() {
             && output.contains("Failed: 1")
             && !output.contains("reference documentation file"),
         "Expected docs/ Rust block to fail compilation, not be treated as reference docs.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_ignores_literal_rust_fences_inside_longer_fences() {
-    let (success, output) = run_validator(
-        r#"# Literal Rust Fence
-
-````text
-```rust
-fn literal_invalid_rust() {
-    let =
-}
-```
-````
-
-```rust
-fn real_rust_block() {}
-```
-"#,
-    );
-
-    assert!(
-        success,
-        "Literal Rust fences inside a longer non-Rust fence should not be extracted.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("Total blocks: 1")
-            && output.contains("Validated: 1")
-            && output.contains("Failed: 0"),
-        "Expected only the real Rust block outside the literal fence to be validated.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_rust_markdown_validator_does_not_close_long_rust_fence_on_shorter_fence() {
-    let (success, output) = run_validator(
-        r#"# Longer Rust Fence
-
-````rust
-fn before_shorter_fence() {}
-```
-fn invalid_after_shorter_fence() {
-    let =
-}
-````
-"#,
-    );
-
-    assert!(
-        !success,
-        "A Rust block opened with four backticks must not close on a three-backtick fence.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("Total blocks: 1")
-            && output.contains("FAILED: Block at line")
-            && output.contains("Failed: 1"),
-        "Expected one extracted long-fence block and a compilation failure.\nOutput:\n{output}"
     );
 }
 

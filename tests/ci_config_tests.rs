@@ -1595,6 +1595,53 @@ fn test_ci_workflow_has_required_jobs() {
 }
 
 #[test]
+fn test_ci_quick_check_gate_guards_expensive_jobs() {
+    // Self-guard for the fail-fast gate. `quick-check` is the mechanism that stops
+    // a non-compiling or unformatted file from wasting the whole compile/test
+    // matrix — a single unclosed delimiter once failed every compile job
+    // independently. Without this assertion the gate (or its `needs:` edges) could
+    // be silently dropped in a CI refactor while every other check stayed green:
+    // the exact "unenforced invariant" failure mode that allowed the original
+    // breakage. So pin both the gate's existence/commands and the edges that make
+    // it actually gate.
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        workflow.contains("\n  quick-check:"),
+        "ci.yml must define a `quick-check` fail-fast gate job so a parse/compile \
+         error is caught once, in seconds, before the expensive matrix fans out."
+    );
+    for command in [
+        "cargo fmt --all -- --check",
+        "cargo check --locked --all-targets --all-features",
+    ] {
+        assert!(
+            workflow.contains(command),
+            "ci.yml `quick-check` gate must run `{command}`. Formatting catches the \
+             unparseable-file class in under a second; `cargo check --all-targets` \
+             catches the broader compile-error class across the test tree."
+        );
+    }
+
+    // Every expensive compile/test job must wait on the gate. `needs:` is declared
+    // in the first few lines of a job block, so a bounded window after the header
+    // is sufficient and avoids brittle full-block parsing.
+    for job in ["lint", "nextest", "msrv", "coverage"] {
+        let header = format!("\n  {job}:");
+        let start = workflow
+            .find(&header)
+            .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
+        let block_end = (start + 300).min(workflow.len());
+        assert!(
+            workflow[start..block_end].contains("needs: quick-check"),
+            "ci.yml `{job}` job must declare `needs: quick-check` so it does not \
+             start until the fail-fast gate passes."
+        );
+    }
+}
+
+#[test]
 fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
     let root = repo_root();
     let workflow = read_file(&root.join(".github/workflows/ci.yml"));
