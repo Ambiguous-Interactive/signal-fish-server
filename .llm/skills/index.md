@@ -59,6 +59,7 @@
 - [Mutation Testing Performance](./mutation-testing-performance.md)
 - [Observability and Logging](./observability-and-logging.md)
 - [Protocol v3 Session-Plan Selection](./protocol-v3-session-plan.md)
+- [Repo Source Hygiene Guards](./repo-source-hygiene-guards.md)
 - [Review Changelog Entries](./review-changelog-entries.md)
 - [Rust Idioms and Patterns](./rust-idioms-and-patterns.md)
 - [Rust Performance Optimization](./rust-performance-optimization.md)

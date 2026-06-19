@@ -23,8 +23,11 @@ fi
 
 python3 -c "import z3" 2>/dev/null || {
   echo "z3 python module not found; attempting install..." >&2
-  pip install --quiet z3-solver 2>/dev/null \
-    || pip install --quiet --break-system-packages z3-solver 2>/dev/null \
+  # Install via `python3 -m pip` (not bare `pip`) so the wheel lands in the SAME
+  # interpreter that imports z3 above and runs the proofs below; a bare `pip` can
+  # resolve to a different Python and silently install where it is never seen.
+  python3 -m pip install --quiet z3-solver 2>/dev/null \
+    || python3 -m pip install --quiet --break-system-packages z3-solver 2>/dev/null \
     || { echo "error: could not import or install the z3 module" >&2; exit 2; }
 }
 

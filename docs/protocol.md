@@ -654,7 +654,7 @@ Reconnection failed.
 {
   "type": "ReconnectionFailed",
   "data": {
-    "reason": "The reconnection token is invalid or malformed.",
+    "reason": "Invalid reconnection token",
     "error_code": "RECONNECTION_TOKEN_INVALID"
   }
 }

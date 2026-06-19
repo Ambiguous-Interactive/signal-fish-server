@@ -16,6 +16,11 @@
 - Code samples and protocol examples must match the implementation in `src/`.
 - Remove stale claims immediately when implementation changes.
 - Avoid absolute wording (`always`, `never`, `guaranteed`) unless every code path is verified.
+- Wire strings (`reason`, `error_code`) in examples must be copied verbatim from their
+  source of truth, never paraphrased. When the string comes from a single enum `Display`
+  (e.g. `ReconnectionError` in `src/reconnection.rs`), a parsed drift guard ties the docs to
+  it — see [Repo Source Hygiene Guards](./repo-source-hygiene-guards.md). The reconnection
+  guard lives in `tests/docs_site_consistency.rs`.
 
 ---
 

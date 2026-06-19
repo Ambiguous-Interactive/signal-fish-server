@@ -236,8 +236,8 @@ async fn ready(ws: &mut WsStream) {
 
 /// Drain messages until a `LobbyStateChanged` reports exactly `count` ready
 /// players. Paces the ready handshake so each `PlayerReady` is fully processed
-/// (and reflected in `ready_players`) before the next is sent — mirrors
-/// `lobby_e2e_tests.rs` and removes the back-to-back-ready race.
+/// (and reflected in `ready_players`) before the next is sent, removing the
+/// back-to-back-ready race.
 async fn await_ready_count(ws: &mut WsStream, count: usize) {
     next_matching_server_message_within(
         ws,

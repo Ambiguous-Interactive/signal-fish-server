@@ -156,14 +156,19 @@ load_node_toolchain() {
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         echo "[setup] ERROR: Node.js and npm are required to install OpenAI Codex CLI."
         echo "[setup] Rebuild the dev container so the Node devcontainer feature is applied."
-        exit 1
+        # Return (don't exit): the sole caller, install_codex_cli, is invoked as a
+        # best-effort `if ! install_codex_cli` step, so this must stay recoverable.
+        return 1
     fi
 }
 
 install_codex_cli() {
     local codex_npm_spec="${CODEX_NPM_SPEC:-@openai/codex@latest}"
 
-    load_node_toolchain
+    # Propagate a missing-toolchain failure as our own non-zero return so the
+    # best-effort caller can warn and continue (a bare call would let setup limp
+    # on to `npm install` with no node/npm).
+    load_node_toolchain || return 1
 
     echo "[setup] Installing OpenAI Codex CLI from npm: $codex_npm_spec"
     run_with_retries 5 3 npm install --global --include=optional "$codex_npm_spec"
@@ -171,7 +176,9 @@ install_codex_cli() {
     if ! command -v codex >/dev/null 2>&1; then
         echo "[setup] ERROR: Codex CLI install completed, but 'codex' is not on PATH."
         echo "[setup] npm global prefix: $(npm prefix --global)"
-        exit 1
+        # Return (don't exit): the caller (`if ! install_codex_cli`) warns and
+        # continues; an exit here would abort the entire dev-container setup.
+        return 1
     fi
 
     echo "[setup] Codex CLI version:"
