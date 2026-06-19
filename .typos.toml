@@ -94,21 +94,21 @@ rustdoc = "rustdoc"
 rustfmt = "rustfmt"
 
 # === Build Tools & Infrastructure ===
-bookworm = "bookworm"    # Debian 12 release name
-clang = "clang"          # C/C++ compiler
+bookworm = "bookworm"     # Debian 12 release name
+clang = "clang"           # C/C++ compiler
 distroless = "distroless" # Google's minimal container images
 dockerfile = "dockerfile"
-ghcr = "ghcr"            # GitHub Container Registry
-HashiCorp = "HashiCorp"  # HashiCorp (company name, proper capitalization)
-hashicorp = "hashicorp"  # hashicorp (lowercase variant)
-mold = "mold"            # Fast linker
-nightly = "nightly"      # Rust nightly toolchain
+ghcr = "ghcr"             # GitHub Container Registry
+HashiCorp = "HashiCorp"   # HashiCorp (company name, proper capitalization)
+hashicorp = "hashicorp"   # hashicorp (lowercase variant)
+mold = "mold"             # Fast linker
+nightly = "nightly"       # Rust nightly toolchain
 
 # === GitHub Actions ===
-dtolnay = "dtolnay"           # rust-toolchain action author
+dtolnay = "dtolnay"             # rust-toolchain action author
 embarkstudios = "embarkstudios" # cargo-deny action author
-github = "github"             # GitHub platform
-swatinem = "swatinem"         # rust-cache action author
+github = "github"               # GitHub platform
+swatinem = "swatinem"           # rust-cache action author
 
 # === Game Engines ===
 bevy = "bevy"
@@ -118,12 +118,12 @@ unreal = "unreal"
 
 # === WebRTC & Networking Protocols ===
 backpressure = "backpressure"
-fishnet = "fishnet"      # Networking library
-netcode = "netcode"      # Network protocol
-sdp = "sdp"              # Session Description Protocol
-stun = "stun"            # Session Traversal Utilities for NAT
+fishnet = "fishnet"           # Networking library
+netcode = "netcode"           # Network protocol
+sdp = "sdp"                   # Session Description Protocol
+stun = "stun"                 # Session Traversal Utilities for NAT
 subprotocol = "subprotocol"
-turn = "turn"            # Traversal Using Relays around NAT
+turn = "turn"                 # Traversal Using Relays around NAT
 url = "url"
 webrtc = "webrtc"
 
@@ -142,12 +142,12 @@ websockets = "websockets"
 
 # === Protocol & API Terms ===
 healthcheck = "healthcheck"
-mtls = "mtls"            # Mutual TLS
-prom = "prom"            # Prometheus metrics endpoint abbreviation
-tls = "tls"              # Transport Layer Security
+mtls = "mtls"               # Mutual TLS
+prom = "prom"               # Prometheus metrics endpoint abbreviation
+tls = "tls"                 # Transport Layer Security
 
 # === Common Technical Abbreviations ===
-ack = "ack"              # Acknowledgment
+ack = "ack"             # Acknowledgment
 async = "async"
 awaitable = "awaitable"
 config = "config"
@@ -155,15 +155,15 @@ configs = "configs"
 crypto = "crypto"
 dedup = "dedup"
 dedupe = "dedupe"
-deser = "deser"          # Deserialization abbreviation
+deser = "deser"         # Deserialization abbreviation
 impl = "impl"
 impls = "impls"
 init = "init"
-nack = "nack"            # Negative acknowledgment
+nack = "nack"           # Negative acknowledgment
 readonly = "readonly"
 repo = "repo"
 repos = "repos"
-ser = "ser"              # Serialization abbreviation
+ser = "ser"             # Serialization abbreviation
 
 # === Project-Specific Terms ===
 roomcode = "roomcode"
@@ -203,9 +203,8 @@ optimises = "optimizes"
 optimising = "optimizing"
 analyse = "analyze"
 analysed = "analyzed"
-# Note: "analyses" (noun plural) is valid in both American and British English.
-# Only the verb form "analyses" (British) should be "analyzes" (American), but
-# typos cannot distinguish noun vs verb usage, so we omit this mapping.
+unparseable = "unparsable"
+Unparseable = "Unparsable"
 analysing = "analyzing"
 defence = "defense"
 licence = "license"
@@ -224,7 +223,6 @@ authorising = "authorizing"
 catalogue = "catalog"
 programme = "program"
 practise = "practice"
-
 [default.extend-identifiers]
 # Code identifiers that are intentionally abbreviated
 consts = "consts"
