@@ -80,10 +80,32 @@ async fn start_server_with_instance(game_server: Arc<EnhancedGameServer>) -> std
         .unwrap();
     });
 
-    // Give server time to start (longer timeout for CI environments)
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
+    // No startup sleep: the listener is already bound above before the serve
+    // task spawns, so the kernel queues the client's connection until axum
+    // begins accepting — `connect_client` then connects under its own timeout.
+    // A fixed sleep here only added 2s of dead wall-clock to every consumer and
+    // could not actually guarantee readiness; the bound-listener handshake does.
     addr
+}
+
+/// Wall-clock scaling for the timing-sensitive idle-timeout tests below.
+///
+/// Defaults to 1 (local runs and the `Nextest (*)` lanes, where the suite is
+/// fast and the multiprocess group is CPU-reserved). The two CI lanes that run
+/// the suite WITHOUT nextest's isolation — `MSRV Verification` (plain
+/// `cargo test`) and `Coverage (llvm-cov)` (instrumented, ~2-4x slower) — export
+/// `SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER` to widen the idle window (and the
+/// heartbeat budget that must outlast it) proportionally. A test task that is
+/// briefly CPU-starved on a 48-binary oversubscribed runner then still resets
+/// the idle timer in time instead of flaking. Scaling the window and the
+/// heartbeat duration together preserves the invariant under test
+/// (heartbeat interval << idle window) at any multiplier.
+fn idle_timeout_test_multiplier() -> u64 {
+    std::env::var("SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&m| m >= 1)
+        .unwrap_or(1)
 }
 
 /// Helper to connect a WebSocket client
@@ -1564,10 +1586,12 @@ async fn collect_frames_until_closed(
 /// coordinator (a coordinator-routed error would be silently dropped here).
 #[tokio::test]
 async fn test_idle_client_is_disconnected_after_idle_timeout() {
-    let mut config = idle_timeout_server_config(2);
+    let mult = idle_timeout_test_multiplier();
+    let mut config = idle_timeout_server_config(2 * mult);
     // Reaper window (500ms) + cleanup interval (1s, from `test_server_config`)
-    // elapse before the 2s idle window: the client is reaped first, exactly as
-    // with production defaults.
+    // elapse before the (2 * mult)s idle window: the client is reaped first,
+    // exactly as with production defaults. ping_timeout stays at 500ms so the
+    // reaper-before-idle ordering holds at every multiplier.
     config.ping_timeout = tokio::time::Duration::from_millis(500);
     let game_server = create_test_server_with_config(config, test_protocol_config()).await;
     // Run the maintenance reaper (main.rs spawns it the same way); the e2e
@@ -1603,7 +1627,7 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
     // socket well within this window (timeout is 2s; allow CI slack).
     let frames = collect_frames_until_closed(
         &mut receiver,
-        tokio::time::Duration::from_secs(10),
+        tokio::time::Duration::from_secs(10 * mult),
         "idle client",
     )
     .await;
@@ -1628,12 +1652,17 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
 /// idle window: every inbound frame resets the timeout.
 #[tokio::test]
 async fn test_active_client_survives_past_idle_timeout_window() {
-    let addr = start_test_server_with_config(idle_timeout_server_config(2)).await;
+    let mult = idle_timeout_test_multiplier();
+    let addr = start_test_server_with_config(idle_timeout_server_config(2 * mult)).await;
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
-    // Heartbeat every 500ms for 2.5s total — strictly longer than the 2s idle
-    // window — asserting the Pong response each round (no silent drains).
-    for round in 0..5 {
+    // Heartbeat every 500ms for (2.5 * mult)s total — strictly longer than the
+    // (2 * mult)s idle window — asserting the Pong response each round (no silent
+    // drains). Scaling the round count with the window keeps "total heartbeat
+    // span > idle window" true at any multiplier, while the per-round 500ms
+    // interval stays far below the window so a briefly-starved scheduler still
+    // resets the idle timer in time.
+    for round in 0..(5 * mult) {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let response = send_and_receive(&mut sender, &mut receiver, ClientMessage::Ping)
             .await
@@ -1701,9 +1730,11 @@ async fn test_idle_timeout_zero_disables_idle_enforcement() {
     // RoomJoined. Drain it before asserting the connection then goes silent.
     expect_lobby_state_changed_notification(&mut receiver, "idle-disabled lobby entry").await;
 
-    // Stay silent for 3s — strictly longer than the 1–2s windows used by the
-    // sibling tests. With the idle timeout disabled the server must send
-    // nothing at all: no `CONNECTION_IDLE_TIMEOUT` error, no Close frame.
+    // Stay silent for 3s — long enough to surface any spurious idle close. With
+    // the idle timeout disabled the server must send nothing at all: no
+    // `CONNECTION_IDLE_TIMEOUT` error, no Close frame. This test does not race
+    // the idle window (there is none), so it needs no timeout multiplier, and
+    // ping_timeout's 10s reaper stays well clear of this 3s window.
     let silence = tokio::time::timeout(tokio::time::Duration::from_secs(3), receiver.next()).await;
     assert!(
         silence.is_err(),

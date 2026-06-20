@@ -157,7 +157,9 @@ async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketA
         .unwrap();
     });
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // No startup sleep: the listener is already bound above, so connections
+    // issued immediately are accepted by the kernel and served once the
+    // spawned `axum::serve` task polls them.
     addr
 }
 

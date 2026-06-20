@@ -274,6 +274,10 @@ fn test_large_room_broadcast_simulation() {
 // ============================================================================
 
 #[test]
+#[ignore = "wall-clock micro-benchmark: ~microseconds of real work against a tens-of-ms budget, so the \
+            only failure mode is a >budget scheduler preemption on an oversubscribed/instrumented CI \
+            lane (the unisolated MSRV/Coverage lanes) — never a real regression (even a deep-copy clone \
+            would pass). Run on demand with `--ignored`, or measure via benches/."]
 fn test_broadcast_clone_performance() {
     let message = MockServerMessage::GameData {
         from_player: Uuid::new_v4(),
@@ -304,6 +308,10 @@ fn test_broadcast_clone_performance() {
 }
 
 #[test]
+#[ignore = "wall-clock micro-benchmark: ~microseconds of real work against a tens-of-ms budget, so the \
+            only failure mode is a >budget scheduler preemption on an oversubscribed/instrumented CI \
+            lane (the unisolated MSRV/Coverage lanes) — never a real regression (even a deep-copy clone \
+            would pass). Run on demand with `--ignored`, or measure via benches/."]
 fn test_bytes_clone_performance() {
     let payload = Bytes::from(vec![0u8; 4096]); // 4KB payload
 
@@ -528,6 +536,10 @@ fn test_real_broadcast_message_json_serialization() {
 }
 
 #[test]
+#[ignore = "wall-clock micro-benchmark: ~microseconds of real work against a tens-of-ms budget, so the \
+            only failure mode is a >budget scheduler preemption on an oversubscribed/instrumented CI \
+            lane (the unisolated MSRV/Coverage lanes) — never a real regression (even a deep-copy clone \
+            would pass). Run on demand with `--ignored`, or measure via benches/."]
 fn test_real_broadcast_message_performance() {
     use signal_fish_server::broadcast::BroadcastMessage;
     use signal_fish_server::protocol::ServerMessage;

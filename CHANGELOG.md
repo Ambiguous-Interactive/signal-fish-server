@@ -426,6 +426,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a class of CI failure where a root version bump silently invalidated the committed
+  `clients/native` lockfile: it kept pinning the previous `signal-fish-server` version, so the
+  `--locked` Browser Interop and WebRTC Interop builds failed with a cryptic "lock file needs to be
+  updated" error after a multi-minute cold build. The lockfile is regenerated, and a new offline
+  guard (`tests/workspace_lockfile_consistency.rs`) now fails fast in the always-on test suite if
+  any git-tracked lockfile drifts from the root crate version — replacing that late, confusing
+  failure with an instant, actionable one.
+- Hardened the timing-sensitive end-to-end tests against CPU starvation on oversubscribed CI
+  runners (the rare flake the `nextest`/`msrv`/`coverage` lanes hit then passed on re-run): the
+  multi-process restart spawn now retries its fixed port with exponential backoff, the
+  idle-timeout tests scale their window via `SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER` on the
+  non-isolated `msrv`/`coverage` lanes, and redundant fixed startup sleeps were removed from the
+  in-process server harnesses (also trimming suite wall-clock).
 - Fixed the noisy `##[error]ENOENT` annotations that every full-test-suite CI job emitted (the
   `nextest`, `msrv`, and `coverage` jobs in `ci.yml`, plus `asan` in `ci-safety.yml`). Those jobs
   compile the `trybuild` UI test, which materializes a nested `<target>/tests` cargo workspace at
@@ -582,6 +595,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Upgraded the dependency tree to current releases. The only direct major bump is `tower-http`
+  0.6 → 0.7 (the CORS/trace middleware the server mounts); `bytes` moved 1.11 → 1.12 and every
+  other crate advanced to its latest semver-compatible version via a lockfile refresh. The root and
+  reference-client lockfiles were regenerated together so the `--locked` CI, interop, and fuzz
+  builds all resolve the same graph.
 - **Lobby start is now explicit and `max_players` is a ceiling, not a required count.** In both
   protocol v2 and v3 the game no longer starts automatically when every player is ready, and a room
   no longer needs to be full to start. Players may `PlayerReady` / unready at any time while the room
