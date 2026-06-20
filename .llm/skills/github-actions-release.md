@@ -190,6 +190,40 @@ ensures every required workflow with `paths:` filters appears in `PATH_FILTERED_
 
 ---
 
+## 6. Cross-Platform Release Binaries
+
+A crate-only release leaves Windows / macOS / ARM users with nothing to download. Add a matrix
+job that builds a standalone binary per OS/arch and attaches each (with a checksum) to the Release.
+
+- **Split build from upload into two jobs.** A `build-binaries` matrix (one leg per target)
+  compiles and uploads each archive + checksum as a workflow artifact via
+  `actions/upload-artifact`; a single `attach-binaries` job then `download-artifact`s all of them
+  and performs ONE `softprops/action-gh-release` upload. Funnelling every asset through one release
+  API call avoids the race where N parallel matrix legs PATCH/upload to the same Release
+  concurrently (intermittent 422s / clobbered assets).
+- **Pin the target list in a drift test** (`REQUIRED_RELEASE_TARGETS`) so a platform can't silently
+  vanish from the matrix. Covered triples here: Linux `x86_64`/`aarch64`, macOS `x86_64`/`aarch64`,
+  Windows `x86_64`/`aarch64`.
+- **`fail-fast: false` + run attach on partial success.** Give `attach-binaries` an
+  `if: ${{ !cancelled() && needs.publish.result == 'success' }}` so one platform's toolchain
+  hiccup attaches the binaries that DID build instead of skipping the attach job entirely (a
+  plain `needs:` on a failed matrix job would skip it and strip every binary off the release).
+- **Cross-compile the awkward targets instead of chasing runners:** build both macOS targets on
+  Apple Silicon (`macos-14`) — the native toolchain cross-compiles `x86_64` and avoids the
+  deprecating Intel runners. For Linux `aarch64`, install `gcc-aarch64-linux-gnu` **and**
+  `libc6-dev-arm64-cross` (the latter is only a _recommends_, so `--no-install-recommends` drops it
+  and linking fails with `cannot find Scrt1.o`).
+- **Ship a `.sha256` next to each archive.**
+- **Run `build-binaries` in parallel with `publish`** (`needs: [preflight]`), and gate
+  `attach-binaries` on `needs: [publish, build-binaries]` so the Release/tag exists before upload.
+- Build with **default features** to match the container image and dodge C-crypto cross-toolchain
+  pain (`aws-lc-sys`/`ring` only arrive via the optional `tls` feature).
+
+**Validated by:** `test_release_workflow_builds_all_platform_binaries` and
+`test_release_workflow_attaches_binaries_with_checksums`.
+
+---
+
 ## Agent Checklist
 
 - [ ] All `cargo` commands in CI use `--locked` consistently
@@ -199,6 +233,8 @@ ensures every required workflow with `paths:` filters appears in `PATH_FILTERED_
 - [ ] Required workflow ID lists asserted unique at start of preflight
 - [ ] Path-filtered required workflows registered in `PATH_FILTERED_WORKFLOWS`
 - [ ] `PATH_FILTERED_WORKFLOWS` patterns kept in sync with each workflow's `paths:` block
+- [ ] Release-binary matrix covers every `REQUIRED_RELEASE_TARGETS` triple with `fail-fast: false`
+- [ ] Each release archive ships a `.sha256` checksum and is uploaded to the Release
 
 ---
 

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cross-platform prebuilt release binaries: `release.yml` now builds a standalone
+  `signal-fish-server` executable for Linux (x86_64, aarch64), macOS (x86_64, Apple
+  Silicon), and Windows (x86_64, aarch64) and attaches each as a SHA-256-checksummed
+  archive to the GitHub Release, so Windows / macOS / ARM users no longer need a Rust
+  toolchain or Docker. The supported target list is pinned by `REQUIRED_RELEASE_TARGETS`
+  in `tests/ci_config_tests.rs`.
+- Multi-architecture drift guards in `tests/ci_config_tests.rs`
+  (`test_docker_publish_builds_multi_arch_manifest`,
+  `test_dockerfile_cross_compiles_for_target_platform`,
+  `test_release_workflow_builds_all_platform_binaries`,
+  `test_release_workflow_attaches_binaries_with_checksums`) so the container manifest and
+  release-binary matrix can never silently regress to a single platform again.
 - Added `tests/docs_site_consistency.rs`, a documentation-accuracy regression guard that ties the
   published docs to source: it asserts `docs/reference/error-codes.md` documents every `ErrorCode`
   variant, `docs/protocol.md` documents every `ClientMessage` / `ServerMessage` variant and the
@@ -426,6 +438,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed [#122](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/122): the
+  published `ghcr.io/ambiguous-interactive/signal-fish-server` image was built only for
+  `linux/amd64`, so pulling it on ARM64 Linux (AWS Graviton, Ampere, Raspberry Pi, Apple Silicon
+  under Docker) failed with `no matching manifest for linux/arm64/v8`. `docker-publish.yml` now
+  builds a single multi-architecture manifest covering `linux/amd64`, `linux/arm64`, and
+  `linux/arm/v7`. The Rust binary is cross-compiled natively on the build runner (the heavy
+  compile never runs under emulation; only the trivial runtime-image setup does), and the
+  `Dockerfile` resolves the cross toolchain per target arch (build-host-agnostic via
+  `$BUILDARCH`).
 - Fixed a class of CI failure where a root version bump silently invalidated the committed
   `clients/native` lockfile: it kept pinning the previous `signal-fish-server` version, so the
   `--locked` Browser Interop and WebRTC Interop builds failed with a cryptic "lock file needs to be

@@ -1339,6 +1339,46 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Container image platforms that MUST be published as a single multi-arch
+/// manifest list by `docker-publish.yml`.
+///
+/// Root cause this guards (issue #122): `docker/build-push-action` was invoked
+/// without a `platforms:` key, so the published `ghcr.io/.../signal-fish-server`
+/// image only carried a `linux/amd64` entry. Pulling on ARM64 Linux (AWS
+/// Graviton, Raspberry Pi, Ampere, Apple Silicon under Docker) failed with
+/// "no matching manifest for linux/arm64/v8 in the manifest list entries".
+///
+/// Keep this list in lockstep with:
+///   - the `platforms:` value passed to `docker/build-push-action` in
+///     `docker-publish.yml`
+///   - the cross-compilation target map in the `Dockerfile`
+///
+/// The build strategy is cross-compilation (the builder stage runs natively on
+/// `$BUILDPLATFORM` and cross-compiles to `$TARGETARCH`), NOT QEMU emulation, so
+/// adding a platform here also requires a Rust target triple + cross linker in
+/// the Dockerfile's arch map.
+const REQUIRED_CONTAINER_PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64", "linux/arm/v7"];
+
+/// Standalone release binaries that MUST be built and attached to every GitHub
+/// Release created by `release.yml`.
+///
+/// `release.yml` historically published only the crate to crates.io and a
+/// changelog-only GitHub Release with no downloadable executables, leaving
+/// Windows / macOS / ARM users with no prebuilt binary. Each tuple is
+/// `(rust target triple, human-facing platform label)`.
+///
+/// Keep this list in lockstep with the build matrix in `release.yml`. Every
+/// triple must appear in the workflow, each produced artifact must ship with a
+/// SHA-256 checksum, and all artifacts must be uploaded to the GitHub Release.
+const REQUIRED_RELEASE_TARGETS: &[(&str, &str)] = &[
+    ("x86_64-unknown-linux-gnu", "Linux x86_64"),
+    ("aarch64-unknown-linux-gnu", "Linux ARM64"),
+    ("x86_64-apple-darwin", "macOS Intel"),
+    ("aarch64-apple-darwin", "macOS Apple Silicon"),
+    ("x86_64-pc-windows-msvc", "Windows x86_64"),
+    ("aarch64-pc-windows-msvc", "Windows ARM64"),
+];
+
 #[test]
 fn test_msrv_consistency_across_config_files() {
     // This test prevents the MSRV inconsistency issue that was fixed in commit d9eac0f
@@ -3456,6 +3496,304 @@ fn test_docker_publish_workflow_uses_owner_derived_ghcr_image_name() {
     );
 }
 
+/// Drop full-line comments so substring assertions cannot be satisfied by
+/// explanatory comment text that names a platform/triple the LIVE config no
+/// longer builds. Inline trailing comments on a real config line are left in
+/// place — that line is live config. Works for both `#`-comment formats
+/// (YAML, Dockerfile).
+fn strip_comment_lines(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Map a container platform to the (TARGETARCH/variant `case` token, Rust target
+/// triple) the `Dockerfile` arch map must handle for it. Panics for an unmapped
+/// platform so that adding an entry to `REQUIRED_CONTAINER_PLATFORMS` forces a
+/// matching Dockerfile arch-map expectation here (and a conscious test update).
+fn container_platform_expectations(platform: &str) -> (&'static str, &'static str) {
+    match platform {
+        "linux/amd64" => ("amd64", "x86_64-unknown-linux-gnu"),
+        "linux/arm64" => ("arm64", "aarch64-unknown-linux-gnu"),
+        "linux/arm/v7" => ("v7", "armv7-unknown-linux-gnueabihf"),
+        other => panic!(
+            "REQUIRED_CONTAINER_PLATFORMS contains '{other}' but the test has no Dockerfile \
+             arch-map expectation for it. Add its (TARGETARCH/variant case token, Rust triple) \
+             to container_platform_expectations() AND the matching `case` arm to the Dockerfile."
+        ),
+    }
+}
+
+/// Locate the mapping for a `docker/build-push-action` step in a workflow and
+/// return its `with:` block as raw text. Returns `None` if no such step exists.
+///
+/// We intentionally read the raw `with:` text rather than fully parsing the
+/// YAML: the assertions below only need substring/token presence, and the raw
+/// form keeps the failure messages pointing at literal workflow content the
+/// maintainer can grep for.
+fn build_push_action_with_block(workflow_content: &str) -> Option<String> {
+    let lines: Vec<&str> = workflow_content.lines().collect();
+    // Find the step that uses docker/build-push-action.
+    let uses_idx = lines
+        .iter()
+        .position(|l| l.contains("uses:") && l.contains("docker/build-push-action"))?;
+
+    // The `with:` block belongs to the same step. Walk forward to the `with:`
+    // key, then collect the indented block beneath it.
+    let with_idx = lines[uses_idx..]
+        .iter()
+        .position(|l| l.trim_start().starts_with("with:"))
+        .map(|rel| uses_idx + rel)?;
+
+    let with_indent = lines[with_idx].len() - lines[with_idx].trim_start().len();
+    let mut block = String::new();
+    for line in &lines[with_idx + 1..] {
+        if line.trim().is_empty() {
+            block.push('\n');
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= with_indent {
+            break;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    Some(block)
+}
+
+#[test]
+fn test_required_container_platforms_cover_issue_122_arm64() {
+    // Documents intent and guards the constant itself: the issue that motivated
+    // multi-arch publishing was specifically a missing linux/arm64 manifest.
+    assert!(
+        REQUIRED_CONTAINER_PLATFORMS.contains(&"linux/amd64"),
+        "linux/amd64 must remain a published platform (regression baseline)."
+    );
+    assert!(
+        REQUIRED_CONTAINER_PLATFORMS.contains(&"linux/arm64"),
+        "linux/arm64 must be a published platform (root cause of issue #122)."
+    );
+    // Pin the full set so the constant cannot silently SHRINK. Every other test
+    // here loops over REQUIRED_CONTAINER_PLATFORMS, so a quiet deletion would
+    // shrink coverage everywhere at once; force it to be a deliberate edit.
+    assert_eq!(
+        REQUIRED_CONTAINER_PLATFORMS,
+        ["linux/amd64", "linux/arm64", "linux/arm/v7"],
+        "REQUIRED_CONTAINER_PLATFORMS changed. If intentional, update this assertion together with \
+         the docker-publish.yml `platforms:` list, the Dockerfile arch map, and \
+         container_platform_expectations()."
+    );
+}
+
+#[test]
+fn test_docker_publish_builds_multi_arch_manifest() {
+    // Regression guard for issue #122: the GHCR image must be a multi-arch
+    // manifest list. A single-platform build-push-action (no `platforms:` key)
+    // publishes only linux/amd64 and breaks every ARM64 consumer.
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/docker-publish.yml");
+    let content = read_file(&workflow_path);
+
+    // The with-block helper assumes a single build-push-action step (and reads
+    // the `with:` that follows it). Assert that assumption holds.
+    let build_push_steps = content
+        .lines()
+        .filter(|l| l.contains("uses:") && l.contains("docker/build-push-action"))
+        .count();
+    assert_eq!(
+        build_push_steps, 1,
+        "docker-publish.yml must have exactly one docker/build-push-action step \
+         (found {build_push_steps}); the multi-arch assertions below assume it."
+    );
+
+    let with_block = build_push_action_with_block(&content).unwrap_or_else(|| {
+        panic!(
+            "docker-publish.yml must invoke docker/build-push-action with a `with:` block.\n\
+             Issue #122: without a multi-platform build the image is amd64-only."
+        )
+    });
+
+    // Match a LIVE `platforms:` mapping line, not a commented-out one — a
+    // `# platforms: ...` comment must NOT satisfy this (that would let the image
+    // silently revert to amd64-only, exactly regression #122).
+    let platforms_line = with_block
+        .lines()
+        .find(|l| l.trim_start().starts_with("platforms:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "docker-publish.yml's build-push-action step must set a live `platforms:` key to \
+                 emit a multi-arch manifest. Without it the image is linux/amd64-only (issue \
+                 #122).\nwith: block was:\n{with_block}"
+            )
+        });
+
+    for platform in REQUIRED_CONTAINER_PLATFORMS {
+        assert!(
+            platforms_line.contains(platform),
+            "docker-publish.yml `platforms:` must build container platform '{platform}'.\n\
+             Add it to the `platforms:` list AND the Dockerfile cross-compile arch map. Keep \
+             REQUIRED_CONTAINER_PLATFORMS in sync.\n`platforms:` line was:\n{platforms_line}"
+        );
+    }
+
+    // setup-buildx-action is required for multi-platform output; setup-qemu is
+    // required so the arm64/armv7 runtime stage (useradd/apt-get) can execute
+    // under emulation (the Rust compile is cross-compiled, the runtime is not).
+    assert!(
+        content.contains("docker/setup-buildx-action"),
+        "docker-publish.yml must set up docker/setup-buildx-action; multi-platform \
+         manifests cannot be produced by the classic builder."
+    );
+    assert!(
+        content.contains("docker/setup-qemu-action"),
+        "docker-publish.yml must set up docker/setup-qemu-action so the non-native runtime \
+         stages (useradd + apt-get for arm64/armv7) can run under emulation."
+    );
+}
+
+#[test]
+fn test_dockerfile_cross_compiles_for_target_platform() {
+    // The chosen strategy is cross-compilation, not QEMU emulation: the builder
+    // stage runs natively on the build platform and cross-compiles to the target
+    // arch. This test guards the Dockerfile primitives that make that possible so
+    // a future "simplification" cannot silently revert to an amd64-only build (or
+    // to slow/flaky emulated compiles) while the workflow still requests arm64.
+    let root = repo_root();
+    let dockerfile = read_file(&root.join("Dockerfile"));
+
+    // The builder stage must pin itself to the native build platform so cross
+    // compiles never execute target-arch binaries (which would require QEMU).
+    assert!(
+        dockerfile.contains("$BUILDPLATFORM") || dockerfile.contains("${BUILDPLATFORM}"),
+        "Dockerfile must pin the build stage to --platform=$BUILDPLATFORM so cross-compilation \
+         runs natively (no QEMU). Multi-arch is built by cross-compiling, not emulating."
+    );
+
+    // The build must be parameterized by the target arch buildx injects.
+    assert!(
+        dockerfile.contains("TARGETARCH")
+            || dockerfile.contains("TARGETPLATFORM")
+            || dockerfile.contains("TARGETTRIPLE"),
+        "Dockerfile must consume the buildx-provided target arch (TARGETARCH/TARGETPLATFORM) \
+         to select the Rust cross-compilation target."
+    );
+
+    // A genuine cross-compile adds a Rust target and links with a cross linker.
+    assert!(
+        dockerfile.contains("rustup target add") || dockerfile.contains("--target"),
+        "Dockerfile must add/select the Rust cross-compilation target triple \
+         (`rustup target add` / `cargo build --target`)."
+    );
+}
+
+#[test]
+fn test_dockerfile_arch_map_covers_required_platforms() {
+    // Issue #122 was an arm64 *build* gap, not just a missing manifest entry:
+    // the workflow requesting a platform is useless if the Dockerfile's
+    // cross-compile arch map cannot resolve it (it would hit the `*) Unsupported
+    // TARGETARCH; exit 1` branch at build time). The doc comments on
+    // REQUIRED_CONTAINER_PLATFORMS and in the Dockerfile both promise these stay
+    // "in lockstep" — this test is what actually enforces it.
+    let root = repo_root();
+    let live = strip_comment_lines(&read_file(&root.join("Dockerfile")));
+
+    for platform in REQUIRED_CONTAINER_PLATFORMS {
+        let (arch_token, triple) = container_platform_expectations(platform);
+        // Require the triple to be SELECTED by the matching `case` arm on one
+        // line, e.g. `arm64) triple=aarch64-unknown-linux-gnu; ...`. A bare
+        // file-wide `contains(arch_token)` would pass spuriously because the
+        // token is a substring of triples/package names (`v7` ⊂ `armv7-...`,
+        // `arm64` ⊂ `libc6-dev-arm64-cross`), so anchor to the case-arm line.
+        let case_arm = format!("{arch_token})");
+        let triple_assign = format!("triple={triple}");
+        let has_case_arm = live
+            .lines()
+            .any(|l| l.contains(&case_arm) && l.contains(&triple_assign));
+        assert!(
+            has_case_arm,
+            "Dockerfile arch map must have a `case` arm `{case_arm} ... {triple_assign}` that \
+             cross-compiles '{platform}' to '{triple}'. Keep the arch map in lockstep with \
+             REQUIRED_CONTAINER_PLATFORMS."
+        );
+    }
+}
+
+#[test]
+fn test_release_workflow_builds_all_platform_binaries() {
+    // release.yml must build a standalone executable for every supported
+    // OS/arch and attach it to the GitHub Release, not just publish the crate.
+    let root = repo_root();
+    let live = strip_comment_lines(&read_file(&root.join(".github/workflows/release.yml")));
+
+    for (triple, label) in REQUIRED_RELEASE_TARGETS {
+        // Require the triple on a live `- target:` matrix line, not merely
+        // somewhere in the file — a leftover comment naming the triple must not
+        // satisfy this, or a binary could silently stop shipping.
+        let on_matrix_line = live
+            .lines()
+            .any(|l| l.trim_start().starts_with("- target:") && l.contains(triple));
+        assert!(
+            on_matrix_line,
+            "release.yml build matrix must include a `- target: {triple}` entry for {label}. \
+             Keep the matrix in lockstep with REQUIRED_RELEASE_TARGETS."
+        );
+    }
+
+    // One platform's toolchain hiccup must not cancel the others and ship a
+    // release missing binaries (a partial recurrence of "no binaries shipped").
+    assert!(
+        live.contains("fail-fast: false"),
+        "release.yml binary build matrix must set `fail-fast: false` so a single platform's \
+         failure does not strip every other platform's binary off the release."
+    );
+}
+
+#[test]
+fn test_release_workflow_attaches_binaries_with_checksums() {
+    // Prebuilt binaries are only trustworthy/usable if they are (a) uploaded to
+    // the Release and (b) accompanied by checksums users can verify. Match on
+    // the concrete mechanisms, not loose tokens that an SBOM step or a comment
+    // could satisfy.
+    let root = repo_root();
+    let live = strip_comment_lines(&read_file(&root.join(".github/workflows/release.yml")));
+
+    assert!(
+        live.contains("softprops/action-gh-release"),
+        "release.yml must upload built binaries to the GitHub Release \
+         (softprops/action-gh-release)."
+    );
+    // A checksum must actually be COMPUTED for each archive...
+    assert!(
+        live.contains("sha256sum") || live.contains("shasum -a 256"),
+        "release.yml must compute a SHA-256 checksum for each release archive \
+         (`sha256sum` on Linux/Git-Bash, `shasum -a 256` on macOS)."
+    );
+    // ...and the `.sha256` files must be uploaded alongside the archives.
+    assert!(
+        live.contains(".sha256"),
+        "release.yml must upload the `.sha256` checksum files so consumers can verify downloads."
+    );
+    // Both archive formats (unix tar.gz + windows zip) must be produced/uploaded.
+    assert!(
+        live.contains(".tar.gz") && live.contains(".zip"),
+        "release.yml must produce and upload both `.tar.gz` (unix) and `.zip` (windows) archives."
+    );
+    // The attach step must NOT use `fail_on_unmatched_files: true`: that flag is
+    // evaluated per-glob, so a single absent format class (e.g. both Windows
+    // legs failing -> no *.zip) would fail the whole upload and strip EVERY
+    // binary off the release — defeating the fail-fast:false partial-success
+    // design. Per-artifact presence is guarded by `if-no-files-found: error`.
+    assert!(
+        !live.contains("fail_on_unmatched_files: true"),
+        "release.yml attach step must not set `fail_on_unmatched_files: true`; a correlated \
+         leg failure would then strip all binaries off the release instead of attaching the \
+         ones that built."
+    );
+}
+
 #[test]
 fn test_permissions_guidance_avoids_incorrect_default_claim() {
     let root = repo_root();
@@ -3586,12 +3924,18 @@ fn test_dockerfile_uses_docker_version_format() {
 
     let content = read_file(&dockerfile);
 
-    // Extract the Rust version from FROM rust:X.Y or FROM rust:X.Y.Z
+    // Extract the Rust version from a `FROM ... rust:X.Y[-variant]` line.
+    // The base-image line may carry a leading `--platform=$BUILDPLATFORM` flag
+    // (used for multi-arch cross-compilation), so match on the `rust:` tag
+    // anywhere in a FROM line rather than a fixed `FROM rust:` prefix.
     let rust_version = content
         .lines()
-        .find(|line| line.trim().starts_with("FROM rust:"))
+        .find(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("FROM ") && trimmed.contains("rust:")
+        })
         .and_then(|line| {
-            line.split(':')
+            line.split("rust:")
                 .nth(1)
                 .and_then(|s| s.split_whitespace().next())
                 .and_then(|s| s.split('-').next())
@@ -3600,7 +3944,7 @@ fn test_dockerfile_uses_docker_version_format() {
 
     assert!(
         rust_version.is_some(),
-        "Could not find 'FROM rust:' line in Dockerfile"
+        "Could not find a 'FROM ... rust:' line in Dockerfile"
     );
 
     let version = rust_version.unwrap();
