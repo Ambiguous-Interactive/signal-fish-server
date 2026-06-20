@@ -177,6 +177,57 @@ fn test_ci_dep_detect_internal_paths_match_script() {
 }
 
 #[test]
+fn test_pre_commit_doc_version_sync_sites_match_checker() {
+    let root = repo_root();
+    let hook = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let checker = read_file(&root.join("scripts/check-doc-consistency.sh"));
+
+    // The pre-commit auto-repair and the CI checker are two implementations of
+    // one policy: every doc that quotes the crate version must equal
+    // Cargo.toml [package].version. If they target different sites they drift
+    // (auto-fix one file, gate another), which is the exact fragility this
+    // automation exists to prevent. Lock the shared sites and markers here so
+    // the fixer can never cover less than the checker validates.
+    let version_sync_sites = ["docs/library-usage.md", ".llm/context.md"];
+    for site in version_sync_sites {
+        assert!(
+            hook.contains(site),
+            "scripts/hooks/pre-commit.ps1 must auto-sync the crate version in '{site}'."
+        );
+        assert!(
+            checker.contains(site),
+            "scripts/check-doc-consistency.sh must validate the crate version in '{site}'."
+        );
+    }
+
+    let shared_markers = ["signal-fish-server", "- **Version:**"];
+    for marker in shared_markers {
+        assert!(
+            hook.contains(marker),
+            "scripts/hooks/pre-commit.ps1 version sync must handle the '{marker}' marker."
+        );
+        assert!(
+            checker.contains(marker),
+            "scripts/check-doc-consistency.sh version check must handle the '{marker}' marker."
+        );
+    }
+
+    // Assert the canonical site list is actually *declared* with both sites
+    // (not merely mentioned in a comment), so the fixer cannot quietly cover
+    // fewer files than the checker validates.
+    assert!(
+        hook.contains(
+            "$script:DocVersionSyncFiles = @(\"docs/library-usage.md\", \".llm/context.md\")"
+        ),
+        "pre-commit.ps1 must declare $script:DocVersionSyncFiles with both canonical version-sync sites."
+    );
+    assert!(
+        hook.contains("Repair-DocVersionsIfNeeded"),
+        "pre-commit.ps1 must run Repair-DocVersionsIfNeeded so a Cargo.toml version bump auto-syncs docs on commit."
+    );
+}
+
+#[test]
 fn test_local_ci_includes_doc_consistency_gate_and_tests() {
     let root = repo_root();
     let local_ci = read_file(&root.join("scripts/run-local-ci.sh"));
