@@ -1619,7 +1619,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         assert!(
             workflow.contains(command),
             "ci.yml `quick-check` gate must run `{command}`. Formatting catches the \
-             unparseable-file class in under a second; `cargo check --all-targets` \
+             unparsable-file class in under a second; `cargo check --all-targets` \
              catches the broader compile-error class across the test tree."
         );
     }

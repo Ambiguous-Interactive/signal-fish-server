@@ -395,7 +395,7 @@ fn string_literals(src: &str) -> BTreeSet<String> {
 /// the 1-based line of the fenced JSON block it appears in. Each ```json block is
 /// parsed and walked for any `ReconnectionFailed` object (compact or pretty,
 /// nested or top-level), so a paraphrased reason cannot hide behind formatting.
-/// Unparseable blocks are skipped — safe because every real wire example is valid
+/// Unparsable blocks are skipped — safe because every real wire example is valid
 /// JSON, and a bogus reason can only be asserted via a valid example anyway.
 fn documented_reconnection_reasons(markdown: &str) -> Vec<(usize, String)> {
     let lines: Vec<&str> = markdown.lines().collect();
