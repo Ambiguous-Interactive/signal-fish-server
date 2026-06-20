@@ -61,7 +61,7 @@ use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{
     assert_full_mesh_glare_matrix, await_ready_count, expect_finalize_plan,
     expect_session_plan_strict, expect_signal, ordered_pairs, ready, relay_one_signal, send,
-    SERVER_MESSAGE_TIMEOUT,
+    start_game, SERVER_MESSAGE_TIMEOUT,
 };
 use websocket_test_helpers::{
     expect_no_server_message_within, maybe_next_matching_server_message_within,
@@ -291,17 +291,22 @@ async fn join_room(
     .await
 }
 
-/// Drive the paced all-ready handshake: every ready is observed by every
-/// member before the next fires, then the final ready triggers finalization.
+/// Drive the paced all-ready handshake, then explicitly start the game: every
+/// ready is observed by every member before the next fires, and once every
+/// current player is ready an explicit `StartGame` (from the creator socket)
+/// triggers finalization. Readiness alone no longer auto-starts the room.
 async fn finalize_room(sockets: &mut [WsStream]) {
     let member_count = sockets.len();
-    for ready_index in 0..member_count - 1 {
+    for ready_index in 0..member_count {
         ready(&mut sockets[ready_index]).await;
         for socket in sockets.iter_mut() {
             await_ready_count(socket, ready_index + 1).await;
         }
     }
-    ready(&mut sockets[member_count - 1]).await;
+    // Every current player is ready; finalize with one explicit StartGame from
+    // the creator socket (conformance rooms use `supports_authority: false`, so
+    // any member may start).
+    start_game(&mut sockets[0]).await;
 }
 
 /// Assert the exact next message is `PlayerLeft(left)`.
@@ -661,6 +666,24 @@ async fn mixed_v2_v3_n3_relay_floor_no_v3_leakage() {
     )
     .await;
     ready(&mut legacy).await;
+    // Drain the all-ready (3/3) lobby update on the v3 sockets before the
+    // explicit start; the v2 client's copy runs through the v2-only guard.
+    await_ready_count(&mut peer_a, 3).await;
+    await_ready_count(&mut peer_b, 3).await;
+    next_matching_v2_only(
+        &mut legacy,
+        "v2 lobby ready count 3",
+        legacy_who,
+        |message| match message {
+            ServerMessage::LobbyStateChanged { ready_players, .. } if ready_players.len() == 3 => {
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    // Readiness no longer auto-starts: the creator explicitly starts the game.
+    send(&mut peer_a, &ClientMessage::StartGame).await;
 
     // Everyone gets GameStarting; the v3 members must see no plan/pairing.
     for (ws, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
@@ -1397,12 +1420,10 @@ async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
         },
     )
     .await;
-    // Drain the room-full lobby transition so the silence window below is a
-    // strict assertion about the fan-out alone.
-    next_matching_v2_only(&mut legacy, "v2 lobby transition", legacy_who, |message| {
-        matches!(message, ServerMessage::LobbyStateChanged { .. }).then_some(())
-    })
-    .await;
+    // The room entered Lobby EXACTLY ONCE, on the creator (PeerA) joining; the
+    // legacy member is a subsequent joiner, so its RoomJoined already reports the
+    // Lobby state and NO LobbyStateChanged is broadcast on its join — there is
+    // nothing further to drain for the v2 member before the silence window below.
 
     report_transport_status(&mut peer_a, Transport::WebRtc, true).await;
 

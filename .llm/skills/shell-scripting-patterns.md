@@ -277,6 +277,8 @@ use that when adding `--quiet` or deciding which messages must still print on wa
 - [ ] `find` commands use `-type f` when targeting files
 - [ ] Log messages match actual search scope (recursive vs. non-recursive)
 - [ ] `--quiet` suppresses banner, info, success, and summary — never errors or warnings
+- [ ] Best-effort functions (caller uses `if ! f` / `f ||`) `return` non-zero — never `exit`
+- [ ] Python packages installed via `python3 -m pip`, not bare `pip` (matches the interpreter)
 
 ---
 
@@ -286,3 +288,4 @@ use that when adding `--quiet` or deciding which messages must still print on wa
 - [GitHub Actions Bash Scripts](./github-actions-bash-scripts.md) — Shellcheck in CI workflows
 - [CI CD Troubleshooting Scripts](./ci-cd-troubleshooting-scripts.md) — Debugging CI script failures
 - [Validation Script Output Modes](./validation-script-output-modes.md) — `--quiet` behavior and failure-summary rules
+- [Repo Source Hygiene Guards](./repo-source-hygiene-guards.md) — `return`-not-`exit` and `python3 -m pip` guards

@@ -521,7 +521,7 @@ When a dependency requires a newer Rust version, follow the MSRV update checklis
    - Update `CHANGELOG.md`
    - Document reason for MSRV bump in commit message
 
-See [MSRV Management](../.llm/skills/msrv-management.md)
+See [MSRV Management](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/skills/msrv-management.md)
 for comprehensive MSRV management guidance.
 
 ## Continuous Integration

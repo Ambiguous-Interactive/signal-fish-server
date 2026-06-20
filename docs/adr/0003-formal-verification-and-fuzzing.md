@@ -2,7 +2,7 @@
 
 ## Status
 
-ADR-0003 - Accepted
+ADR-0003 - Accepted (amended — see [Update: production-readiness additions](#update-production-readiness-additions))
 
 ## Context
 
@@ -239,6 +239,53 @@ failure traces, with no heavyweight solver dependency or encoding gap.
 avoids (it uses tokio/DashMap with per-task serialization); Kani targets bounded
 numeric/`unsafe` proofs not central to this state-machine-shaped logic, and the
 parser panic-freedom it would provide is already covered on stable.
+
+## Update: production-readiness additions
+
+The "rejected for now" stances on **coverage-guided fuzzing** and **SMT** above
+were revisited for the v2/v3 production-readiness pass and **both were added** —
+each as exactly the _non-stable-gate-weakening_ lane the original ADR anticipated.
+The original reasoning is preserved above as the at-the-time record; this section
+is the amendment.
+
+### Coverage-guided fuzzing (cargo-fuzz / libFuzzer) — added
+
+The ADR named the condition: "a dedicated nightly fuzzing lane that does not
+weaken the stable gate (e.g. an out-of-band scheduled job feeding a corpus, kept
+clearly separate from the required checks)." That is precisely what was built:
+
+- An **out-of-workspace** crate ([`fuzz/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/fuzz/README.md))
+  with an empty `[workspace]` table, so it never perturbs the pinned-stable build.
+- Targets `decode_protocol` and `validate_inputs`, mirroring the stable
+  proptest surfaces, seeded from the canonical `.llm/code-samples/protocol/*.jsonl`.
+- A **nightly-only** CI job (`.github/workflows/fuzz.yml`) on a pinned nightly,
+  separate from the required stable checks. The stable proptest suite remains the
+  always-on gate; any reproducible fuzz finding is added back to
+  `tests/protocol_fuzz_hardening.rs` so it is caught on every `cargo test`.
+
+The stable proptest fuzzer is **still primary**; cargo-fuzz adds coverage-guided
+depth without moving the gate, so the original parity concern is fully preserved.
+
+### SMT proofs (z3) for the pure decision functions — added
+
+The ADR rejected SMT because the v3 properties are _state-machine reachability_
+facts that TLC checks exhaustively with concrete traces. That remains true — and
+TLC is still the primary check for the lifecycle. The added Z3 layer
+([`formal/z3/protocol_invariants.py`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/z3/protocol_invariants.py))
+targets a **complementary** layer TLC cannot reach: the _pure decision functions_
+(ladder selector, `all_support` relay-floor invariant, glare antisymmetry, host
+election) proven over **unbounded** inputs — any member count, any capability mix,
+any id space — where TLC only samples a bounded model. The encoding gap the ADR
+warned about is mitigated by a **self-checking harness** (a deliberately wrong
+selector must produce a `sat` counterexample, so a `PASS` is never vacuous) and a
+dedicated CI job (`.github/workflows/formal-verification.yml`, `z3` job). The
+accepted tradeoff is the dual maintenance of the SMT model alongside the Rust
+source — bounded by keeping the proofs scoped to the small, stable pure-logic
+surface and anchored to function names in `src/server/session_policy.rs` /
+`signaling.rs`.
+
+See [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md#z3-proofs)
+for the proof catalog and the TLA+ ⇄ Z3 division of labour.
 
 ## References
 

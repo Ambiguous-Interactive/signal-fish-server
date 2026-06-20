@@ -144,6 +144,18 @@ assert_contains_literal() {
     fi
 }
 
+assert_not_contains_literal() {
+    local file="$1"
+    local needle="$2"
+    local description="$3"
+
+    if grep -Fq -- "$needle" "$file"; then
+        error_item "$description (unexpected literal: $needle in $file)"
+    else
+        ok "$description"
+    fi
+}
+
 info "Validating CI/devcontainer tooling parity"
 
 require_file "$DOC_VALIDATION_WORKFLOW"
@@ -182,18 +194,32 @@ assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'yq_linux_${yq_arch}' "Devcon
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION"' "Devcontainer installs pinned taplo-cli"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo install --locked cargo-binstall" "Devcontainer installs cargo-binstall"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo binstall --no-confirm --locked" "Devcontainer uses cargo-binstall for heavy cargo tools"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "Acquire::Retries=5" "Devcontainer apt operations enable retry hardening"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)" "Devcontainer release-binary downloads enable curl retries"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV CARGO_NET_RETRY=10" "Devcontainer configures Cargo network retries"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV CARGO_HTTP_TIMEOUT=120" "Devcontainer configures Cargo HTTP timeout"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-deny --version" "Devcontainer smoke checks cargo-deny"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-tarpaulin --version" "Devcontainer smoke checks cargo-tarpaulin"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-watch --version" "Devcontainer smoke checks cargo-watch"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-expand --version" "Devcontainer smoke checks cargo-expand"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo llvm-cov --version" "Devcontainer smoke checks cargo-llvm-cov"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-nextest --version" "Devcontainer smoke checks cargo-nextest"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo mutants --version" "Devcontainer smoke checks cargo-mutants via cargo plugin entrypoint"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo fuzz --help" "Devcontainer smoke checks cargo-fuzz via cargo plugin entrypoint"
+assert_not_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-mutants --version" "Devcontainer avoids unsupported direct cargo-mutants --version smoke check"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "fd --version;" "Devcontainer smoke checks fd"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "yq --version;" "Devcontainer smoke checks yq"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "taplo --version" "Devcontainer smoke checks taplo"
 assert_contains_literal "$DEVCONTAINER_JSON" "ghcr.io/devcontainers/features/docker-outside-of-docker:1" "Devcontainer enables Docker CLI feature"
 assert_contains_literal "$DEVCONTAINER_JSON" '"moby": false' "Devcontainer uses Docker CE path for docker-outside-of-docker reliability"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "verify_required_rust_tools" "Post-create verifies required Rust tools"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! install_codex_cli; then" "Post-create treats Codex install failures as non-fatal"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "run_with_retries 3 5 cargo fetch" "Post-create retries cargo dependency prefetch"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "is_truthy" "Post-create supports standard truthy warm-up values"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo-mutants" "Post-create required-tools list includes cargo-mutants"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo-fuzz" "Post-create required-tools list includes cargo-fuzz"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo mutants --version" "Post-create validates cargo-mutants via cargo plugin entrypoint"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo fuzz --help" "Post-create validates cargo-fuzz via cargo plugin entrypoint"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "SIGNAL_FISH_WARM_CARGO_CHECK" "Post-create uses opt-in cargo warm-up"
 
 if [ "$ERRORS" -gt 0 ]; then

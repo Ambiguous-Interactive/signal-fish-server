@@ -28,7 +28,7 @@ payload-agnostic: it forwards `Signal { receiver -> sender, data }`, emits
 newcomers. Our v3 routing model (Appendix E glare rule, `NewPeer`, opaque
 forwarding) is deliberately the same shape.
 
-The open decision (PLAN.md Appendix L, item 1): should the **recommended** native
+The open decision: should the **recommended** native
 signal payload be matchbox-shaped?
 
 ## Decision

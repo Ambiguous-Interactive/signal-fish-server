@@ -211,7 +211,7 @@ The server responds with a `ReconnectionFailed` message if:
 {
   "type": "ReconnectionFailed",
   "data": {
-    "reason": "The reconnection window has expired. You must join the room again as a new player.",
+    "reason": "Reconnection window has expired",
     "error_code": "RECONNECTION_EXPIRED"
   }
 }

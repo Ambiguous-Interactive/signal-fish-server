@@ -242,6 +242,87 @@ jobs:
 }
 
 #[test]
+fn test_workflow_hygiene_exempts_cargo_fuzz_from_locked_warning() {
+    // cargo-fuzz (0.12/0.13) rejects --locked on `cargo fuzz run`, so the
+    // checker must not warn that `cargo fuzz` is missing --locked.
+    let workflow = r#"name: Fuzz Workflow
+on: [push]
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-fuzz
+        run: cargo fuzz run target -- -runs=1000
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("fuzz.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed for cargo-fuzz.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("missing --locked flag"),
+        "cargo-fuzz rejects --locked and should be exempt from the requirement.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_still_requires_locked_for_cargo_mutants() {
+    // cargo-mutants is NOT exempt: it forwards --locked via --cargo-arg=--locked,
+    // so a bare `cargo mutants` must still warn.
+    let workflow = r#"name: Mutants Workflow
+on: [push]
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-mutants
+        run: cargo mutants --no-shuffle --shard 0/6 -j 4
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("mutants-missing-locked.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should exit success for warning-only cases.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("'cargo mutants' missing --locked flag"),
+        "cargo mutants must still require --locked (forwarded via --cargo-arg=--locked).\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_accepts_cargo_mutants_with_cargo_arg_locked() {
+    // --cargo-arg=--locked satisfies the substring check and is the correct way
+    // to pin cargo-mutants to Cargo.lock (a bare --locked is rejected by the tool).
+    let workflow = r#"name: Mutants Workflow
+on: [push]
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cargo-mutants
+        run: cargo mutants --no-shuffle --shard 0/6 -j 4 --cargo-arg=--locked
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("mutants-with-locked.yml", workflow);
+
+    assert!(
+        success,
+        "Workflow hygiene script should succeed when cargo mutants pins --locked.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("'cargo mutants' missing --locked flag"),
+        "Did not expect a missing --locked warning when --cargo-arg=--locked is present.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_workflow_hygiene_flags_multiline_cargo_sbom_locked_as_error() {
     let workflow = r#"name: SBOM Workflow
 on: [push]
@@ -447,115 +528,299 @@ jobs:
 }
 
 #[test]
-fn test_workflow_hygiene_fails_when_pull_request_rust_cache_missing_save_if() {
-    let workflow = r#"name: Rust Cache Policy
+fn test_workflow_hygiene_pull_request_rust_cache_save_if_policy_matrix() {
+    struct Case<'a> {
+        name: &'a str,
+        workflow: &'a str,
+        expect_success: bool,
+        expected_substrings: &'a [&'a str],
+        forbidden_substrings: &'a [&'a str],
+    }
+
+    let cases = [
+        Case {
+            name: "rust-cache-missing-save-if.yml",
+            workflow: r#"name: Rust Cache Policy
 on:
-  pull_request:
-  push:
+    pull_request:
+    push:
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6.0.3
-      - uses: Swatinem/rust-cache@v2.9.1
-      - run: cargo test --locked
-"#;
-
-    let (success, output) = run_hygiene_with_workflow("rust-cache-missing-save-if.yml", workflow);
-
-    assert!(
-        !success,
-        "Workflow hygiene script must fail when pull_request rust-cache lacks save-if.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("rust-cache step in pull_request workflow must define with.save-if"),
-        "Expected rust-cache save-if policy violation message.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_workflow_hygiene_accepts_pull_request_rust_cache_with_save_if() {
-    let workflow = r#"name: Rust Cache Policy
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+            - run: cargo test --locked
+"#,
+            expect_success: false,
+            expected_substrings: &[
+                "rust-cache step in pull_request workflow must define with.save-if",
+            ],
+            forbidden_substrings: &[],
+        },
+        Case {
+            name: "rust-cache-with-save-if.yml",
+            workflow: r#"name: Rust Cache Policy
 on:
-  pull_request:
-  push:
+    pull_request:
+    push:
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6.0.3
-      - uses: Swatinem/rust-cache@v2.9.1
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo test --locked
-"#;
-
-    let (success, output) = run_hygiene_with_workflow("rust-cache-with-save-if.yml", workflow);
-
-    assert!(
-        success,
-        "Workflow hygiene script should succeed when pull_request rust-cache has save-if.\nOutput:\n{output}"
-    );
-    assert!(
-        !output.contains("rust-cache step in pull_request workflow must define with.save-if"),
-        "Did not expect rust-cache save-if policy violations.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_workflow_hygiene_fails_when_pull_request_rust_cache_has_weak_save_if() {
-    let workflow = r#"name: Rust Cache Policy
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "1 fork-gated, 0 restore-only",
+            ],
+            forbidden_substrings: &[
+                "rust-cache step in pull_request workflow must define with.save-if",
+                "rust-cache save-if must gate fork PR writes",
+            ],
+        },
+        Case {
+            name: "rust-cache-with-double-quoted-pr-literal.yml",
+            workflow: r#"name: Rust Cache Policy
 on:
-  pull_request:
+    pull_request:
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6.0.3
-      - uses: Swatinem/rust-cache@v2.9.1
-        with:
-          save-if: ${{ true }}
-      - run: cargo test --locked
-"#;
-
-    let (success, output) = run_hygiene_with_workflow("rust-cache-weak-save-if.yml", workflow);
-
-    assert!(
-        !success,
-        "Workflow hygiene script must fail when pull_request rust-cache save-if is too weak.\nOutput:\n{output}"
-    );
-    assert!(
-        output.contains("rust-cache save-if must gate fork PR writes"),
-        "Expected rust-cache save-if strength policy violation message.\nOutput:\n{output}"
-    );
-}
-
-#[test]
-fn test_workflow_hygiene_ignores_non_pr_workflow_with_pull_request_string() {
-    let workflow = r#"name: Rust Cache Policy
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: ${{ github.event_name != "pull_request" || github.event.pull_request.head.repo.full_name == github.repository }}
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "1 fork-gated, 0 restore-only",
+            ],
+            forbidden_substrings: &["rust-cache save-if must gate fork PR writes"],
+        },
+        Case {
+            name: "rust-cache-with-multiline-save-if.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: |
+                        ${{ github.event_name != 'pull_request' ||
+                                github.event.pull_request.head.repo.full_name == github.repository }}
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "1 fork-gated, 0 restore-only",
+            ],
+            forbidden_substrings: &["rust-cache save-if must gate fork PR writes"],
+        },
+        Case {
+            name: "rust-cache-weak-save-if.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: ${{ true }}
+            - run: cargo test --locked
+"#,
+            expect_success: false,
+            expected_substrings: &[
+                "rust-cache save-if must gate fork PR writes",
+                "Detected save-if expression (normalized):",
+            ],
+            forbidden_substrings: &[],
+        },
+        Case {
+            name: "rust-cache-weak-partial-gate.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: ${{ github.event_name != 'pull_request' }}
+            - run: cargo test --locked
+"#,
+            expect_success: false,
+            expected_substrings: &[
+                "rust-cache save-if must gate fork PR writes",
+                "Detected save-if expression (normalized):",
+            ],
+            forbidden_substrings: &[],
+        },
+        Case {
+            name: "rust-cache-restore-only-save-if-false.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: false
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "0 fork-gated, 1 restore-only",
+            ],
+            forbidden_substrings: &["rust-cache save-if must gate fork PR writes"],
+        },
+        Case {
+            name: "rust-cache-restore-only-save-if-false-with-comment.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: false # restore only
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "0 fork-gated, 1 restore-only",
+            ],
+            forbidden_substrings: &["rust-cache save-if must gate fork PR writes"],
+        },
+        Case {
+            name: "rust-cache-restore-only-save-if-expression.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: ${{ false }}
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "0 fork-gated, 1 restore-only",
+            ],
+            forbidden_substrings: &["rust-cache save-if must gate fork PR writes"],
+        },
+        Case {
+            name: "rust-cache-restore-only-save-if-quoted.yml",
+            workflow: r#"name: Rust Cache Policy
+on:
+    pull_request:
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+              with:
+                save-if: "false"
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "define safe save-if policies",
+                "0 fork-gated, 1 restore-only",
+            ],
+            forbidden_substrings: &["rust-cache save-if must gate fork PR writes"],
+        },
+        Case {
+            name: "rust-cache-non-pr-string.yml",
+            workflow: r#"name: Rust Cache Policy
 on: [push]
 jobs:
-  lint:
-    if: contains(github.event.pull_request.labels.*.name, 'deps')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6.0.3
-      - uses: Swatinem/rust-cache@v2.9.1
-      - run: cargo test --locked
-"#;
+    lint:
+        if: contains(github.event.pull_request.labels.*.name, 'deps')
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6.0.3
+            - uses: Swatinem/rust-cache@v2.9.1
+            - run: cargo test --locked
+"#,
+            expect_success: true,
+            expected_substrings: &[],
+            forbidden_substrings: &[
+                "rust-cache step in pull_request workflow must define with.save-if",
+            ],
+        },
+    ];
 
-    let (success, output) = run_hygiene_with_workflow("rust-cache-non-pr-string.yml", workflow);
+    for case in cases {
+        let (success, output) = run_hygiene_with_workflow(case.name, case.workflow);
 
-    assert!(
-        success,
-        "Workflow hygiene script should not enforce pull_request rust-cache policy for push-only workflows.\nOutput:\n{output}"
-    );
-    assert!(
-        !output.contains("rust-cache step in pull_request workflow must define with.save-if"),
-        "Did not expect pull_request rust-cache policy violation for push-only workflow.\nOutput:\n{output}"
-    );
+        assert_eq!(
+            success, case.expect_success,
+            "Workflow hygiene script success mismatch for {}.\nOutput:\n{}",
+            case.name, output
+        );
+
+        for expected in case.expected_substrings {
+            assert!(
+                output.contains(expected),
+                "Expected output for {} to include '{}'.\nOutput:\n{}",
+                case.name,
+                expected,
+                output
+            );
+        }
+
+        for forbidden in case.forbidden_substrings {
+            assert!(
+                !output.contains(forbidden),
+                "Did not expect output for {} to include '{}'.\nOutput:\n{}",
+                case.name,
+                forbidden,
+                output
+            );
+        }
+    }
 }

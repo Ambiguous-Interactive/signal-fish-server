@@ -3,6 +3,7 @@
 {"type": "GameData", "data": {"data": {"action": "move", "x": 10}}}
 {"type": "AuthorityRequest", "data": {"become_authority": true}}
 {"type": "PlayerReady"}
+{"type": "StartGame"}
 {"type": "ProvideConnectionInfo", "data": {"connection_info": {"type": "direct", "host": "127.0.0.1", "port": 7777}}}
 {"type": "Reconnect", "data": {"player_id": "...", "room_id": "...", "auth_token": "..."}}
 {"type": "JoinAsSpectator", "data": {"game_name": "...", "room_code": "ABC123", "spectator_name": "Observer"}}

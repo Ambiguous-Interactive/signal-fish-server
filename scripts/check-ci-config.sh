@@ -16,7 +16,10 @@ success() { printf '\033[1;32m[OK]\033[0m    %s\n' "$1"; }
 # ---------------------------------------------------------------------------
 info "Checking Cargo.lock version..."
 if [[ -f Cargo.lock ]]; then
-    LOCK_VERSION=$(grep -m1 '^version' Cargo.lock | sed 's/version = //' | tr -d '"' || true)
+    # `tr` also strips any trailing CR so the exact `== "4"` comparison below
+    # holds on a CRLF-checked-out Cargo.lock (Windows/WSL2 under `* text=auto`),
+    # without depending on a particular grep build's CRLF handling.
+    LOCK_VERSION=$(grep -m1 '^version' Cargo.lock | sed 's/version = //' | tr -d '"\r' || true)
     info "Cargo.lock version: ${LOCK_VERSION:-unknown}"
     if [[ "$LOCK_VERSION" == "4" ]]; then
         # Check whether the CI workflow already uses a compatible action version
@@ -100,7 +103,10 @@ if [[ -f Dockerfile ]]; then
     fi
 
     # Verify HEALTHCHECK port matches EXPOSE port using portable awk/sed parsing.
-    EXPOSE_PORT=$(awk '/^EXPOSE[[:space:]]+[0-9]+/ { port = $2; sub(/\/.*/, "", port); print port; exit }' Dockerfile)
+    # gsub strips any CR so EXPOSE_PORT compares equal to the sed-extracted
+    # HEALTH_PORT on a CRLF-checked-out Dockerfile (sed's trailing `.*` already
+    # swallows the CR; awk's `$2` would otherwise retain it).
+    EXPOSE_PORT=$(awk '/^EXPOSE[[:space:]]+[0-9]+/ { port = $2; sub(/\/.*/, "", port); gsub(/\r/, "", port); print port; exit }' Dockerfile)
     HEALTH_PORT=$(sed -nE '/HEALTHCHECK.*localhost:/ { s/.*localhost:([0-9]+).*/\1/; p; q; }' Dockerfile)
     if [[ -n "$HEALTH_PORT" && -n "$EXPOSE_PORT" ]]; then
         if [[ "$HEALTH_PORT" == "$EXPOSE_PORT" ]]; then

@@ -112,7 +112,7 @@ pub struct ServerMetrics {
     pub relay_client_id_exhaustion_events: AtomicU64,
     pub relay_session_timeouts: AtomicU64,
 
-    // Transport / session-plan metrics (Protocol v3, PLAN §P5)
+    // Transport / session-plan metrics (Protocol v3)
     /// Non-relay `SessionPlan`s actually emitted (one per finalized non-relay
     /// room). Mid-session re-plans and late-join plans are counted separately
     /// (`session_replans_emitted` / `session_plans_late_join`) so this keeps
@@ -160,8 +160,8 @@ pub struct ServerMetrics {
     /// join event never mints twice.
     pub turn_credentials_issued: AtomicU64,
     /// `RoomJoined` / `Reconnected` payloads that actually carried a non-empty
-    /// ICE pre-gather list: exactly once per carrying payload (PLAN §P4's
-    /// deferred "RoomJoined ICE pre-gather" refinement). An eligible joiner
+    /// ICE pre-gather list: exactly once per carrying payload (the deferred
+    /// "RoomJoined ICE pre-gather" refinement). An eligible joiner
     /// whose composed list is empty (no static ICE, no STUN urls, TURN
     /// disabled) skips the field on the wire and is NOT counted.
     pub ice_pregather_emitted: AtomicU64,
@@ -344,7 +344,7 @@ pub struct RelayHealthMetrics {
     pub session_timeouts: u64,
 }
 
-/// Protocol v3 transport / session-plan observability (PLAN §P5).
+/// Protocol v3 transport / session-plan observability.
 ///
 /// Exposes the per-finalized-room topology/transport selection ratios, the
 /// P2P-established-vs-relay-fallback first-report/transition split (reported by
@@ -902,7 +902,7 @@ impl ServerMetrics {
             .fetch_add(count, Ordering::Relaxed);
     }
 
-    // Transport / session-plan metrics (Protocol v3, PLAN §P5)
+    // Transport / session-plan metrics (Protocol v3)
 
     /// Record the topology chosen for one finalized room. Called once per
     /// finalize (in `emit_session_plan`), including the relay-resolved floor, so

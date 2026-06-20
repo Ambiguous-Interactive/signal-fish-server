@@ -92,8 +92,13 @@ Behavior:
 
 1. First send in `lobby` state marks the player ready.
 2. Sending again in `lobby` state marks the player unready.
-3. The server broadcasts `LobbyStateChanged` after each toggle.
-4. When all players are ready, the server sends `GameStarting`.
+3. Readiness may be toggled any time before the room is `finalized`; the room
+   need not be full.
+4. The server broadcasts `LobbyStateChanged` after each toggle, with
+   `all_ready` set once every current player is ready.
+
+Readiness **no longer** starts the game. When every current player is ready,
+the game starts only after an explicit [`StartGame`](#startgame) message.
 
 ```json
 
@@ -107,6 +112,46 @@ This message has no data payload.
 
 If sent while not in a joinable lobby state, the server returns an `Error`
 with `INVALID_ROOM_STATE`.
+
+### StartGame
+
+Explicitly start (finalize) the game with the room's **current** members. This
+message has no payload. `max_players` is a ceiling, not a required count — a
+room need not be full to start (a single ready player may start; solo is
+allowed).
+
+```json
+
+{
+  "type": "StartGame"
+}
+
+```
+
+This message has no data payload.
+
+Preconditions:
+
+1. Every **current** player in the room must be ready (`all_ready`). Otherwise
+   the server returns an `Error` with `GAME_START_NOT_READY`.
+2. The sender must be permitted to start: if the room has a designated
+   authority player, only that authority may start; if no authority is set,
+   **any** member may start. An unauthorized sender receives an `Error` with
+   `GAME_START_FORBIDDEN`.
+
+On success the server transitions the room to `finalized` and broadcasts the
+unchanged [`GameStarting`](#gamestarting) (legacy peer metadata) to every
+member. For a negotiated v3 non-relay room it additionally emits the
+per-recipient [`SessionPlan`](#sessionplan). Sending `StartGame` to an already
+`finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
+
+!!! note "Authority and start liveness"
+    In an authority room, only the authority may start, so the game does not
+    begin until the authority sends `StartGame` — design your client so the
+    authority's UI offers a "Start" action once `all_ready` is reported. If the
+    authority **leaves** the room, the server clears the authority designation,
+    after which any remaining member may start (the room is never locked into
+    `GAME_START_FORBIDDEN` by an authority departure).
 
 ### AuthorityRequest
 
@@ -448,9 +493,11 @@ Lobby state transitioned.
 
 Possible states:
 
-- `waiting` - Waiting for players to join
-- `lobby` - Room is full, players coordinating readiness
-- `finalized` - All players ready, game starting
+- `waiting` - Waiting for the first player to join
+- `lobby` - Players are present and coordinating readiness (the room need not be
+  full; `max_players` is a ceiling)
+- `finalized` - The game has started after an explicit `StartGame` (sent once
+  every current player is ready)
 
 ### AuthorityChanged
 
@@ -607,7 +654,7 @@ Reconnection failed.
 {
   "type": "ReconnectionFailed",
   "data": {
-    "reason": "The reconnection token is invalid or malformed.",
+    "reason": "Invalid reconnection token",
     "error_code": "RECONNECTION_TOKEN_INVALID"
   }
 }
@@ -775,7 +822,11 @@ Client                              Server
   |<-- PlayerJoined -------------------|
   |                                    |
   |--- PlayerReady ------------------->|
-  |<-- LobbyStateChanged (lobby) ------|
+  |<-- LobbyStateChanged (all_ready) --|
+  |                                    |
+  |--- StartGame --------------------->|
+  |<-- GameStarting -------------------|
+  |    (+ SessionPlan on v3 non-relay) |
   |                                    |
   |--- GameData ---------------------->|
   |<-- GameData (from other player) ---|
@@ -817,8 +868,8 @@ a v3 message — the relay floor is the universal default and a v2 client observ
 
 Canonical wire samples for this section:
 
-- [v3 client messages](../.llm/code-samples/protocol/v3-client-messages.jsonl)
-- [v3 server messages](../.llm/code-samples/protocol/v3-server-messages.jsonl)
+- [v3 client messages](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl)
+- [v3 server messages](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl)
 
 See also the [Transport Fallback Contract](architecture/transport-fallback.md) (client-side state machine and the
 relay-floor guarantee) and [Handoff and Topologies](architecture/handoff-and-topologies.md) (mesh / host / relay
@@ -1138,8 +1189,9 @@ Every WebRTC `SessionPlan` carries an `ice_servers` list:
   `urls`). Each recipient receives its **own** short-lived credential: `username` is
   `"<expiry-unix>:<player-uuid>"` and `credential` is the base64 of `HMAC-SHA1(static_auth_secret, username)`
   (the coturn REST scheme). The static auth secret is **never** sent to clients. The `username` / `credential`
-  values in the [v3 server-message samples](../.llm/code-samples/protocol/v3-server-messages.jsonl) are
-  **illustrative placeholders, not a real credential** (the sample `credential` is not the actual HMAC of the
+  values in the
+  [v3 server-message samples](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl)
+  are **illustrative placeholders, not a real credential** (the sample `credential` is not the actual HMAC of the
   shown `username`).
 
 See the [TURN and STUN configuration](configuration.md#turn-and-stun-ice-credentials-protocol-v3) section and the

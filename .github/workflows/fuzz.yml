@@ -1,0 +1,125 @@
+# Coverage-guided Fuzzing Workflow (cargo-fuzz / libFuzzer)
+#
+# The NIGHTLY counterpart to the stable in-suite proptest fuzzer
+# (tests/protocol_fuzz_hardening.rs, run on every `cargo test`). This job builds
+# the out-of-workspace fuzz crate (fuzz/) on the nightly toolchain and smoke-runs
+# each target for a bounded time, seeded from the canonical wire samples. A
+# crash (panic/abort/overflow on the decode or validation surface) fails the job
+# and uploads the reproducing artifact.
+#
+# Kept off the stable toolchain and out of the workspace so it never perturbs the
+# pinned-stable build (ADR-0003); see fuzz/README.md.
+
+name: Fuzzing
+
+on:
+  schedule:
+    # Daily 04:00 UTC.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to fuzz each target"
+        required: false
+        default: "120"
+  pull_request:
+    branches: [main]
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+      - "src/protocol/**"
+      - "src/websocket/token_binding.rs"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: cargo-fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_protocol, validate_inputs]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+
+      # Nightly Toolchain Strategy:
+      #   cargo-fuzz/libFuzzer requires NIGHTLY Rust: the sanitizer instrumentation
+      #   is driven by unstable `-Z` compiler flags (e.g. -Zsanitizer=address) that
+      #   are not available on the pinned stable MSRV. Production artifacts are never
+      #   built with nightly (ADR-0003); this nightly is CI-only, for the fuzz crate.
+      #
+      #   Nightly Version: nightly-2026-02-01 (kept in sync with unused-deps.yml)
+      #
+      #   Update Criteria (when to bump this pin):
+      #     - If the nightly version is >6 months old
+      #     - If security advisories affect this version
+      #     - If cargo-fuzz/libFuzzer requires newer nightly sanitizer features
+      #     - If the nightly version becomes unavailable or broken
+      #
+      #   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-02-01
+          # Explicitly add the gnu std target for this nightly. The runner is a
+          # gnu host (so gnu std is already present via the host toolchain), but
+          # pin it here so the `--target x86_64-unknown-linux-gnu` build below is
+          # robust regardless of how cargo-fuzz was installed. See the Fuzz step.
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2.81.10
+        with:
+          tool: cargo-fuzz
+
+      - name: Seed corpus from canonical wire samples
+        if: matrix.target == 'decode_protocol'
+        run: |
+          mkdir -p fuzz/corpus/decode_protocol
+          i=0
+          for f in .llm/code-samples/protocol/*.jsonl; do
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              printf '%s' "$line" > "fuzz/corpus/decode_protocol/seed_$i"
+              i=$((i + 1))
+            done < "$f"
+          done
+          echo "Seeded $i corpus entries"
+
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '120' }}
+        # `--target x86_64-unknown-linux-gnu` is REQUIRED, not cosmetic. cargo-fuzz
+        # derives its DEFAULT build target from its OWN binary's host triple, and
+        # taiki-e/install-action installs the musl-built cargo-fuzz (cargo-binstall
+        # fallback), so the default target becomes x86_64-unknown-linux-musl. On a
+        # gnu runner that build fails: ASan is incompatible with musl's static crt
+        # and musl std is not installed (cargo-fuzz#398). Pinning the gnu target
+        # makes the instrumented build use gnu std + a working sanitizer. Do not
+        # remove. (No --locked: cargo-fuzz rejects it.)
+        run: |
+          cargo +nightly-2026-02-01 fuzz run ${{ matrix.target }} \
+            --target x86_64-unknown-linux-gnu -- \
+            -max_total_time="${MAX_TOTAL_TIME}" -max_len=65536
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

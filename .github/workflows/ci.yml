@@ -48,8 +48,56 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Fast-fail gate. A single cheap "does it format and compile" pass that the
+  # expensive compile/test jobs in this workflow depend on via `needs:
+  # quick-check`. A file that does not parse or type-check fails here in seconds,
+  # so the eight gated lanes (lint x3, nextest x3, msrv, coverage) never start —
+  # collapsing what was a redundant per-lane recompile-and-fail into one fast
+  # failure. This exists because an unclosed delimiter in a committed test file
+  # once failed every one of those lanes independently. (Compile jobs in sibling
+  # workflows such as ci-safety.yml and doc-validation.yml are out of scope here;
+  # see test_ci_quick_check_gate_guards_expensive_jobs which pins this wiring.)
+  quick-check:
+    name: Quick Check
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # Formatting first: an unclosed delimiter or otherwise unparseable file
+      # fails this in well under a second — the cheapest signal for the
+      # syntactic-corruption class that motivated this gate.
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      # Then a no-codegen type-check across ALL targets (tests/ and benches/
+      # included). This is what catches a compile error in the test tree before
+      # the expensive matrix spends minutes rediscovering it on every lane.
+      - name: Check compilation
+        run: cargo check --locked --all-targets --all-features
+
   lint:
     name: Lint (${{ matrix.os }})
+    needs: quick-check
     if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -126,6 +174,7 @@ jobs:
 
   nextest:
     name: Nextest (${{ matrix.os }})
+    needs: quick-check
     if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -155,7 +204,26 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Install cargo-nextest
+      # cargo-nextest install is retried because windows-latest runner images
+      # intermittently fail install-action with a "bash startup failure" BEFORE
+      # the action's own internal retries kick in (upstream runner-image bug:
+      # https://github.com/actions/partner-runner-images/issues/169). A single
+      # transient failure should not force a manual CI re-run. GitHub Actions has
+      # no native step-level retry, so we use the repo's existing
+      # id + continue-on-error + outcome-gated retry idiom (mirrors the SBOM
+      # step in release.yml) instead of adding a new third-party action.
+      # The retry is harmless cross-OS: on non-Windows the first attempt
+      # effectively never hits this flake, so the second attempt is skipped.
+      - name: Install cargo-nextest (attempt 1)
+        id: install_nextest
+        continue-on-error: true
+        uses: taiki-e/install-action@v2.81.10
+        with:
+          tool: cargo-nextest
+      - name: Install cargo-nextest (retry on transient runner failure)
+        # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
+        # No continue-on-error here, so a second failure correctly fails the job.
+        if: steps.install_nextest.outcome == 'failure'
         uses: taiki-e/install-action@v2.81.10
         with:
           tool: cargo-nextest
@@ -163,6 +231,17 @@ jobs:
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: cargo nextest run --profile ci --locked --all-features
+
+      - name: Drop trybuild artifacts before cache save
+        # trybuild builds nested cargo projects under `<target>/tests`. Swatinem/rust-cache's
+        # restore-time cleanup probes `<target>/tests/target` (a path trybuild never creates) in a
+        # non-awaited call, surfacing a benign but noisy `##[error]ENOENT` whenever a restored
+        # cache contains that dir. Dropping it before the post-run cache save keeps it out of
+        # future caches; the noise self-clears after one save cycle (a cache saved before this
+        # step still shows it once on restore).
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
 
   doc-consistency:
     name: Doc Consistency
@@ -326,6 +405,7 @@ jobs:
 
   msrv:
     name: MSRV Verification
+    needs: quick-check
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -368,6 +448,12 @@ jobs:
           cargo test --locked --all-features --no-fail-fast
           echo "✓ Build and tests successful with MSRV ${{ steps.msrv.outputs.msrv }}"
 
+      - name: Drop trybuild artifacts before cache save
+        # See the nextest job: prevents the trybuild/rust-cache `##[error]ENOENT` noise.
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+
   docker:
     name: Docker Build
     if: github.event_name != 'schedule'
@@ -407,6 +493,7 @@ jobs:
 
   coverage:
     name: Coverage (llvm-cov)
+    needs: quick-check
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -451,6 +538,12 @@ jobs:
           name: coverage-report
           path: lcov.info
           retention-days: 14
+
+      - name: Drop trybuild artifacts before cache save
+        # See the nextest job: prevents the trybuild/rust-cache `##[error]ENOENT` noise.
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
 
   panic-policy:
     name: Panic Policy

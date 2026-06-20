@@ -33,9 +33,10 @@ relay (floor)      ← always available
 
 ## The finalization handoff seam
 
-The handoff happens at lobby finalization — the moment all players are ready and
-the server broadcasts the unchanged `GameStarting`. The sequence per recipient is
-strictly `GameStarting` **then** `SessionPlan`:
+The handoff happens at lobby finalization — when a member sends `StartGame` while
+every current player is ready, and the server broadcasts the unchanged
+`GameStarting`. The sequence per recipient is strictly `GameStarting`
+**then** `SessionPlan`:
 
 1. **Finalize.** The coordinator finalizes the room and broadcasts `GameStarting`
    to every member, exactly as in v2.

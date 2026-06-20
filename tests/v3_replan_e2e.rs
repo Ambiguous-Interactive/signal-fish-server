@@ -351,6 +351,13 @@ async fn host_disconnect_reelects_host_and_reissues_session_plans() {
         await_ready_count(ws, 2).await;
     }
     ready(&mut peer_b).await;
+    for ws in [&mut host, &mut peer_a, &mut peer_b] {
+        await_ready_count(ws, 3).await;
+    }
+
+    // Readiness no longer auto-starts: the creator (an ordinary member here,
+    // supports_authority: false) sends an explicit StartGame to finalize.
+    send(&mut host, &ClientMessage::StartGame).await;
 
     // Finalize: everyone gets GameStarting then a host-topology SessionPlan
     // naming the creator as host.
@@ -447,6 +454,12 @@ async fn relay_room_departure_then_v3_late_join_emits_no_plan_or_new_peer() {
     await_ready_count(&mut peer_a, 1).await;
     await_ready_count(&mut legacy, 1).await;
     ready(&mut legacy).await;
+    await_ready_count(&mut peer_a, 2).await;
+    await_ready_count(&mut legacy, 2).await;
+
+    // Readiness no longer auto-starts: the v3 creator sends an explicit
+    // StartGame to finalize the relay-floored room.
+    send(&mut peer_a, &ClientMessage::StartGame).await;
 
     // Both observe GameStarting; the relay floor emits no SessionPlan, so the
     // next interesting event for peer_a is the departure below.
@@ -535,6 +548,11 @@ async fn mesh_late_join_sends_joiner_plan_and_existing_member_new_peer() {
     await_ready_count(&mut peer_a, 1).await;
     await_ready_count(&mut peer_b, 1).await;
     ready(&mut peer_b).await;
+    await_ready_count(&mut peer_a, 2).await;
+    await_ready_count(&mut peer_b, 2).await;
+
+    // Readiness no longer auto-starts: an explicit StartGame finalizes.
+    send(&mut peer_a, &ClientMessage::StartGame).await;
 
     let plan_a = expect_finalize_plan(&mut peer_a, "peer_a").await;
     assert_eq!(plan_a.topology, Topology::Mesh);

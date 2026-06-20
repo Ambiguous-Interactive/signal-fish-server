@@ -664,7 +664,13 @@ split_shell_statements() {
 #   - cargo init/new/search/login/owner/yank: Registry or scaffolding commands,
 #     not project builds (unlikely in CI but listed for completeness)
 #   - cargo bench: Benchmarking, not a correctness gate
-LOCKED_EXEMPT_PATTERNS="audit|fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench"
+#   - cargo fuzz: cargo-fuzz (0.12/0.13) rejects --locked on `cargo fuzz run`
+#     ("Found argument '--locked' which wasn't expected"); there is no supported
+#     way to forward --locked, so requiring it would force an invalid flag.
+#     NOTE: cargo-mutants is NOT exempt — it forwards --locked correctly via
+#     `--cargo-arg=--locked` (the substring satisfies the check below), so the
+#     mutation workflow stays lockfile-pinned.
+LOCKED_EXEMPT_PATTERNS="audit|fmt|publish|install|machete|sbom|clean|init|new|search|login|owner|yank|bench|fuzz"
 
 MISSING_LOCKED=0
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
@@ -1044,6 +1050,7 @@ info "Checking pull_request workflows for rust-cache save-if gating..."
 
 RUST_CACHE_SAVE_IF_VIOLATIONS=0
 RUST_CACHE_GATED_STEPS=0
+RUST_CACHE_RESTORE_ONLY_STEPS=0
 PULL_REQUEST_TRIGGER_PATTERN='^[[:space:]]*pull_request:[[:space:]]*$|^[[:space:]]*-[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*pull_request([[:space:]]|$)|^[[:space:]]*on:[[:space:]]*\[[^]]*pull_request'
 
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
@@ -1056,13 +1063,18 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
         continue
     fi
 
-    while IFS=$'\t' read -r cache_line save_if_state; do
+    while IFS=$'\t' read -r cache_line save_if_state save_if_preview; do
         [ -n "$cache_line" ] || continue
         if [ "$save_if_state" = "2" ]; then
             RUST_CACHE_GATED_STEPS=$((RUST_CACHE_GATED_STEPS + 1))
+        elif [ "$save_if_state" = "3" ]; then
+            RUST_CACHE_RESTORE_ONLY_STEPS=$((RUST_CACHE_RESTORE_ONLY_STEPS + 1))
         elif [ "$save_if_state" = "1" ]; then
             error "$WORKFLOW_NAME:$cache_line: rust-cache save-if must gate fork PR writes"
-            error "  Use event_name + head.repo.full_name checks to restrict untrusted cache saves."
+            error "  Use event_name + head.repo.full_name checks, or disable writes with save-if: false."
+            if [ -n "$save_if_preview" ]; then
+                error "  Detected save-if expression (normalized): $save_if_preview"
+            fi
             RUST_CACHE_SAVE_IF_VIOLATIONS=$((RUST_CACHE_SAVE_IF_VIOLATIONS + 1))
         else
             error "$WORKFLOW_NAME:$cache_line: rust-cache step in pull_request workflow must define with.save-if"
@@ -1074,11 +1086,118 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
         #   0 = missing save-if
         #   1 = present but does not enforce fork-safe structure
         #   2 = present with expected fork-safe structure
+        #   3 = present and explicitly disables writes (restore-only)
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+
+        function leading_spaces(s, n) {
+            n = 0
+            while (substr(s, n + 1, 1) == " ") {
+                n++
+            }
+            return n
+        }
+
+        function strip_inline_comment(s, i, ch, out, in_single, in_double, prev_char, single_quote) {
+            out = ""
+            in_single = 0
+            in_double = 0
+            prev_char = " "
+            single_quote = sprintf("%c", 39)
+
+            for (i = 1; i <= length(s); i++) {
+                ch = substr(s, i, 1)
+
+                if (ch == single_quote && !in_double) {
+                    in_single = !in_single
+                    out = out ch
+                    prev_char = ch
+                    continue
+                }
+
+                if (ch == "\"" && !in_single) {
+                    in_double = !in_double
+                    out = out ch
+                    prev_char = ch
+                    continue
+                }
+
+                if (ch == "#" && !in_single && !in_double &&
+                    (i == 1 || prev_char ~ /[[:space:]]/)) {
+                    break
+                }
+
+                out = out ch
+                prev_char = ch
+            }
+
+            return trim(out)
+        }
+
+        function normalize_save_if(value, normalized, single_quote, first_char, last_char) {
+            value = strip_inline_comment(value)
+            normalized = tolower(value)
+            gsub(/[[:space:]]+/, "", normalized)
+
+            if (length(normalized) >= 2) {
+                single_quote = sprintf("%c", 39)
+                first_char = substr(normalized, 1, 1)
+                last_char = substr(normalized, length(normalized), 1)
+                if ((first_char == "\"" && last_char == "\"") ||
+                    (first_char == single_quote && last_char == single_quote)) {
+                    normalized = substr(normalized, 2, length(normalized) - 2)
+                }
+            }
+
+            return normalized
+        }
+
+        function classify_save_if(value, normalized, single_quote, double_quote, gate_event_single_pattern, gate_event_double_pattern, gate_repo_pattern) {
+            normalized = normalize_save_if(value)
+
+            if (normalized == "false" || normalized == "${{false}}" ||
+                normalized == "0" || normalized == "${{0}}") {
+                return 3
+            }
+
+            single_quote = sprintf("%c", 39)
+            double_quote = "\""
+            gate_event_single_pattern = "github.event_name!=" single_quote "pull_request" single_quote
+            gate_event_double_pattern = "github.event_name!=" double_quote "pull_request" double_quote
+            gate_repo_pattern = "github.event.pull_request.head.repo.full_name==github.repository"
+
+            if ((index(normalized, gate_event_single_pattern) > 0 ||
+                 index(normalized, gate_event_double_pattern) > 0) &&
+                index(normalized, "||") > 0 &&
+                index(normalized, gate_repo_pattern) > 0) {
+                return 2
+            }
+
+            return 1
+        }
+
+        function finalize_multiline_save_if() {
+            if (!collecting_save_if) {
+                return
+            }
+
+            cache_save_if_preview = normalize_save_if(save_if_expression)
+            cache_save_if_state = classify_save_if(save_if_expression)
+            collecting_save_if = 0
+            save_if_expression = ""
+            save_if_indent = -1
+        }
+
         function flush_step() {
             if (!in_cache_step) return
-            printf "%d\t%d\n", cache_line, cache_save_if_state
+            finalize_multiline_save_if()
+            printf "%d\t%d\t%s\n", cache_line, cache_save_if_state, cache_save_if_preview
             in_cache_step = 0
             cache_save_if_state = 0
+            cache_save_if_preview = ""
             cache_line = 0
         }
 
@@ -1089,6 +1208,18 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
         }
 
         {
+            if (collecting_save_if) {
+                current_indent = leading_spaces($0)
+                if ($0 ~ /^[[:space:]]*$/ || current_indent > save_if_indent) {
+                    save_if_line = strip_inline_comment($0)
+                    if (length(save_if_line) > 0) {
+                        save_if_expression = save_if_expression " " save_if_line
+                    }
+                    next
+                }
+                finalize_multiline_save_if()
+            }
+
             if ($0 ~ /^[[:space:]-]*uses:[[:space:]]*Swatinem\/rust-cache@/) {
                 if (in_cache_step) {
                     flush_step()
@@ -1096,18 +1227,25 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                 in_cache_step = 1
                 cache_line = NR
                 cache_save_if_state = 0
+                cache_save_if_preview = ""
                 next
             }
 
             if (in_cache_step && $0 ~ /^[[:space:]]*save-if:[[:space:]]*/) {
                 cache_save_if_state = 1
-                if ($0 ~ /github\.event_name[[:space:]]*!=/ &&
-                    $0 ~ /pull_request/ &&
-                    $0 ~ /\|\|/ &&
-                    $0 ~ /github\.event\.pull_request\.head\.repo\.full_name/ &&
-                    $0 ~ /==/ &&
-                    $0 ~ /github\.repository/) {
-                    cache_save_if_state = 2
+                save_if_value = $0
+                sub(/^[[:space:]]*save-if:[[:space:]]*/, "", save_if_value)
+                save_if_value = trim(save_if_value)
+                save_if_indicator = strip_inline_comment(save_if_value)
+
+                if (tolower(save_if_indicator) ~ /^[|>][0-9+-]*$/) {
+                    collecting_save_if = 1
+                    save_if_indent = leading_spaces($0)
+                    save_if_expression = ""
+                    cache_save_if_preview = ""
+                } else {
+                    cache_save_if_preview = normalize_save_if(save_if_value)
+                    cache_save_if_state = classify_save_if(save_if_value)
                 }
             }
         }
@@ -1119,7 +1257,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 done
 
 if [ "$RUST_CACHE_SAVE_IF_VIOLATIONS" -eq 0 ]; then
-    success "All pull_request rust-cache steps define save-if gating ($RUST_CACHE_GATED_STEPS checked)"
+    success "All pull_request rust-cache steps define safe save-if policies ($RUST_CACHE_GATED_STEPS fork-gated, $RUST_CACHE_RESTORE_ONLY_STEPS restore-only)"
 fi
 echo ""
 

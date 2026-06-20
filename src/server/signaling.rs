@@ -1,4 +1,4 @@
-//! Targeted WebRTC signal relay (Protocol v3, PLAN §P2/§P3).
+//! Targeted WebRTC signal relay (Protocol v3).
 //!
 //! Relays opaque WebRTC signals (offer/answer/trickle-ICE) to a specific peer in
 //! the same room ([`EnhancedGameServer::handle_signal`]) and brings a peer that
@@ -76,7 +76,7 @@ impl EnhancedGameServer {
     /// security invariants (payload size cap, same room, negotiated WebRTC,
     /// rate limit, v3 target).
     pub async fn handle_signal(&self, from: &PlayerId, to: PlayerId, signal: serde_json::Value) {
-        // 0. Payload size cap (PLAN Appendix I). Checked first because the cap
+        // 0. Payload size cap. Checked first because the cap
         //    is a property of the frame itself, independent of room/transport
         //    state, and rejecting before any lookup keeps oversized payloads
         //    maximally cheap. Size is the canonical serialized JSON byte
@@ -226,7 +226,7 @@ impl EnhancedGameServer {
     /// Initial pairing for a freshly finalized lobby is the `SessionPlan`'s job
     /// at finalize (`session_policy.rs`); this path only fires once the room is
     /// live, and it consults the **stored** `ActiveSessionPlan` rather than
-    /// re-running the selection ladder (PLAN Appendix L decision #4):
+    /// re-running the selection ladder:
     ///
     /// 1. The room must be `Finalized` — premature lobby-fill pairing is
     ///    suppressed (the `SessionPlan` delivers initial pairing at finalize).

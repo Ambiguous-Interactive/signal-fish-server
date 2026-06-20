@@ -38,6 +38,16 @@ pub async fn ready(ws: &mut WsStream) {
     send(ws, &ClientMessage::PlayerReady).await;
 }
 
+/// Explicitly start the game. `max_players` is a ceiling, not a required count,
+/// and readiness alone never finalizes — the room starts only on an explicit
+/// `StartGame` sent by the authority (or, when no authority is set, any member).
+/// The conformance rooms are created with `supports_authority: false`, so any
+/// member may start; sending from the creator is always valid (the creator is
+/// the authority when authority is enabled, and an ordinary member otherwise).
+pub async fn start_game(ws: &mut WsStream) {
+    send(ws, &ClientMessage::StartGame).await;
+}
+
 /// Drain messages until a `LobbyStateChanged` reports exactly `count` ready
 /// players (paces the ready handshake; mirrors `v3_session_plan_e2e.rs`).
 pub async fn await_ready_count(ws: &mut WsStream, count: usize) {

@@ -169,13 +169,14 @@ The server confirms with a `SpectatorLeft` response:
 ## When Spectator Join Fails
 
 If the room does not exist or spectating is not allowed, the server
-responds with `SpectatorJoinFailed`:
+responds with an `Error` carrying the reason and an `error_code` (for a
+missing room, the literal reason is `Room not found`):
 
 ```json
 {
-  "type": "SpectatorJoinFailed",
+  "type": "Error",
   "data": {
-    "reason": "The requested room could not be found.",
+    "message": "Room not found",
     "error_code": "ROOM_NOT_FOUND"
   }
 }
@@ -199,8 +200,8 @@ responds with `SpectatorJoinFailed`:
 Rooms accept an unlimited number of spectators -- there is currently no
 configuration option to cap spectator count per room. The protocol does
 reserve a `TOO_MANY_SPECTATORS` error code: if a per-room limit is ever
-introduced, a spectator exceeding it would receive a `SpectatorJoinFailed`
-response carrying that code. Until then, the limit is never reached.
+introduced, a spectator exceeding it would receive an `Error` response
+carrying that code. Until then, the limit is never reached.
 
 ## Next Steps
 

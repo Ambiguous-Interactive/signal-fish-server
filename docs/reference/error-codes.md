@@ -101,6 +101,8 @@ Errors related to room lifecycle, capacity, and membership.
 | `ROOM_CREATION_FAILED` | Failed to create the room. Try again later. |
 | `MAX_ROOMS_PER_GAME_EXCEEDED` | The maximum number of rooms for this game has been reached. |
 | `INVALID_ROOM_STATE` | The room is in an invalid state for this operation. |
+| `GAME_START_NOT_READY` | `StartGame` was sent before every current player was ready. |
+| `GAME_START_FORBIDDEN` | `StartGame` was sent by a player not permitted to start (the room has a designated authority and the sender is not it). |
 
 ### Authority Errors (4xxx)
 

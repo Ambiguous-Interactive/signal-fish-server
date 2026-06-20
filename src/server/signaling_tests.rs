@@ -812,7 +812,7 @@ async fn rejected_signals_do_not_consume_valid_signal_budget() {
 }
 
 // ---------------------------------------------------------------------------
-// Signal payload size cap (`security.max_signal_bytes`, PLAN Appendix I).
+// Signal payload size cap (`security.max_signal_bytes`).
 // ---------------------------------------------------------------------------
 
 /// Register a v3+WebRTC pair sharing one room on `server`.

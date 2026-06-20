@@ -23,6 +23,7 @@ use common::bash_command;
 use common::{read_file, repo_root};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
+use saphyr::{LoadableYamlNode, Yaml};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -1594,6 +1595,53 @@ fn test_ci_workflow_has_required_jobs() {
 }
 
 #[test]
+fn test_ci_quick_check_gate_guards_expensive_jobs() {
+    // Self-guard for the fail-fast gate. `quick-check` is the mechanism that stops
+    // a non-compiling or unformatted file from wasting the whole compile/test
+    // matrix — a single unclosed delimiter once failed every compile job
+    // independently. Without this assertion the gate (or its `needs:` edges) could
+    // be silently dropped in a CI refactor while every other check stayed green:
+    // the exact "unenforced invariant" failure mode that allowed the original
+    // breakage. So pin both the gate's existence/commands and the edges that make
+    // it actually gate.
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+
+    assert!(
+        workflow.contains("\n  quick-check:"),
+        "ci.yml must define a `quick-check` fail-fast gate job so a parse/compile \
+         error is caught once, in seconds, before the expensive matrix fans out."
+    );
+    for command in [
+        "cargo fmt --all -- --check",
+        "cargo check --locked --all-targets --all-features",
+    ] {
+        assert!(
+            workflow.contains(command),
+            "ci.yml `quick-check` gate must run `{command}`. Formatting catches the \
+             unparsable-file class in under a second; `cargo check --all-targets` \
+             catches the broader compile-error class across the test tree."
+        );
+    }
+
+    // Every expensive compile/test job must wait on the gate. `needs:` is declared
+    // in the first few lines of a job block, so a bounded window after the header
+    // is sufficient and avoids brittle full-block parsing.
+    for job in ["lint", "nextest", "msrv", "coverage"] {
+        let header = format!("\n  {job}:");
+        let start = workflow
+            .find(&header)
+            .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
+        let block_end = (start + 300).min(workflow.len());
+        assert!(
+            workflow[start..block_end].contains("needs: quick-check"),
+            "ci.yml `{job}` job must declare `needs: quick-check` so it does not \
+             start until the fail-fast gate passes."
+        );
+    }
+}
+
+#[test]
 fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
     let root = repo_root();
     let workflow = read_file(&root.join(".github/workflows/ci.yml"));
@@ -1930,111 +1978,171 @@ fn test_workflow_files_are_valid_yaml() {
         let content = read_file(&path);
         let filename = path.file_name().unwrap().to_string_lossy();
 
-        // Basic YAML validation checks
-        // Note: This is not a full YAML parser, but catches common errors
-
-        // Check for balanced quotes, but only on YAML-level lines (not inside
-        // multiline scalar blocks). Shell scripts embedded via `run: |` and
-        // folded scalars like `args: >-` can legitimately have odd quote
-        // counts (AWK programs, glob patterns, etc.), so we skip lines
-        // inside any YAML multiline scalar block.
-        let mut single_quotes = 0;
-        let mut double_quotes = 0;
-        let mut in_multiline_block = false;
-        let mut block_indent = 0;
-
-        for line in content.lines() {
-            let stripped = line.trim();
-            let indent = line.len() - line.trim_start().len();
-
-            // Detect start of any YAML multiline scalar block.
-            // Matches patterns like: "key: |", "key: >-", "key: |+", etc.
-            // The scalar indicator (|, >, |-, >-, |+, >+) after a colon
-            // signals that subsequent indented lines are scalar content.
-            if stripped.contains(": |") || stripped.contains(": >") {
-                // Verify this looks like a YAML key: value with a block scalar indicator
-                // (not just any line that happens to contain ": |")
-                let after_colon = stripped
-                    .split_once(": ")
-                    .map(|(_, rest)| rest.trim())
-                    .unwrap_or("");
-                if after_colon == "|"
-                    || after_colon == "|-"
-                    || after_colon == "|+"
-                    || after_colon == ">"
-                    || after_colon == ">-"
-                    || after_colon == ">+"
-                {
-                    in_multiline_block = true;
-                    block_indent = indent;
-                    continue;
-                }
-            }
-
-            // Detect end of multiline block (line at same or lesser indent, non-empty)
-            if in_multiline_block && !stripped.is_empty() && indent <= block_indent {
-                in_multiline_block = false;
-            }
-
-            // Only count quotes on YAML-level lines, not multiline scalar content
-            if !in_multiline_block {
-                single_quotes += line.matches('\'').count();
-                double_quotes += line.matches('"').count();
-            }
+        if let Some(error) = workflow_yaml_error(&filename, &content) {
+            errors.push(error);
         }
+    }
 
-        if single_quotes % 2 != 0 {
-            errors.push(format!(
-                "{filename}: Unbalanced single quotes in YAML lines (found {single_quotes} quotes)\n  \
-                 Check for missing closing quotes in strings (shell script blocks excluded)"
-            ));
-        }
+    assert!(
+        errors.is_empty(),
+        "Workflow files failed YAML validation:\n\n{}\n\n\
+         Each workflow must parse as a YAML 1.2 mapping with `name`, `on`, and `jobs` \
+         top-level keys. For full style diagnostics run:\n    yamllint .github/workflows/",
+        errors.join("\n")
+    );
+}
 
-        if double_quotes % 2 != 0 {
-            errors.push(format!(
-                "{filename}: Unbalanced double quotes in YAML lines (found {double_quotes} quotes)\n  \
-                 Check for missing closing quotes in strings (shell script blocks excluded)"
-            ));
-        }
+/// Validate one workflow file's YAML, returning a human-readable error string if
+/// it is not a structurally valid GitHub Actions workflow, or `None` if it is.
+///
+/// This parses the file as YAML 1.2 (via `saphyr`) rather than approximating a
+/// parser with quote/indent/substring heuristics. A real parser is both simpler
+/// and immune to the false positives those heuristics produce — apostrophes in
+/// `#` comments, regex metacharacters inside `run:`/`args:` scalar blocks, `#`
+/// inside quoted scalars, etc. Style concerns (2-space indentation, trailing
+/// newline) are enforced authoritatively by yamllint in
+/// `.github/workflows/yaml-lint.yml`, so they are intentionally not re-checked
+/// here. Parsing as YAML 1.2 also keeps `on` a string key (YAML 1.1 parsers
+/// coerce the bare `on`/`off`/`yes`/`no` tokens to booleans).
+fn workflow_yaml_error(filename: &str, content: &str) -> Option<String> {
+    // Tolerate a leading UTF-8 BOM, which a parser otherwise folds into the first
+    // key (turning `name` into `\u{feff}name`).
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
-        // Check for required GitHub Actions fields
-        let mut missing_fields = Vec::new();
+    let docs = match Yaml::load_from_str(content) {
+        Ok(docs) => docs,
+        Err(e) => return Some(format!("{filename}: invalid YAML: {e}")),
+    };
 
-        if !content.contains("name:") {
-            missing_fields.push("name:");
-        }
-        if !content.contains("on:") && !content.contains("'on':") {
-            missing_fields.push("on:");
-        }
-        if !content.contains("jobs:") {
-            missing_fields.push("jobs:");
-        }
+    // An empty/comment-only file parses to zero documents — a workflow must have
+    // actual content, so treat that as an error rather than silently passing.
+    let Some(doc) = docs.first() else {
+        return Some(format!(
+            "{filename}: contains no YAML document (file is empty or only comments)"
+        ));
+    };
+    let Yaml::Mapping(mapping) = doc else {
+        return Some(format!(
+            "{filename}: top-level YAML value must be a mapping (key: value pairs)"
+        ));
+    };
 
-        if !missing_fields.is_empty() {
-            errors.push(format!(
-                "{}: Missing required fields: {}\n  \
-                 GitHub Actions workflows must have: name, on, jobs",
-                filename,
-                missing_fields.join(", ")
+    let missing: Vec<&str> = ["name", "on", "jobs"]
+        .into_iter()
+        .filter(|key| !mapping.contains_key(&Yaml::value_from_str(key)))
+        .collect();
+    if !missing.is_empty() {
+        return Some(format!(
+            "{filename}: missing required top-level field(s): {}",
+            missing.join(", ")
+        ));
+    }
+
+    None
+}
+
+#[test]
+fn test_workflow_yaml_validator_behavior() {
+    // Data-driven guard for `workflow_yaml_error` — the parser-based replacement
+    // for the old quote-counting heuristic that false-failed on apostrophes in
+    // comments. Each case is (description, content, expects_error). The accepted
+    // cases are exactly the inputs the old heuristic mis-flagged; the rejected
+    // cases are the genuinely broken YAML a syntax check must still catch.
+    let minimal = "name: CI\non:\n  push:\njobs:\n  build:\n    runs-on: ubuntu-latest\n";
+
+    struct Case {
+        description: &'static str,
+        content: String,
+        expects_error: bool,
+    }
+
+    let cases = [
+        Case {
+            description: "valid workflow",
+            content: minimal.to_string(),
+            expects_error: false,
+        },
+        Case {
+            description: "odd number of apostrophes in comments (the original false positive)",
+            // The old heuristic counted single quotes file-wide and flagged an odd
+            // total as "unbalanced". Three apostrophes (lychee's, can't, shell's) —
+            // exactly the comment words that broke link-check.yml in CI — make the
+            // count odd. The YAML is valid, so the parser-based validator accepts it.
+            content: format!("# lychee's remap can't use the shell's positional param\n{minimal}"),
+            expects_error: false,
+        },
+        Case {
+            description: "leading UTF-8 BOM is tolerated",
+            content: format!("\u{feff}{minimal}"),
+            expects_error: false,
+        },
+        Case {
+            description: "empty file (no YAML document)",
+            content: String::new(),
+            expects_error: true,
+        },
+        Case {
+            description: "comment-only file (no YAML document)",
+            content: "# just a comment, no workflow\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "odd single quote inside a block scalar (regex/AWK in run:)",
+            content: format!(
+                "{minimal}    steps:\n      - run: |\n          awk '/^```/ {{ print }}'\n"
+            ),
+            expects_error: false,
+        },
+        Case {
+            description: "`#` inside a quoted scalar is not a comment",
+            content: "name: 'C# build'\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+                .to_string(),
+            expects_error: false,
+        },
+        Case {
+            description: "`on` stays a string key under YAML 1.2 (not coerced to bool)",
+            content: minimal.to_string(),
+            expects_error: false,
+        },
+        Case {
+            description: "genuinely malformed YAML (unclosed flow sequence)",
+            content: "name: CI\non: push\njobs: [build\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "unbalanced quote that truly breaks parsing",
+            content: "name: \"unterminated\non: push\njobs: {}\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "missing required top-level field (jobs)",
+            content: "name: CI\non: push\n".to_string(),
+            expects_error: true,
+        },
+        Case {
+            description: "top-level value is not a mapping",
+            content: "- just\n- a\n- list\n".to_string(),
+            expects_error: true,
+        },
+    ];
+
+    let mut failures = Vec::new();
+    for case in &cases {
+        let result = workflow_yaml_error("fixture.yml", &case.content);
+        if result.is_some() != case.expects_error {
+            failures.push(format!(
+                "  - case {:?}: expected error = {}, got {:?}",
+                case.description, case.expects_error, result
             ));
         }
     }
 
-    if !errors.is_empty() {
-        panic!(
-            "Workflow files have YAML validation errors:\n\n{}\n\n\
-             To fix:\n\
-             1. Use a YAML validator/linter (yamllint, prettier, or IDE plugin)\n\
-             2. Check for missing quotes, colons, or indentation errors\n\
-             3. Ensure all required fields (name, on, jobs) are present\n\
-             4. Verify quotes are balanced (each opening quote has a closing quote)\n\n\
-             Common issues:\n\
-             - Missing closing quote: name: \"My Workflow\n\
-             - Missing colon: name My Workflow\n\
-             - Wrong indentation: jobs should be at root level, not nested",
-            errors.join("\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "workflow_yaml_error misclassified {} case(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -5043,8 +5151,9 @@ fn test_lychee_excludes_placeholder_urls() {
         ("https://github", "Truncated URL without trailing slash"),
         ("https://lib/", "Truncated URL from .lychee.toml regex"),
         ("https://lib", "Truncated URL without trailing slash"),
-        // file:// protocol for local file links
-        ("file:///tmp/foo", "Local file URLs should be excluded"),
+        // NOTE: file:// URLs are intentionally NOT excluded — lychee validates
+        // in-repo file references against the checkout (see .lychee.toml comment
+        // and the --remap rule in .github/workflows/link-check.yml).
         // Anchor-only links (same-page references)
         ("#section-heading", "Anchor-only links should be excluded"),
         // lib.rs returns 403 for automated checks
@@ -14187,6 +14296,12 @@ fn test_ci_safety_runs_miri_with_isolation_disabled() {
 
 #[test]
 fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
+    // The nightly safety jobs build with distinct toolchains/RUSTFLAGS (Miri and
+    // `-Zsanitizer=address`), so they isolate their target dirs and cache epoch from the
+    // stable CI caches to avoid cross-contaminating fingerprints and forcing rebuilds.
+    // The separate trybuild/rust-cache `ENOENT` noise is prevented elsewhere by dropping
+    // `<target>/tests` before the cache save — see
+    // `test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir`.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
@@ -14201,12 +14316,218 @@ fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
     ] {
         assert!(
             content.contains(required),
-            "ci-safety.yml must isolate advanced-safety target directories and \
-             use a fresh cache epoch so stale trybuild target caches cannot \
-             cause rust-cache ENOENT noise.\n\
+            "ci-safety.yml must isolate the nightly safety target directories and cache \
+             epoch from the stable CI caches so their distinct toolchain/RUSTFLAGS builds \
+             do not invalidate each other.\n\
              Missing required marker: `{required}`\n\
              File: {}",
             workflow_path.display()
+        );
+    }
+}
+
+/// Does a single shell command segment invoke a cargo subcommand that EXECUTES the
+/// root integration test suite — and therefore triggers `trybuild`, which
+/// materializes a nested `<target>/tests` cargo workspace? Restricted runs do not:
+/// `--lib` (unit only), `--doc` (doc-tests only), `--test <name>` (a single,
+/// non-trybuild target), and `--no-run` (compile only); nor do non-test subcommands
+/// (`build`, `clippy`, `udeps`, ...).
+fn cargo_segment_runs_full_test_suite(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cargo_idx) = tokens.iter().position(|&t| t == "cargo") else {
+        return false;
+    };
+    // Step over `+toolchain` selectors and the `miri` driver to reach the subcommand.
+    let mut i = cargo_idx + 1;
+    while tokens.get(i).is_some_and(|t| t.starts_with('+')) {
+        i += 1;
+    }
+    if tokens.get(i) == Some(&"miri") {
+        i += 1;
+    }
+    let Some(&subcommand) = tokens.get(i) else {
+        return false;
+    };
+    let args = &tokens[i + 1..];
+    let has = |flag: &str| args.contains(&flag);
+    match subcommand {
+        // `cargo nextest run` executes every test binary unless explicitly narrowed.
+        "nextest" => {
+            args.first() == Some(&"run") && !has("--no-run") && !has("--lib") && !has("--test")
+        }
+        // `cargo test`, including `cargo +toolchain test` and `cargo miri test`.
+        "test" => !has("--no-run") && !has("--lib") && !has("--doc") && !has("--test"),
+        // `cargo llvm-cov` runs the suite except for its reporting/util subcommands.
+        "llvm-cov" => !matches!(args.first().copied(), Some("report" | "show-env" | "clean")),
+        _ => false,
+    }
+}
+
+/// Whether a `run:` script runs the full integration suite in any of its commands.
+/// Shell line-continuations (`\` + newline) are joined first so a flag on a continued
+/// line stays with its command; the script is then split into command segments so
+/// flags from one command cannot bleed into the classification of another
+/// (e.g. `cargo test && cargo build --lib`).
+fn run_step_executes_full_test_suite(run: &str) -> bool {
+    run.replace("\\\n", " ")
+        .split(['\n', ';', '|', '&'])
+        .any(cargo_segment_runs_full_test_suite)
+}
+
+/// Whether a `run:` script drops trybuild's nested `<target>/tests` directory. Kept
+/// deliberately loose (any `rm -rf ... /tests`) so it is robust to quote style and
+/// to how `CARGO_TARGET_DIR` is spelled.
+fn run_step_drops_trybuild_tests_dir(run: &str) -> bool {
+    run.contains("rm -rf") && run.contains("/tests")
+}
+
+#[test]
+fn test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir() {
+    // CLASS GUARD for the trybuild/rust-cache `##[error]ENOENT` noise (root cause and
+    // remedy are documented at ci.yml's nextest "Drop trybuild artifacts" step): any job
+    // that RUNS the root integration suite materializes trybuild's `<target>/tests`
+    // workspace, and Swatinem/rust-cache then trips over it on restore. Rather than hard-
+    // code the affected jobs (which silently misses ones added later), this structurally
+    // parses every workflow and enforces the invariant: a job that combines a
+    // `Swatinem/rust-cache` step with a full-suite test run MUST also drop `<target>/tests`
+    // before the post-run cache save. Jobs that only run `--lib`/`--doc` tests, compile
+    // without running (clippy/udeps), or cache a different workspace are correctly exempt.
+    // (It classifies inline `run:` commands; a job that reaches the suite only through a
+    // called script is not traced. None do today: the scripts that run `cargo test` either
+    // run it from a non-trybuild crate or narrow it to a specific `--test` target.)
+    let root = repo_root();
+    let workflow_files = collect_workflow_files(&root.join(".github/workflows"));
+    assert!(
+        !workflow_files.is_empty(),
+        "expected workflow files under .github/workflows"
+    );
+
+    let mut classified_as_needing_cleanup: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut violations: Vec<String> = Vec::new();
+
+    for entry in &workflow_files {
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let raw = read_file(&path);
+        let content = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+
+        let Ok(docs) = Yaml::load_from_str(content) else {
+            continue; // YAML validity is enforced by test_workflow_files_are_valid_yaml.
+        };
+        let Some(jobs) = docs.first().and_then(|doc| doc.as_mapping_get("jobs")) else {
+            continue;
+        };
+        let Yaml::Mapping(jobs) = jobs else {
+            continue;
+        };
+
+        for (job_key, job) in jobs.iter() {
+            let job_name = job_key.as_str().unwrap_or("<job>");
+            let Some(Yaml::Sequence(steps)) = job.as_mapping_get("steps") else {
+                continue;
+            };
+
+            let mut uses_rust_cache = false;
+            let mut runs_full_suite = false;
+            let mut drops_tests_dir = false;
+            for step in steps {
+                if let Some(uses) = step.as_mapping_get("uses").and_then(|v| v.as_str()) {
+                    uses_rust_cache |= uses.contains("Swatinem/rust-cache");
+                }
+                if let Some(run) = step.as_mapping_get("run").and_then(|v| v.as_str()) {
+                    runs_full_suite |= run_step_executes_full_test_suite(run);
+                    drops_tests_dir |= run_step_drops_trybuild_tests_dir(run);
+                }
+            }
+
+            if uses_rust_cache && runs_full_suite {
+                classified_as_needing_cleanup.insert(format!("{filename}:{job_name}"));
+                if !drops_tests_dir {
+                    violations.push(format!("  - {filename}: job `{job_name}`"));
+                }
+            }
+        }
+    }
+
+    // Sanity floor: the four jobs known to run the full suite under rust-cache must be
+    // detected. This keeps the invariant above from silently passing as a no-op if the
+    // YAML traversal or the command classifier ever regresses.
+    for known in [
+        "ci.yml:nextest",
+        "ci.yml:msrv",
+        "ci.yml:coverage",
+        "ci-safety.yml:asan",
+    ] {
+        assert!(
+            classified_as_needing_cleanup.contains(known),
+            "structural detection regressed: expected `{known}` to be classified as a job that \
+             runs the full test suite under rust-cache, but it was not. The workflow YAML \
+             traversal or cargo command classifier is broken.\nDetected: {classified_as_needing_cleanup:?}"
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Every job that runs the root integration test suite under Swatinem/rust-cache must drop \
+         trybuild's nested `<target>/tests` directory before the post-run cache save, or rust-cache \
+         emits a noisy `##[error]ENOENT` on restore (see ci.yml's nextest \"Drop trybuild artifacts\" \
+         step for the full rationale).\nJobs missing the cleanup:\n{}\n\n\
+         Add a final step to each:\n  \
+         - name: Drop trybuild artifacts before cache save\n    if: always()\n    shell: bash\n    \
+         run: rm -rf \"${{CARGO_TARGET_DIR:-target}}/tests\"",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_run_step_full_suite_classifier() {
+    // Data-driven guard for the cargo-command classifier behind the trybuild cleanup
+    // invariant above. Each case is (run script, expected: does it run the full
+    // integration suite — i.e. trigger trybuild?). These pin the subtle cases:
+    // `+toolchain`/`miri` prefixes, the `--lib`/`--doc`/`--test`/`--no-run` exclusions,
+    // shell line-continuations, pipes, and per-segment flag isolation.
+    let cases: &[(&str, bool)] = &[
+        // Runners that execute every test target → DO trigger trybuild.
+        ("cargo nextest run --profile ci --locked --all-features", true),
+        ("cargo test --locked --all-features --no-fail-fast", true),
+        ("cargo +nightly-2026-02-01 test --locked --all-features", true),
+        (
+            "cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info",
+            true,
+        ),
+        // Line-continuation: a narrowing flag on the continued line must still count.
+        ("cargo test --locked --all-features \\\n  --lib --no-fail-fast", false),
+        (
+            "RUSTFLAGS=-Zx \\\n  cargo +nightly-2026-02-01 test --locked \\\n  --all-features 2>&1 | tee out.txt",
+            true,
+        ),
+        // Restricted runs that do NOT execute the integration tests → no trybuild.
+        ("cargo test --locked --lib", false),
+        ("cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast", false),
+        ("cargo test --locked --doc --all-features", false),
+        ("cargo test --locked --test browser_interop_e2e", false),
+        ("cargo test --locked --all-features --no-run", false),
+        ("cargo llvm-cov report --fail-under-lines 70", false),
+        ("cargo nextest run --no-run", false),
+        // Non-test subcommands.
+        ("cargo build --lib --locked --all-features", false),
+        ("cargo clippy --locked --all-targets --all-features -- -D warnings", false),
+        ("cargo +nightly-2026-02-01 udeps --locked --all-targets", false),
+        ("cargo machete", false),
+        ("cargo fmt --check", false),
+        ("cargo +nightly-2026-02-01 fuzz run protocol_target", false),
+        ("bash scripts/run-webrtc-interop.sh", false),
+        // Per-segment flag isolation: a flag from one command must not bleed into another.
+        ("cargo build && cargo test --all-features", true),
+        ("cargo test --lib && cargo build", false),
+    ];
+
+    for (run, expected) in cases {
+        assert_eq!(
+            run_step_executes_full_test_suite(run),
+            *expected,
+            "trybuild full-suite classifier mismatch for run script:\n{run}"
         );
     }
 }
@@ -14398,12 +14719,18 @@ fn test_nightly_version_consistency_across_workflows() {
     let nightly_workflows = ["ci-safety.yml", "unused-deps.yml"];
 
     let mut nightly_versions: Vec<(String, String)> = Vec::new();
+    // Count the workflows that actually exist so we can assert below that each
+    // one yielded a pin. Without this, a parser regression or a moved nightly
+    // pin would empty `nightly_versions`, and the `len() > 1` drift check would
+    // pass vacuously — silently disabling the very guard it implements.
+    let mut existing_nightly_workflows = 0usize;
 
     for workflow_file in &nightly_workflows {
         let workflow_path = workflows_dir.join(workflow_file);
         if !workflow_path.exists() {
             continue;
         }
+        existing_nightly_workflows += 1;
         let content = read_file(&workflow_path);
 
         // Extract all pinned nightly versions (e.g., "nightly-2026-01-15")
@@ -14428,6 +14755,20 @@ fn test_nightly_version_consistency_across_workflows() {
             }
         }
     }
+
+    // Every workflow that exists and is declared to pin a nightly must have
+    // actually produced a pin; otherwise the extraction silently regressed.
+    assert_eq!(
+        nightly_versions.len(),
+        existing_nightly_workflows,
+        "Expected a pinned nightly from each of the {existing_nightly_workflows} known \
+         nightly workflow(s), but extracted {}.\n\
+         Parsed pins: {:?}\n\
+         This means the nightly-pin extractor regressed or a workflow stopped \
+         pinning nightly — the drift check below would otherwise pass vacuously.",
+        nightly_versions.len(),
+        nightly_versions
+    );
 
     // All extracted versions should be the same
     if nightly_versions.len() > 1 {
@@ -17362,9 +17703,17 @@ fn test_same_action_uses_consistent_ref_across_workflows() {
 
     let workflow_files = collect_workflow_files(&workflows_dir);
 
-    if workflow_files.is_empty() {
-        return;
-    }
+    // A guard that silently passes when it inspects nothing is worse than no
+    // guard at all: a broken glob, renamed directory, or parser regression
+    // would turn this drift check permanently green without anyone noticing.
+    // Assert we actually discovered workflows (matching every sibling pinning
+    // test) and, below, that we parsed at least one remote action from them.
+    assert!(
+        !workflow_files.is_empty(),
+        "No workflow files found in .github/workflows/\n\
+         Workflows directory: {}",
+        workflows_dir.display()
+    );
 
     // Map of action name -> Vec<(reference, filename, line_num)>
     let mut action_refs: std::collections::HashMap<String, Vec<(String, String, usize)>> =
@@ -17392,6 +17741,18 @@ fn test_same_action_uses_consistent_ref_across_workflows() {
                 .push((action_ref.to_string(), filename.clone(), line_num));
         }
     }
+
+    // The repository pins many remote actions (checkout, rust-toolchain,
+    // rust-cache, install-action, ...). Parsing zero of them means the
+    // `uses:` extractor or action-reference parser silently broke, which
+    // would mask real drift — fail loudly instead of vacuously passing.
+    assert!(
+        !action_refs.is_empty(),
+        "Parsed zero remote `uses:` action references from {} workflow file(s).\n\
+         The repository is known to pin remote actions, so this indicates the\n\
+         `uses:` extractor or action-reference parser regressed.",
+        workflow_files.len()
+    );
 
     let mut inconsistencies = Vec::new();
 
@@ -19989,18 +20350,26 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
     let required_fragments = [
         "cargo install --locked cargo-binstall",
         "cargo binstall --no-confirm --locked",
+        "Acquire::Retries=5",
+        "curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)",
+        "ENV CARGO_NET_RETRY=10",
+        "ENV CARGO_HTTP_TIMEOUT=120",
         "cargo-deny",
         "cargo-tarpaulin",
         "cargo-watch",
         "cargo-expand",
         "cargo-llvm-cov",
         "cargo-nextest",
+        "cargo-mutants",
+        "cargo-fuzz",
         "cargo-deny --version",
         "cargo-tarpaulin --version",
         "cargo-watch --version",
         "cargo-expand --version",
         "cargo llvm-cov --version",
         "cargo-nextest --version",
+        "cargo mutants --version",
+        "cargo fuzz --help",
     ];
 
     for fragment in required_fragments {
@@ -20009,6 +20378,12 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
             ".devcontainer/Dockerfile must include fast heavy-tool install fragment: {fragment}"
         );
     }
+
+    assert!(
+        !dockerfile_content.contains("cargo-mutants --version"),
+        ".devcontainer/Dockerfile must not use direct 'cargo-mutants --version' because
+         cargo-mutants is a cargo plugin entrypoint and should be invoked as 'cargo mutants ...'."
+    );
 }
 
 #[test]
@@ -20018,9 +20393,16 @@ fn test_post_create_verifies_required_rust_tools() {
 
     let required_fragments = [
         "verify_required_rust_tools",
+        "if ! install_codex_cli; then",
+        "run_with_retries 3 5 cargo fetch",
+        "is_truthy",
+        "cargo-mutants",
+        "cargo-fuzz",
         "cargo-deny --version",
         "cargo-nextest --version",
         "cargo llvm-cov --version",
+        "cargo mutants --version",
+        "cargo fuzz --help",
         "taplo --version",
     ];
 
@@ -20042,7 +20424,1056 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
         ".devcontainer/post-create.sh must gate cargo check warm-up behind SIGNAL_FISH_WARM_CARGO_CHECK."
     );
     assert!(
+        post_create_content.contains("is_truthy"),
+        ".devcontainer/post-create.sh should parse standard truthy values for warm-up toggles."
+    );
+    assert!(
         post_create_content.contains("Skipping cargo check warm-up"),
         ".devcontainer/post-create.sh should log when warm-up is skipped by default."
+    );
+}
+
+// ===========================================================================
+// Mutation-testing performance policy tests (fail-closed)
+//
+// These tests lock the mutation-testing-speed configuration in place forever so
+// the per-shard wall-clock stays well under the timeout. The full rationale and
+// the measured numbers live in .llm/skills/mutation-testing-performance.md; the
+// machinery is split across:
+//   - .cargo/mutants.toml          (oracle: --lib, no --all-features; scope)
+//   - Cargo.toml [profile.mutants] (debug=0, incremental=true, inherits dev)
+//   - scripts/run-mutants.sh       (single source of truth for the command)
+//   - .github/workflows/mutation.yml (baseline warm job + sharded matrix)
+//
+// Each test below accumulates a Vec<String> of violations (or asserts directly)
+// and fails loudly with a Fix:/Verify: remediation, and each includes a vacuous-
+// pass guard so a silently-broken parser cannot turn the check permanently green.
+// ===========================================================================
+
+// Mutation-speed budget constants. These are the CONTRACT from
+// .llm/skills/mutation-testing-performance.md. Treat them as a unit: changing
+// one without re-measuring the others can make a shard exceed its timeout.
+//
+// Total mutants generated by `cargo mutants --list` over the scoped modules in
+// .cargo/mutants.toml. Re-measure (and update mutation.yml's shard count if
+// needed) whenever the scope or the mutated code changes materially.
+const MUTATION_TOTAL_MUTANTS: u32 = 199;
+// LOCAL-measured per-mutant budget (~22s wall-clock for in-place + slice +
+// lib-only incremental rebuild + relink + lib test run). A small ceiling above
+// the measurement absorbs runner variance. Update ONLY after re-measuring.
+const MUTATION_PER_MUTANT_BUDGET_SECS: u32 = 23;
+// Soft target: each shard should finish in under 5 minutes.
+const MUTATION_TARGET_SECS: u32 = 300;
+// Allowed band for the mutants job `timeout-minutes`. The floor stops anyone
+// trimming the timeout below the feasible budget; the ceiling stops the timeout
+// drifting back toward the old 20-min value that masked the cold-build blowup.
+const MUTATION_TIMEOUT_FLOOR_MIN: u32 = 8;
+const MUTATION_TIMEOUT_CEILING_MIN: u32 = 15;
+
+/// Extract the body of a TOML table section (`[section]` ... up to the next
+/// top-level `[` header or EOF). Returns `None` if the header is absent.
+///
+/// Hand-rolled to match this file's existing config-parsing style (no `toml`
+/// crate is a dev-dependency).
+fn extract_toml_section(content: &str, header: &str) -> Option<String> {
+    let target = format!("[{header}]");
+    let lines: Vec<&str> = content.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim() == target {
+            let mut body = Vec::new();
+            for follow in lines.iter().skip(idx + 1) {
+                // A new top-level table header ends this section.
+                if follow.trim_start().starts_with('[') {
+                    break;
+                }
+                body.push(*follow);
+            }
+            return Some(body.join("\n"));
+        }
+    }
+    None
+}
+
+/// Parse a TOML string-array value for `key` from `content`, supporting both the
+/// inline form (`key = ["a", "b"]`) and the multi-line form:
+///   key = [
+///       "a",
+///       "b",
+///   ]
+///
+/// Returns the de-quoted, comma-separated entries in source order.
+fn parse_toml_string_array(content: &str, key: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut values = Vec::new();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let Some(after_eq) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+
+        // Collect the array text, whether it closes on this line or spans many.
+        let mut array_text = String::new();
+        let first = after_eq.trim_start();
+        array_text.push_str(first);
+        if !first.contains(']') {
+            for follow in lines.iter().skip(idx + 1) {
+                array_text.push('\n');
+                array_text.push_str(follow);
+                if follow.contains(']') {
+                    break;
+                }
+            }
+        }
+
+        // Slice between the first '[' and the last ']' and split on commas.
+        let open = array_text.find('[');
+        let close = array_text.rfind(']');
+        if let (Some(open), Some(close)) = (open, close) {
+            if close > open {
+                let inner = &array_text[open + 1..close];
+                for raw in inner.split(',') {
+                    // Drop any trailing inline comment on a per-element line.
+                    let no_comment = raw.split('#').next().unwrap_or(raw);
+                    let value = no_comment.trim().trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        values.push(value.to_string());
+                    }
+                }
+            }
+        }
+        return values;
+    }
+
+    values
+}
+
+/// Drop whole-line `#` comments (lines whose first non-whitespace char is `#`),
+/// returning only the active lines joined by newlines.
+///
+/// Used to test for forbidden FLAGS in TOML / shell bodies without matching the
+/// prose in explanatory comments (which deliberately NAME the forbidden flag,
+/// e.g. ".cargo/mutants.toml: deliberately do NOT pass `--all-features`").
+fn strip_full_line_hash_comments(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Read `.github/workflows/mutation.yml`.
+fn read_mutation_workflow() -> String {
+    read_file(&repo_root().join(".github/workflows/mutation.yml"))
+}
+
+/// Read `scripts/run-mutants.sh`.
+fn read_run_mutants_script() -> String {
+    read_file(&repo_root().join("scripts/run-mutants.sh"))
+}
+
+/// Parse the `strategy.matrix.shard: [...]` list from a workflow file.
+///
+/// Mirrors the matrix-list parse idiom of
+/// `test_ci_workflow_matrix_os_values_match_constant`: find the `shard:` line,
+/// strip the surrounding `[`..`]`, and split on commas.
+fn parse_mutation_shard_matrix(workflow: &str) -> Vec<u32> {
+    for line in workflow.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("shard:") else {
+            continue;
+        };
+        let scalar = strip_yaml_inline_comment(rest).trim();
+        let Some(inner) = scalar.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+            continue;
+        };
+        return inner
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u32>().ok())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Parse the `mutants` job's `timeout-minutes` from mutation.yml.
+///
+/// Uses the job-block walk idiom (find the `  mutants:` header, walk lines until
+/// the next 2-space-indented job key, read `    timeout-minutes:` with inline
+/// comments stripped via `split('#')`).
+fn parse_mutants_job_timeout_minutes(workflow: &str) -> Option<u32> {
+    let mut in_job = false;
+    for line in workflow.lines() {
+        if line.starts_with("  mutants:") {
+            in_job = true;
+            continue;
+        }
+        if in_job {
+            let trimmed = line.trim();
+            // A new top-level job (2-space indent, not 4) ends this job block.
+            if line.starts_with("  ") && !line.starts_with("    ") && !trimmed.is_empty() {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix("    timeout-minutes:") {
+                let value = rest.split('#').next().unwrap_or(rest).trim();
+                return value.parse::<u32>().ok();
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn test_mutation_workflow_uses_fast_linker_and_in_place() {
+    // The mutation pipeline's speed depends on: (1) routing the run through the
+    // single source of truth (scripts/run-mutants.sh) rather than an inline
+    // `cargo mutants` whose flags can drift; (2) the mold linker in RUSTFLAGS;
+    // (3) --in-place + slice sharding (warm-target reuse + incremental
+    // locality); and (4) both jobs installing mold AND clang. Lock all four.
+
+    let script = read_run_mutants_script();
+    let workflow = read_mutation_workflow();
+
+    // Vacuous-pass guard: a guard that inspects nothing is worse than no guard.
+    // Prove we actually read both files and that the script really does invoke
+    // cargo-mutants before asserting on the flags below.
+    assert!(
+        !script.trim().is_empty(),
+        "scripts/run-mutants.sh is empty or unreadable; the mutation-speed policy tests cannot\n\
+         validate a missing single-source-of-truth script."
+    );
+    assert!(
+        !workflow.trim().is_empty(),
+        ".github/workflows/mutation.yml is empty or unreadable."
+    );
+    assert!(
+        script.contains("cargo mutants"),
+        "scripts/run-mutants.sh must contain a `cargo mutants` invocation (it is the single\n\
+         source of truth for the mutation command). A missing invocation means the parser\n\
+         or the script regressed; failing instead of vacuously passing.\n\
+         File: scripts/run-mutants.sh"
+    );
+
+    let mut violations = Vec::new();
+
+    // (1) The mutants job must run the mutation via the script, not a raw inline
+    //     `cargo mutants` whose flags would bypass the locked-in speed levers.
+    if !workflow.contains("bash scripts/run-mutants.sh --shard") {
+        violations.push(
+            "mutation.yml mutants job must run mutation via `bash scripts/run-mutants.sh --shard \
+             ...`, not an inline `cargo mutants` command (inline flags bypass the single source \
+             of truth)."
+                .to_string(),
+        );
+    }
+    // The workflow should NOT inline its own `cargo mutants` run step. (The
+    // explanatory comments mention the tool by name, so we look specifically for
+    // a `run:`-style inline invocation rather than the substring `cargo mutants`.)
+    if workflow.contains("run: cargo mutants") {
+        violations.push(
+            "mutation.yml must not inline a `run: cargo mutants ...` step; route it through \
+             scripts/run-mutants.sh instead."
+                .to_string(),
+        );
+    }
+
+    // (2) mold linker in RUSTFLAGS (exported by the script).
+    if !script.contains("-fuse-ld=mold") {
+        violations.push(
+            "scripts/run-mutants.sh must export `-fuse-ld=mold` in RUSTFLAGS to cut per-mutant \
+             relink time."
+                .to_string(),
+        );
+    }
+
+    // (3) --in-place + slice sharding in the script's shard command.
+    if !script.contains("--in-place") {
+        violations.push(
+            "scripts/run-mutants.sh shard command must use `--in-place` so each shard reuses the \
+             warm ./target instead of a cold /tmp scratch build."
+                .to_string(),
+        );
+    }
+    if !script.contains("--sharding slice") {
+        violations.push(
+            "scripts/run-mutants.sh shard command must use `--sharding slice` to preserve \
+             incremental-compilation locality across a shard's mutants."
+                .to_string(),
+        );
+    }
+
+    // (4) BOTH jobs must install mold AND clang. Accept either an apt-get
+    //     install line that names both, or a setup-mold action.
+    let installs_mold_and_clang = |body: &str| -> bool {
+        body.lines().any(|line| {
+            let l = line.to_lowercase();
+            l.contains("apt-get")
+                && l.contains("install")
+                && l.contains("mold")
+                && l.contains("clang")
+        }) || body.to_lowercase().contains("setup-mold")
+    };
+    let baseline_block = extract_yaml_mapping_block(&workflow, "baseline", 2);
+    let mutants_block = extract_yaml_mapping_block(&workflow, "mutants", 2);
+    match &baseline_block {
+        Some(block) if installs_mold_and_clang(block) => {}
+        _ => violations.push(
+            "mutation.yml `baseline` job must install mold AND clang (e.g. `apt-get install ... \
+             mold clang`) so the warm build links with mold."
+                .to_string(),
+        ),
+    }
+    match &mutants_block {
+        Some(block) if installs_mold_and_clang(block) => {}
+        _ => violations.push(
+            "mutation.yml `mutants` job must install mold AND clang so each shard links with \
+             mold (matching the warm cache fingerprint)."
+                .to_string(),
+        ),
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Mutation-testing fast-linker / in-place policy violations:\n\n{}\n\n\
+         Why this matters: each shard must finish well under its timeout; mold + --in-place + \
+         slice sharding are the measured levers (see .llm/skills/mutation-testing-performance.md), \
+         and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
+         Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
+         Verify: bash scripts/run-mutants.sh --shard 0/16 --print-cmd",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_mutation_workflow_uses_optimized_build_profile() {
+    // Mutation rebuilds the crate once per mutant, so the build profile is a
+    // first-order speed lever. Lock: the script passes `--profile mutants`, and
+    // Cargo.toml defines [profile.mutants] with debug=0, incremental=true, and
+    // inherits = "dev" (explicitly NOT "ci", whose incremental=false would force
+    // a near-clean rebuild every mutant).
+
+    let script = read_run_mutants_script();
+    let cargo_toml = read_file(&repo_root().join("Cargo.toml"));
+
+    assert!(
+        script.contains("--profile mutants") || script.contains("--profile \"$MUTANTS_PROFILE\""),
+        "scripts/run-mutants.sh must build with `--profile mutants` (the trimmed mutation \
+         profile).\n\
+         Fix: keep MUTANTS_PROFILE=\"mutants\" and `--profile \"$MUTANTS_PROFILE\"` in the script.\n\
+         File: scripts/run-mutants.sh"
+    );
+    // Also confirm the profile name is literally "mutants" so it maps to the
+    // Cargo.toml section asserted below.
+    assert!(
+        script.contains("MUTANTS_PROFILE=\"mutants\"") || script.contains("--profile mutants"),
+        "scripts/run-mutants.sh must select the `mutants` profile by name so it maps to \
+         [profile.mutants] in Cargo.toml.\n\
+         File: scripts/run-mutants.sh"
+    );
+
+    // Vacuous-pass guard: the [profile.mutants] section must actually exist, or
+    // the field assertions below would pass against an empty string.
+    let section = extract_toml_section(&cargo_toml, "profile.mutants");
+    let section = section.unwrap_or_else(|| {
+        panic!(
+            "Cargo.toml is missing the [profile.mutants] section.\n\
+             It must exist with `inherits = \"dev\"`, `debug = 0`, `incremental = true` so each \
+             per-mutant rebuild is cheap and incremental.\n\
+             File: Cargo.toml"
+        )
+    });
+
+    let mut violations = Vec::new();
+
+    if !section.contains("inherits = \"dev\"") {
+        violations.push(
+            "[profile.mutants] must set `inherits = \"dev\"` (it reuses the per-job target dir \
+             incrementally across mutants)."
+                .to_string(),
+        );
+    }
+    // Explicitly forbid inheriting "ci": profile.ci sets incremental = false,
+    // which would force a near-clean rebuild every mutant.
+    if section.contains("inherits = \"ci\"") {
+        violations.push(
+            "[profile.mutants] must NOT set `inherits = \"ci\"`: profile.ci has \
+             incremental = false, which forces a near-clean rebuild on every mutant (the exact \
+             cost this profile exists to avoid)."
+                .to_string(),
+        );
+    }
+    if !section.contains("debug = 0") {
+        violations.push(
+            "[profile.mutants] must set `debug = 0` (debuginfo is dead weight to generate and \
+             link on every per-mutant relink)."
+                .to_string(),
+        );
+    }
+    if !section.contains("incremental = true") {
+        violations.push(
+            "[profile.mutants] must set `incremental = true` so cargo-mutants reuses the \
+             incremental cache across mutants instead of rebuilding from clean."
+                .to_string(),
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Mutation-testing build-profile policy violations:\n\n{}\n\n\
+         Why this matters: the per-mutant build/relink cost dominates the ~199-mutant run; this \
+         profile (see .llm/skills/mutation-testing-performance.md) trims it. \n\
+         Fix: restore the listed fields to [profile.mutants] in Cargo.toml.\n\
+         Verify: cargo test --test ci_config_tests test_mutation_workflow_uses_optimized_build_profile",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_mutation_shard_matrix_is_complete_contiguous_partition() {
+    // cargo-mutants shard indices are 0-based: --shard k/N spans k = 0..N-1.
+    // The matrix list must be exactly that contiguous partition, and EVERY
+    // `/<denominator>` token in the file (the job `name:` and the run step) must
+    // equal N (the matrix length). A drift here either skips mutants or reruns
+    // the same slice under a wrong denominator.
+
+    let workflow = read_mutation_workflow();
+    let shards = parse_mutation_shard_matrix(&workflow);
+
+    // Vacuous-pass guard (part 1): the matrix list must parse non-empty.
+    assert!(
+        !shards.is_empty(),
+        "Could not parse a non-empty `strategy.matrix.shard: [...]` list from mutation.yml.\n\
+         A silent parser regression here would let the partition checks pass vacuously.\n\
+         File: .github/workflows/mutation.yml"
+    );
+
+    let n = shards.len() as u32;
+
+    // Collect every `/<denominator>` token that follows a `shard` reference, so
+    // we validate the job-name `shard .../16` and the `--shard ...{}/16` run step
+    // alike. We scan for the `/N` pattern appearing after `shard` / `}}` tokens.
+    let mut denominators: Vec<u32> = Vec::new();
+    for line in workflow.lines() {
+        // Job name: "... shard ${{ matrix.shard }}/16"
+        // Run step: "... --shard ${{ matrix.shard }}/16"
+        // Match the "}/<digits>" form (the matrix placeholder closes with "}}").
+        for (pos, _) in line.match_indices("}/") {
+            let after = &line[pos + 2..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(value) = digits.parse::<u32>() {
+                denominators.push(value);
+            }
+        }
+    }
+
+    let mut violations = Vec::new();
+
+    // Vacuous-pass guard (part 2): at least one `/N` denominator token found.
+    if denominators.is_empty() {
+        violations.push(
+            "Found no `${{ matrix.shard }}/<N>` denominator token in mutation.yml (expected in \
+             the job name and the run step). A parser regression must not pass vacuously."
+                .to_string(),
+        );
+    }
+
+    // Contiguous 0..N-1: sorted, no gaps, no duplicates, length N, contains 0.
+    let unique: BTreeSet<u32> = shards.iter().copied().collect();
+    if unique.len() != shards.len() {
+        violations.push(format!(
+            "matrix.shard contains duplicate indices: {shards:?} (expected a partition with no \
+             duplicates)."
+        ));
+    }
+    let expected: Vec<u32> = (0..n).collect();
+    let mut sorted = shards.clone();
+    sorted.sort_unstable();
+    if sorted != expected {
+        violations.push(format!(
+            "matrix.shard must be the contiguous 0-based partition {expected:?} but was \
+             {shards:?} (sorted: {sorted:?})."
+        ));
+    }
+    if !shards.contains(&0) {
+        violations.push(
+            "matrix.shard must be 0-BASED (contain index 0); cargo-mutants spans k = 0..N-1."
+                .to_string(),
+        );
+    }
+    if shards.contains(&n) {
+        violations.push(format!(
+            "matrix.shard must be 0-based and must NOT contain N={n} (valid indices are 0..{}).",
+            n - 1
+        ));
+    }
+
+    // Every denominator must equal N.
+    for value in &denominators {
+        if *value != n {
+            violations.push(format!(
+                "found `/{value}` denominator token but the matrix has N={n} shards; every \
+                 `/<N>` (job name + run step) must equal the matrix length."
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Mutation shard-matrix partition policy violations:\n\n{}\n\n\
+         Why this matters: `--shard k/N` must cover every mutant exactly once. A matrix that is \
+         not the contiguous 0..N-1 set, or a `/N` denominator that disagrees with the matrix \
+         length, silently skips or double-runs mutants.\n\
+         Fix: make `strategy.matrix.shard` the list 0..N-1 and set every `/<N>` to the matrix \
+         length in .github/workflows/mutation.yml.\n\
+         Verify: cargo test --test ci_config_tests test_mutation_shard_matrix_is_complete_contiguous_partition",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_mutation_shard_budget_is_feasible_vs_timeout() {
+    // Keep {mutant-count, shard-count N, per-mutant budget, per-shard timeout}
+    // feasible TOGETHER. The constants above are the contract from
+    // .llm/skills/mutation-testing-performance.md.
+
+    let workflow = read_mutation_workflow();
+    let shards = parse_mutation_shard_matrix(&workflow);
+    let timeout = parse_mutants_job_timeout_minutes(&workflow);
+
+    // Vacuous-pass guard: N>0 and a timeout value parsed.
+    let n = shards.len() as u32;
+    assert!(
+        n > 0,
+        "Could not parse a non-empty shard matrix from mutation.yml; the feasibility arithmetic \
+         needs N (shard count).\n\
+         File: .github/workflows/mutation.yml"
+    );
+    let timeout_minutes = timeout.unwrap_or_else(|| {
+        panic!(
+            "Could not parse the `mutants` job `timeout-minutes` from mutation.yml; the \
+             feasibility arithmetic needs it.\n\
+             File: .github/workflows/mutation.yml"
+        )
+    });
+
+    // ceil(total / N) mutants per shard, each costing the per-mutant budget.
+    let mutants_per_shard = MUTATION_TOTAL_MUTANTS.div_ceil(n);
+    let worst_shard_secs = mutants_per_shard * MUTATION_PER_MUTANT_BUDGET_SECS;
+
+    let mut violations = Vec::new();
+
+    // (a) Under the <5-min soft target.
+    if worst_shard_secs > MUTATION_TARGET_SECS {
+        violations.push(format!(
+            "worst-case shard ≈ ceil({MUTATION_TOTAL_MUTANTS}/{n}) * {MUTATION_PER_MUTANT_BUDGET_SECS}s \
+             = {mutants_per_shard} * {MUTATION_PER_MUTANT_BUDGET_SECS} = {worst_shard_secs}s exceeds the \
+             {MUTATION_TARGET_SECS}s (<5 min) soft target. Increase N (shards) in mutation.yml."
+        ));
+    }
+
+    // (b) Hard no-cancellation bound: under the per-shard timeout.
+    let timeout_secs = timeout_minutes * 60;
+    if worst_shard_secs > timeout_secs {
+        violations.push(format!(
+            "worst-case shard ≈ {worst_shard_secs}s exceeds the mutants job timeout \
+             ({timeout_minutes} min = {timeout_secs}s); shards would be cancelled. Increase N or \
+             raise the timeout (within [{MUTATION_TIMEOUT_FLOOR_MIN}, {MUTATION_TIMEOUT_CEILING_MIN}] min)."
+        ));
+    }
+
+    // (c) Timeout within the sane band.
+    if timeout_minutes < MUTATION_TIMEOUT_FLOOR_MIN {
+        violations.push(format!(
+            "mutants job timeout-minutes={timeout_minutes} is below the floor \
+             {MUTATION_TIMEOUT_FLOOR_MIN} min; that risks cancelling a slightly-slow shard."
+        ));
+    }
+    if timeout_minutes > MUTATION_TIMEOUT_CEILING_MIN {
+        violations.push(format!(
+            "mutants job timeout-minutes={timeout_minutes} exceeds the ceiling \
+             {MUTATION_TIMEOUT_CEILING_MIN} min; a high timeout hides the cold-build blowup this \
+             setup was built to prevent. Lower it or re-justify the budget."
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Mutation shard-budget feasibility policy violations:\n\n{}\n\n\
+         Arithmetic: with N={n} shards, ~{MUTATION_TOTAL_MUTANTS} mutants, and a measured \
+         ~{MUTATION_PER_MUTANT_BUDGET_SECS}s/mutant budget, the worst shard runs \
+         ceil({MUTATION_TOTAL_MUTANTS}/{n})={mutants_per_shard} mutants ≈ {worst_shard_secs}s; it must be \
+         <= {MUTATION_TARGET_SECS}s (soft target) AND <= {timeout_minutes}*60={timeout_secs}s (hard \
+         timeout), with the timeout in [{MUTATION_TIMEOUT_FLOOR_MIN}, {MUTATION_TIMEOUT_CEILING_MIN}] min.\n\
+         These constants are the contract in .llm/skills/mutation-testing-performance.md; \
+         re-measure before changing them.\n\
+         Fix: adjust the shard count / timeout in .github/workflows/mutation.yml.\n\
+         Verify: cargo test --test ci_config_tests test_mutation_shard_budget_is_feasible_vs_timeout",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn test_mutation_oracle_does_not_use_all_features() {
+    // The fast oracle is the in-crate `--lib` unit tests with NO --all-features:
+    // the scoped modules have zero feature gates, so --all-features cannot change
+    // the mutant set or the catch outcome — it only drags tls / legacy-fullmesh
+    // into every per-mutant relink. Lock that in both config surfaces.
+
+    let mutants_toml = read_file(&repo_root().join(".cargo/mutants.toml"));
+    let script = read_run_mutants_script();
+
+    // Vacuous-pass guard: additional_cargo_args must actually parse, or the
+    // --lib assertion below could pass against an empty parse.
+    let cargo_args = parse_toml_string_array(&mutants_toml, "additional_cargo_args");
+    assert!(
+        !cargo_args.is_empty(),
+        "Could not parse a non-empty `additional_cargo_args` from .cargo/mutants.toml.\n\
+         A silent parser regression must not let the oracle-scope checks pass vacuously.\n\
+         (Note: the correct key is `additional_cargo_args`, NOT `additional_cargo_test_args` — \
+         the former applies `--lib` to BOTH the build and the test.)\n\
+         File: .cargo/mutants.toml"
+    );
+
+    let mut violations = Vec::new();
+
+    // --all-features must appear in NEITHER surface. Strip whole-line comments
+    // first: both files deliberately NAME `--all-features` in explanatory prose
+    // ("do NOT pass --all-features"), which must not be mistaken for actual use.
+    let mutants_toml_active = strip_full_line_hash_comments(&mutants_toml);
+    let script_active = strip_full_line_hash_comments(&script);
+    if mutants_toml_active.contains("--all-features") {
+        violations.push(
+            ".cargo/mutants.toml must NOT contain `--all-features`: the scoped modules have no \
+             feature gates, so it only slows every per-mutant build."
+                .to_string(),
+        );
+    }
+    if script_active.contains("--all-features") {
+        violations.push(
+            "scripts/run-mutants.sh must NOT contain `--all-features` (same reason).".to_string(),
+        );
+    }
+
+    // The oracle key must be present and correctly named: additional_cargo_args
+    // must contain `--lib`.
+    if !cargo_args.iter().any(|a| a == "--lib") {
+        violations.push(format!(
+            "`additional_cargo_args` in .cargo/mutants.toml must contain `--lib` (the fast \
+             unit-test oracle applied to BOTH build and test). Parsed: {cargo_args:?}."
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Mutation oracle scope policy violations:\n\n{}\n\n\
+         Why this matters: `--lib` (via additional_cargo_args, not additional_cargo_test_args) \
+         keeps the oracle to fast in-crate unit tests and avoids building ~20 integration-test \
+         binaries per mutant; --all-features would only add heavy optional deps with no signal. \
+         See .llm/skills/mutation-testing-performance.md.\n\
+         Fix: keep `additional_cargo_args = [\"--lib\"]` and remove any --all-features from \
+         .cargo/mutants.toml and scripts/run-mutants.sh.\n\
+         Verify: cargo test --test ci_config_tests test_mutation_oracle_does_not_use_all_features",
+        violations.join("\n")
+    );
+}
+
+/// Jobs that run the FULL test suite under a Swatinem/rust-cache and therefore
+/// must drop trybuild's nested `<target>/tests` artifacts before the cache save
+/// (otherwise rust-cache's restore-time cleanup emits a noisy `##[error]ENOENT`).
+///
+/// Keyed by (workflow file, job key). The job keys are the REAL keys verified
+/// against .github/workflows/{ci,ci-safety}.yml.
+const FULL_SUITE_CACHING_JOBS: &[(&str, &str)] = &[
+    ("ci.yml", "nextest"),
+    ("ci.yml", "msrv"),
+    ("ci.yml", "coverage"),
+    ("ci-safety.yml", "asan"),
+];
+
+/// Extract a single job block (the lines from `  <job>:` up to the next
+/// 2-space-indented job key or EOF) from a workflow file.
+fn extract_workflow_job_block(content: &str, job_key: &str) -> Option<String> {
+    let header = format!("  {job_key}:");
+    let mut in_job = false;
+    let mut block = Vec::new();
+    for line in content.lines() {
+        if line.starts_with(&header) {
+            in_job = true;
+            block.push(line);
+            continue;
+        }
+        if in_job {
+            let trimmed = line.trim();
+            if line.starts_with("  ") && !line.starts_with("    ") && !trimmed.is_empty() {
+                break;
+            }
+            block.push(line);
+        }
+    }
+    if in_job {
+        Some(block.join("\n"))
+    } else {
+        None
+    }
+}
+
+/// Return `true` if `job_block` contains the canonical trybuild-drop step:
+/// a step named `Drop trybuild artifacts before cache save` whose `run:` is
+/// exactly `rm -rf "${CARGO_TARGET_DIR:-target}/tests"` and which has
+/// `if: always()`.
+fn job_has_trybuild_drop_step(job_block: &str) -> bool {
+    let has_name = job_block.contains("Drop trybuild artifacts before cache save");
+    let has_run = job_block.contains(r#"rm -rf "${CARGO_TARGET_DIR:-target}/tests""#);
+    let has_if_always = job_block.contains("if: always()");
+    has_name && has_run && has_if_always
+}
+
+#[test]
+fn test_full_suite_caching_jobs_drop_trybuild_artifacts() {
+    // trybuild builds nested cargo projects under `<target>/tests`. When a
+    // rust-cache-backed job runs the FULL test suite, that dir ends up in the
+    // cache and rust-cache's restore-time cleanup then probes a path trybuild
+    // never creates, emitting a benign-but-noisy `##[error]ENOENT`. Every such
+    // job must drop the dir before the cache save. This test (a) checks the
+    // registered jobs have the exact drop step, and (b) bidirectionally scans
+    // for any unregistered full-suite + rust-cache job missing the step.
+
+    let root = repo_root();
+
+    let mut violations = Vec::new();
+
+    // (a) Forward direction: each registered job has the canonical drop step.
+    let mut checked_blocks = 0usize;
+    for (workflow_file, job_key) in FULL_SUITE_CACHING_JOBS {
+        let content = read_file(&root.join(".github/workflows").join(workflow_file));
+        let Some(block) = extract_workflow_job_block(&content, job_key) else {
+            violations.push(format!(
+                "{workflow_file}: registered job `{job_key}` not found (FULL_SUITE_CACHING_JOBS is \
+                 out of sync with the workflow file)."
+            ));
+            continue;
+        };
+        checked_blocks += 1;
+        if !job_has_trybuild_drop_step(&block) {
+            violations.push(format!(
+                "{workflow_file} job `{job_key}` is missing the canonical trybuild-drop step.\n  \
+                 Required: a step named `Drop trybuild artifacts before cache save` with \
+                 `if: always()` and run exactly `rm -rf \"${{CARGO_TARGET_DIR:-target}}/tests\"`."
+            ));
+        }
+    }
+
+    // Vacuous-pass guard: we must have actually located+parsed the registered
+    // job blocks, or the forward check above passed against nothing.
+    assert!(
+        checked_blocks == FULL_SUITE_CACHING_JOBS.len(),
+        "Parsed only {checked_blocks}/{} registered full-suite caching job blocks; a workflow \
+         rename or parser regression must not let this guard pass vacuously.\n\
+         Accumulated so far:\n{}",
+        FULL_SUITE_CACHING_JOBS.len(),
+        violations.join("\n")
+    );
+
+    // (b) Bidirectional guard: scan ci.yml + ci-safety.yml for any job that has
+    //     BOTH a rust-cache step AND a `run:` invoking the full test suite
+    //     (cargo nextest run / cargo test / cargo llvm-cov WITHOUT a `--lib`
+    //     restriction) but is NOT registered and lacks the drop step.
+    let registered: BTreeSet<(&str, &str)> = FULL_SUITE_CACHING_JOBS.iter().copied().collect();
+    for workflow_file in ["ci.yml", "ci-safety.yml"] {
+        let content = read_file(&root.join(".github/workflows").join(workflow_file));
+        // Find every 2-space-indented job key, skipping known non-job top-level
+        // mapping keys that also live at 2 spaces under their parents are not a
+        // concern here because we only look at column-0-prefixed "  key:" lines
+        // that are direct children of `jobs:` — those are exactly the job keys.
+        let job_keys: Vec<String> = content
+            .lines()
+            .filter_map(|line| {
+                if line.starts_with("  ")
+                    && !line.starts_with("   ")
+                    && line.trim_end().ends_with(':')
+                {
+                    let key = line.trim().trim_end_matches(':').trim();
+                    // Exclude top-level mapping keys that are not jobs.
+                    if matches!(key, "on" | "concurrency" | "permissions" | "env" | "jobs") {
+                        None
+                    } else {
+                        Some(key.to_string())
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for job_key in job_keys {
+            let Some(block) = extract_workflow_job_block(&content, &job_key) else {
+                continue;
+            };
+            let uses_rust_cache = block.contains("Swatinem/rust-cache");
+            if !uses_rust_cache {
+                continue;
+            }
+            // Does any line run the full suite without --lib?
+            let runs_full_suite = block.lines().any(line_runs_full_test_suite);
+            if !runs_full_suite {
+                continue;
+            }
+            let key_pair = (workflow_file, job_key.as_str());
+            let is_registered = registered.contains(&key_pair);
+            let has_drop = job_has_trybuild_drop_step(&block);
+            if !is_registered && !has_drop {
+                violations.push(format!(
+                    "{workflow_file} job `{job_key}` uses Swatinem/rust-cache AND runs the full \
+                     test suite (no `--lib`) but is NOT in FULL_SUITE_CACHING_JOBS and lacks the \
+                     trybuild-drop step.\n  Fix: add the `Drop trybuild artifacts before cache \
+                     save` step (`if: always()`, run `rm -rf \"${{CARGO_TARGET_DIR:-target}}/tests\"`) \
+                     AND register (\"{workflow_file}\", \"{job_key}\") in FULL_SUITE_CACHING_JOBS — \
+                     or justify why it is exempt (e.g. it restricts to `--lib`)."
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Full-suite trybuild-artifact-drop policy violations:\n\n{}\n\n\
+         Why this matters: a full-suite test run under rust-cache caches trybuild's \
+         `<target>/tests` dir, and rust-cache's restore cleanup then emits a noisy \
+         `##[error]ENOENT`. Dropping the dir before the save keeps the trigger out of the cache.\n\
+         Fix: see each line above.\n\
+         Verify: cargo test --test ci_config_tests test_full_suite_caching_jobs_drop_trybuild_artifacts",
+        violations.join("\n")
+    );
+}
+
+/// Return `true` if a workflow `run:` line invokes the full test suite without a
+/// `--lib` restriction: `cargo [+toolchain] nextest run`, `cargo [+toolchain]
+/// test`, or `cargo [+toolchain] llvm-cov` — and the line does NOT contain
+/// `--lib`. A `cargo ... test --lib` / `miri test --lib` never builds the
+/// trybuild `<target>/tests` dir, so it is exempt.
+fn line_runs_full_test_suite(line: &str) -> bool {
+    // Work on the command portion after an optional `run:` prefix; this also
+    // matches continued lines inside a `run: |` block (which have no prefix).
+    let cmd = line.trim();
+    if cmd.contains("--lib") {
+        return false;
+    }
+
+    // Tokenize and look for a `cargo` token followed (allowing an optional
+    // `+toolchain` and the `miri` subcommand) by a full-suite subcommand.
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        if tokens[idx] == "cargo" {
+            // Skip an optional `+toolchain` token.
+            let mut j = idx + 1;
+            if j < tokens.len() && tokens[j].starts_with('+') {
+                j += 1;
+            }
+            // Optionally skip a `miri` driver token (e.g. `cargo +nightly miri test`).
+            if j < tokens.len() && tokens[j] == "miri" {
+                j += 1;
+            }
+            if j < tokens.len() {
+                match tokens[j] {
+                    "test" => return true,
+                    "llvm-cov" => return true,
+                    "nextest" => {
+                        // `cargo nextest run` is the suite runner; `cargo nextest
+                        // list` etc. are not.
+                        if j + 1 < tokens.len() && tokens[j + 1] == "run" {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        idx += 1;
+    }
+    false
+}
+
+#[test]
+fn test_mutation_scope_matches_workflow_path_filter() {
+    // Every mutated module must also be a PR trigger for the mutation workflow:
+    // the `examine_globs` src entries in .cargo/mutants.toml must be a subset of
+    // the `src/...rs` entries under `on.pull_request.paths` in mutation.yml.
+    // Otherwise a PR could change a mutated module without ever running mutation.
+
+    let mutants_toml = read_file(&repo_root().join(".cargo/mutants.toml"));
+    let workflow = read_mutation_workflow();
+
+    // examine_globs src entries.
+    let examine_src: BTreeSet<String> = parse_toml_string_array(&mutants_toml, "examine_globs")
+        .into_iter()
+        .filter(|p| p.starts_with("src/") && p.ends_with(".rs"))
+        .collect();
+
+    // on.pull_request.paths src entries. The `paths:` block (under
+    // on.pull_request) is a multi-line list of `- "..."` items. mutation.yml has
+    // exactly one such list, so scanning the file for `- "src/....rs"` items
+    // captures the pull_request.paths source set authoritatively.
+    let mut workflow_src: BTreeSet<String> = BTreeSet::new();
+    for line in workflow.lines() {
+        let trimmed = line.trim_start();
+        if let Some(item) = trimmed.strip_prefix("- ") {
+            let value = strip_yaml_inline_comment(item)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            if value.starts_with("src/") && value.ends_with(".rs") {
+                workflow_src.insert(value);
+            }
+        }
+    }
+
+    // Vacuous-pass guard: both sets must be non-empty.
+    assert!(
+        !examine_src.is_empty(),
+        "Parsed zero `src/*.rs` entries from `examine_globs` in .cargo/mutants.toml; a parser \
+         regression must not let the subset check pass vacuously.\n\
+         File: .cargo/mutants.toml"
+    );
+    assert!(
+        !workflow_src.is_empty(),
+        "Parsed zero `src/*.rs` entries from `on.pull_request.paths` in mutation.yml; a parser \
+         regression must not let the subset check pass vacuously.\n\
+         File: .github/workflows/mutation.yml"
+    );
+
+    // Every examined (mutated) module must be a PR trigger path.
+    let missing: Vec<&String> = examine_src.difference(&workflow_src).collect();
+
+    assert!(
+        missing.is_empty(),
+        "Mutation scope / PR-trigger drift: these mutated modules from .cargo/mutants.toml \
+         `examine_globs` are NOT listed under `on.pull_request.paths` in mutation.yml, so a PR \
+         editing them would not run mutation testing:\n  {missing:?}\n\n\
+         examine_globs src set: {examine_src:?}\n\
+         workflow paths src set: {workflow_src:?}\n\n\
+         Why this matters: the per-PR mutation gate only fires for files in the path filter; a \
+         mutated module outside it can regress test strength undetected.\n\
+         Fix: add each missing `src/...rs` path under `on.pull_request.paths` in \
+         .github/workflows/mutation.yml (keep examine_globs ⊆ paths).\n\
+         Verify: cargo test --test ci_config_tests test_mutation_scope_matches_workflow_path_filter"
+    );
+}
+
+#[test]
+fn test_mutation_jobs_skip_on_fork_prs() {
+    // Both mutation jobs MUST carry the fork-safe gate. A fork PR cannot write the
+    // shared rust-cache (the `save-if` fork gate), so without skipping, the
+    // sharded mutants would restore nothing and rebuild every dependency cold —
+    // re-triggering the >20-min cold-build blowup + cancellation this workflow was
+    // rebuilt to eliminate. Mutation is a periodic health check (schedule +
+    // workflow_dispatch + same-repo PRs), so skipping forks loses no required gate.
+    let workflow = read_mutation_workflow();
+
+    // The distinctive fragment of the fork-safe condition (same one used by the
+    // job's `save-if`): runs unless this is a PR from a different repo (a fork).
+    let fork_safe_marker = "github.event.pull_request.head.repo.full_name == github.repository";
+
+    let mut violations = Vec::new();
+    let mut checked = 0usize;
+    for job_key in ["baseline", "mutants"] {
+        let Some(block) = extract_workflow_job_block(&workflow, job_key) else {
+            violations.push(format!(
+                "mutation.yml: job `{job_key}` not found (the workflow structure changed; this \
+                 fork-gate guard must not pass vacuously)."
+            ));
+            continue;
+        };
+        checked += 1;
+        // The gate must be a job-level `if:` line carrying the fork-safe marker —
+        // NOT merely the marker appearing anywhere in the block. (The baseline job
+        // already has the same marker on its rust-cache `save-if:`; a loose
+        // `block.contains(marker)` check would pass vacuously even if the job-level
+        // `if:` were deleted. `save-if:`.starts_with("if:") is false, so keying on
+        // a line that starts with `if:` correctly excludes the `save-if:` line.)
+        let has_job_if_fork_gate = block
+            .lines()
+            .any(|line| line.trim_start().starts_with("if:") && line.contains(fork_safe_marker));
+        if !has_job_if_fork_gate {
+            violations.push(format!(
+                "mutation.yml job `{job_key}` is missing the fork-safe `if:` gate.\n  \
+                 Required: `if: ${{{{ github.event_name != 'pull_request' || \
+                 {fork_safe_marker} }}}}` so cold fork shards don't time out."
+            ));
+        }
+    }
+
+    // Vacuous-pass guard: both jobs must have been located.
+    assert!(
+        checked == 2,
+        "Parsed only {checked}/2 mutation jobs (baseline, mutants); a rename must not let this \
+         fork-gate guard pass vacuously.\nAccumulated so far:\n{}",
+        violations.join("\n")
+    );
+
+    assert!(
+        violations.is_empty(),
+        "Mutation fork-gate policy violations:\n\n{}\n\n\
+         Why this matters: fork PRs cannot write the shared `mutants` rust-cache, so an ungated \
+         fork run rebuilds all deps cold per shard and hits the timeout — the original \
+         all-cancelled symptom. Both jobs must skip on fork PRs.\n\
+         Fix: add the fork-safe `if:` to each job in .github/workflows/mutation.yml.\n\
+         Verify: cargo test --test ci_config_tests test_mutation_jobs_skip_on_fork_prs",
+        violations.join("\n")
+    );
+}
+
+/// Count the mutants `cargo mutants --list` generates for the current config, or
+/// `None` if cargo-mutants is not installed / errored (so the test skips rather
+/// than failing in environments without the tool — mirrors `cargo_deny_available`).
+fn cargo_mutants_list_count() -> Option<usize> {
+    let output = Command::new("cargo")
+        .args(["mutants", "--list"])
+        .current_dir(repo_root())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    Some(count)
+}
+
+#[test]
+fn test_mutation_total_mutants_constant_matches_list() {
+    // Lock MUTATION_TOTAL_MUTANTS to reality: `cargo mutants --list` must report
+    // exactly that many mutants. This keeps the feasibility arithmetic in
+    // test_mutation_shard_budget_is_feasible_vs_timeout honest — if the scope
+    // changes (a mutated module added/removed, exclude_re edited, or the scoped
+    // source materially changed), the count drifts and the budget must be
+    // re-evaluated. Skips when cargo-mutants is not installed (e.g. the standard
+    // CI test lanes); it runs for local devs and any cargo-mutants-equipped lane.
+    let Some(count) = cargo_mutants_list_count() else {
+        eprintln!(
+            "Skipping test_mutation_total_mutants_constant_matches_list: cargo-mutants is not \
+             installed.\nInstall with: cargo install cargo-mutants"
+        );
+        return;
+    };
+
+    assert_eq!(
+        count, MUTATION_TOTAL_MUTANTS as usize,
+        "`cargo mutants --list` reports {count} mutants but MUTATION_TOTAL_MUTANTS = \
+         {MUTATION_TOTAL_MUTANTS} in this test file.\n\
+         The mutation scope changed (a mutated module added/removed, exclude_re edited, or the \
+         scoped source materially changed). When the count drifts:\n\
+         1. Update MUTATION_TOTAL_MUTANTS to {count}.\n\
+         2. Re-check test_mutation_shard_budget_is_feasible_vs_timeout — the shard count and/or \
+         per-shard timeout in .github/workflows/mutation.yml may need to change to keep each \
+         shard <5 min.\n\
+         3. Re-measure MUTATION_PER_MUTANT_BUDGET_SECS if the scope change altered build cost.\n\
+         See .llm/skills/mutation-testing-performance.md (the feasibility contract).\n\
+         Verify: cargo mutants --list | grep -c ."
     );
 }

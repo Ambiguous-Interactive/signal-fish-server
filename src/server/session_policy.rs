@@ -1,5 +1,5 @@
 //! Per-room session-plan selection, emission, and mid-session re-planning
-//! (Protocol v3, PLAN §P3).
+//! (Protocol v3).
 //!
 //! At lobby finalization the server picks a single room-wide plan from the
 //! intersection of every member's negotiated capabilities (Appendix D), then
@@ -29,7 +29,7 @@
 //! capabilities, runs the core, and best-effort delivers the result — gated on
 //! v3 so a v2 client never observes a `SessionPlan` (Appendix K).
 //!
-//! This module also hosts the **ICE pre-gather** seam (PLAN §P4's deferred
+//! This module also hosts the **ICE pre-gather** seam (the deferred
 //! "RoomJoined ICE pre-gather" refinement): the pure [`ice_pregather_eligible`]
 //! gate plus [`EnhancedGameServer::pregather_ice_servers`], which surfaces the
 //! same composed ICE list ([`EnhancedGameServer::composed_ice_servers_for`] —
@@ -238,7 +238,7 @@ pub(crate) fn desired_topology_for(game_name: &str, cfg: &SessionConfig) -> Topo
 }
 
 /// Whether a joiner/reconnector should receive the ICE pre-gather list on its
-/// `RoomJoined` / `Reconnected` payload (PLAN §P4's deferred "RoomJoined ICE
+/// `RoomJoined` / `Reconnected` payload (the deferred "RoomJoined ICE
 /// pre-gather" refinement). Pure over plain data so the full gating matrix is
 /// unit-testable without a server. Eligible iff ALL of:
 ///
@@ -583,8 +583,8 @@ impl EnhancedGameServer {
     /// connection manager, so a member hosted on another node fails the v3 gate
     /// and downgrades the whole room to the relay floor. That is the safe failure
     /// direction (Appendix K — never emit a v3 message to an unconfirmed peer; the
-    /// relay floor always works) and is correct under the room-affinity model
-    /// (PLAN Appendix J). Revisit when a single room can span nodes (P8).
+    /// relay floor always works) and is correct under the room-affinity model.
+    /// Revisit when a single room can span nodes.
     pub(crate) fn session_members_from(&self, players: &[PlayerInfo]) -> Vec<SessionMember> {
         players
             .iter()
@@ -1022,7 +1022,7 @@ impl EnhancedGameServer {
     }
 
     /// Build the ICE pre-gather list for a `RoomJoined` / `Reconnected` payload
-    /// (PLAN §P4's deferred "RoomJoined ICE pre-gather" refinement): the same
+    /// (the deferred "RoomJoined ICE pre-gather" refinement): the same
     /// composed list a WebRTC `SessionPlan` would carry, surfaced at join time
     /// so a v3 WebRTC-capable client can gather ICE candidates during the lobby
     /// wait instead of adding that latency at game start. The `SessionPlan` ICE

@@ -77,6 +77,15 @@ reason = "Deprecated - use std::time::Instant directly"
 # Proactive bans: prevent introduction of known-problematic crates
 
 # Security/TLS policy — enforce rustls-only TLS stack
+#
+# rustls-pemfile is flagged unmaintained by RUSTSEC-2025-0134. This is a
+# PROACTIVE ban: as of this writing the crate is NOT in our dependency tree
+# (`cargo tree -i rustls-pemfile` matches nothing) on the default build OR via
+# the optional `tls` feature. Our rustls stack already parses PEM through
+# rustls-pki-types (`cargo tree -i rustls-pki-types`), the maintained
+# replacement. The ban guards against a future dependency bump silently
+# reintroducing rustls-pemfile (e.g., through the `tls` feature's axum-server /
+# rustls cert+key loading), which would otherwise pull in the advisory.
 [[bans.deny]]
 name = "rustls-pemfile"
 reason = "Unmaintained (RUSTSEC-2025-0134) — use rustls-pki-types PEM parsing instead"

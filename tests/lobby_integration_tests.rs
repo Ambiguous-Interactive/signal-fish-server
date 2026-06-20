@@ -36,33 +36,43 @@ async fn test_lobby_integration_full_flow() {
             .await;
     }
 
-    // Assert initial messages
-    for (i, rx) in channels.iter_mut().enumerate() {
-        expect_room_joined(rx, &format!("player {} initial join", i + 1));
+    // A room enters the `Lobby` state EXACTLY ONCE — when its creator (the first
+    // player, p1) joins. The creator's `RoomJoined` still reports
+    // `lobby_state: Waiting` (built before the transition), followed by ONE
+    // own-join `LobbyStateChanged`. Every SUBSEQUENT joiner's `RoomJoined`
+    // already reports `lobby_state: Lobby`, so NO `LobbyStateChanged` is
+    // broadcast on their join, and existing members see ONLY `PlayerJoined`.
+    // The per-receiver message stream is therefore:
+    //   p1: RoomJoined, LSC(own-join), PlayerJoined(p2), PlayerJoined(p3)
+    //   p2: RoomJoined, PlayerJoined(p3)
+    //   p3: RoomJoined
+    expect_room_joined(&mut channels[0], "player 1 initial join");
+    expect_lobby_state_changed_with_ready(
+        &mut channels[0],
+        "player 1 own-join lobby update",
+        0,
+        false,
+    );
+    expect_player_joined(
+        &mut channels[0],
+        player_ids[1],
+        "player 1 sees player 2 join",
+    );
+    expect_player_joined(
+        &mut channels[0],
+        player_ids[2],
+        "player 1 sees player 3 join",
+    );
 
-        // Only the last player (when room becomes full) gets LobbyStateChanged
-        if i == 2 {
-            expect_lobby_state_changed(rx, "player 3 full-lobby update");
-        }
-    }
+    expect_room_joined(&mut channels[1], "player 2 initial join");
+    expect_player_joined(
+        &mut channels[1],
+        player_ids[2],
+        "player 2 sees player 3 join",
+    );
 
-    // Assert PlayerJoined notifications that existing players received
-    for (i, rx) in channels.iter_mut().enumerate() {
-        if i == 0 {
-            // Player 1 should have received PlayerJoined for Player 2 and Player 3
-            expect_player_joined(rx, player_ids[1], "player 1 sees player 2 join");
-            expect_player_joined(rx, player_ids[2], "player 1 sees player 3 join");
-            expect_lobby_state_changed(rx, "player 1 full-lobby update");
-        } else if i == 1 {
-            // Player 2 should have received PlayerJoined for Player 3
-            expect_player_joined(rx, player_ids[2], "player 2 sees player 3 join");
-            expect_lobby_state_changed(rx, "player 2 full-lobby update");
-        }
-        // Player 3 doesn't receive any PlayerJoined messages (already covered above)
-    }
+    expect_room_joined(&mut channels[2], "player 3 initial join");
 
-    // All LobbyStateChanged messages should have been cleared above
-    // Verify no unexpected messages remain
     for (i, rx) in channels.iter_mut().enumerate() {
         assert_no_pending_message(rx, &format!("player {} post-join drain", i + 1));
     }
@@ -88,8 +98,13 @@ async fn test_lobby_integration_full_flow() {
             }
         }
 
-        // If all players are ready, should receive GameStarting
+        // Finalization is now explicit: once every current player is ready,
+        // the room creator (the authority, player 1) sends StartGame to finalize
+        // the lobby and trigger the GameStarting broadcast. Readiness alone no
+        // longer auto-starts the game.
         if i == 2 {
+            server.handle_start_game(&player_ids[0]).await;
+
             for rx in channels.iter_mut() {
                 let msg = rx.try_recv().unwrap();
                 match msg.as_ref() {
@@ -134,15 +149,19 @@ async fn test_lobby_player_leaves_during_ready_phase() {
             .await;
     }
 
+    // The room enters the lobby EXACTLY ONCE, on the creator (player 1) joining:
+    // player 1 sees its own-join LobbyStateChanged. Player 2 is a subsequent
+    // joiner, so its RoomJoined already reports `lobby_state: Lobby` and no
+    // LobbyStateChanged is broadcast on its join — player 1 sees only
+    // PlayerJoined, and player 2 sees nothing further.
     expect_room_joined(&mut rx1, "player 1 leave-test room join");
+    expect_lobby_state_changed(&mut rx1, "player 1 leave-test own-join lobby update");
     expect_room_joined(&mut rx2, "player 2 leave-test room join");
     expect_player_joined(
         &mut rx1,
         player2_id,
         "player 1 leave-test join notification",
     );
-    expect_lobby_state_changed(&mut rx1, "player 1 leave-test lobby update");
-    expect_lobby_state_changed(&mut rx2, "player 2 leave-test lobby update");
 
     // Player 1 signals ready
     server.handle_player_ready(&player1_id).await;
@@ -169,17 +188,28 @@ async fn test_lobby_player_leaves_during_ready_phase() {
         _ => panic!("Expected RoomLeft message"),
     }
 
-    // Room should no longer be in lobby state (only 1 player left)
-    // Player 1 should not be able to start the game alone
-    server.handle_player_ready(&player1_id).await;
+    // A departure no longer regresses a partial lobby back to Waiting: the room
+    // stays a valid lobby with its remaining member, who keeps their readiness.
+    // The leave emits only PlayerLeft (asserted above) — no LobbyStateChanged.
+    assert_no_pending_message(&mut rx1, "player 1 after player 2 leaves");
 
-    // Should receive an error message since room is no longer in lobby state
+    // Player 1 is the room's only current member and is already ready
+    // (`all_ready` over the live membership). `max_players` is a ceiling, not a
+    // required count, so a solo lobby may start: an explicit StartGame from
+    // player 1 finalizes the room and broadcasts GameStarting.
+    server.handle_start_game(&player1_id).await;
+
     let msg = rx1.try_recv().unwrap();
     match msg.as_ref() {
-        ServerMessage::Error { message, .. } => {
-            assert!(message.contains("Room must be in lobby state"));
+        ServerMessage::GameStarting { peer_connections } => {
+            assert_eq!(
+                peer_connections.len(),
+                1,
+                "solo lobby finalizes with its single remaining member"
+            );
+            assert_eq!(peer_connections[0].player_id, player1_id);
         }
-        _ => panic!("Expected error message, but received: {msg:?}"),
+        _ => panic!("Expected GameStarting message, but received: {msg:?}"),
     }
 }
 
@@ -210,11 +240,15 @@ async fn test_lobby_ready_toggle_resets_ready_state() {
             .await;
     }
 
+    // A room enters the lobby EXACTLY ONCE, on the creator (player 1) joining:
+    // player 1's join triggers the single Waiting->Lobby LobbyStateChanged.
+    // Player 2 is a subsequent joiner, so its RoomJoined already reports
+    // `lobby_state: Lobby` and no LobbyStateChanged is broadcast on its join —
+    // player 1 sees only PlayerJoined, and player 2 sees nothing further.
     expect_room_joined(&mut rx1, "toggle player 1 room join");
+    expect_lobby_state_changed_with_ready(&mut rx1, "toggle player 1 lobby entry", 0, false);
     expect_room_joined(&mut rx2, "toggle player 2 room join");
     expect_player_joined(&mut rx1, player2_id, "toggle player 1 sees player 2 join");
-    expect_lobby_state_changed_with_ready(&mut rx1, "toggle player 1 full-lobby update", 0, false);
-    expect_lobby_state_changed_with_ready(&mut rx2, "toggle player 2 full-lobby update", 0, false);
 
     server.handle_player_ready(&player1_id).await;
 
@@ -285,9 +319,14 @@ async fn test_lobby_room_authority_preservation() {
         _ => panic!("Expected RoomJoined message"),
     }
 
+    // The room enters the lobby EXACTLY ONCE, on the authority (creator)
+    // joining: the authority sees its own-join LobbyStateChanged. The regular
+    // player is a subsequent joiner, so its RoomJoined already reports
+    // `lobby_state: Lobby` and no LobbyStateChanged is broadcast on its join —
+    // the authority sees only PlayerJoined, and the regular player sees nothing
+    // further.
+    expect_lobby_state_changed(&mut rx1, "authority player own-join lobby update");
     expect_player_joined(&mut rx1, player2_id, "authority player sees regular join");
-    expect_lobby_state_changed(&mut rx1, "authority player full-lobby update");
-    expect_lobby_state_changed(&mut rx2, "regular player full-lobby update");
 
     // Both players signal ready
     server.handle_player_ready(&player1_id).await;
@@ -297,6 +336,10 @@ async fn test_lobby_room_authority_preservation() {
     server.handle_player_ready(&player2_id).await;
     expect_lobby_state_changed(&mut rx1, "authority player all-ready update");
     expect_lobby_state_changed(&mut rx2, "regular player all-ready update");
+
+    // Finalization is now explicit: with every current player ready, the room's
+    // authority (player 1) sends StartGame to finalize and trigger GameStarting.
+    server.handle_start_game(&player1_id).await;
 
     // Check GameStarting message preserves authority
     let game_start_msg1 = rx1.try_recv().unwrap();
@@ -355,6 +398,11 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
         ServerMessage::RoomJoined(ref payload) => assert_eq!(payload.room_code, room_code),
         other => panic!("unexpected host message: {other:?}"),
     }
+
+    // The room enters the lobby as soon as the host joins (`max_players` is a
+    // ceiling, not a required count), so the host receives a LobbyStateChanged
+    // right after RoomJoined. Drain it before asserting the spectator flow.
+    expect_lobby_state_changed(&mut player_rx, "host lobby entry on first join");
 
     server
         .handle_join_as_spectator(

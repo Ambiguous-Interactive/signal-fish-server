@@ -145,26 +145,39 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let mut batcher = MessageBatcher::new(100, 50); // Small interval, flush on time
+        // The batcher's flush timer starts at `new()` and `should_flush()` reads
+        // the wall clock, so a naive "queue then immediately assert !should_flush"
+        // flakes under load: the thread can be descheduled past the interval
+        // between construction and the check. Split the two assertions into
+        // robust legs (zero-flakiness policy, .llm/context-testing.md):
 
-        // Add a single message
-        let message = Arc::new(ServerMessage::PlayerLeft {
+        // "Not enough time" leg — a LARGE (10s) interval so the immediate check
+        // cannot flip even under extreme scheduling delay.
+        let mut fresh = MessageBatcher::new(100, 10_000);
+        fresh.queue(Arc::new(ServerMessage::PlayerLeft {
             player_id: uuid::Uuid::new_v4(),
-        });
-        batcher.queue(message);
+        }));
+        assert_eq!(fresh.len(), 1);
+        assert!(
+            !fresh.should_flush(),
+            "a fresh batch under a 10s interval must not flush on time"
+        );
 
-        assert_eq!(batcher.len(), 1);
-        assert!(!batcher.should_flush()); // Not enough time passed
-
-        // Wait for interval to pass
-        thread::sleep(Duration::from_millis(60));
-
-        assert!(batcher.should_flush()); // Should flush now due to time
-
-        // Test flush
-        let messages = batcher.flush();
+        // "Enough time" leg — a TINY (5ms) interval and a sleep an order of
+        // magnitude larger, so the time-based flush is deterministic even if the
+        // sleep overruns (sleep only ever overshoots, never undershoots).
+        let mut timed = MessageBatcher::new(100, 5);
+        timed.queue(Arc::new(ServerMessage::PlayerLeft {
+            player_id: uuid::Uuid::new_v4(),
+        }));
+        thread::sleep(Duration::from_millis(50)); // >> 5ms interval
+        assert!(
+            timed.should_flush(),
+            "the batch must flush once its interval has elapsed"
+        );
+        let messages = timed.flush();
         assert_eq!(messages.len(), 1);
-        assert_eq!(batcher.len(), 0);
+        assert_eq!(timed.len(), 0);
     }
 
     #[test]
@@ -213,25 +226,37 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let mut batcher = MessageBatcher::new(10, 20);
+        // Same split-leg shape as `test_message_batcher_flush_on_time` to keep the
+        // time-based assertions deterministic under load (zero-flakiness policy).
 
-        // Add fewer messages than batch size
+        // "Not full, not enough time" leg — a LARGE (10s) interval makes the
+        // immediate check robust to any scheduling delay.
+        let mut fresh = MessageBatcher::new(10, 10_000);
         for _ in 0..3 {
-            let message = Arc::new(ServerMessage::PlayerLeft {
+            fresh.queue(Arc::new(ServerMessage::PlayerLeft {
                 player_id: uuid::Uuid::new_v4(),
-            });
-            batcher.queue(message);
+            }));
         }
+        assert_eq!(fresh.len(), 3);
+        assert!(
+            !fresh.should_flush(),
+            "a partial batch under a 10s interval must not flush yet"
+        );
 
-        assert_eq!(batcher.len(), 3);
-        assert!(!batcher.should_flush()); // Batch not full, time not elapsed
-
-        // Wait for time interval
-        thread::sleep(Duration::from_millis(25));
-
-        assert!(batcher.should_flush()); // Should flush due to time
-
-        let messages = batcher.flush();
+        // "Time elapsed" leg — a TINY (5ms) interval with a generous sleep, so the
+        // partial-batch time flush is deterministic.
+        let mut timed = MessageBatcher::new(10, 5);
+        for _ in 0..3 {
+            timed.queue(Arc::new(ServerMessage::PlayerLeft {
+                player_id: uuid::Uuid::new_v4(),
+            }));
+        }
+        thread::sleep(Duration::from_millis(50)); // >> 5ms interval
+        assert!(
+            timed.should_flush(),
+            "a partial batch must flush once its interval has elapsed"
+        );
+        let messages = timed.flush();
         assert_eq!(messages.len(), 3);
     }
 }

@@ -73,8 +73,25 @@ pub enum ClientMessage {
     },
     /// Request to become or connect to authoritative server
     AuthorityRequest { become_authority: bool },
-    /// Signal readiness to start the game in lobby
+    /// Toggle this player's readiness in the lobby.
+    ///
+    /// Readiness can be toggled at any time while the room is open (not yet
+    /// `Finalized`); the room need not be full. The server broadcasts
+    /// `LobbyStateChanged` after each toggle, with `all_ready` set once every
+    /// *current* player is ready. Readiness alone no longer starts the game — an
+    /// explicit [`ClientMessage::StartGame`] is required (see its docs).
     PlayerReady,
+    /// Explicitly start the game, finalizing the lobby with its *current*
+    /// members (`max_players` is a ceiling, not a required count).
+    ///
+    /// Accepted only when **every current player is ready** (`all_ready`). The
+    /// sender must be permitted to start: if the room has a designated authority
+    /// player, only that authority may start; if no authority is set, **any**
+    /// player in the room may start. On success the server transitions the room
+    /// to `Finalized` and broadcasts `GameStarting` (and, for a negotiated v3
+    /// non-relay room, the per-recipient `SessionPlan`). A room with a single
+    /// ready player may start (solo is allowed).
+    StartGame,
     /// Provide legacy, self-declared v2/back-compat connection metadata.
     ///
     /// Stored for `GameStarting.peer_connections[*].connection_info`; not used
@@ -126,7 +143,7 @@ pub struct RoomJoinedPayload {
     #[serde(default)]
     pub current_spectators: Vec<SpectatorInfo>,
     /// ICE (STUN/TURN) servers for early candidate gathering during the lobby
-    /// wait (v3 only — PLAN §P4's deferred "RoomJoined ICE pre-gather"
+    /// wait (v3 only — the deferred "RoomJoined ICE pre-gather"
     /// refinement). Populated only under the pre-gather gate
     /// (`session.enable_ice_pregather` + WebRTC enabled + non-relay desired
     /// topology + non-finalized room + a v3 recipient that negotiated the
@@ -160,7 +177,7 @@ pub struct ReconnectedPayload {
     #[serde(default)]
     pub current_spectators: Vec<SpectatorInfo>,
     /// ICE (STUN/TURN) servers for early candidate gathering during the lobby
-    /// wait (v3 only — PLAN §P4's deferred "RoomJoined ICE pre-gather"
+    /// wait (v3 only — the deferred "RoomJoined ICE pre-gather"
     /// refinement). Populated only under the pre-gather gate
     /// (`session.enable_ice_pregather` + WebRTC enabled + non-relay desired
     /// topology + non-finalized room + a v3 recipient that negotiated the

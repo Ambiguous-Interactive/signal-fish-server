@@ -13,7 +13,8 @@ pub mod room_coordinator;
 // Re-export public types
 pub use dedup::DedupCacheSettings;
 pub use room_coordinator::{
-    FinalizedRoom, InMemoryRoomOperationCoordinator, RoomOperationCoordinatorTrait,
+    FinalizedRoom, InMemoryRoomOperationCoordinator, PlayerReadyError,
+    RoomOperationCoordinatorTrait, StartGameOutcome,
 };
 
 // MessageCoordinator trait (defined in server.rs as InMemoryMessageCoordinator)

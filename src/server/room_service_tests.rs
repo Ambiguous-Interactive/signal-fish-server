@@ -164,6 +164,76 @@ async fn max_room_cap_denial_releases_join_coordination_locks() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
+    // Regression guard for error-code classification (the same class fixed in
+    // `ready_state.rs`/`PlayerReadyError`): a join rejected because the room is
+    // at capacity is a BUSINESS rejection and MUST surface as `ROOM_FULL` — so a
+    // client knows to try a different room — never the catch-all
+    // `ROOM_CREATION_FAILED`, which signals a transient/infra fault a client
+    // would (wrongly) retry against the same full room. This also keeps the
+    // join path consistent with the reconnection path, which already maps a full
+    // room to `ROOM_FULL`. See `JoinRoomError`.
+    let server = create_test_server().await;
+
+    // Player 1 creates a room capped at a single seat → full once the creator is
+    // seated (room creation seats the creator).
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48002".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "test-game".to_string(),
+            Some("FULLRM".to_string()),
+            "creator".to_string(),
+            Some(1),
+            Some(false),
+            None,
+        )
+        .await;
+    match timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("channel still open")
+        .expect("creator join response present")
+        .as_ref()
+    {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("creator expected RoomJoined, got {other:?}"),
+    }
+
+    // Player 2 attempts to join the now-full room by its code.
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:48003".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &joiner,
+            "test-game".to_string(),
+            Some("FULLRM".to_string()),
+            "joiner".to_string(),
+            Some(1),
+            Some(false),
+            None,
+        )
+        .await;
+
+    match timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("channel still open")
+        .expect("joiner failure message present")
+        .as_ref()
+    {
+        ServerMessage::RoomJoinFailed { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::RoomFull),
+                "a full-room join must classify as ROOM_FULL, not ROOM_CREATION_FAILED"
+            );
+        }
+        other => panic!("joiner expected RoomJoinFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn maintenance_cleanup_removes_expired_reconnections() {
     let server = create_test_server_with_config(ServerConfig {
         reconnection_window: Duration::ZERO,

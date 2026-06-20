@@ -8,7 +8,10 @@
 // 2. Room: `JoinRoom` with no code creates; `--join-code` joins by code.
 // 3. Ready barrier: send `PlayerReady` only once the room is in the Lobby
 //    state AND `--peers N` members are present (counting members alone races
-//    the server's Waiting→Lobby transition).
+//    the server's Waiting→Lobby transition). The lobby no longer auto-starts
+//    on a full ready set: when the server reports every current member ready
+//    (`LobbyStateChanged.all_ready`), the room creator sends an explicit
+//    `StartGame`; joiners just await the `GameStarting` it produces.
 // 4. Finalize: `GameStarting`, then (non-relay rooms) the per-recipient
 //    `SessionPlan`.
 // 5. P2P per `peers[].initiate` / `NewPeer.you_initiate`; the overall WebRTC
@@ -115,6 +118,11 @@ class Orchestrator {
   private readonly membersSeen = new Set<string>();
   private inLobby = false;
   private readySent = false;
+  /**
+   * The explicit `StartGame` has been sent (room creator only, once). Guards
+   * against re-sending on subsequent `LobbyStateChanged` broadcasts.
+   */
+  private startGameSent = false;
   private gameStarted = false;
   private lateJoined = false;
   private webrtcPlanSeen = false;
@@ -644,6 +652,10 @@ class Orchestrator {
         if (data['lobby_state'] === 'lobby') {
           this.inLobby = true;
           this.maybeSendReady();
+          // The lobby no longer auto-starts: the room creator issues the
+          // explicit StartGame that produces GameStarting once the server
+          // reports the full ready set.
+          this.maybeSendStartGame(Boolean(data['all_ready']));
         }
         break;
       }
@@ -844,6 +856,38 @@ class Orchestrator {
     if (!this.readySent && this.inLobby && this.present.size >= this.config.peers) {
       this.sendFrame(clientFrame('PlayerReady'));
       this.readySent = true;
+    }
+  }
+
+  /**
+   * Send the explicit `StartGame` that finalizes the lobby, exactly once, when
+   * this client created the room AND the server reports every current member
+   * ready (`LobbyStateChanged.all_ready`).
+   *
+   * The protocol no longer auto-starts a full, all-ready room: finalization is
+   * driven by an explicit `StartGame` from the authority — or, when no
+   * authority is designated (the interop rooms never set one), any member. The
+   * room creator is elected as that member here: it is always a v3 participant
+   * that is present through finalization, so the choice is deterministic and
+   * needs no cross-client coordination. Joiners send no `StartGame`; they
+   * simply await the `GameStarting` the creator's call produces. `all_ready`
+   * already implies a full, seated, ready room (every client gates
+   * `PlayerReady` on having seen all `--peers` members), and the server
+   * re-checks readiness under its room lock, so this never races a late joiner.
+   * The send is idempotent-guarded by `startGameSent`.
+   *
+   * Assumption: readiness is monotonic until finalize — no member leaves or
+   * un-readies between `all_ready` and the server processing this `StartGame`.
+   * That holds for every interop scenario (rooms cap at `--peers`; the only
+   * departures are AFTER `GameStarting`). A pre-finalize departure is a
+   * deliberate non-goal here (it could leave the latch set after a `NotReady`);
+   * a production game client would re-issue `StartGame` on the next ready set.
+   */
+  private maybeSendStartGame(allReady: boolean): void {
+    if (this.config.createRoom && allReady && !this.startGameSent && !this.gameStarted) {
+      this.sendFrame(clientFrame('StartGame'));
+      this.startGameSent = true;
+      console.error('all members ready; sent StartGame to finalize the lobby');
     }
   }
 

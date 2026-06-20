@@ -32,6 +32,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{read_file, repo_root};
+use serde_json::Value;
 use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::GameDataEncoding;
 
@@ -292,6 +293,191 @@ fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 // ---------------------------------------------------------------------------
+// Server-emitted wire-string extraction (keep doc examples honest)
+// ---------------------------------------------------------------------------
+
+/// Extract the first double-quoted string literal from `s`. The reason/message
+/// literals this guard compares are plain ASCII with no embedded quotes or
+/// escapes, so a first-quote/next-quote scan is exact (and far simpler than a
+/// real lexer).
+fn first_string_literal(s: &str) -> Option<String> {
+    let rest = &s[s.find('"')? + 1..];
+    Some(rest[..rest.find('"')?].to_string())
+}
+
+/// The `reason` strings produced by `ReconnectionError::Display` — the right-hand
+/// string literals of its `match` in `src/reconnection.rs`. The typed-rejection
+/// path sends these via `error.to_string()` (`reconnection_service.rs`). This is
+/// only PART of the allowed set; other rejections send a literal reason that lives
+/// in `reconnection_service.rs` (collected by [`string_literals`]). Parsed from
+/// source — never a hand-kept list — so a new variant's reason joins the set
+/// automatically.
+fn reconnection_reason_strings(src: &str) -> BTreeSet<String> {
+    let anchor = "impl std::fmt::Display for ReconnectionError";
+    let start = src
+        .find(anchor)
+        .expect("src/reconnection.rs must `impl Display for ReconnectionError`");
+
+    // Bound the scan to this impl's body via brace matching so an unrelated
+    // `=> \"...\"` elsewhere in the file can never widen the allowed set.
+    let body_start = src[start..].find('{').expect("impl opening brace") + start + 1;
+    let mut depth = 1usize;
+    let mut body_end = body_start;
+    for (i, c) in src[body_start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = body_start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    src[body_start..body_end]
+        .lines()
+        .filter_map(|line| {
+            line.split_once("=>")
+                .and_then(|(_, rhs)| first_string_literal(rhs))
+        })
+        .collect()
+}
+
+/// Every double-quoted string literal in `src`. The reconnection guard feeds it
+/// `reconnection_service.rs` to get the reasons that module can put on the wire.
+///
+/// A reason reaches a `ReconnectionFailed` through more than one path — an inline
+/// `reason: "..."` field AND a `reason: &str` helper parameter
+/// (`reject_claimed_reconnect`) — so enumerating paths is brittle (it already
+/// missed one). Taking EVERY literal in the module is a deliberate *superset*: it
+/// also holds a few log strings, which is the safe direction — it can never reject
+/// a real reason, while an invented paraphrase still matches nothing. `\"` escapes
+/// are honored and `//` comments skipped; the module has no raw strings or
+/// quote char-literals (a lexer-pitfall check in the guard's tests asserts this).
+fn string_literals(src: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // Skip `//` line comments so a `"` in a comment can't open a literal.
+            '/' if chars.peek() == Some(&'/') => {
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                let mut literal = String::new();
+                while let Some(d) = chars.next() {
+                    match d {
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                literal.push(escaped);
+                            }
+                        }
+                        '"' => break,
+                        _ => literal.push(d),
+                    }
+                }
+                out.insert(literal);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Every `reason` documented inside a `ReconnectionFailed` example, paired with
+/// the 1-based line of the fenced JSON block it appears in. Each ```json block is
+/// parsed and walked for any `ReconnectionFailed` object (compact or pretty,
+/// nested or top-level), so a paraphrased reason cannot hide behind formatting.
+/// Unparsable blocks are skipped — safe because every real wire example is valid
+/// JSON, and a bogus reason can only be asserted via a valid example anyway.
+fn documented_reconnection_reasons(markdown: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        // Skip whole fenced blocks at once. A non-JSON block (including a
+        // ```` wrapper that merely *shows* ```json as literal text) is consumed
+        // without parsing, so a nested fence is never mistaken for a real example.
+        if let Some((marker, info)) = code_fence_open(lines[i]) {
+            let fence_line = i + 1;
+            i += 1;
+            let mut block = String::new();
+            while i < lines.len() && !is_code_fence_close(lines[i], &marker) {
+                block.push_str(lines[i]);
+                block.push('\n');
+                i += 1;
+            }
+            if info == "json" {
+                if let Ok(value) = serde_json::from_str::<Value>(&block) {
+                    collect_reconnection_reasons(&value, fence_line, &mut found);
+                }
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+/// If `line` opens a fenced code block (3+ backticks or tildes), return the fence
+/// marker and the lowercased first token of its info string (`json`, `rust`, …).
+/// Handles 4+-fence wrappers and attributes/case (` ```JSON title="x" ` → `json`).
+fn code_fence_open(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim_start();
+    let ch = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = trimmed.chars().take_while(|c| *c == ch).count();
+    if len < 3 {
+        return None;
+    }
+    let info = trimmed[len..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some((ch.to_string().repeat(len), info))
+}
+
+/// A closing fence: only the opener's fence character, at least as long.
+fn is_code_fence_close(line: &str, marker: &str) -> bool {
+    let trimmed = line.trim();
+    let ch = marker.chars().next().expect("non-empty fence marker");
+    trimmed.len() >= marker.len() && !trimmed.is_empty() && trimmed.chars().all(|c| c == ch)
+}
+
+/// Recursively collect `data.reason` from every `ReconnectionFailed` object in a
+/// parsed JSON value.
+fn collect_reconnection_reasons(value: &Value, line: usize, out: &mut Vec<(usize, String)>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("ReconnectionFailed") {
+                if let Some(reason) = map
+                    .get("data")
+                    .and_then(|data| data.get("reason"))
+                    .and_then(Value::as_str)
+                {
+                    out.push((line, reason.to_string()));
+                }
+            }
+            for nested in map.values() {
+                collect_reconnection_reasons(nested, line, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_reconnection_reasons(item, line, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Guards
 // ---------------------------------------------------------------------------
 
@@ -451,6 +637,50 @@ fn public_docs_have_no_stale_protocol_tokens() {
 }
 
 #[test]
+fn reconnection_failure_docs_use_canonical_reason_strings() {
+    // A `ReconnectionFailed.reason` on the wire is one the server can actually
+    // emit: a `ReconnectionError::Display` string (the typed path sends
+    // `error.to_string()`) OR a literal reason inlined in `reconnection_service.rs`
+    // (e.g. "Reconnection is not enabled"). Docs that invent a paraphrase — e.g.
+    // "The reconnection token is invalid or malformed." — lie about the wire
+    // contract a client matches against. This guard ties every documented
+    // ReconnectionFailed example back to that source-derived set.
+    let root = repo_root();
+    let mut allowed = reconnection_reason_strings(&read_file(&root.join("src/reconnection.rs")));
+    allowed.extend(string_literals(&read_file(
+        &root.join("src/server/reconnection_service.rs"),
+    )));
+    assert!(
+        allowed.len() >= 5,
+        "expected to parse every ReconnectionError::Display reason, got {allowed:?}"
+    );
+
+    let mut files = Vec::new();
+    collect_markdown_files(&docs_dir(), &mut files);
+    files.push(root.join("README.md"));
+
+    let mut violations = Vec::new();
+    for file in &files {
+        for (line_no, reason) in documented_reconnection_reasons(&read_file(file)) {
+            if !allowed.contains(&reason) {
+                violations.push(format!(
+                    "  {}:{line_no}: documents reason {reason:?}",
+                    file.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "These ReconnectionFailed examples show a `reason` the server never sends \
+         (the wire reason comes from `ReconnectionError::Display` in src/reconnection.rs \
+         or a literal in src/server/reconnection_service.rs). Use one of {allowed:?}:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn docs_internal_anchor_links_resolve_on_both_github_and_mkdocs() {
     let docs = docs_dir();
     let mut files = Vec::new();
@@ -538,4 +768,129 @@ fn docs_internal_anchor_links_resolve_on_both_github_and_mkdocs() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the reconnection reason extraction (lock in JSON-shape
+// robustness so the guard cannot silently miss a drift behind formatting)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod reconnection_reason_tests {
+    use super::*;
+
+    fn reasons(md: &str) -> Vec<String> {
+        documented_reconnection_reasons(md)
+            .into_iter()
+            .map(|(_, reason)| reason)
+            .collect()
+    }
+
+    #[test]
+    fn finds_reason_in_pretty_compact_and_nested_json() {
+        let pretty = "```json\n{\n  \"type\": \"ReconnectionFailed\",\n  \"data\": { \"reason\": \"A\" }\n}\n```\n";
+        assert_eq!(reasons(pretty), ["A"]);
+
+        // Compact / single-line — the old line-scanner missed this.
+        let compact =
+            "```json\n{ \"type\": \"ReconnectionFailed\", \"data\": { \"reason\": \"B\" } }\n```\n";
+        assert_eq!(reasons(compact), ["B"]);
+
+        // Nested inside an envelope, after an unrelated `}` and a sibling object.
+        let nested = "```json\n{ \"note\": \"has a } brace\", \"frames\": [ {}, { \"type\": \"ReconnectionFailed\", \"data\": { \"reason\": \"C\" } } ] }\n```\n";
+        assert_eq!(reasons(nested), ["C"]);
+    }
+
+    #[test]
+    fn ignores_non_json_blocks_and_unrelated_reasons() {
+        let other = "```json\n{ \"type\": \"RoomJoinFailed\", \"data\": { \"reason\": \"Room is full\" } }\n```\n";
+        assert!(reasons(other).is_empty());
+
+        // Not a fenced JSON block → not scanned.
+        let prose = "The reason field is `ReconnectionFailed`.\n";
+        assert!(reasons(prose).is_empty());
+    }
+
+    #[test]
+    fn finds_reason_in_uppercase_and_thick_fences() {
+        // Reviewer A #1/#2: 4+-backtick fences and an upper/attributed info string
+        // must still be scanned.
+        let thick = "````json\n{ \"type\": \"ReconnectionFailed\", \"data\": { \"reason\": \"D\" } }\n````\n";
+        assert_eq!(reasons(thick), ["D"]);
+
+        let upper = "```JSON title=\"x\"\n{ \"type\": \"ReconnectionFailed\", \"data\": { \"reason\": \"E\" } }\n```\n";
+        assert_eq!(reasons(upper), ["E"]);
+
+        // A ```json shown literally *inside* a ```` wrapper is documentation of
+        // markup, not a wire example, so it must NOT be scanned.
+        let wrapped = "````text\n```json\n{ \"type\": \"ReconnectionFailed\", \"data\": { \"reason\": \"WRAP\" } }\n```\n````\n";
+        assert!(reasons(wrapped).is_empty());
+    }
+
+    #[test]
+    fn allowed_set_is_parsed_from_display_impl() {
+        let src = "\
+impl std::fmt::Display for ReconnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::TokenMismatch => \"Invalid reconnection token\",
+            Self::WindowExpired => \"Reconnection window has expired\",
+        };
+        f.write_str(reason)
+    }
+}";
+        let set = reconnection_reason_strings(src);
+        assert!(set.contains("Invalid reconnection token"));
+        assert!(set.contains("Reconnection window has expired"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn string_literals_collects_inline_and_helper_reasons() {
+        // Reviewer B #3: reasons reach `ReconnectionFailed` via BOTH an inline
+        // field and a `reject_claimed_reconnect(reason: &str)` helper. Collecting
+        // every literal covers both paths; `\"`-escapes don't terminate early and
+        // `//` comments are skipped.
+        let src = "\
+        send(ReconnectionFailed { reason: \"Reconnection is not enabled\".to_string(), code });
+        self.reject_claimed_reconnect(guard, \"Room is full\", ErrorCode::ReconnectionFailed);
+        // \"this is a comment, not a reason\"
+        let q = \"a \\\" quote\";";
+        let set = string_literals(src);
+        assert!(set.contains("Reconnection is not enabled")); // inline field path
+        assert!(set.contains("Room is full")); // helper-parameter path
+        assert!(set.contains("a \" quote")); // escaped quote handled
+        assert!(!set.contains("this is a comment, not a reason")); // comment skipped
+    }
+
+    #[test]
+    fn reconnection_service_has_no_lexer_pitfalls() {
+        // `string_literals` is a simple double-quote scanner; it stays exact only
+        // while reconnection_service.rs has no raw strings or quote char-literals.
+        // Assert that precondition so a future one fails loudly here rather than
+        // silently skewing the allowed set.
+        let src = read_file(&repo_root().join("src/server/reconnection_service.rs"));
+        let bytes = src.as_bytes();
+        // A raw-string prefix is `r`/`r#`…`"` where `r` STARTS a token — not the
+        // `r` that merely ends a word like `error"` (which is a normal literal).
+        let has_raw_string = (0..bytes.len()).any(|i| {
+            bytes[i] == b'r'
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                && {
+                    let mut j = i + 1;
+                    while bytes.get(j) == Some(&b'#') {
+                        j += 1;
+                    }
+                    bytes.get(j) == Some(&b'"')
+                }
+        });
+        assert!(
+            !has_raw_string,
+            "raw string in reconnection_service.rs breaks string_literals()"
+        );
+        assert!(
+            !src.contains("'\"'"),
+            "a quote char-literal in reconnection_service.rs breaks string_literals()"
+        );
+    }
 }

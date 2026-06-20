@@ -487,6 +487,15 @@ async fn test_room_creation_and_joining() {
         _ => panic!("Expected RoomJoined for player 2, got {response2:?}"),
     }
 
+    // The room enters the lobby as soon as player 1 joins (`max_players` is a
+    // ceiling, not a required count), so player 1 first receives an own-join
+    // LobbyStateChanged before the PlayerJoined for player 2.
+    expect_lobby_state_changed_notification(
+        &mut receiver1,
+        "player 1 room-creation own-join update",
+    )
+    .await;
+
     // Player 1 should receive a PlayerJoined notification
     match tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver1.next()).await {
         Ok(Some(msg)) => {
@@ -537,11 +546,14 @@ async fn test_game_data_broadcasting() {
         .await
         .unwrap();
 
+    // The room enters the lobby EXACTLY ONCE, as soon as player 1 joins
+    // (`max_players` is a ceiling, not a required count). Player 1 sees its
+    // own-join lobby update, then a PlayerJoined when player 2 joins. Player 2
+    // joins an already-Lobby room, so its `RoomJoined` already carries
+    // `lobby_state: Lobby` and no further LobbyStateChanged is broadcast.
+    expect_lobby_state_changed_notification(&mut receiver1, "player 1 game-data own-join update")
+        .await;
     expect_player_joined_notification(&mut receiver1, "player 1 game-data join notification").await;
-    expect_lobby_state_changed_notification(&mut receiver1, "player 1 game-data lobby update")
-        .await;
-    expect_lobby_state_changed_notification(&mut receiver2, "player 2 game-data lobby update")
-        .await;
 
     // Player 1 sends game data
     let game_data = serde_json::json!({"action": "move", "x": 100, "y": 200});
@@ -990,6 +1002,15 @@ async fn test_e2e_authority_protocol_enforcement() {
     };
     assert_ne!(player1_id, player2_id, "test must use distinct players");
 
+    // The room enters the lobby EXACTLY ONCE, on player 1's join (`max_players`
+    // is a ceiling, not a required count): player 1 sees its own-join lobby
+    // update, then a PlayerJoined for player 2. Player 2 joins an already-Lobby
+    // room, so no further LobbyStateChanged is broadcast.
+    expect_lobby_state_changed_notification(
+        &mut receiver1,
+        "player 1 authority-protocol own-join lobby update",
+    )
+    .await;
     expect_player_joined_notification(
         &mut receiver1,
         "player 1 authority-protocol join notification",
@@ -1187,6 +1208,11 @@ async fn test_simple_authority_release() {
         _ => panic!("Expected RoomJoined, got {response:?}"),
     }
 
+    // The room enters the lobby as soon as the creator joins (`max_players` is a
+    // ceiling, not a required count), so an own-join LobbyStateChanged follows
+    // RoomJoined. Drain it before exercising the authority release flow.
+    expect_lobby_state_changed_notification(&mut receiver, "single-player lobby entry").await;
+
     // Now try to release authority
     println!("Attempting to release authority");
     let release_request = ClientMessage::AuthorityRequest {
@@ -1278,11 +1304,12 @@ async fn test_two_player_authority_release() {
         _ => panic!("Expected RoomJoined, got {response2:?}"),
     }
 
+    // The room enters the lobby EXACTLY ONCE, on player 1's join: player 1 sees
+    // its own-join lobby update, then a PlayerJoined for player 2. Player 2 joins
+    // an already-Lobby room, so no further LobbyStateChanged is broadcast.
+    expect_lobby_state_changed_notification(&mut receiver1, "player 1 two-player own-join update")
+        .await;
     expect_player_joined_notification(&mut receiver1, "player 1 two-player join notification")
-        .await;
-    expect_lobby_state_changed_notification(&mut receiver1, "player 1 two-player lobby update")
-        .await;
-    expect_lobby_state_changed_notification(&mut receiver2, "player 2 two-player lobby update")
         .await;
 
     // Now Player 1 releases authority
@@ -1363,6 +1390,11 @@ async fn test_e2e_authority_disabled_rooms() {
         }
         _ => panic!("Expected RoomJoined, got {response:?}"),
     }
+
+    // The room enters the lobby as soon as the creator joins (`max_players` is a
+    // ceiling, not a required count), so an own-join LobbyStateChanged follows
+    // RoomJoined. Drain it before asserting the authority-request denial.
+    expect_lobby_state_changed_notification(&mut receiver, "no-auth room lobby entry").await;
 
     // Try to request authority - should be denied
     let authority_request = ClientMessage::AuthorityRequest {
@@ -1663,6 +1695,11 @@ async fn test_idle_timeout_zero_disables_idle_enforcement() {
         matches!(response, ServerMessage::RoomJoined(_)),
         "expected RoomJoined, got {response:?}"
     );
+
+    // The room enters the lobby as soon as the creator joins (`max_players` is a
+    // ceiling, not a required count), so an own-join LobbyStateChanged follows
+    // RoomJoined. Drain it before asserting the connection then goes silent.
+    expect_lobby_state_changed_notification(&mut receiver, "idle-disabled lobby entry").await;
 
     // Stay silent for 3s — strictly longer than the 1–2s windows used by the
     // sibling tests. With the idle timeout disabled the server must send

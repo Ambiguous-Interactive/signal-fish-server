@@ -8,6 +8,42 @@ impl EnhancedGameServer {
         tracing::debug!(%room_id, %reason, "Room closed");
     }
 
+    /// Drop the coordinator's in-memory ready-state entries for rooms that no
+    /// longer exist in storage. Returns the number of entries pruned.
+    ///
+    /// This mirrors [`Self::prune_active_session_plans`]: `cleanup_expired_rooms`
+    /// reports only counts (no per-room ids) and removes inactive rooms even when
+    /// they still had members, so this sweep is the guaranteed reclaim for every
+    /// room-removal path. A transient storage error keeps the entry for the next
+    /// tick rather than risk clearing a live room's ready set.
+    pub(crate) async fn prune_ready_players(&self) -> usize {
+        let room_ids = self.room_coordinator.ready_player_room_ids().await;
+        let mut removed = 0;
+        for room_id in room_ids {
+            match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if self
+                        .room_coordinator
+                        .clear_ready_players(&room_id)
+                        .await
+                        .is_ok()
+                    {
+                        removed += 1;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        %room_id,
+                        error = %err,
+                        "Failed to check room existence while pruning ready players"
+                    );
+                }
+            }
+        }
+        removed
+    }
+
     pub(crate) async fn cleanup_expired_reconnections(&self) -> usize {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return 0;
@@ -83,6 +119,21 @@ impl EnhancedGameServer {
                             // idempotency claim below.
                             self.clear_active_session_plan(room_id);
 
+                            // Likewise drop the coordinator's per-node in-memory
+                            // ready set for this deleted room. This is the prompt
+                            // reclaim on the empty-room path; the all-paths
+                            // backstop (for rooms reaped via `cleanup_expired_rooms`,
+                            // which reports no ids) is `prune_ready_players` below.
+                            // Idempotent.
+                            if let Err(e) = self.room_coordinator.clear_ready_players(room_id).await
+                            {
+                                tracing::warn!(
+                                    %room_id,
+                                    error = %e,
+                                    "Failed to clear ready players during empty-room cleanup"
+                                );
+                            }
+
                             // Try to claim the cleanup operation for this room
                             // Only proceed with post-cleanup if we successfully claimed it
                             let should_process = self
@@ -156,6 +207,21 @@ impl EnhancedGameServer {
                     count = pruned_session_plans,
                     instance_id = %self.instance_id,
                     "Pruned stored session plans for removed rooms"
+                );
+            }
+
+            // Drop coordinator ready-state entries for rooms that no longer
+            // exist. Like the session-plan sweep above, this is the guaranteed
+            // all-paths reclaim — `cleanup_expired_rooms` removes inactive rooms
+            // (including non-empty ones) reporting only counts, so neither the
+            // per-room empty-cleanup clear nor any departure hook would otherwise
+            // catch them.
+            let pruned_ready_players = self.prune_ready_players().await;
+            if pruned_ready_players > 0 {
+                tracing::debug!(
+                    count = pruned_ready_players,
+                    instance_id = %self.instance_id,
+                    "Pruned ready-state entries for removed rooms"
                 );
             }
 

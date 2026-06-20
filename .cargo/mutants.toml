@@ -1,0 +1,84 @@
+# cargo-mutants configuration — mutation testing of the protocol decision logic.
+#
+# Mutation testing answers "do our tests actually catch bugs?": cargo-mutants
+# injects small behavioral mutations (flip a comparison, drop a `!`, replace a
+# return value) into the source and re-runs the tests. A mutant that survives
+# (tests still pass) marks a gap in test strength — a place where a real bug of
+# that shape would ship undetected.
+#
+# Scope: the pure decision logic where mutation has the highest signal and the
+# cheapest oracle — the session-plan selection ladder, the signaling glare /
+# size / gating logic, input validation, and room-code generation. These are
+# all exercised by fast in-crate `#[cfg(test)]` unit tests, so the oracle is
+# `--lib` (no slow WebSocket e2e per mutant). Broaden `examine_globs` for a
+# wider sweep when running locally with more time.
+#
+# Run:  cargo mutants            (uses this config)
+#       cargo mutants --list     (enumerate mutants without testing)
+# CI:   .github/workflows/mutation.yml (scheduled + workflow_dispatch)
+
+# Only the in-crate unit tests are the oracle — fast and deterministic. A mutant
+# in code reachable ONLY from WebSocket e2e tests is out of this config's scope
+# by design (the e2e suites are the regression net there); keep mutation focused
+# where unit tests give a tight, quick verdict.
+test_tool = "cargo"
+# Oracle = the in-crate `--lib` unit tests ONLY, passed via `additional_cargo_args`
+# (NOT `additional_cargo_test_args`). The distinction is a major speed lever:
+# `additional_cargo_test_args` applies `--lib` to the TEST run only, so the
+# preceding `cargo test --no-run` BUILD still compiles ALL ~20 integration-test
+# binaries (each relinks the whole lib) on every mutant. `additional_cargo_args`
+# applies `--lib` to BOTH the build and the test, so each mutant only rebuilds the
+# lib + its unit-test binary — the integration suites are never built or run here.
+#
+# We also deliberately do NOT pass `--all-features`: the scoped modules below
+# contain ZERO `#[cfg(feature = ...)]` (default features = []), so enabling `tls`
+# (rustls/axum-server) and `legacy-fullmesh` (matchbox_signaling) changes neither
+# the generated mutant set (`cargo mutants --list` stays 199) nor the catch
+# outcome — it only drags those heavy deps into every per-mutant build/relink.
+#
+# Standing rules (enforced by tests/ci_config_tests.rs::
+# test_mutation_oracle_does_not_use_all_features): keep `--lib` in
+# `additional_cargo_args`; never re-add `--all-features`; if a scoped module ever
+# gains a feature gate, add the exact minimal feature here and to the test's
+# allowed set.
+additional_cargo_args = ["--lib"]
+
+# High-signal pure-logic modules.
+examine_globs = [
+    "src/server/session_policy.rs",
+    "src/server/signaling.rs",
+    "src/server/relay_policy.rs",
+    "src/protocol/validation.rs",
+    "src/protocol/room_codes.rs",
+    "src/protocol/error_codes.rs",
+]
+
+# Never mutate test code or generated/build files.
+exclude_globs = [
+    "**/*_tests.rs",
+    "build.rs",
+    "benches/**",
+    "tests/**",
+    "fuzz/**",
+]
+
+# Provably-equivalent mutants — excluded with justification (not test gaps).
+#
+# `replan_host_session` re-elects the host via `elect_host(electable_authority,
+# &electable)`. The `electable_authority` filter (`session_policy.rs:880`,
+# `authority.filter(|id| electable.any(|m| m.player_id == id))`) is DELIBERATELY
+# redundant: `elect_host` already drops an authority id that is absent from its
+# members slice. Flipping that `==` to `!=` changes `electable_authority` between
+# `Some(authority)` and `None`, but in every reachable case `elect_host` produces
+# the SAME elected host (it re-filters internally), so the mutant is behaviorally
+# equivalent and cannot be killed by any test. The filter is kept for explicitness
+# (see its doc comment) and `replan_prefers_electable_authority_over_earliest_joiner`
+# pins the authority-preference contract regardless.
+exclude_re = [
+    "replace == with != in EnhancedGameServer::replan_host_session",
+]
+
+# The unit-test oracle is quick; give a generous floor so a loaded CI runner
+# never spuriously times out a surviving-mutant build.
+minimum_test_timeout = 120
+timeout_multiplier = 3.0

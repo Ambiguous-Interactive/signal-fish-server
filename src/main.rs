@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging from config.
     logging::init_with_config(&cfg.logging);
 
-    // PLAN Appendix I: DTLS fingerprints travel inside the SDP that `Signal`
+    // DTLS fingerprints travel inside the SDP that `Signal`
     // relays, so a server actively brokering WebRTC (TURN enabled) should have
     // its signaling terminated over wss://. Reverse-proxy TLS termination is
     // the common deployment, so this is a once-at-startup warning, never a

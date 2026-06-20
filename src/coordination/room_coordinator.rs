@@ -22,8 +22,8 @@ const ROOM_OPERATION_LOCK_TTL: Duration = Duration::from_secs(5);
 /// Snapshot of a room at finalization, surfaced so the capability-aware server
 /// layer can compute and emit the v3 SessionPlan after `GameStarting`.
 ///
-/// Returned by [`RoomOperationCoordinatorTrait::handle_player_ready`] only on the
-/// finalize path (all players ready); the non-finalize path returns `None`.
+/// Returned by [`RoomOperationCoordinatorTrait::handle_start_game`] on the
+/// finalize path (all current players ready and the sender authorized).
 #[derive(Debug, Clone)]
 pub struct FinalizedRoom {
     /// The room's game name (used for per-game topology selection).
@@ -33,6 +33,71 @@ pub struct FinalizedRoom {
     /// The finalized member list (the players that received `GameStarting`).
     pub members: Vec<PlayerInfo>,
 }
+
+/// The outcome of an explicit `StartGame`
+/// ([`RoomOperationCoordinatorTrait::handle_start_game`]).
+#[derive(Debug, Clone)]
+pub enum StartGameOutcome {
+    /// The room finalized; `GameStarting` has already been broadcast and the
+    /// caller should emit the v3 `SessionPlan` from this snapshot.
+    Started(FinalizedRoom),
+    /// Not every current player is ready (maps to `GAME_START_NOT_READY`).
+    NotReady,
+    /// The sender is not permitted to start (the room has a designated
+    /// authority and the sender is not it; maps to `GAME_START_FORBIDDEN`).
+    Forbidden,
+    /// The room is already `Finalized` (maps to `INVALID_ROOM_STATE`).
+    AlreadyStarted,
+}
+
+/// Why a `PlayerReady` toggle failed
+/// ([`RoomOperationCoordinatorTrait::handle_player_ready`]).
+///
+/// Typed so the caller maps each case to the correct client `ErrorCode` by an
+/// exhaustive `match` — never by inspecting an error string. Only [`Self::Finalized`]
+/// is a business rejection the client should surface as a room-state error; the
+/// other variants are infrastructure failures that must NOT masquerade as one
+/// (see `src/server/ready_state.rs`).
+#[derive(Debug)]
+pub enum PlayerReadyError {
+    /// The room is `Finalized` — the game already started, so further ready
+    /// toggles are rejected (maps to `INVALID_ROOM_STATE`).
+    Finalized,
+    /// The room no longer exists (maps to `ROOM_NOT_FOUND`).
+    RoomNotFound,
+    /// An unexpected infrastructure failure — lock acquisition, storage, or the
+    /// lobby broadcast (maps to `INTERNAL_ERROR`).
+    Internal(anyhow::Error),
+}
+
+impl PlayerReadyError {
+    /// The client-facing [`crate::protocol::ErrorCode`] for this failure.
+    ///
+    /// Only [`Self::Finalized`] is a business rejection (`INVALID_ROOM_STATE`);
+    /// the rest are infrastructure faults that must surface as `ROOM_NOT_FOUND`
+    /// or `INTERNAL_ERROR`, never as a room-state error.
+    pub fn error_code(&self) -> crate::protocol::ErrorCode {
+        match self {
+            Self::Finalized => crate::protocol::ErrorCode::InvalidRoomState,
+            Self::RoomNotFound => crate::protocol::ErrorCode::RoomNotFound,
+            Self::Internal(_) => crate::protocol::ErrorCode::InternalError,
+        }
+    }
+}
+
+impl std::fmt::Display for PlayerReadyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Finalized => {
+                write!(f, "the game has already started (room is Finalized)")
+            }
+            Self::RoomNotFound => write!(f, "room not found"),
+            Self::Internal(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PlayerReadyError {}
 
 /// Trait for room operation coordination
 #[async_trait]
@@ -58,20 +123,47 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
         become_authority: bool,
     ) -> Result<(bool, Option<String>)>;
 
-    /// Handle player ready state change.
+    /// Handle a player ready-state toggle.
     ///
-    /// Returns `Ok(Some(FinalizedRoom))` when this toggle finalized the room
-    /// (all players ready → `GameStarting` broadcast), so the caller can emit the
-    /// v3 SessionPlan; otherwise `Ok(None)`.
+    /// Records the toggle and broadcasts the updated `LobbyStateChanged` (with
+    /// `all_ready` once every current player is ready). Readiness no longer
+    /// starts the game — finalization is driven by an explicit `StartGame`
+    /// ([`Self::handle_start_game`]).
     async fn handle_player_ready(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
         app_id: Option<Uuid>,
-    ) -> Result<Option<FinalizedRoom>>;
+    ) -> std::result::Result<(), PlayerReadyError>;
+
+    /// Handle an explicit `StartGame` from `player_id`.
+    ///
+    /// Finalizes the room with its *current* members when every current player
+    /// is ready and the sender is authorized (the room's authority, or any
+    /// member if no authority is set). See [`StartGameOutcome`].
+    async fn handle_start_game(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<StartGameOutcome>;
+
+    /// The current ready set for a room, filtered to present members.
+    ///
+    /// The live ready state is tracked by the coordinator (not persisted to the
+    /// room record until finalize), so `RoomJoined` / `Reconnected` must read it
+    /// from here to report an accurate ready set to a player joining a lobby that
+    /// already has ready members. Returns an empty vec for an unknown room.
+    async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId>;
 
     /// Clear ready players for a room
     async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()>;
+
+    /// Snapshot the room ids that currently hold a ready-state entry.
+    ///
+    /// The maintenance prune sweep uses this to reclaim entries for rooms that
+    /// no longer exist — the all-paths backstop to [`Self::clear_ready_players`]
+    /// (mirrors the server's `prune_active_session_plans`).
+    async fn ready_player_room_ids(&self) -> Vec<RoomId>;
 }
 
 /// In-memory room operation coordinator
@@ -206,13 +298,28 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         .await?;
 
         let result = async {
-            // Simulate success and broadcast lobby state change
+            // Enter the lobby EXACTLY ONCE. `should_enter_lobby` is now true for
+            // any non-empty `Waiting` room (`max_players` is a ceiling), so the
+            // join path calls this on every join; persisting the transition and
+            // short-circuiting a room that already left `Waiting` keeps a room
+            // from re-broadcasting `LobbyStateChanged` on each join. A late
+            // joiner therefore reads an accurate `lobby_state: Lobby` in its
+            // `RoomJoined` and receives no redundant follow-up.
+            match self.database.get_room_by_id(room_id).await {
+                Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Waiting => {}
+                Ok(Some(_)) => return Ok(false), // already Lobby/Finalized: no-op
+                Ok(None) => return Err(anyhow::anyhow!("Room not found")),
+                Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
+            }
+
+            // Persist Waiting -> Lobby, then broadcast the single transition.
+            self.database.transition_room_to_lobby(room_id).await?;
+
             let message = crate::protocol::ServerMessage::LobbyStateChanged {
                 lobby_state: crate::protocol::LobbyState::Lobby,
                 ready_players: Vec::new(),
                 all_ready: false,
             };
-
             self.coordinator
                 .broadcast_to_room(room_id, Arc::new(message))
                 .await?;
@@ -435,7 +542,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         room_id: &RoomId,
         player_id: &PlayerId,
         _app_id: Option<Uuid>,
-    ) -> Result<Option<FinalizedRoom>> {
+    ) -> std::result::Result<(), PlayerReadyError> {
         // For in-memory implementation, simulate player ready toggle
         let lock_key = format!("room_ready_state:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
@@ -444,25 +551,41 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             ROOM_OPERATION_LOCK_TTL,
             "handle_player_ready",
         )
-        .await?;
+        .await
+        .map_err(PlayerReadyError::Internal)?;
 
         let result = async {
             // Get current room state to check if it has enough players for lobby actions
             let room = match self.database.get_room_by_id(room_id).await {
                 Ok(Some(room)) => room,
                 Ok(None) => {
-                    return Err(anyhow::anyhow!("Room not found"));
+                    return Err(PlayerReadyError::RoomNotFound);
                 }
                 Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to get room: {e}"));
+                    return Err(PlayerReadyError::Internal(
+                        e.context("failed to load room for ready toggle"),
+                    ));
                 }
             };
 
-            // Check if room has enough players for lobby state - prevent ready actions if room is no longer full
-            if !room.should_enter_lobby() && room.lobby_state != crate::protocol::LobbyState::Lobby
-            {
-                return Err(anyhow::anyhow!("Player ready failed: room may not be in lobby state. Current state: {:?}, player count: {}/{}", room.lobby_state, room.players.len(), room.max_players));
+            // Readiness can be toggled any time the room is open (`max_players`
+            // is a ceiling, not a required count); only a `Finalized` room — the
+            // game already started — rejects further ready toggles.
+            if room.lobby_state == crate::protocol::LobbyState::Finalized {
+                return Err(PlayerReadyError::Finalized);
             }
+
+            // Fetch the live membership first so readiness is computed over the
+            // current players (a departed player must not count toward
+            // `all_ready`, nor linger in the broadcast ready list).
+            let room_players = match self.database.get_room_players(room_id).await {
+                Ok(players) => players,
+                Err(e) => {
+                    tracing::error!("Failed to get room players: {}", e);
+                    Vec::new()
+                }
+            };
+            let current_ids: HashSet<PlayerId> = room_players.iter().map(|p| p.id).collect();
 
             // Toggle player ready state in ready_players map
             let mut ready_map = self.ready_players.write().await;
@@ -474,19 +597,17 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             } else {
                 room_ready_players.insert(*player_id);
             }
+            // Drop any ids that are no longer current members (departed players).
+            room_ready_players.retain(|id| current_ids.contains(id));
 
             let ready_players_vec: Vec<PlayerId> = room_ready_players.iter().copied().collect();
 
-            // Get total players in room to check if all are ready
-            let room_players = match self.database.get_room_players(room_id).await {
-                Ok(players) => players,
-                Err(e) => {
-                    tracing::error!("Failed to get room players: {}", e);
-                    Vec::new()
-                }
-            };
-
-            let all_ready = !room_players.is_empty() && ready_players_vec.len() == room_players.len();
+            // Every current player ready (min 1). Robust to a ready id that just
+            // departed: membership, not a raw count, decides `all_ready`.
+            let all_ready = !room_players.is_empty()
+                && room_players
+                    .iter()
+                    .all(|p| room_ready_players.contains(&p.id));
 
             drop(ready_map); // Release write lock
 
@@ -499,64 +620,163 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
             self.coordinator
                 .broadcast_to_room(room_id, Arc::new(message))
-                .await?;
+                .await
+                .map_err(PlayerReadyError::Internal)?;
 
-            // If all players are ready, transition to game starting
-            if all_ready {
-                let finalized_members = room_players;
-
-                // Persist the finalized lobby state BEFORE broadcasting, still
-                // under the room-operation lock, so storage and clients agree
-                // the session is live. Without this write the stored room
-                // stays `Lobby` forever: a post-game departure would wrongly
-                // regress it to `Waiting` and replay the whole lobby cycle,
-                // and every `Finalized`-gated path (v3 late-join/reconnect
-                // pairing, departure re-planning) would be unreachable.
-                // Best-effort: a persist failure must not abort the v2
-                // GameStarting broadcast (the relay floor still works).
-                if let Err(err) = self.database.finalize_room_game(room_id).await {
-                    tracing::warn!(
-                        %room_id,
-                        error = %err,
-                        "Failed to persist finalized lobby state"
-                    );
-                }
-
-                // Preserve the legacy GameStarting metadata; v3 transport proof
-                // comes from negotiation and TransportStatus, not this payload.
-                let peer_connections =
-                    PeerConnectionInfo::from_players(&finalized_members, &room.relay_type);
-
-                let game_start_message =
-                    Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
-
-                self.coordinator
-                    .broadcast_to_room(room_id, game_start_message)
-                    .await?;
-
-                // Clear ready players for this room since game is starting
-                let mut ready_map = self.ready_players.write().await;
-                ready_map.remove(room_id);
-                drop(ready_map);
-
-                tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled; room finalized (in-memory)");
-
-                // Surface the snapshot so the server can emit the v3 SessionPlan
-                // (per-recipient) AFTER the unchanged GameStarting broadcast above.
-                return Ok(Some(FinalizedRoom {
-                    game_name: room.game_name.clone(),
-                    authority_player: room.authority_player,
-                    members: finalized_members,
-                }));
-            }
-
+            // Readiness no longer starts the game. `max_players` is a ceiling,
+            // not a required count, and the game begins only on an explicit
+            // `StartGame` (see `handle_start_game`) — so a `PlayerReady` toggle
+            // just records readiness and broadcasts the new lobby snapshot
+            // (with `all_ready` so clients know `StartGame` is now permitted).
+            let _ = all_ready;
             tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
-            Ok(None)
+            Ok(())
         }
         .await;
 
         lock_guard.release().await;
         result
+    }
+
+    /// Handle an explicit `StartGame`: finalize the room with its *current*
+    /// members when every current player is ready and the sender is permitted
+    /// to start (the room's authority, or any member if no authority is set).
+    ///
+    /// Returns the [`StartGameOutcome`]: `Started(FinalizedRoom)` on success (the
+    /// `GameStarting` broadcast has already been sent, so the caller only needs
+    /// to emit the v3 `SessionPlan`), or a rejection variant the caller maps to
+    /// the matching `ErrorCode`.
+    async fn handle_start_game(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<StartGameOutcome> {
+        let lock_key = format!("room_ready_state:{room_id}");
+        let lock_guard = RoomOperationLockGuard::acquire(
+            Arc::clone(&self.distributed_lock),
+            lock_key,
+            ROOM_OPERATION_LOCK_TTL,
+            "handle_start_game",
+        )
+        .await?;
+
+        let result = async {
+            let room = match self.database.get_room_by_id(room_id).await {
+                Ok(Some(room)) => room,
+                Ok(None) => return Err(anyhow::anyhow!("Room not found")),
+                Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
+            };
+
+            // Already started: a finalized room cannot be started again.
+            if room.lobby_state == crate::protocol::LobbyState::Finalized {
+                return Ok(StartGameOutcome::AlreadyStarted);
+            }
+
+            // Authorization: a designated authority may start; otherwise any
+            // member may. The sender is already known to be in this room.
+            if let Some(authority) = room.authority_player {
+                if authority != *player_id {
+                    return Ok(StartGameOutcome::Forbidden);
+                }
+            }
+
+            let room_players = match self.database.get_room_players(room_id).await {
+                Ok(players) => players,
+                Err(e) => {
+                    tracing::error!("Failed to get room players: {}", e);
+                    Vec::new()
+                }
+            };
+
+            // All current players must be ready (min 1 — solo is allowed).
+            let ready_map = self.ready_players.read().await;
+            let ready_set = ready_map.get(room_id);
+            let all_ready = !room_players.is_empty()
+                && room_players
+                    .iter()
+                    .all(|p| ready_set.is_some_and(|set| set.contains(&p.id)));
+            drop(ready_map);
+
+            if !all_ready {
+                return Ok(StartGameOutcome::NotReady);
+            }
+
+            // Persist the finalized lobby state BEFORE broadcasting, still under
+            // the room-operation lock, so storage and clients agree the session
+            // is live. Without this write the stored room stays `Lobby` forever:
+            // a post-game departure would wrongly regress it and replay the
+            // lobby cycle, and every `Finalized`-gated path (v3 late-join /
+            // reconnect pairing, departure re-planning) would be unreachable.
+            // Best-effort: a persist failure must not abort the v2 GameStarting
+            // broadcast (the relay floor still works).
+            if let Err(err) = self.database.finalize_room_game(room_id).await {
+                tracing::warn!(%room_id, error = %err, "Failed to persist finalized lobby state");
+            }
+
+            // Re-read membership AFTER persisting `Finalized` so the broadcast and
+            // the emitted plan reflect the authoritative finalized member set, not
+            // the pre-check snapshot. `leave_room` is not serialized against this
+            // lock, so a player could depart between the all-ready check above and
+            // here; using the post-finalize read keeps `GameStarting.peer_connections`
+            // and `FinalizedRoom.members` consistent with the persisted room (a
+            // player who left before finalize is not named as a phantom peer/host).
+            // Any departure AFTER finalize is a Finalized-room leave, handled by
+            // `handle_session_member_departure` (PlayerLeft + v3 re-plan).
+            let finalized_members = match self.database.get_room_players(room_id).await {
+                Ok(players) if !players.is_empty() => players,
+                // Fall back to the pre-check snapshot if the room vanished (e.g.
+                // the last member left concurrently) — the broadcast below is then
+                // best-effort and the departure path carries the relay floor.
+                _ => room_players,
+            };
+
+            // Preserve the legacy GameStarting metadata; v3 transport proof comes
+            // from negotiation and TransportStatus, not this payload.
+            let peer_connections =
+                PeerConnectionInfo::from_players(&finalized_members, &room.relay_type);
+            let game_start_message =
+                Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
+            self.coordinator
+                .broadcast_to_room(room_id, game_start_message)
+                .await?;
+
+            // Clear ready players for this room since the game is starting.
+            let mut ready_map = self.ready_players.write().await;
+            ready_map.remove(room_id);
+            drop(ready_map);
+
+            tracing::info!(%room_id, %player_id, "Game started via explicit StartGame (in-memory)");
+
+            Ok(StartGameOutcome::Started(FinalizedRoom {
+                game_name: room.game_name.clone(),
+                authority_player: room.authority_player,
+                members: finalized_members,
+            }))
+        }
+        .await;
+
+        lock_guard.release().await;
+        result
+    }
+
+    async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId> {
+        // Snapshot the set without holding the lock across the DB await.
+        let set: HashSet<PlayerId> = {
+            let ready_map = self.ready_players.read().await;
+            match ready_map.get(room_id) {
+                Some(s) => s.clone(),
+                None => return Vec::new(),
+            }
+        };
+        // Filter to present members so an id that departed without a toggle is
+        // never reported as ready.
+        match self.database.get_room_players(room_id).await {
+            Ok(players) => {
+                let current: HashSet<PlayerId> = players.iter().map(|p| p.id).collect();
+                set.into_iter().filter(|id| current.contains(id)).collect()
+            }
+            Err(_) => set.into_iter().collect(),
+        }
     }
 
     async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()> {
@@ -565,6 +785,11 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         ready_map.remove(room_id);
         tracing::info!(%room_id, "Cleared ready players from coordinator (in-memory)");
         Ok(())
+    }
+
+    async fn ready_player_room_ids(&self) -> Vec<RoomId> {
+        // Snapshot keys without holding the lock across any caller `.await`.
+        self.ready_players.read().await.keys().copied().collect()
     }
 }
 
@@ -582,6 +807,78 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, Mutex, Notify};
     use tokio::time::{sleep, timeout};
+
+    use crate::protocol::ErrorCode;
+
+    #[test]
+    fn player_ready_error_maps_each_variant_to_its_client_code() {
+        // Only a Finalized room is a business rejection; the rest are infra
+        // faults that must NOT surface as INVALID_ROOM_STATE.
+        assert_eq!(
+            PlayerReadyError::Finalized.error_code(),
+            ErrorCode::InvalidRoomState
+        );
+        assert_eq!(
+            PlayerReadyError::RoomNotFound.error_code(),
+            ErrorCode::RoomNotFound
+        );
+        assert_eq!(
+            PlayerReadyError::Internal(anyhow::anyhow!("lock busy")).error_code(),
+            ErrorCode::InternalError
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_ready_players_removes_the_rooms_coordinator_entry() {
+        // Leak guard: a `PlayerReady` toggle creates a per-room ready entry in
+        // the coordinator's in-memory map; that entry is pure garbage once the
+        // room empties/deletes and must be removable. `leave_room` (last member
+        // departs) and empty-room cleanup both call `clear_ready_players`; this
+        // verifies the mechanism they rely on actually drops the entry.
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let coord = InMemoryRoomOperationCoordinator::new(coordinator, lock, database.clone());
+
+        let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let room = database
+            .create_room(
+                "clear-ready-game".to_string(),
+                None,
+                2,
+                true,
+                player,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+
+        coord
+            .handle_player_ready(&room.id, &player, None)
+            .await
+            .expect("ready toggle succeeds");
+        assert!(
+            coord.ready_players.read().await.contains_key(&room.id),
+            "a ready toggle must create the room's coordinator entry"
+        );
+
+        coord
+            .clear_ready_players(&room.id)
+            .await
+            .expect("clear succeeds");
+        assert!(
+            !coord.ready_players.read().await.contains_key(&room.id),
+            "the coordinator entry must be gone after clear (no stale retention)"
+        );
+
+        // Idempotent: clearing an already-absent room is a harmless no-op.
+        coord
+            .clear_ready_players(&room.id)
+            .await
+            .expect("repeat clear is a no-op");
+    }
 
     #[derive(Debug, Clone)]
     struct BroadcastEvent {
@@ -868,9 +1165,26 @@ mod tests {
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let lock = Arc::new(InMemoryDistributedLock::new());
         let room_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database);
-        let room_id = RoomId::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);
+            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database.clone());
         let player_id = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb);
+
+        // The lobby transition now persists and is idempotent, so it needs a real
+        // Waiting room to transition (the other operations below simulate success
+        // independent of room existence).
+        let room = database
+            .create_room(
+                "lock-release-game".to_string(),
+                Some("LOCK01".to_string()),
+                4,
+                true,
+                player_id,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        let room_id = room.id;
 
         room_coordinator
             .transition_room_to_lobby(&room_id)
@@ -1047,17 +1361,23 @@ mod tests {
             .await
             .expect("lobby transition succeeds");
 
+        // Both ready toggles succeed (broadcasts 1 and 2); the third broadcast —
+        // the GameStarting from the explicit StartGame — is the one set to fail.
         ready_coordinator
             .handle_player_ready(&room.id, &peer, None)
             .await
             .expect("first ready toggle succeeds");
+        ready_coordinator
+            .handle_player_ready(&room.id, &authority, None)
+            .await
+            .expect("second ready toggle succeeds");
 
         let result = ready_coordinator
-            .handle_player_ready(&room.id, &authority, None)
+            .handle_start_game(&room.id, &authority)
             .await;
         assert!(
             result.is_err(),
-            "ready toggle should propagate GameStarting broadcast failure"
+            "StartGame should propagate the GameStarting broadcast failure"
         );
         assert!(
             !lock
@@ -1292,22 +1612,25 @@ mod tests {
             .await
             .expect("lobby transition succeeds");
 
-        for player_id in [authority, peer_a] {
-            let result = ready_coordinator
+        // Ready toggles never finalize — they only broadcast lobby state. The
+        // third toggle makes every current player ready (`all_ready: true`), but
+        // the game does not start until an explicit `StartGame`.
+        for player_id in [authority, peer_a, peer_b] {
+            ready_coordinator
                 .handle_player_ready(&room.id, &player_id, None)
                 .await
                 .expect("ready toggle succeeds");
-            assert!(
-                result.is_none(),
-                "room should not finalize until every player is ready"
-            );
         }
 
-        let finalized = ready_coordinator
-            .handle_player_ready(&room.id, &peer_b, None)
+        // The authority starts the game; this finalizes and broadcasts GameStarting.
+        let finalized = match ready_coordinator
+            .handle_start_game(&room.id, &authority)
             .await
-            .expect("final ready toggle succeeds")
-            .expect("last ready toggle finalizes the room");
+            .expect("start game succeeds")
+        {
+            StartGameOutcome::Started(finalized) => finalized,
+            other => panic!("StartGame by the authority must finalize, got {other:?}"),
+        };
 
         let broadcasts = coordinator.broadcasts().await;
         assert_eq!(
@@ -1366,6 +1689,361 @@ mod tests {
                 .iter()
                 .all(|peer| peer.relay_type == "custom-relay"),
             "GameStarting metadata must carry the finalized room relay type"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_game_enforces_readiness_and_authorization() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let coord = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+        );
+        let authority = PlayerId::from_u128(0xa1);
+        let peer = PlayerId::from_u128(0xb2);
+
+        let room = database
+            .create_room(
+                "start-rules".to_string(),
+                Some("START1".to_string()),
+                4, // ceiling of 4, but the room starts with only 2 present
+                true,
+                authority,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(peer, "Peer", false, None))
+            .await
+            .expect("adding peer succeeds"));
+
+        // Not everyone is ready yet -> NotReady.
+        assert!(matches!(
+            coord.handle_start_game(&room.id, &authority).await.unwrap(),
+            StartGameOutcome::NotReady
+        ));
+
+        coord
+            .handle_player_ready(&room.id, &authority, None)
+            .await
+            .unwrap();
+        coord
+            .handle_player_ready(&room.id, &peer, None)
+            .await
+            .unwrap();
+
+        // All ready, but a non-authority may not start an authority room.
+        assert!(matches!(
+            coord.handle_start_game(&room.id, &peer).await.unwrap(),
+            StartGameOutcome::Forbidden
+        ));
+
+        // The authority starts the partially-full room (2 of a 4-ceiling).
+        let started = coord.handle_start_game(&room.id, &authority).await.unwrap();
+        let finalized = match started {
+            StartGameOutcome::Started(f) => f,
+            other => panic!("authority StartGame must finalize, got {other:?}"),
+        };
+        assert_eq!(
+            finalized.members.len(),
+            2,
+            "started with the 2 present members"
+        );
+        assert_eq!(finalized.authority_player, Some(authority));
+
+        // Starting again is rejected: the room is already finalized.
+        assert!(matches!(
+            coord.handle_start_game(&room.id, &authority).await.unwrap(),
+            StartGameOutcome::AlreadyStarted
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_game_allows_solo_and_any_member_without_authority() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let coord = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+        );
+        let solo = PlayerId::from_u128(0xc3);
+
+        // No authority (supports_authority=false): any member may start, and a
+        // single ready player is enough (solo is allowed).
+        let room = database
+            .create_room(
+                "solo-start".to_string(),
+                Some("SOLO01".to_string()),
+                4,
+                false,
+                solo,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+
+        // Cannot start before readying.
+        assert!(matches!(
+            coord.handle_start_game(&room.id, &solo).await.unwrap(),
+            StartGameOutcome::NotReady
+        ));
+
+        coord
+            .handle_player_ready(&room.id, &solo, None)
+            .await
+            .unwrap();
+
+        let started = coord.handle_start_game(&room.id, &solo).await.unwrap();
+        assert!(
+            matches!(started, StartGameOutcome::Started(ref f) if f.members.len() == 1),
+            "a lone ready player may start a no-authority room, got {started:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_game_excludes_a_member_that_left_before_finalize() {
+        // Adversarial guard (StartGame vs LeaveRoom): peer_connections and
+        // FinalizedRoom.members are built from the POST-finalize membership, so a
+        // player that departs before StartGame is never named as a phantom peer.
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let coord = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+        );
+        let authority = PlayerId::from_u128(0xa1);
+        let leaver = PlayerId::from_u128(0xb2);
+        let room = database
+            .create_room(
+                "leave-before-start".to_string(),
+                Some("LEAVE1".to_string()),
+                4,
+                true,
+                authority,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(leaver, "Leaver", false, None))
+            .await
+            .expect("adding leaver succeeds"));
+
+        coord
+            .handle_player_ready(&room.id, &authority, None)
+            .await
+            .unwrap();
+        coord
+            .handle_player_ready(&room.id, &leaver, None)
+            .await
+            .unwrap();
+
+        // The leaver departs before the explicit StartGame.
+        database
+            .remove_player_from_room(&room.id, &leaver)
+            .await
+            .expect("removing leaver succeeds");
+
+        let finalized = match coord.handle_start_game(&room.id, &authority).await.unwrap() {
+            StartGameOutcome::Started(f) => f,
+            other => panic!("authority StartGame must finalize, got {other:?}"),
+        };
+        assert_eq!(
+            finalized.members.len(),
+            1,
+            "only the remaining member is in the finalized session"
+        );
+        assert!(
+            !finalized.members.iter().any(|m| m.id == leaver),
+            "the departed player must not be a finalized session member"
+        );
+
+        let peers = coordinator
+            .broadcasts()
+            .await
+            .into_iter()
+            .find_map(|e| match e.message {
+                ServerMessage::GameStarting { peer_connections } => Some(peer_connections),
+                _ => None,
+            })
+            .expect("a GameStarting was broadcast");
+        assert!(
+            !peers.iter().any(|p| p.player_id == leaver),
+            "GameStarting peer_connections must not name the departed player"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_game_finalizes_exactly_once() {
+        // Two concurrent StartGame calls: the shared `room_ready_state` lock plus
+        // the persist-before-broadcast ordering mean exactly one finalizes (one
+        // GameStarting) and the other sees AlreadyStarted (or loses the lock).
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        ));
+        let a = PlayerId::from_u128(0xaa);
+        let b = PlayerId::from_u128(0xbb);
+        // No authority: either member may start.
+        let room = database
+            .create_room(
+                "concurrent-start".to_string(),
+                Some("CONC01".to_string()),
+                4,
+                false,
+                a,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(b, "B", false, None))
+            .await
+            .expect("adding b succeeds"));
+        coord.handle_player_ready(&room.id, &a, None).await.unwrap();
+        coord.handle_player_ready(&room.id, &b, None).await.unwrap();
+
+        let (c1, c2) = (Arc::clone(&coord), Arc::clone(&coord));
+        let rid = room.id;
+        let (r1, r2) = tokio::join!(
+            async move { c1.handle_start_game(&rid, &a).await },
+            async move { c2.handle_start_game(&rid, &b).await },
+        );
+        let started = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r, Ok(StartGameOutcome::Started(_))))
+            .count();
+        assert_eq!(
+            started, 1,
+            "exactly one concurrent StartGame finalizes; got {r1:?} and {r2:?}"
+        );
+        let game_starts = coordinator
+            .broadcasts()
+            .await
+            .into_iter()
+            .filter(|e| matches!(e.message, ServerMessage::GameStarting { .. }))
+            .count();
+        assert_eq!(
+            game_starts, 1,
+            "GameStarting must be broadcast exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_game_after_authority_departs_allows_remaining_member() {
+        // Liveness guard: after the authority leaves (authority_player is cleared
+        // by remove_player_from_room), a remaining ready member CAN start — the
+        // room is not locked into Forbidden forever.
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let coord = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+        );
+        let authority = PlayerId::from_u128(0xc1);
+        let member = PlayerId::from_u128(0xc2);
+        let room = database
+            .create_room(
+                "authority-departs".to_string(),
+                Some("AUTH01".to_string()),
+                4,
+                true,
+                authority,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(member, "Member", false, None))
+            .await
+            .expect("adding member succeeds"));
+        coord
+            .handle_player_ready(&room.id, &authority, None)
+            .await
+            .unwrap();
+        coord
+            .handle_player_ready(&room.id, &member, None)
+            .await
+            .unwrap();
+
+        // Before the authority leaves, a non-authority member is Forbidden.
+        assert!(matches!(
+            coord.handle_start_game(&room.id, &member).await.unwrap(),
+            StartGameOutcome::Forbidden
+        ));
+
+        // The authority departs (clears authority_player).
+        database
+            .remove_player_from_room(&room.id, &authority)
+            .await
+            .expect("removing authority succeeds");
+
+        // Now any remaining member may start.
+        let outcome = coord.handle_start_game(&room.id, &member).await.unwrap();
+        assert!(
+            matches!(outcome, StartGameOutcome::Started(_)),
+            "a remaining member may start after the authority leaves, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_game_after_unready_is_not_ready() {
+        // An un-ready toggle before StartGame must block finalization (NotReady),
+        // never finalize a not-all-ready room.
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(RecordingMessageCoordinator::default());
+        let coord = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+        );
+        let a = PlayerId::from_u128(0xd1);
+        let b = PlayerId::from_u128(0xd2);
+        let room = database
+            .create_room(
+                "unready-start".to_string(),
+                Some("UNRDY1".to_string()),
+                4,
+                false,
+                a,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(b, "B", false, None))
+            .await
+            .expect("adding b succeeds"));
+        coord.handle_player_ready(&room.id, &a, None).await.unwrap();
+        coord.handle_player_ready(&room.id, &b, None).await.unwrap();
+        // b un-readies.
+        coord.handle_player_ready(&room.id, &b, None).await.unwrap();
+
+        let outcome = coord.handle_start_game(&room.id, &a).await.unwrap();
+        assert!(
+            matches!(outcome, StartGameOutcome::NotReady),
+            "StartGame with a not-ready member must be NotReady, got {outcome:?}"
         );
     }
 }

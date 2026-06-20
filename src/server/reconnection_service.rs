@@ -228,21 +228,19 @@ impl EnhancedGameServer {
             .await
         {
             Ok(claim) => claim,
-            Err(reason) => {
+            Err(error) => {
+                // Typed classification: the error variant maps to its own
+                // `ErrorCode` and wire `reason` (see [`ReconnectionError`]); no
+                // error-string matching, so a token failure can never be
+                // mislabeled as an expired window (and vice versa).
+                let error_code = error.error_code();
+                let reason = error.to_string();
                 tracing::warn!(
                     %reconnect_player_id,
                     %room_id,
-                    %reason,
-                    "Reconnection validation failed"
+                    %error_code,
+                    "Reconnection validation failed: {reason}"
                 );
-                let error_code = if reason.contains("expired") {
-                    ErrorCode::ReconnectionExpired
-                } else if reason.contains("token") {
-                    ErrorCode::ReconnectionTokenInvalid
-                } else {
-                    ErrorCode::ReconnectionFailed
-                };
-
                 let _ = self
                     .message_coordinator
                     .send_to_player(
@@ -475,8 +473,15 @@ impl EnhancedGameServer {
             );
         }
 
-        // Prepare room state
-        let current_players: Vec<PlayerInfo> = room.players.values().cloned().collect();
+        // Prepare room state. The live ready set is held by the coordinator (the
+        // room record only syncs at finalize), so read it from there to report an
+        // accurate ready set to a reconnector rejoining an in-progress lobby, and
+        // reflect it on each player's `is_ready`.
+        let ready_players = self.room_coordinator.current_ready_players(room_id).await;
+        let mut current_players: Vec<PlayerInfo> = room.players.values().cloned().collect();
+        for player in current_players.iter_mut() {
+            player.is_ready = ready_players.contains(&player.id);
+        }
         let is_authority = room.authority_player == Some(*reconnect_player_id);
 
         // Send reconnected message
@@ -494,10 +499,10 @@ impl EnhancedGameServer {
                     current_players: current_players.clone(),
                     is_authority,
                     lobby_state: room.lobby_state.clone(),
-                    ready_players: room.ready_players.clone(),
+                    ready_players: ready_players.clone(),
                     relay_type: room.relay_type.clone(),
                     current_spectators: room.get_spectators(),
-                    // v3 ICE pre-gather (PLAN §P4 deferred refinement): empty —
+                    // v3 ICE pre-gather (deferred refinement): empty —
                     // and skipped on the wire — unless this reconnector passes
                     // the pre-gather gate (its original credentials may have
                     // expired while it was away), so v2 bytes are untouched. A
@@ -528,7 +533,7 @@ impl EnhancedGameServer {
         // `SessionPlan` (fresh ICE — its original TURN credentials may have
         // expired) and existing members receive the `NewPeer` delta per the
         // stored topology when the transport is WebRTC. A non-finalized room
-        // or the relay floor emits nothing (PLAN §P3).
+        // or the relay floor emits nothing.
         self.handle_active_session_late_join(&room, reconnect_player_id, &current_players)
             .await;
 

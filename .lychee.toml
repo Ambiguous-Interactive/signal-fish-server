@@ -24,8 +24,11 @@ exclude = [
     # Email addresses
     "^mailto:",
 
-    # Relative links that lychee can't resolve
-    "^file://",
+    # NOTE: local file:// links are intentionally NOT excluded so lychee
+    # validates relative/in-repo file references against the checkout. CI also
+    # remaps in-repo /blob/main/ self-URLs to file:// so new-on-branch targets
+    # are checked against the working tree, not the lagging main branch
+    # (see --remap in .github/workflows/link-check.yml).
 
     # Anchors within the same file
     "^#",
@@ -88,7 +91,17 @@ exclude_link_local = true
 # Include verbatim sections
 include_verbatim = false
 
-# Remap URLs (useful for local development)
+# Remap URLs.
+# In-repo /blob/main/ self-links are remapped to the working tree in CI so that
+# files added/moved on a branch (not yet on main) are validated against the
+# checkout instead of 404ing against github.com/main. lychee's remap target must
+# be an absolute URL with a scheme (a bare/relative path is rejected), and TOML
+# cannot interpolate env, so the rule lives on the CLI in
+# .github/workflows/link-check.yml using ${{ github.workspace }}. To reproduce
+# locally (substitute $PWD for the workspace; add --offline to skip external URLs):
+#   lychee --config .lychee.toml \
+#     --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://$PWD/\$1" \
+#     <files...>
 # remap = [
 #     "https://example.com https://staging.example.com",
 # ]

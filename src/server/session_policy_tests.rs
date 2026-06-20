@@ -2029,6 +2029,35 @@ async fn emit_session_plan_relay_resolution_removes_stale_stored_entry() {
     );
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn clear_active_session_plan_removes_the_stored_entry() {
+    // `clear_active_session_plan` is the room-removal seam: it must actually
+    // drop the stored decision. Store one, clear it, and assert it is gone.
+    // Kills the `clear_active_session_plan -> ()` (no-op) mutant
+    // (session_policy.rs:690): under that mutant the entry would survive.
+    let server = create_server_with_session(mesh_config()).await;
+    let room_id = uuid::Uuid::new_v4();
+    let stored = ActiveSessionPlan {
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+    };
+    server.active_session_plans.insert(room_id, stored);
+    assert_eq!(
+        server.active_session_plan(&room_id),
+        Some(stored),
+        "precondition: the plan is stored before clearing"
+    );
+
+    server.clear_active_session_plan(&room_id);
+
+    assert!(
+        server.active_session_plan(&room_id).is_none(),
+        "clear_active_session_plan must actually remove the stored decision"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Departure re-planning (host failover) — handle_session_member_departure.
 // ---------------------------------------------------------------------------
@@ -3846,7 +3875,7 @@ mod properties {
 }
 
 // ---------------------------------------------------------------------------
-// ICE pre-gather on RoomJoined / Reconnected (PLAN §P4's deferred refinement).
+// ICE pre-gather on RoomJoined / Reconnected (the deferred refinement).
 //
 // Pure-logic tests pin the eligibility predicate's full gating matrix (every
 // conjunct flipped independently) and the desired-topology lookup; server-based
@@ -4197,5 +4226,53 @@ async fn pregather_eligible_but_nothing_configured_emits_nothing_and_counts_noth
         server.metrics.ice_pregather_emitted.load(Ordering::Relaxed),
         emitted_before,
         "an empty (skipped-on-the-wire) list is not an emission"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn replan_prefers_electable_authority_over_earliest_joiner() {
+    // Kills the authority-membership check in `replan_host_session`: when the
+    // designated authority is electable (it can run the sticky session) but is
+    // NOT the earliest joiner, host re-election must prefer the AUTHORITY, not
+    // the earliest member. With the membership test inverted, the authority is
+    // dropped from the preference and the earliest joiner is elected instead.
+    let server = create_server_with_session(host_config()).await;
+    let room_id = uuid::Uuid::new_v4();
+
+    let early = PlayerId::new_v4();
+    let authority = PlayerId::new_v4();
+
+    let mut early_member = v3_full(early, "Early");
+    early_member.joined_at = base_time(); // earliest joiner
+    let mut authority_member = v3_full(authority, "Authority");
+    authority_member.joined_at = base_time() + chrono::Duration::seconds(100); // joined later
+    authority_member.is_authority = true;
+
+    let stored = ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::WebRtc,
+        host: Some(early), // old host being re-planned; value is irrelevant here
+    };
+    server.active_session_plans.insert(room_id, stored);
+
+    server
+        .replan_host_session(
+            &room_id,
+            stored,
+            Some(authority),
+            vec![early_member, authority_member],
+        )
+        .await;
+
+    let replanned = server
+        .active_session_plans
+        .get(&room_id)
+        .expect("the re-planned session is still stored");
+    assert_eq!(
+        replanned.host,
+        Some(authority),
+        "an electable authority is preferred as host even when it is not the \
+         earliest joiner (the earliest joiner is {early})"
     );
 }

@@ -107,24 +107,25 @@ Rooms transition through three states based on player ready status:
 
 ### Waiting
 
-Initial state. Waiting for players to join until the room reaches
-`max_players`. No ready-state toggles happen in this state.
+Initial state. The room is empty, waiting for its first player. No ready-state
+toggles happen in this state.
 
 ### Lobby
 
-Room is full and players are coordinating readiness.
+Players are present and coordinating readiness. `max_players` is a ceiling, not
+a required count — the room need not be full.
 
 ### Finalized
 
-All players are ready and the game is starting.
+A member sent `StartGame` while every current player was ready, and the game is
+starting.
 
 ### State Transitions
 
 ```text
 
-Waiting --> Lobby (room full)
-Lobby --> Waiting (player leaves)
-Lobby --> Finalized (all players ready)
+Waiting --> Lobby (first player joins)
+Lobby --> Finalized (StartGame, every current player ready)
 Finalized --> [*] (game started, room cleanup)
 
 ```
@@ -157,8 +158,11 @@ Players toggle their own ready state by sending `PlayerReady`:
 ```
 
 Each `PlayerReady` send flips that player's ready/unready status and broadcasts
-`LobbyStateChanged`. When all players are ready, the server sends
-`GameStarting`.
+`LobbyStateChanged` (with `all_ready` set once every current player is ready).
+Readiness no longer starts the game on its own: once every current player is
+ready, a member sends `StartGame` to finalize the lobby, and the server then
+sends `GameStarting`. The starter must be the room's authority if it has one,
+else any member; `max_players` is a ceiling, so the room need not be full.
 
 ## Authority Management
 

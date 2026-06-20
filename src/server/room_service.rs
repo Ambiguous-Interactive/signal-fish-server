@@ -2,13 +2,55 @@ use super::{EnhancedGameServer, MaxRoomsPerGameExceededError};
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
-    LobbyState, PlayerId, PlayerInfo, RelayTransport, Room, RoomJoinedPayload, ServerMessage,
+    ErrorCode, PlayerId, PlayerInfo, RelayTransport, Room, RoomJoinedPayload, ServerMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::Error;
 
 const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
 const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
+
+/// Typed failure of [`EnhancedGameServer::join_room_with_coordination`], so the
+/// handler classifies each cause to the correct client [`ErrorCode`] by an
+/// exhaustive, compiler-checked `match` — never by inspecting an error string or
+/// downcasting (the fragile shape that let a "room is full" rejection
+/// masquerade as the generic `ROOM_CREATION_FAILED`).
+///
+/// Mirrors [`crate::coordination::PlayerReadyError`]: a *business* rejection
+/// gets its own specific code (`RoomFull`, `MaxRoomsPerGameExceeded`); every
+/// other failure — storage, lock, name validation, broadcast — is an
+/// infrastructure fault that surfaces as the generic `RoomCreationFailed`.
+/// Because [`Self::error_code`] is exhaustive, adding a new business rejection
+/// forces a new arm to compile, so the class of "a distinct failure silently
+/// collapses into the catch-all code" cannot reappear unnoticed.
+#[derive(Debug, Error)]
+pub(super) enum JoinRoomError {
+    /// The room is at capacity — a business rejection (→ `ROOM_FULL`).
+    #[error("Room is full")]
+    RoomFull,
+    /// The per-game room cap is reached — a business rejection
+    /// (→ `MAX_ROOMS_PER_GAME_EXCEEDED`).
+    #[error(transparent)]
+    MaxRoomsPerGameExceeded(#[from] MaxRoomsPerGameExceededError),
+    /// Any other failure — storage, lock, name validation, broadcast — an
+    /// infrastructure fault that must NOT masquerade as a specific business
+    /// rejection (→ `ROOM_CREATION_FAILED`).
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+impl JoinRoomError {
+    /// The client-facing [`ErrorCode`] for this failure. Exhaustive by design: a
+    /// new variant cannot compile without an explicit, reviewed classification.
+    pub(super) fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::RoomFull => ErrorCode::RoomFull,
+            Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
+            Self::Internal(_) => ErrorCode::RoomCreationFailed,
+        }
+    }
+}
 
 impl EnhancedGameServer {
     /// Enhanced room joining with distributed coordination
@@ -89,7 +131,7 @@ impl EnhancedGameServer {
                     player_id,
                     Arc::new(ServerMessage::RoomJoinFailed {
                         reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidInput),
+                        error_code: Some(crate::protocol::ErrorCode::InvalidPlayerName),
                     }),
                 )
                 .await;
@@ -106,7 +148,7 @@ impl EnhancedGameServer {
                     player_id,
                     Arc::new(ServerMessage::RoomJoinFailed {
                         reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidInput),
+                        error_code: Some(crate::protocol::ErrorCode::InvalidMaxPlayers),
                     }),
                 )
                 .await;
@@ -173,13 +215,23 @@ impl EnhancedGameServer {
                     .await;
 
                 // Get current players from database
-                let current_players = match self.database.get_room_players(&room.id).await {
+                let mut current_players = match self.database.get_room_players(&room.id).await {
                     Ok(players) => players,
                     Err(e) => {
                         tracing::error!("Failed to get room players: {}", e);
                         Vec::new()
                     }
                 };
+
+                // The live ready set is held by the coordinator (the room record
+                // only syncs `ready_players` / `is_ready` at finalize), so read it
+                // from there to report an accurate ready set to a player joining a
+                // lobby that already has ready members; reflect it on each player's
+                // `is_ready` too.
+                let ready_players = self.room_coordinator.current_ready_players(&room.id).await;
+                for player in current_players.iter_mut() {
+                    player.is_ready = ready_players.contains(&player.id);
+                }
 
                 // Send success response
                 let is_authority = room.authority_player == Some(*player_id);
@@ -197,10 +249,10 @@ impl EnhancedGameServer {
                             current_players: current_players.clone(),
                             is_authority,
                             lobby_state: room.lobby_state.clone(),
-                            ready_players: room.ready_players.clone(),
+                            ready_players: ready_players.clone(),
                             relay_type: room.relay_type.clone(),
                             current_spectators: room.get_spectators(),
-                            // v3 ICE pre-gather (PLAN §P4 deferred refinement):
+                            // v3 ICE pre-gather (deferred refinement):
                             // empty — and skipped on the wire — unless this
                             // joiner passes the pre-gather gate, so v2 bytes
                             // are untouched. A join into a Finalized room gets
@@ -264,13 +316,13 @@ impl EnhancedGameServer {
                     "Player joined room with distributed coordination"
                 );
             }
-            Err(e) => {
-                let reason = e.to_string();
-                let error_code = if e.downcast_ref::<MaxRoomsPerGameExceededError>().is_some() {
-                    Some(crate::protocol::ErrorCode::MaxRoomsPerGameExceeded)
-                } else {
-                    Some(crate::protocol::ErrorCode::RoomCreationFailed)
-                };
+            Err(error) => {
+                // Each cause carries its own client `ErrorCode` via an
+                // exhaustive, compiler-checked `match` (see `JoinRoomError`): a
+                // business rejection (room full / per-game cap) is never
+                // conflated with an infrastructure fault.
+                let error_code = Some(error.error_code());
+                let reason = error.to_string();
                 let _ = self
                     .message_coordinator
                     .send_to_player(
@@ -357,24 +409,22 @@ impl EnhancedGameServer {
         self.handle_session_member_departure(&room_id, player_id)
             .await;
 
-        // Check if room should transition out of lobby state after player left
+        // A departure no longer regresses the lobby. `max_players` is a ceiling,
+        // not a required count, so a partially-full room stays a valid lobby:
+        // the remaining players keep their readiness and can still start the game
+        // (an explicit `StartGame`, once all current players are ready). A
+        // `Finalized` room likewise stays finalized (the running session is
+        // re-planned by `handle_session_member_departure` above, not regressed).
+        // The coordinator's in-memory ready set is NOT cleared here: reads filter
+        // it by current membership (so a departed id is never reported ready),
+        // and the entry itself is reclaimed when the room is deleted — promptly
+        // by the empty-room cleanup loop, and as an all-paths backstop by
+        // `prune_ready_players` (see `src/server/maintenance.rs`). Keeping this
+        // hot path free of coordinator coupling mirrors how session plans are
+        // handled (re-planned here, swept for removal elsewhere).
         let mut latest_room_code: Option<String> = None;
         if let Ok(Some(room)) = self.database.get_room_by_id(&room_id).await {
             latest_room_code = Some(room.code.clone());
-            if room.lobby_state == LobbyState::Lobby && !room.should_enter_lobby() {
-                if let Err(e) = self.database.transition_room_to_waiting(&room_id).await {
-                    tracing::warn!("Failed to transition room back to waiting state: {}", e);
-                } else {
-                    tracing::info!(
-                        %room_id,
-                        "Room transitioned from lobby back to waiting state after player left"
-                    );
-
-                    if let Err(e) = self.room_coordinator.clear_ready_players(&room_id).await {
-                        tracing::warn!("Failed to clear ready players from coordinator: {}", e);
-                    }
-                }
-            }
         }
         if let Some(code) = &latest_room_code {
             leave_span.record("room_code", tracing::field::display(code));
@@ -398,7 +448,7 @@ impl EnhancedGameServer {
         player_name: &str,
         max_players: u8,
         supports_authority: bool,
-    ) -> anyhow::Result<Room> {
+    ) -> Result<Room, JoinRoomError> {
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let lock_handle = self
             .distributed_lock
@@ -414,7 +464,7 @@ impl EnhancedGameServer {
                 if let Err(reason) =
                     validation::validate_player_name_uniqueness(player_name, &room.players)
                 {
-                    Err(anyhow::anyhow!(reason))
+                    Err(anyhow::anyhow!(reason).into())
                 } else {
                     let player_info = PlayerInfo {
                         id: *player_id,
@@ -444,8 +494,8 @@ impl EnhancedGameServer {
                             }
                             Ok(room)
                         }
-                        Ok(false) => Err(anyhow::anyhow!("Room is full")),
-                        Err(e) => Err(e),
+                        Ok(false) => Err(JoinRoomError::RoomFull),
+                        Err(e) => Err(e.into()),
                     }
                 }
             }
@@ -475,11 +525,13 @@ impl EnhancedGameServer {
                         if let Some(lock) = &game_cap_lock {
                             let _ = self.distributed_lock.release(lock).await;
                         }
-                        Err(anyhow::anyhow!(MaxRoomsPerGameExceededError {
-                            game_name: game_name.to_string(),
-                            current: current_room_count,
-                            limit: self.config.max_rooms_per_game,
-                        }))
+                        Err(JoinRoomError::MaxRoomsPerGameExceeded(
+                            MaxRoomsPerGameExceededError {
+                                game_name: game_name.to_string(),
+                                current: current_room_count,
+                                limit: self.config.max_rooms_per_game,
+                            },
+                        ))
                     }
                     Ok(_) => {
                         let relay_type = self.resolve_relay_type(game_name);
@@ -521,7 +573,7 @@ impl EnhancedGameServer {
                                 }
                                 Ok(room)
                             }
-                            Err(e) => Err(anyhow::anyhow!(e)),
+                            Err(e) => Err(anyhow::anyhow!(e).into()),
                         }
                     }
                     Err(err) => {
@@ -529,11 +581,11 @@ impl EnhancedGameServer {
                         if let Some(lock) = &game_cap_lock {
                             let _ = self.distributed_lock.release(lock).await;
                         }
-                        Err(err)
+                        Err(err.into())
                     }
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         };
 
         let _ = self.distributed_lock.release(&lock_handle).await;

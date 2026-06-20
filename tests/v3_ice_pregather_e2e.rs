@@ -444,6 +444,13 @@ async fn finalize_two_player_room(
     await_ready_count(peer1, 1).await;
     await_ready_count(peer2, 1).await;
     ready(peer2).await;
+    await_ready_count(peer1, 2).await;
+    await_ready_count(peer2, 2).await;
+
+    // Readiness no longer auto-starts: an explicit StartGame (any member, since
+    // these rooms are created with supports_authority: false) finalizes once all
+    // current players are ready.
+    send(peer1, &ClientMessage::StartGame).await;
 
     let (plan1, plan2) = tokio::join!(read_finalization(peer1), read_finalization(peer2));
     assert!(

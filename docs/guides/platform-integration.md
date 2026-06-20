@@ -6,9 +6,12 @@ companion to the wire-level [Protocol v3 additions](../protocol.md#protocol-v3-a
 tells you _what_ the messages are; this guide tells you _which library_ to reach for on each engine and platform,
 and the traps to avoid when two different stacks must interoperate.
 
-It corresponds to PLAN Appendix H (per-platform integration notes). The browser and native rows are demonstrated
-end to end by the in-repo reference clients ([`clients/browser/`](../../clients/browser/README.md)
-and [`clients/native/`](../../clients/native/README.md)); the mobile,
+It gathers per-platform integration notes. The browser and native rows are demonstrated
+end to end by the in-repo reference clients
+([`clients/browser/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/clients/browser/README.md)
+and
+[`clients/native/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/clients/native/README.md));
+the mobile,
 Steam, and engine rows are integration notes for builds that live outside this repository.
 
 For **runnable, copy-pasteable code**, start from the [Rust Client Guide](rust-client.md) (a complete relay-floor
@@ -78,7 +81,7 @@ denominator that every other platform must interoperate with.
 - **Fallback.** If the connection does not reach `connected` within your timeout, keep using `GameData` over the
   WebSocket and emit `TransportStatus {transport: "webrtc", connected: false}`.
 
-The reference implementation is [`clients/browser/`](../../clients/browser/README.md),
+The reference implementation is [`clients/browser/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/clients/browser/README.md),
 a TypeScript client driving a real headless-Chromium `RTCPeerConnection`. See
 [Interop traps](#interop-traps) at the end of this guide — Chrome obfuscates host candidates as `.local` mDNS names.
 
@@ -87,7 +90,8 @@ a TypeScript client driving a real headless-Chromium `RTCPeerConnection`. See
 Native desktop clients (Linux, Windows, macOS) have the widest choice of stack:
 
 - **`webrtc-rs`** — pure Rust, no system dependencies. This is what the in-repo
-  [`clients/native/`](../../clients/native/README.md) reference client
+  [`clients/native/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/clients/native/README.md)
+  reference client
   uses (version 0.17), exercising real ICE gathering, DTLS handshakes, and SCTP data channels over loopback. The
   reference client is exercised in CI on Linux; the same pure-Rust stack is portable to Windows and macOS.
 - **libdatachannel** — a lean C/C++ library (with bindings for many languages) that is the recommended embed when
@@ -98,7 +102,7 @@ The signaling flow is identical to the browser; only the API names differ. One n
 serialize an ICE candidate into the `{"IceCandidate": ...}` payload, serialize the full candidate init object (the
 `RTCIceCandidateInit` shape — candidate string plus `sdpMid` / `sdpMLineIndex`), not the bare candidate string, so
 the remote side can reconstruct it. The reference client documents the exact shape it emits in
-[its signal-payload section](../../clients/native/README.md#signal-payload-convention-matchbox-peersignal).
+[its signal-payload section](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/clients/native/README.md#signal-payload-convention-matchbox-peersignal).
 
 Use the native reference client as a conformance oracle: run it against your build with the shared interop harness
 to validate mesh, host-star, late-join, and crippled-ICE relay fallback before shipping.

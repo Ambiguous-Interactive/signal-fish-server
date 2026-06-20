@@ -57,6 +57,13 @@ trap 'rm -f "$TMP_OUTPUT"' EXIT
                 /^# Skill:/ {
                     title=$0
                     sub(/^# Skill:[[:space:]]*/, "", title)
+                    # Strip a trailing carriage return (CRLF-checked-out skill
+                    # files) and any trailing whitespace, so the emitted link text
+                    # never becomes "[Title\r](...)" — which markdownlint rejects
+                    # (MD039 no-space-in-links) and which silently breaks the index
+                    # when regenerated in a CRLF working tree.
+                    gsub(/\r/, "", title)
+                    sub(/[[:space:]]+$/, "", title)
                     print title
                     found=1
                     exit

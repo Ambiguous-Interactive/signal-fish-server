@@ -236,8 +236,8 @@ async fn ready(ws: &mut WsStream) {
 
 /// Drain messages until a `LobbyStateChanged` reports exactly `count` ready
 /// players. Paces the ready handshake so each `PlayerReady` is fully processed
-/// (and reflected in `ready_players`) before the next is sent — mirrors
-/// `lobby_e2e_tests.rs` and removes the back-to-back-ready race.
+/// (and reflected in `ready_players`) before the next is sent, removing the
+/// back-to-back-ready race.
 async fn await_ready_count(ws: &mut WsStream, count: usize) {
     next_matching_server_message_within(
         ws,
@@ -332,6 +332,11 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
     await_ready_count(&mut peer1, 1).await;
     await_ready_count(&mut peer2, 1).await;
     ready(&mut peer2).await;
+    // Both members are ready; readiness no longer auto-starts, so the creator
+    // explicitly starts the game once the all-ready (2/2) lobby update lands.
+    await_ready_count(&mut peer1, 2).await;
+    await_ready_count(&mut peer2, 2).await;
+    send(&mut peer1, &ClientMessage::StartGame).await;
 
     // Reaching past read_finalization means each saw GameStarting first, in order.
     let (plan1, plan2) = tokio::join!(read_finalization(&mut peer1), read_finalization(&mut peer2));
@@ -391,6 +396,11 @@ async fn mixed_v2_v3_room_finalization_sends_no_session_plan() {
     await_ready_count(&mut peer1, 1).await;
     await_ready_count(&mut peer2, 1).await;
     ready(&mut peer2).await;
+    // Both members are ready; the creator explicitly starts the game (readiness
+    // no longer auto-starts) once the all-ready (2/2) lobby update lands.
+    await_ready_count(&mut peer1, 2).await;
+    await_ready_count(&mut peer2, 2).await;
+    send(&mut peer1, &ClientMessage::StartGame).await;
 
     // Both receive GameStarting (reaching past read_finalization proves it,
     // in order), exactly like v2. The room resolved to the relay floor, so

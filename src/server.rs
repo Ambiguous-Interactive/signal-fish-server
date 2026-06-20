@@ -372,7 +372,7 @@ impl EnhancedGameServer {
     /// Fetch the client's last-reported data-path transport state, or `None` if it
     /// has not reported one (the relay floor is the implicit default). Mirrors
     /// [`client_protocol`](Self::client_protocol). Consumed by tests and the future
-    /// targeted-relay path (PLAN §P5 notes); not yet read in production.
+    /// targeted-relay path; not yet read in production.
     #[allow(dead_code)]
     pub(crate) fn client_transport_status(
         &self,

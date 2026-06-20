@@ -303,6 +303,20 @@ fn golden_client_player_ready() {
 }
 
 #[test]
+fn golden_client_start_game() {
+    // Explicit lobby finalization: a payloadless `StartGame`, serialized exactly
+    // like the other unit variants (`{"type":"StartGame"}`). Readiness alone no
+    // longer auto-starts the game, so this is the on-the-wire start trigger.
+    let msg = ClientMessage::StartGame;
+    assert_json(
+        &msg,
+        json!({ "type": "StartGame" }),
+        r#"{"type":"StartGame"}"#,
+    );
+    assert_msgpack(&msg, "81a474797065a9537461727447616d65");
+}
+
+#[test]
 fn golden_client_provide_connection_info() {
     let msg = ClientMessage::ProvideConnectionInfo {
         connection_info: ConnectionInfo::Direct {

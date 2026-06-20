@@ -2,7 +2,7 @@
 
 How Signal Fish Server upgrades a room from the universal relay floor to a
 peer-to-peer data path, and how clients fall back when that path fails. This is
-the client-side contract for the v3 session flow (PLAN Appendix G), plus the
+the client-side contract for the v3 session flow, plus the
 server-side guarantees and the observability it exposes.
 
 ## The relay floor always stays open
@@ -170,7 +170,7 @@ never changes how the server relays `GameData`. Delivery is best-effort (like
 `Signal` / `NewPeer`): a backpressured peer may miss a notice and re-syncs on
 the next state change.
 
-## Metrics exposed (PLAN §P5)
+## Metrics exposed
 
 The server exposes Prometheus counters for the v3 transport surface so dashboards
 can see how often the relay floor is upgraded to a peer-to-peer path:
