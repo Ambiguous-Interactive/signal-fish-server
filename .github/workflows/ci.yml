@@ -444,6 +444,14 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Verify build and tests with MSRV
+        # Plain `cargo test` (NOT nextest) runs every test binary in parallel
+        # with no `process-spawning` isolation, so the multiprocess and
+        # idle-timeout tests share CPU with ~40 other binaries. The timeout
+        # multiplier gives the idle-timeout tests proportional headroom so a
+        # starved task still resets the idle timer in time (see
+        # idle_timeout_test_multiplier in tests/e2e_tests.rs).
+        env:
+          SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: "3"
         run: |
           cargo test --locked --all-features --no-fail-fast
           echo "✓ Build and tests successful with MSRV ${{ steps.msrv.outputs.msrv }}"
@@ -462,8 +470,26 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.3
+      - name: Set up Docker Buildx
+        # Buildx unlocks the GitHub Actions layer cache below. Mirrors the proven
+        # pattern in docker-publish.yml (same pinned action versions), turning a
+        # cold ~3-5 min image build into a warm sub-minute one on cache hits.
+        uses: docker/setup-buildx-action@v4.1.0
       - name: Build Docker image
-        run: docker build -t signal-fish-server:ci .
+        uses: docker/build-push-action@v7.2.0
+        with:
+          context: .
+          # load (not push): import the built image into the local Docker daemon
+          # so the smoke test below can `docker run` it.
+          load: true
+          tags: signal-fish-server:ci
+          # Reads are always safe; only EXPORT the layer cache from same-repo runs.
+          # A fork PR gets a read-only GITHUB_TOKEN that cannot write the Actions
+          # cache, and a `cache-to: type=gha` export failure is fatal by default —
+          # so gate the export the same way rust-cache's `save-if` does. An empty
+          # cache-to is a no-op export, leaving the cold build correct on forks.
+          cache-from: type=gha
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max' || '' }}
 
       - name: Smoke test
         run: |
@@ -526,6 +552,15 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Generate coverage report
+        # cargo-llvm-cov runs the suite via plain `cargo test` (NOT nextest), so
+        # the `.config/nextest.toml` `process-spawning` isolation never applies
+        # here, and coverage instrumentation slows execution ~2-4x. The timeout
+        # multiplier widens the idle-timeout tests' windows proportionally so a
+        # briefly CPU-starved task on this oversubscribed, instrumented lane
+        # cannot slip the window and flake (see idle_timeout_test_multiplier in
+        # tests/e2e_tests.rs and the multiprocess backoff in v3_multiprocess_e2e.rs).
+        env:
+          SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: "3"
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 
       - name: Enforce coverage threshold

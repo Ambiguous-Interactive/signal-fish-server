@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 #[cfg(unix)]
 use common::bash_command;
-use common::{read_file, repo_root};
+use common::{read_file, repo_root, unique_temp_dir, write_file};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
 use saphyr::{LoadableYamlNode, Yaml};
@@ -15760,6 +15760,176 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_availab
          stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r##"
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+
+                # 1) Version is read from the [package] table only.
+                $toml = "[package]`nname = `"x`"`nversion = `"1.2.3`"`n`n[dependencies]`nversion = `"9.9.9`"`n"
+                Assert ((Read-CargoPackageVersion -CargoTomlText $toml) -eq "1.2.3") "version must be parsed from the [package] table, not other tables"
+                Assert ($null -eq (Read-CargoPackageVersion -CargoTomlText "")) "empty Cargo.toml text must yield a null version"
+
+                # 2) library-usage: both dependency forms rewritten; <version>
+                #    placeholder skipped; CRLF preserved verbatim.
+                $lib = "signal-fish-server = `"0.2.0`"`r`nsignal-fish-server = { version = `"0.2.0`", features = [`"tls`"] }`r`nsignal-fish-server = `"<version>`"`r`n"
+                $libOut = Get-DocVersionSyncedContent -Path "docs/library-usage.md" -Content $lib -Version "0.3.0"
+                Assert ($libOut.Contains("signal-fish-server = `"0.3.0`"")) "plain dependency form must be synced"
+                Assert ($libOut.Contains("version = `"0.3.0`", features")) "table dependency form must be synced"
+                Assert ($libOut.Contains("signal-fish-server = `"<version>`"")) "the <version> placeholder must be left untouched"
+                Assert (-not $libOut.Contains("0.2.0")) "no stale version must remain"
+                Assert ($libOut.Contains("`r`n")) "CRLF line endings must be preserved"
+
+                # 3) context.md metadata line rewritten exactly; CRLF preserved
+                #    (this branch uses a different regex than library-usage).
+                $ctx = "# Title`r`n- **Version:** 0.2.0`r`n- **Code name:** Signal Fish`r`n"
+                $ctxOut = Get-DocVersionSyncedContent -Path ".llm/context.md" -Content $ctx -Version "0.3.0"
+                Assert ($ctxOut.Contains("- **Version:** 0.3.0")) "context.md version line must be synced"
+                Assert (-not $ctxOut.Contains("0.2.0")) "no stale context.md version must remain"
+                Assert ($ctxOut.Contains("- **Version:** 0.3.0`r`n")) "context.md CRLF line endings must be preserved"
+
+                # 4) Idempotent: re-syncing already-correct content is a no-op.
+                $again = Get-DocVersionSyncedContent -Path "docs/library-usage.md" -Content $libOut -Version "0.3.0"
+                Assert ($again -ceq $libOut) "version sync must be idempotent"
+
+                # 5) Non-site files are returned byte-for-byte unchanged, AND the
+                #    library-usage regex is anchored on `signal-fish-server` so a
+                #    bare JSON `"version": "0.2.0"` line is never rewritten. This
+                #    is why .vscode/launch.json (schema version) and
+                #    spec/*.asyncapi.yaml (protocol version) can never be corrupted.
+                $jsonVersion = "  `"version`": `"0.2.0`","
+                Assert ((Get-DocVersionSyncedContent -Path ".vscode/launch.json" -Content $jsonVersion -Version "0.3.0") -ceq $jsonVersion) "non-site files must be left untouched"
+                Assert ((Get-DocVersionSyncedContent -Path "docs/library-usage.md" -Content $jsonVersion -Version "0.3.0") -ceq $jsonVersion) "a bare JSON version line must not match the signal-fish-server-anchored regex"
+
+                # 6) Honesty guard: never report compliant on a state the checker
+                #    still rejects (path/git dep with no version key; a context.md
+                #    whose required version line was deleted).
+                Assert ($null -ne (Get-DocVersionResidualProblem -Path "docs/library-usage.md" -Content "signal-fish-server = { path = `"../..`" }" -Version "0.3.0")) "a version-less signal-fish-server dependency must be flagged unfixable"
+                Assert ($null -ne (Get-DocVersionResidualProblem -Path "docs/library-usage.md" -Content "signal-fish-server = { git = `"https://x`", tag = `"0.3.0`" }" -Version "0.3.0")) "a version-less dep that merely mentions the crate version elsewhere (git tag) must still be flagged"
+                Assert ($null -eq (Get-DocVersionResidualProblem -Path "docs/library-usage.md" -Content $libOut -Version "0.3.0")) "fully-synced library-usage content must have no residual problem"
+                Assert ($null -ne (Get-DocVersionResidualProblem -Path ".llm/context.md" -Content "# Title`nno version line here`n" -Version "0.3.0")) "a missing context.md version line must be flagged unfixable"
+                Assert ($null -eq (Get-DocVersionResidualProblem -Path ".llm/context.md" -Content $ctxOut -Version "0.3.0")) "synced context.md content must have no residual problem"
+            "##,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping doc version sync logic test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "pre-commit.ps1 doc version sync helpers must satisfy the version-sync contract.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh_available() {
+    let root = repo_root();
+    let hook = root.join("scripts/hooks/pre-commit.ps1");
+
+    // Throwaway repo so we exercise the REAL index re-staging path
+    // (Set-IndexText / git update-index), proving fixer output satisfies the
+    // checker's contract, without mutating this repository.
+    let temp = unique_temp_dir("docver-e2e");
+    let dir = temp.path();
+
+    let git = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        Command::new("git").args(args).current_dir(dir).output()
+    };
+
+    let Ok(init) = git(&["init", "-q"]) else {
+        eprintln!("Skipping doc version sync e2e test because git is unavailable.");
+        return;
+    };
+    if !init.status.success() {
+        eprintln!("Skipping doc version sync e2e test because git init failed.");
+        return;
+    }
+    let _ = git(&["config", "user.email", "test@example.com"]);
+    let _ = git(&["config", "user.name", "Test"]);
+    let _ = git(&["config", "commit.gpgsign", "false"]);
+
+    // Seed a repo whose docs match the original crate version, then commit.
+    write_file(
+        &dir.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.2.0\"\n",
+    );
+    write_file(
+        &dir.join("docs/library-usage.md"),
+        "signal-fish-server = \"0.2.0\"\nsignal-fish-server = { version = \"0.2.0\", features = [\"tls\"] }\n",
+    );
+    write_file(&dir.join(".llm/context.md"), "- **Version:** 0.2.0\n");
+    assert!(git(&["add", "-A"]).unwrap().status.success());
+    assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
+        .unwrap()
+        .status
+        .success());
+
+    // Bump ONLY the manifest and stage it, exactly like a real version bump
+    // that forgets the docs — the scenario that broke CI.
+    write_file(
+        &dir.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.9.9\"\n",
+    );
+    assert!(git(&["add", "Cargo.toml"]).unwrap().status.success());
+
+    let output = Command::new("pwsh")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+        .arg(&hook)
+        .current_dir(dir)
+        .output();
+    let Ok(output) = output else {
+        eprintln!("Skipping doc version sync e2e test because pwsh is unavailable.");
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "pre-commit hook must succeed and auto-sync docs from the bumped Cargo.toml.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The STAGED (index) docs must now carry the bumped version, so the commit
+    // that lands is internally consistent and the checker would pass.
+    let staged = |path: &str| -> String {
+        let out = git(&["show", &format!(":{path}")]).expect("git show staged blob");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let lib = staged("docs/library-usage.md");
+    assert!(
+        lib.contains("signal-fish-server = \"0.9.9\""),
+        "plain dependency form must be re-staged at 0.9.9, got:\n{lib}"
+    );
+    assert!(
+        lib.contains("version = \"0.9.9\""),
+        "table dependency form must be re-staged at 0.9.9, got:\n{lib}"
+    );
+    assert!(
+        !lib.contains("0.2.0"),
+        "no stale version may remain in the staged docs, got:\n{lib}"
+    );
+    let ctx = staged(".llm/context.md");
+    assert!(
+        ctx.contains("- **Version:** 0.9.9"),
+        "context.md version line must be re-staged at 0.9.9, got:\n{ctx}"
     );
 }
 

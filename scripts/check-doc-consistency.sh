@@ -32,6 +32,7 @@ fi
 
 ERRORS=0
 WARNINGS=0
+VERSION_DRIFT=0
 CHANGED_MODE=none
 SKIP_CHANGELOG_GATE=0
 
@@ -177,6 +178,7 @@ validate_signal_fish_dependency_versions() {
 
         if [ "$observed" != "$CARGO_VERSION" ]; then
             action_error "$file has stale signal-fish-server version '$observed' (expected '$CARGO_VERSION' from Cargo.toml)"
+            VERSION_DRIFT=1
         fi
     done < <(grep -E 'signal-fish-server[[:space:]]*=' "$file" || true)
 
@@ -197,6 +199,7 @@ if [ -n "$CARGO_VERSION" ]; then
             action_ok ".llm/context.md version line matches Cargo.toml"
         else
             action_error ".llm/context.md must contain exact line: $expected_context_line"
+            VERSION_DRIFT=1
         fi
     fi
 fi
@@ -559,6 +562,11 @@ fi
 
 echo
 if [ "$ERRORS" -gt 0 ]; then
+    if [ "$VERSION_DRIFT" -ne 0 ]; then
+        action_info "Crate version drift detected. Cargo.toml [package].version is the single source of truth."
+        action_info "The Signal Fish pre-commit hook auto-syncs these docs on commit; to fix the working tree now run:"
+        action_info "  pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree"
+    fi
     action_error "Doc consistency checks failed with $ERRORS error(s) and $WARNINGS warning(s)"
     exit 1
 fi

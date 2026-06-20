@@ -2107,6 +2107,215 @@ function Repair-SkillsIndexIfNeeded {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Doc version sync (auto-repair)
+#
+# Cargo.toml [package].version is the single source of truth for the crate
+# version. A version bump must propagate to the human-facing docs that quote it,
+# or scripts/check-doc-consistency.sh (run in CI and run-local-ci) fails. This
+# check regenerates those quoted versions from Cargo.toml and re-stages them, so
+# a bump can never land a stale doc and break CI.
+#
+# SITES (must mirror the version-sync section of
+# scripts/check-doc-consistency.sh; the parity is locked by
+# tests/doc_consistency_policy_tests.rs):
+#   - docs/library-usage.md : signal-fish-server = "X"
+#                             signal-fish-server = { version = "X", ... }
+#   - .llm/context.md       : - **Version:** X
+# Dependency lines containing a <version> placeholder are intentionally left
+# untouched, matching the checker.
+$script:DocVersionSyncFiles = @("docs/library-usage.md", ".llm/context.md")
+
+function Read-CargoPackageVersion {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][string]$CargoTomlText)
+
+    if ([string]::IsNullOrEmpty($CargoTomlText)) {
+        return $null
+    }
+
+    # Mirror read_cargo_package_version() in scripts/check-doc-consistency.sh:
+    # the first `version = "..."` inside the [package] table, and only there.
+    $inPackage = $false
+    foreach ($rawLine in ($CargoTomlText -split "`n")) {
+        $line = $rawLine.TrimEnd("`r")
+        if ($line -match '^\s*\[package\]\s*$') {
+            $inPackage = $true
+            continue
+        }
+        if ($line -match '^\s*\[[^\]]+\]\s*$') {
+            $inPackage = $false
+            continue
+        }
+        if ($inPackage -and $line -match '^\s*version\s*=\s*"([^"]+)"') {
+            return $Matches[1]
+        }
+    }
+    $null
+}
+
+function Get-DocVersionSyncedContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    switch ($Path) {
+        "docs/library-usage.md" {
+            # Rewrite the version inside any signal-fish-server dependency
+            # assignment, both the plain (= "X") and table
+            # (= { version = "X", ... }) forms. The leading group captures
+            # everything up to and including the opening quote; [^"<]+ matches
+            # the version without spanning the closing quote and without
+            # matching <version> placeholders. Line-ending bytes stay outside
+            # the match, so LF/CRLF is preserved verbatim.
+            return [regex]::Replace(
+                $Content,
+                '(signal-fish-server[ \t]*=[ \t]*(?:\{[^}\r\n]*?\bversion[ \t]*=[ \t]*)?")[^"<]+(")',
+                { param($m) "$($m.Groups[1].Value)$Version$($m.Groups[2].Value)" })
+        }
+        ".llm/context.md" {
+            # Rewrite the exact metadata line. [^\r\n]* stops before the line
+            # ending so LF/CRLF is preserved verbatim.
+            return [regex]::Replace(
+                $Content,
+                '(?m)^(- \*\*Version:\*\* )[^\r\n]*',
+                { param($m) "$($m.Groups[1].Value)$Version" })
+        }
+        default {
+            return $Content
+        }
+    }
+}
+
+# Report the residual reason the CI checker (scripts/check-doc-consistency.sh)
+# would STILL reject $Content after an auto-sync attempt, or $null if it is
+# compliant. This keeps the hook honest: it must never report success on a
+# state CI rejects (e.g. a path/git dependency with no version key to rewrite,
+# or a context.md whose required version line was deleted entirely and cannot
+# be re-synthesized). Mirrors the checker's per-file rules.
+function Get-DocVersionResidualProblem {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    switch ($Path) {
+        "docs/library-usage.md" {
+            # Mirror validate_signal_fish_dependency_versions() in
+            # scripts/check-doc-consistency.sh EXACTLY: parse each
+            # signal-fish-server dependency line's version (table form first,
+            # then plain form) and require it to equal the crate version.
+            # A <version> placeholder is exempt; a line with no extractable
+            # version (path/git dep) is unfixable. We extract-and-compare rather
+            # than substring-test so a version-less line that merely mentions
+            # the crate version elsewhere (e.g. a git tag) is still flagged.
+            $unfixable = [System.Collections.Generic.List[string]]::new()
+            foreach ($match in [regex]::Matches($Content, '(?m)^.*signal-fish-server[ \t]*=.*$')) {
+                $line = $match.Value
+                if ($line -match '<version>') {
+                    continue
+                }
+                $observed = $null
+                $tableForm = [regex]::Match($line, 'signal-fish-server[ \t]*=[ \t]*\{[^}]*version[ \t]*=[ \t]*"([^"]+)"')
+                if ($tableForm.Success) {
+                    $observed = $tableForm.Groups[1].Value
+                } else {
+                    $plainForm = [regex]::Match($line, 'signal-fish-server[ \t]*=[ \t]*"([^"]+)"')
+                    if ($plainForm.Success) {
+                        $observed = $plainForm.Groups[1].Value
+                    }
+                }
+                if ($null -eq $observed -or $observed -ne $Version) {
+                    [void]$unfixable.Add($line)
+                }
+            }
+            if ($unfixable.Count -gt 0) {
+                return "docs/library-usage.md has a signal-fish-server dependency line that cannot be auto-synced to $Version (e.g. a path/git dependency without a version key). Fix it by hand:`n  $($unfixable -join "`n  ")"
+            }
+            return $null
+        }
+        ".llm/context.md" {
+            # The checker requires the exact line; if it was deleted entirely the
+            # regex has nothing to rewrite and we must not silently pass.
+            $expectedLine = "- **Version:** $Version"
+            foreach ($line in ($Content -split "`n")) {
+                if ($line.TrimEnd("`r") -eq $expectedLine) {
+                    return $null
+                }
+            }
+            return ".llm/context.md is missing the required line '$expectedLine' and cannot be auto-created. Add it under the project identity section."
+        }
+        default {
+            return $null
+        }
+    }
+}
+
+function Repair-DocVersionsIfNeeded {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedFiles)
+
+    # Only meaningful when the crate version or a tracked version-doc changed.
+    # Mirrors the trigger gate of Repair-SkillsIndexIfNeeded so the common
+    # commit pays no extra git calls.
+    $triggerFiles = @("Cargo.toml") + $script:DocVersionSyncFiles
+    if (@($ChangedFiles | Where-Object { $triggerFiles -contains $_ }).Count -eq 0) {
+        Skip "Doc version sync" "no Cargo.toml or version-doc changes"
+        return
+    }
+
+    $cargoText = Get-PolicyText -Path "Cargo.toml"
+    $version = Read-CargoPackageVersion -CargoTomlText $cargoText
+    if ([string]::IsNullOrEmpty($version)) {
+        Skip "Doc version sync" "Cargo.toml [package].version not readable"
+        return
+    }
+
+    $repaired = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $script:DocVersionSyncFiles) {
+        $actual = Get-PolicyText -Path $path
+        if ($null -eq $actual) {
+            # File not tracked in this commit / not present: nothing to sync.
+            continue
+        }
+
+        $expected = Get-DocVersionSyncedContent -Path $path -Content $actual -Version $version
+
+        $problem = Get-DocVersionResidualProblem -Path $path -Content $expected -Version $version
+        if ($null -ne $problem) {
+            Fail "Doc version sync" $problem
+            return
+        }
+
+        if ($expected -eq $actual) {
+            continue
+        }
+
+        if ($script:InspectWorktree) {
+            $absolutePath = Join-Path $script:RepoRoot $path
+            [System.IO.File]::WriteAllText($absolutePath, $expected, [System.Text.UTF8Encoding]::new($false))
+            $script:WorktreeTextCache[$path] = $expected
+            [void]$repaired.Add($path)
+            continue
+        }
+
+        $expectedHash = Set-IndexText -Path $path -Content $expected
+        $updatedHash = Get-IndexObjectId -Path $path
+        if ($updatedHash -ne $expectedHash) {
+            Fail "Doc version sync" "Unable to re-stage $path with crate version $version."
+            return
+        }
+        [void]$repaired.Add($path)
+    }
+
+    if ($repaired.Count -gt 0) {
+        Pass "Doc version sync (auto-repaired: $($repaired -join ', '))"
+    } else {
+        Pass "Doc version sync"
+    }
+}
+
 function Test-LlmFileSizes {
     if ($null -ne $script:PreloadError) {
         Skip "LLM file sizes" "staged content preload failed"
@@ -2218,8 +2427,9 @@ $worktreePolicyPathspecs = @(
     "src",
     ".llm",
     "README.md",
-    "scripts/generate-skills-index.sh"
-) + $script:HookPolicyFiles
+    "scripts/generate-skills-index.sh",
+    "Cargo.toml"
+) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
 $allChangedFiles = [string[]]@(if ($script:InspectWorktree) {
         Get-WorktreeChangedFiles -Pathspecs $worktreePolicyPathspecs
     } else {
@@ -2233,6 +2443,12 @@ if ($script:InspectWorktree) {
 } else {
     Write-Step "Running fast last-resort checks..."
 }
+
+# Keep the crate version and the docs that quote it in lockstep for every
+# commit shape (runs before the Rust early-exit below so a Cargo.toml bump that
+# also touches Rust still auto-syncs).
+if (-not (Invoke-Check "Doc version sync" { Repair-DocVersionsIfNeeded -ChangedFiles $allChangedFiles })) { Complete-PreCommit }
+
 $hasProductionRust = @($script:StagedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ }).Count -gt 0
 if ($hasProductionRust) {
     if ($script:HookPolicyChangedFiles.Count -gt 0) {

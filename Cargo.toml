@@ -1,6 +1,6 @@
 [package]
 name = "signal-fish-server"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
@@ -30,7 +30,7 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 tokio-tungstenite = "0.29"
 
 # Serialization
@@ -69,7 +69,7 @@ async-trait = "0.1"
 futures-util = { version = "0.3", features = ["std"] }
 
 # Performance primitives
-bytes = "1.11"
+bytes = "1.12"
 smallvec = { version = "1.15", features = ["union", "const_generics", "serde"] }
 dashmap = "6.2"
 

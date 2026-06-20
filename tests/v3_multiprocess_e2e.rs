@@ -82,7 +82,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const SPAWN_ATTEMPTS: usize = 3;
+/// Fresh-port spawn attempts. Each retry reserves a NEW port, so this absorbs
+/// the reserve-release-spawn race cheaply; a few attempts make a stolen port
+/// vanishingly unlikely to fail a run.
+const SPAWN_ATTEMPTS: usize = 5;
+/// Fixed-port (restart) spawn attempts. This path CANNOT dodge a transient race
+/// by picking a fresh port — it must reuse the SIGKILL'd port — so it gets more
+/// attempts and exponential backoff (see `spawn_server_on_fixed_port`).
+const FIXED_PORT_SPAWN_ATTEMPTS: usize = 6;
 
 /// Guard around the spawned server binary. Dropping it kills the child
 /// (`start_kill` here plus `kill_on_drop(true)` at spawn), so a panicking test
@@ -159,18 +166,30 @@ async fn spawn_server(default_topology: &str) -> ServerProcess {
 }
 
 /// Spawn the server binary on a FIXED port (restart-on-same-port semantics),
-/// retrying the same port to absorb transient socket-teardown races.
+/// retrying the same port with exponential backoff to absorb transient
+/// socket-teardown races. After a SIGKILL the kernel may briefly hold the
+/// listening port (the dead server's accepted connections linger in TIME_WAIT;
+/// Windows' `TerminateProcess` tears the socket down more slowly than a Unix
+/// signal), so a single flat retry can expire before the port frees under load.
+/// Backoff — not a bigger fixed sleep — is the right tool: the happy path
+/// rebinds on attempt 1 and returns immediately, while a genuinely slow teardown
+/// gets progressively more time without inflating the common case.
 async fn spawn_server_on_fixed_port(port: u16, default_topology: &str) -> ServerProcess {
     let mut failures = Vec::new();
-    for attempt in 1..=SPAWN_ATTEMPTS {
+    let mut backoff = Duration::from_millis(100);
+    for attempt in 1..=FIXED_PORT_SPAWN_ATTEMPTS {
         match try_spawn_server(port, default_topology).await {
             Ok(server) => return server,
             Err(failure) => failures.push(format!("attempt {attempt}: {failure}")),
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        if attempt < FIXED_PORT_SPAWN_ATTEMPTS {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(1600));
+        }
     }
     panic!(
-        "server binary failed to restart on port {port} after {SPAWN_ATTEMPTS} attempts:\n{}",
+        "server binary failed to restart on port {port} after {FIXED_PORT_SPAWN_ATTEMPTS} \
+         attempts:\n{}",
         failures.join("\n")
     );
 }
@@ -261,7 +280,8 @@ async fn wait_until_healthy(server: &mut ServerProcess) -> Result<(), String> {
         .timeout(Duration::from_secs(2))
         .build()
         .expect("build health-poll client");
-    let deadline = std::time::Instant::now() + HEALTH_DEADLINE;
+    let start = std::time::Instant::now();
+    let deadline = start + HEALTH_DEADLINE;
 
     loop {
         let child = server
@@ -283,8 +303,11 @@ async fn wait_until_healthy(server: &mut ServerProcess) -> Result<(), String> {
         }
 
         if std::time::Instant::now() >= deadline {
+            let elapsed = start.elapsed();
             return Err(format!(
-                "health endpoint {url} not ready within {HEALTH_DEADLINE:?}"
+                "health endpoint {url} (port {}) never answered 200 within {HEALTH_DEADLINE:?} \
+                 (waited {elapsed:?}); the child stayed alive but unready",
+                server.port
             ));
         }
         tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
