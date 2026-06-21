@@ -41,6 +41,21 @@ case "${1:-}" in
     ;;
 esac
 
+echo "==> Verifying the native client lockfile is in sync (fast --locked precheck)"
+# A stale clients/native/Cargo.lock makes every --locked build below fail late
+# with a cryptic "lock file needs to be updated" error -- after a multi-minute
+# cold compile. `cargo metadata --locked` reproduces that exact lock check up
+# front via dependency resolution only (no compilation; it may fetch the index
+# on a cold cache, but the build below would anyway), so drift fails fast with
+# an actionable fix instead of burning a full build first.
+if ! (cd "${CLIENT_DIR}" && cargo metadata --locked --format-version 1 >/dev/null); then
+    echo "ERROR: clients/native/Cargo.lock is out of date with clients/native/Cargo.toml." >&2
+    echo "       Regenerate and commit it before re-running:" >&2
+    echo "         cargo update -p signal-fish-server --manifest-path clients/native/Cargo.toml  # after a root version bump" >&2
+    echo "         cargo generate-lockfile --manifest-path clients/native/Cargo.toml             # for other dependency changes" >&2
+    exit 1
+fi
+
 echo "==> Building the server binary (${PROFILE_DIR})"
 (cd "${REPO_ROOT}" && cargo build --locked --bin signal-fish-server "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}")
 

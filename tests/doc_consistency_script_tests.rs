@@ -305,6 +305,36 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_contain: vec![".llm/context.md must contain exact line"],
             must_not_contain: vec![],
         },
+        // Superset coverage: the scan validates EVERY doc that quotes the crate
+        // version, not just docs/library-usage.md. A new doc that drifts must be
+        // caught -- this is the class of bug that broke six CI jobs after a bump.
+        // (Before the filesystem-scan rewrite this case passed silently.)
+        ScriptCase {
+            name: "fails_on_stale_version_in_additional_doc",
+            overrides: vec![(
+                "docs/quickstart.md",
+                "# Quickstart\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec![
+                "quickstart.md has stale signal-fish-server version '0.0.9'",
+            ],
+            must_not_contain: vec![],
+        },
+        // No false positives: a sourceless (path) dependency example has no
+        // version to pin and must not be flagged.
+        ScriptCase {
+            name: "allows_path_dependency_example_without_version",
+            overrides: vec![(
+                "docs/contributing.md",
+                "# Contributing\n\n```toml\nsignal-fish-server = { path = \"../signal-fish-server\" }\n```\n",
+            )],
+            args: vec![],
+            expected_exit: 0,
+            must_contain: vec!["Doc consistency checks passed"],
+            must_not_contain: vec!["without a parseable version"],
+        },
         ScriptCase {
             name: "passes_context_version_check_with_crlf_line_endings",
             overrides: vec![(

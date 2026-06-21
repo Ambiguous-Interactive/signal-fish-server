@@ -147,17 +147,27 @@ fi
 # ---------------------------------------------------------------------------
 # 1) Version sync checks
 # ---------------------------------------------------------------------------
+# Every doc that quotes the crate as a dependency (`signal-fish-server = "X"` or
+# `signal-fish-server = { version = "X" }`) must pin the SAME version as the
+# Cargo.toml [package].version. Discovery is a filesystem SUPERSET scan, not a
+# hand-maintained file list: any tracked Markdown doc that quotes the version is
+# covered automatically and can never drift silently -- the exact class of bug
+# that broke six CI jobs after the 0.2.0 -> 0.3.0 bump. Generated/vendored trees
+# are skipped so a stale rendered copy of an example cannot false-positive.
+
+# Dependency-line shape: `signal-fish-server =` followed by a quote (`"X"`) or a
+# brace table (`{ version = "X" }`). Anchoring on the value start avoids matching
+# prose that merely mentions the crate name. Single source of truth for the
+# discovery scan and the per-file validator below.
+SFS_DEP_PATTERN='signal-fish-server[[:space:]]*=[[:space:]]*["{]'
+
+# The canonical usage doc must always exist and carry an example, so the scan can
+# never pass vacuously if it is renamed or loses its dependency snippet.
+CANONICAL_USAGE_DOC="docs/library-usage.md"
+
 validate_signal_fish_dependency_versions() {
     local file="$1"
-    if [ ! -f "$file" ]; then
-        action_error "Missing required file: $file"
-        return
-    fi
-
-    local found=0
     while IFS= read -r line; do
-        found=1
-
         # Allow placeholders in template docs.
         if [[ "$line" == *"<version>"* ]]; then
             continue
@@ -172,6 +182,12 @@ validate_signal_fish_dependency_versions() {
         fi
 
         if [ -z "$observed" ]; then
+            # A sourceless dependency (path/git/workspace/registry, no version
+            # key) is a legitimate example with nothing to pin -- skip it.
+            # Anything else is a malformed version example and must be fixed.
+            if [[ "$line" =~ (path|git|workspace|registry)[[:space:]]*= ]]; then
+                continue
+            fi
             action_error "$file contains a signal-fish-server dependency line without a parseable version: $line"
             continue
         fi
@@ -180,15 +196,48 @@ validate_signal_fish_dependency_versions() {
             action_error "$file has stale signal-fish-server version '$observed' (expected '$CARGO_VERSION' from Cargo.toml)"
             VERSION_DRIFT=1
         fi
-    done < <(grep -E 'signal-fish-server[[:space:]]*=' "$file" || true)
+    done < <(grep -E "$SFS_DEP_PATTERN" "$file" || true)
+}
 
-    if [ "$found" -eq 0 ]; then
-        action_warn "$file contains no signal-fish-server dependency example"
-    fi
+# All Markdown docs, discovered from the filesystem (works in the non-git fixture
+# harness too) and excluding generated/vendored trees. NUL-delimited (-print0)
+# for path-safety and identical behavior on GNU and BSD/macOS find. The version
+# filter is applied per-file in the loop with a plain `grep -qE`; we deliberately
+# avoid `grep -Z` here because BSD/macOS grep treats `-Z` as zgrep (decompress),
+# not GNU's --null -- the same portable idiom used by check-internal-links.sh.
+find_markdown_docs() {
+    find . -type f -name '*.md' \
+        -not -path '*/target/*' \
+        -not -path '*/node_modules/*' \
+        -not -path '*/site/*' \
+        -not -path '*/.git/*' \
+        -not -path '*/mutants.out/*' \
+        -print0
 }
 
 if [ -n "$CARGO_VERSION" ]; then
-    validate_signal_fish_dependency_versions "docs/library-usage.md"
+    # Canonical usage doc must exist and carry a version example.
+    if [ ! -f "$CANONICAL_USAGE_DOC" ]; then
+        action_error "Missing required file: $CANONICAL_USAGE_DOC"
+    elif ! grep -qE "$SFS_DEP_PATTERN" "$CANONICAL_USAGE_DOC"; then
+        action_error "$CANONICAL_USAGE_DOC must contain a signal-fish-server dependency example"
+    fi
+
+    # Superset scan: validate the pinned version in EVERY doc that quotes it.
+    canonical_seen=0
+    while IFS= read -r -d '' doc; do
+        grep -qE "$SFS_DEP_PATTERN" "$doc" || continue
+        [ "${doc#./}" = "$CANONICAL_USAGE_DOC" ] && canonical_seen=1
+        validate_signal_fish_dependency_versions "$doc"
+    done < <(find_markdown_docs)
+
+    # Discovery sanity: if the canonical doc quotes a version but the scan missed
+    # it, filesystem discovery is broken -- fail loud rather than pass vacuously
+    # (mirrors the REQUIRED_NESTED_LOCK assertion in the lockfile guard).
+    if grep -qE "$SFS_DEP_PATTERN" "$CANONICAL_USAGE_DOC" 2>/dev/null \
+        && [ "$canonical_seen" -eq 0 ]; then
+        action_error "version scan did not discover $CANONICAL_USAGE_DOC despite its dependency example; doc discovery is broken"
+    fi
 
     if [ ! -f ".llm/context.md" ]; then
         action_error "Missing required file: .llm/context.md"

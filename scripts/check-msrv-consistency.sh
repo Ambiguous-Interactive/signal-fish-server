@@ -107,8 +107,14 @@ fi
 
 # Check 3: Dockerfile (production build)
 if [ -f Dockerfile ]; then
-    # Extract Rust version from FROM rust:X.Y line (handles both 1.88 and 1.88.0 formats)
-    DOCKERFILE_RUST=$(sed -nE '/^FROM rust:/ { s/FROM rust:([0-9]+\.[0-9]+).*/\1/; p; q; }' Dockerfile)
+    # Extract the Rust version from the first `FROM ... rust:X.Y ...` stage.
+    # Tolerant of build flags before the image (`FROM --platform=$BUILDPLATFORM
+    # rust:1.88-bookworm`), an `AS <stage>` suffix, digests, and both 1.88 and
+    # 1.88.0 forms. Anchoring on ` rust:` (whitespace-preceded) rather than the
+    # start of the line is what makes a multi-arch `--platform` base -- a legit
+    # Dockerfile change -- not silently read as an empty version. POSIX classes
+    # only (no \b / \s) so it behaves identically under BSD sed (macOS CI).
+    DOCKERFILE_RUST=$(sed -nE '/^FROM[[:space:]].*rust:[0-9]/ { s/.*[[:space:]]rust:([0-9]+\.[0-9]+).*/\1/; p; q; }' Dockerfile)
     # Normalize MSRV to major.minor for comparison (1.88.0 -> 1.88)
     MSRV_SHORT=$(echo "$MSRV" | sed -E 's/([0-9]+\.[0-9]+).*/\1/')
     check_file "Dockerfile" "$MSRV_SHORT" "$DOCKERFILE_RUST" "rust"
@@ -133,7 +139,10 @@ fi
 if [ -f .devcontainer/Dockerfile ]; then
     # Extract MSRV comment if present
     if grep -q "# Project MSRV:" .devcontainer/Dockerfile; then
-        DEVCONTAINER_COMMENT=$(grep "# Project MSRV:" .devcontainer/Dockerfile | sed -E 's/.*MSRV: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+        # Tolerant of `1.88` and `1.88.0` and extra spacing; `-n ... p` yields an
+        # empty value on a malformed comment instead of echoing the whole line
+        # (same brittle-parse class hardened for the production Dockerfile above).
+        DEVCONTAINER_COMMENT=$(grep "# Project MSRV:" .devcontainer/Dockerfile | sed -nE 's/.*MSRV:[[:space:]]*([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p')
         if [ "$DEVCONTAINER_COMMENT" = "$MSRV" ]; then
             echo -e "${GREEN}✓ INFO${NC}: .devcontainer/Dockerfile (MSRV comment correct: $DEVCONTAINER_COMMENT)"
         else
