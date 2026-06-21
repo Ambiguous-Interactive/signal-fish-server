@@ -84,6 +84,34 @@ fn describe_exit_code(exit_code: i32) -> String {
     }
 }
 
+#[test]
+fn test_repository_llm_files_stay_within_size_policy() {
+    let root = repo_root();
+    let mut command = bash_command();
+    let output = command
+        .arg("scripts/check-llm-file-sizes.sh")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to run LLM file size checker in {}: {e}",
+                root.display()
+            )
+        });
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    assert!(
+        output.status.success(),
+        "repository .llm files must stay within the 300-line policy so cargo test catches \
+         oversized context before git hooks.\nExit code: {}\nOutput:\n{}",
+        describe_exit_code(exit_code),
+        combined.replace("\r\n", "\n")
+    );
+}
+
 #[derive(Debug)]
 struct ScriptCase {
     name: &'static str,

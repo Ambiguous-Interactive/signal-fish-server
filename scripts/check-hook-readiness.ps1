@@ -1,6 +1,7 @@
 #requires -Version 7.0
 param(
-    [switch]$Repair
+    [switch]$Repair,
+    [switch]$WorkflowTools
 )
 
 Set-StrictMode -Version Latest
@@ -106,34 +107,36 @@ foreach ($tool in $requiredTools) {
     }
 }
 
-$optionalTools = @("cargo", "node", "npm", "shellcheck", "yamllint", "lychee", "jq", "yq", "taplo", "fd", "docker")
-foreach ($tool in $optionalTools) {
-    if (Command-Exists $tool) {
-        Ok "Optional workflow tool available: $tool"
-    } else {
-        Warn "Optional workflow tool missing: $tool"
-    }
-}
-
-if (Test-Path -LiteralPath ".markdownlint-version") {
-    $requiredMarkdownlint = (Get-Content -LiteralPath ".markdownlint-version" -Raw).Trim()
-    $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2"
-    if ($IsWindows) {
-        $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2.cmd"
-    }
-
-    if (Test-Path -LiteralPath $localMarkdownlint) {
-        $version = (& $localMarkdownlint --version 2>$null) -join "`n"
-        if ($version -match [regex]::Escape($requiredMarkdownlint)) {
-            Ok "Pinned markdownlint-cli2 $requiredMarkdownlint is installed locally."
+if ($WorkflowTools) {
+    $optionalTools = @("cargo", "node", "npm", "shellcheck", "yamllint", "lychee", "jq", "yq", "taplo", "fd", "docker")
+    foreach ($tool in $optionalTools) {
+        if (Command-Exists $tool) {
+            Ok "Optional workflow tool available: $tool"
         } else {
-            Warn "Local markdownlint-cli2 version does not match .markdownlint-version ($requiredMarkdownlint)."
+            Warn "Optional workflow tool missing: $tool"
+        }
+    }
+
+    if (Test-Path -LiteralPath ".markdownlint-version") {
+        $requiredMarkdownlint = (Get-Content -LiteralPath ".markdownlint-version" -Raw).Trim()
+        $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2"
+        if ($IsWindows) {
+            $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2.cmd"
+        }
+
+        if (Test-Path -LiteralPath $localMarkdownlint) {
+            $version = (& $localMarkdownlint --version 2>$null) -join "`n"
+            if ($version -match [regex]::Escape($requiredMarkdownlint)) {
+                Ok "Pinned markdownlint-cli2 $requiredMarkdownlint is installed locally."
+            } else {
+                Warn "Local markdownlint-cli2 version does not match .markdownlint-version ($requiredMarkdownlint)."
+            }
+        } else {
+            Warn "Pinned markdownlint-cli2 is not installed locally. Run npm ci before local CI checks."
         }
     } else {
-        Warn "Pinned markdownlint-cli2 is not installed locally. Run npm ci before local CI checks."
+        Warn ".markdownlint-version is missing."
     }
-} else {
-    Warn ".markdownlint-version is missing."
 }
 
 if ($script:Errors -gt 0) {

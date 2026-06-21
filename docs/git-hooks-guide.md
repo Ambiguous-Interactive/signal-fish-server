@@ -19,18 +19,16 @@ local CI, or GitHub CI.
   `git ls-files -s -z`, `git cat-file --batch-check`, and
   `git cat-file --batch`; avoid per-file `git show` loops in hooks.
 - Batched blob reads cap aggregate bytes before loading content.
-- Safe deterministic recovery is allowed. The pre-commit hook regenerates and
-  stages `.llm/skills/index.md` when skill inputs changed, then verifies the
-  repaired index entry by Git object id.
+- Safe deterministic recovery is allowed. The pre-commit hook regenerates
+  `.llm/skills/index.md` when skill inputs changed, mirrors it to the worktree
+  when there are no unstaged edits, then verifies the repaired index entry by
+  Git object id.
 
-The current failure captured in `pre-commit.txt` is a 484 ms last-resort Rust
-panic-pattern failure on a production `.expect(...)` addition. That exposed a
-policy mismatch: the hook was doing semantic `.expect()`/`.unwrap()` work that
-belongs in local CI and CI. The hook now stays to explicit panic macros, while
-agents run worktree preflight and the full panic policy before handoff. An
-earlier Windows incident spent 20.99 seconds in
-`cargo clippy --fix`; that remains the reason clippy is enforced by agent
-workflow and CI, not by git hooks.
+Recent hook incidents reinforced the split: hooks catch only cheap staged or
+pushed-file policy failures, while agents, local CI, and CI run semantic checks.
+The hook stays to explicit panic macros and metadata guards; `.expect()` /
+`.unwrap()`, clippy, tests, markdownlint, and broader documentation policy stay
+outside git hooks.
 
 ## Installation
 
@@ -51,7 +49,7 @@ The readiness check verifies:
 - `.githooks/pre-commit` and `.githooks/pre-push` exist
 - hook executable bits are correct in the Git index
 - required tools `git` and `pwsh` are available
-- optional local-CI tools are visible when installed
+- optional local-CI tools only when `-WorkflowTools` is supplied
 
 ## What Runs
 
@@ -59,7 +57,7 @@ The readiness check verifies:
 
 The pre-commit hook runs `scripts/hooks/pre-commit.ps1`. When production Rust
 files are staged, it runs only the code-path guards needed for last-resort
-safety and budget:
+safety and budget, unless metadata paths also changed:
 
 - new explicit `panic!`, `todo!`, `unimplemented!`, and `unreachable!` macro
   additions in `src/**/*.rs`, excluding test-only files and staged
@@ -69,8 +67,8 @@ Production `.expect()` and `.unwrap()` policy is enforced by
 `scripts/check-no-panics.sh` in agent workflow, local CI, and CI, not by the git
 hook.
 
-When no production Rust files are staged, it also checks lightweight repository
-metadata guards:
+When matching paths changed, it also checks lightweight repository metadata
+guards, even in mixed Rust/metadata commits:
 
 - generated skills index freshness when skill inputs changed, with auto-repair
 - staged `.llm/*.md` files stay at or below 300 lines
@@ -97,6 +95,10 @@ pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Work
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 ./scripts/run-local-ci.sh
 ```
+
+`pre-commit.ps1 -Worktree` checks unstaged worktree policy paths and staged
+policy paths. If a staged policy path differs from the worktree, the preflight
+fails closed because the real git hook validates the staged snapshot.
 
 `scripts/run-local-ci.sh` owns slower policy checks including hook readiness,
 worktree hook preflights, LLM file-size/example policies, markdownlint,

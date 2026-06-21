@@ -48,6 +48,64 @@ pub fn read_file(path: &Path) -> String {
         .replace("\r\n", "\n")
 }
 
+/// Drop full-line `#` comments from config text, returning only the *live*
+/// (uncommented) lines.
+///
+/// # Why this exists
+///
+/// Drift-guard tests assert that a config file still contains some required
+/// token, e.g. `assert!(workflow.contains("docker/setup-qemu-action"))`. A raw
+/// `String::contains` matches anywhere in the file, so a maintainer who merely
+/// *comments out* the real line —
+///
+/// ```text
+/// # uses: docker/setup-qemu-action@v3   # temporarily disabled
+/// ```
+///
+/// — leaves text that still contains the token, and the guard passes while the
+/// live config has silently lost the setting. That is exactly the regression
+/// these guards exist to catch. Asserting against the comment-stripped view
+/// closes the hole.
+///
+/// # Scope and contract
+///
+/// - Removes lines whose first non-whitespace character begins a line comment:
+///   `#` (YAML, Dockerfile, TOML, POSIX shell, PowerShell) or `//` (JSONC, e.g.
+///   `.devcontainer/devcontainer.json`). Those cover every config format these
+///   tests guard. A full-line `//` is unambiguous here — a real JSON/YAML value
+///   line never *starts* with `//` (a `https://` URL has its key first).
+/// - Inline trailing comments (`platforms: linux/amd64  # native`) are
+///   deliberately *preserved*: that line is live config, and stripping the tail
+///   would risk corrupting a token the assertion looks for.
+/// - It does not understand block comments (`<# #>`, `/* */`), heredocs, or
+///   strings that merely start with the comment marker. None occur in the
+///   guarded config files; keep it that way rather than growing a parser here.
+///
+/// Use this for **presence** assertions on config files. Do *not* pre-strip
+/// content feeding an **absence** assertion (`assert!(!c.contains("| head"))`):
+/// there, a commented occurrence is still a real occurrence you want to flag,
+/// and stripping would weaken the guard.
+pub fn strip_comment_lines(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with('#') && !trimmed.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Read a config file and return only its *live* (comment-stripped) lines.
+///
+/// Equivalent to `strip_comment_lines(&read_file(path))`; the shorthand makes
+/// "read this config as the live view a drift guard should assert against" the
+/// obvious one-liner at each call site. See [`strip_comment_lines`] for the full
+/// rationale and the presence-vs-absence caveat.
+pub fn read_live_file(path: &Path) -> String {
+    strip_comment_lines(&read_file(path))
+}
+
 /// Create a uniquely-named temporary directory with a descriptive prefix.
 pub fn unique_temp_dir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()

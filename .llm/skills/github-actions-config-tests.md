@@ -249,6 +249,16 @@ When validating optional elements, keep policy and implementation aligned:
 
 ---
 
+## 4a. Live Config Presence Checks
+
+Presence assertions against comment-bearing config must use the live
+comment-stripped view so a commented-out required line cannot satisfy a drift
+guard. Use [CI Config Live View Tests](./ci-config-live-view-tests.md) for the
+`read_live_file` / `strip_comment_lines` convention and the locked regression
+tests.
+
+---
+
 ## 5. Running Configuration Tests
 
 ```bash
@@ -272,4 +282,5 @@ Total time for all configuration tests: < 1 second.
 - [GitHub Actions Caching](./github-actions-caching.md) — Ecosystem-specific caching, action ref policy
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Schedule guard validation
 - [GitHub Actions Release](./github-actions-release.md) — Release preflight tests
+- [CI Config Live View Tests](./ci-config-live-view-tests.md) — Presence assertions against active config only
 - [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures

@@ -33,6 +33,7 @@ or when reviewing own work for correctness.
 
 - Run cargo check → clippy → test → fmt after every change
 - Run worktree hook preflights before handoff; do not rely on staged/push hook dry runs
+- After `.llm` edits, run `scripts/check-llm-file-sizes.sh` before handoff
 - Use Deep Review checklist for significant changes
 - Walk the "Am I Done?" decision tree before committing
 - Never modify test expectations to make tests pass

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{bash_command, read_file, repo_root};
+use common::{bash_command, read_file, read_live_file, repo_root, strip_comment_lines};
 
 #[test]
 fn test_repository_passes_doc_consistency_script() {
@@ -25,7 +25,7 @@ fn test_repository_passes_doc_consistency_script() {
 #[test]
 fn test_run_local_ci_includes_doc_consistency_check() {
     let root = repo_root();
-    let local_ci = read_file(&root.join("scripts/run-local-ci.sh"));
+    let local_ci = read_live_file(&root.join("scripts/run-local-ci.sh"));
 
     assert!(
         local_ci.contains("doc-consistency"),
@@ -40,7 +40,7 @@ fn test_run_local_ci_includes_doc_consistency_check() {
 #[test]
 fn test_ci_workflow_runs_doc_consistency_check_with_changed_files() {
     let root = repo_root();
-    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     assert!(
         workflow.contains("Doc Consistency") || workflow.contains("doc-consistency"),
@@ -69,30 +69,32 @@ fn extract_ci_dep_detect_step_block(workflow: &str) -> String {
 fn test_ci_workflow_has_file_based_actor_agnostic_dep_detect_step() {
     let root = repo_root();
     let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let workflow_live = strip_comment_lines(&workflow);
     let dep_detect_step = extract_ci_dep_detect_step_block(&workflow);
+    let dep_detect_step_live = strip_comment_lines(&dep_detect_step);
 
     assert!(
-        dep_detect_step.contains("Detect dependency-only changes"),
+        dep_detect_step_live.contains("Detect dependency-only changes"),
         "ci.yml must contain a 'Detect dependency-only changes' step."
     );
     assert!(
-        dep_detect_step.contains("id: dep-detect"),
+        dep_detect_step_live.contains("id: dep-detect"),
         "ci.yml dependency detection step must have id 'dep-detect'."
     );
     assert!(
-        dep_detect_step.contains("skip_changelog"),
+        dep_detect_step_live.contains("skip_changelog"),
         "ci.yml dep-detect step must set a skip_changelog output."
     );
     assert!(
-        dep_detect_step.contains("HAS_CARGO_CHANGE=\"false\"")
-            && dep_detect_step.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
-            && dep_detect_step
+        dep_detect_step_live.contains("HAS_CARGO_CHANGE=\"false\"")
+            && dep_detect_step_live.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
+            && dep_detect_step_live
                 .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
         "ci.yml dep-detect step must use file-based dependency-only detection for Cargo manifest/lock changes."
     );
 
     assert!(
-        workflow.contains("--skip-changelog-gate"),
+        workflow_live.contains("--skip-changelog-gate"),
         "ci.yml must pass --skip-changelog-gate to the checker when dep-detect triggers."
     );
 
@@ -112,8 +114,8 @@ fn test_ci_workflow_has_file_based_actor_agnostic_dep_detect_step() {
 #[test]
 fn test_ci_dep_detect_internal_paths_match_script() {
     let root = repo_root();
-    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
-    let script = read_file(&root.join("scripts/check-doc-consistency.sh"));
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let script = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
 
     // Both the CI dep-detect case statement and the script's is_internal_path()
     // must classify the same directory prefixes as internal. Extract the
@@ -179,8 +181,8 @@ fn test_ci_dep_detect_internal_paths_match_script() {
 #[test]
 fn test_pre_commit_doc_version_sync_sites_match_checker() {
     let root = repo_root();
-    let hook = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
-    let checker = read_file(&root.join("scripts/check-doc-consistency.sh"));
+    let hook = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let checker = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
 
     // The pre-commit auto-repair and the CI checker are two implementations of
     // one policy: every doc that quotes the crate version must equal
@@ -230,7 +232,7 @@ fn test_pre_commit_doc_version_sync_sites_match_checker() {
 #[test]
 fn test_local_ci_includes_doc_consistency_gate_and_tests() {
     let root = repo_root();
-    let local_ci = read_file(&root.join("scripts/run-local-ci.sh"));
+    let local_ci = read_live_file(&root.join("scripts/run-local-ci.sh"));
 
     assert!(
         local_ci.contains("doc-consistency")

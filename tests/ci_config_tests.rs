@@ -20,7 +20,9 @@ use std::sync::OnceLock;
 
 #[cfg(unix)]
 use common::bash_command;
-use common::{read_file, repo_root, unique_temp_dir, write_file};
+use common::{
+    read_file, read_live_file, repo_root, strip_comment_lines, unique_temp_dir, write_file,
+};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use regex::Regex;
 use saphyr::{LoadableYamlNode, Yaml};
@@ -1521,8 +1523,8 @@ fn test_ci_workflow_msrv_normalization() {
 
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
-    let content = read_file(&ci_workflow);
-    let script_content = read_file(&root.join("scripts/check-msrv-consistency.sh"));
+    let content = read_live_file(&ci_workflow);
+    let script_content = read_live_file(&root.join("scripts/check-msrv-consistency.sh"));
 
     assert!(
         content.contains("bash scripts/check-msrv-consistency.sh"),
@@ -1565,8 +1567,8 @@ fn test_msrv_script_consistency_with_ci() {
         );
     }
 
-    let script_content = read_file(&script);
-    let ci_content = read_file(&ci_workflow);
+    let script_content = read_live_file(&script);
+    let ci_content = read_live_file(&ci_workflow);
 
     // The script should normalize MSRV to major.minor for Dockerfile comparison,
     // and CI should call that script instead of maintaining duplicate logic.
@@ -1645,7 +1647,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // breakage. So pin both the gate's existence/commands and the edges that make
     // it actually gate.
     let root = repo_root();
-    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     assert!(
         workflow.contains("\n  quick-check:"),
@@ -1684,7 +1686,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
 #[test]
 fn test_ci_lint_job_reports_clippy_failure_diagnostics() {
     let root = repo_root();
-    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     assert!(
         workflow.contains("Show Rust tool versions")
@@ -1824,7 +1826,7 @@ fn test_ci_workflow_matrix_os_values_match_constant() {
     // `os:` lines at 8-space indent to ensure consistency across jobs.
 
     let root = repo_root();
-    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     // Collect ALL "os: [...]" lines from matrix sections (8-space indent).
     // Multiple jobs (lint, nextest) each have their own matrix.os list.
@@ -2612,10 +2614,11 @@ fn test_typos_config_exists_and_is_valid() {
     );
 
     let content = read_file(&typos_config);
+    let content_live = strip_comment_lines(&content);
 
     // Basic validation: check for required sections
     assert!(
-        content.contains("[default.extend-words]") || content.contains("[default]"),
+        content_live.contains("[default.extend-words]") || content_live.contains("[default]"),
         ".typos.toml must contain [default.extend-words] or [default] section"
     );
 
@@ -2648,12 +2651,12 @@ fn test_typos_config_exists_and_is_valid() {
     // Verify that mixed-case company names are handled in extend-identifiers
     // This prevents false positives when company names use CamelCase (e.g., HashiCorp)
     assert!(
-        content.contains("[default.extend-identifiers]"),
+        content_live.contains("[default.extend-identifiers]"),
         ".typos.toml must contain [default.extend-identifiers] section for mixed-case terms"
     );
 
     // Check that HashiCorp is properly configured to prevent false positive on first part
-    let has_hashicorp_identifier = content.contains("HashiCorp = \"HashiCorp\"");
+    let has_hashicorp_identifier = content_live.contains("HashiCorp = \"HashiCorp\"");
     assert!(
         has_hashicorp_identifier,
         ".typos.toml must include 'HashiCorp = \"HashiCorp\"' in [default.extend-identifiers]\n\
@@ -2735,7 +2738,7 @@ fn test_markdown_config_exists() {
          See .github/workflows/markdownlint.yml"
     );
 
-    let content = read_file(&markdownlint_config);
+    let content = read_live_file(&markdownlint_config);
 
     // Verify it's valid JSON
     assert!(
@@ -3091,16 +3094,20 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
     let root = repo_root();
     let script = root.join("scripts/check-markdown.sh");
     let content = read_file(&script);
+    // Presence checks assert against the live view (the script's header comment
+    // names `.markdownlint-version`); the npx/docker MUST-NOT-appear checks below
+    // stay on raw `content`.
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains(".markdownlint-version"),
+        content_live.contains(".markdownlint-version"),
         "check-markdown.sh must read required version from .markdownlint-version.\n\
          Missing pinned version reference in {}",
         script.display()
     );
 
     assert!(
-        content.contains("command -v markdownlint-cli2"),
+        content_live.contains("command -v markdownlint-cli2"),
         "check-markdown.sh must still detect locally available markdownlint-cli2.\n\
          Missing detection logic in {}",
         script.display()
@@ -3122,29 +3129,29 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
     );
 
     assert!(
-        content.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
-            && content.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
+        content_live.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
+            && content_live.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
         "check-markdown.sh should document both local and global pinned markdownlint installation paths.\n\
          Update install guidance in {}",
         script.display()
     );
 
     assert!(
-        content.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
+        content_live.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
         "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
          Update mismatch guidance in {}",
         script.display()
     );
 
     assert!(
-        content.contains("./scripts/check-markdown-link-text.sh"),
+        content_live.contains("./scripts/check-markdown-link-text.sh"),
         "check-markdown.sh must enforce human-readable internal markdown link text via scripts/check-markdown-link-text.sh.\n\
          Missing link-text policy enforcement in {}",
         script.display()
     );
 
     assert!(
-        content.contains("git ls-files -z -- '*.md'"),
+        content_live.contains("git ls-files -z -- '*.md'"),
         "check-markdown.sh must lint tracked Markdown files from git when \
          available. This keeps local runs aligned with clean CI checkouts and \
          avoids ignored planning artifacts causing false failures.\n\
@@ -3317,6 +3324,28 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
 }
 
 #[test]
+fn test_enable_hooks_helper_fails_closed_and_points_to_powershell_repair() {
+    let root = repo_root();
+    let script_path = root.join("scripts/enable-hooks.sh");
+    let content = read_live_file(&script_path);
+
+    assert!(
+        content.contains("git config --local core.hooksPath \"$DESIRED\"")
+            && !content.contains("if git config --local core.hooksPath \"$DESIRED\""),
+        "scripts/enable-hooks.sh must fail closed under `set -e` when git config \
+         cannot set core.hooksPath, instead of silently reporting success."
+    );
+    assert!(
+        content.contains("Canonical cross-platform hook setup/repair")
+            && content.contains("scripts/check-hook-readiness.ps1 -Repair")
+            && content.contains("scripts/check-hook-readiness.ps1 -WorkflowTools")
+            && content.contains("pinned .devcontainer/Dockerfile version"),
+        "scripts/enable-hooks.sh must point native Windows/macOS/Linux users at \
+         the PowerShell repair entrypoint and avoid unpinned optional-tool install guidance."
+    );
+}
+
+#[test]
 fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
     let root = repo_root();
     let guidance_path = root.join(".llm/skills/git-hooks-checks.md");
@@ -3477,36 +3506,24 @@ fn test_docker_publish_workflow_uses_owner_derived_ghcr_image_name() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/docker-publish.yml");
     let content = read_file(&workflow_path);
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains("GITHUB_REPOSITORY_OWNER"),
+        content_live.contains("GITHUB_REPOSITORY_OWNER"),
         "docker-publish.yml must derive GHCR image owner from GITHUB_REPOSITORY_OWNER."
     );
     assert!(
-        content.contains("GITHUB_REPOSITORY#*/"),
+        content_live.contains("GITHUB_REPOSITORY#*/"),
         "docker-publish.yml must derive GHCR repository name from GITHUB_REPOSITORY."
     );
     assert!(
-        content.contains("images: ${{ steps.image.outputs.name }}"),
+        content_live.contains("images: ${{ steps.image.outputs.name }}"),
         "docker-publish.yml must pass a derived step output to docker/metadata-action images."
     );
     assert!(
         !content.contains("images: ghcr.io/"),
         "docker-publish.yml must not hard-code GHCR owner/repo in metadata-action images."
     );
-}
-
-/// Drop full-line comments so substring assertions cannot be satisfied by
-/// explanatory comment text that names a platform/triple the LIVE config no
-/// longer builds. Inline trailing comments on a real config line are left in
-/// place — that line is live config. Works for both `#`-comment formats
-/// (YAML, Dockerfile).
-fn strip_comment_lines(content: &str) -> String {
-    content
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Map a container platform to the (TARGETARCH/variant `case` token, Rust target
@@ -3595,7 +3612,11 @@ fn test_docker_publish_builds_multi_arch_manifest() {
     // publishes only linux/amd64 and breaks every ARM64 consumer.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/docker-publish.yml");
-    let content = read_file(&workflow_path);
+    // Read the LIVE (comment-stripped) workflow so every presence check below —
+    // the build-push-action step count, the `with:` block, `platforms:`, and the
+    // buildx/qemu setup actions — is satisfied only by real config, never by a
+    // commented-out line that still mentions the token.
+    let content = read_live_file(&workflow_path);
 
     // The with-block helper assumes a single build-push-action step (and reads
     // the `with:` that follows it). Assert that assumption holds.
@@ -3662,14 +3683,28 @@ fn test_dockerfile_cross_compiles_for_target_platform() {
     // a future "simplification" cannot silently revert to an amd64-only build (or
     // to slow/flaky emulated compiles) while the workflow still requests arm64.
     let root = repo_root();
-    let dockerfile = read_file(&root.join("Dockerfile"));
+    // Live (comment-stripped) Dockerfile: the header comment block legitimately
+    // mentions `$BUILDPLATFORM`, `TARGETARCH`, and `rustup target add` to explain
+    // the strategy, so a raw `contains` would pass on prose alone even if the
+    // real instructions were deleted. Assert against live config only.
+    let dockerfile = read_live_file(&root.join("Dockerfile"));
 
     // The builder stage must pin itself to the native build platform so cross
     // compiles never execute target-arch binaries (which would require QEMU).
+    // Anchor to the builder stage's own `FROM ... AS builder` line: a stray
+    // `--platform=$BUILDPLATFORM` elsewhere (or only on chef/planner) must not
+    // satisfy this — the stage that runs the expensive cross-compile is builder.
     assert!(
-        dockerfile.contains("$BUILDPLATFORM") || dockerfile.contains("${BUILDPLATFORM}"),
-        "Dockerfile must pin the build stage to --platform=$BUILDPLATFORM so cross-compilation \
-         runs natively (no QEMU). Multi-arch is built by cross-compiling, not emulating."
+        dockerfile.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("FROM ")
+                && (trimmed.contains("--platform=$BUILDPLATFORM")
+                    || trimmed.contains("--platform=${BUILDPLATFORM}"))
+                && trimmed.contains(" AS builder")
+        }),
+        "Dockerfile's builder stage must pin `FROM --platform=$BUILDPLATFORM ... AS builder` so \
+         cross-compilation runs natively (no QEMU). Multi-arch is built by cross-compiling, not \
+         emulating."
     );
 
     // The build must be parameterized by the target arch buildx injects.
@@ -3698,7 +3733,7 @@ fn test_dockerfile_arch_map_covers_required_platforms() {
     // REQUIRED_CONTAINER_PLATFORMS and in the Dockerfile both promise these stay
     // "in lockstep" — this test is what actually enforces it.
     let root = repo_root();
-    let live = strip_comment_lines(&read_file(&root.join("Dockerfile")));
+    let live = read_live_file(&root.join("Dockerfile"));
 
     for platform in REQUIRED_CONTAINER_PLATFORMS {
         let (arch_token, triple) = container_platform_expectations(platform);
@@ -3721,12 +3756,133 @@ fn test_dockerfile_arch_map_covers_required_platforms() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Meta-tests: the comment-stripping mechanism the drift guards above rely on.
+//
+// Every guard in this file that asserts a config file still *contains* a
+// required token reads the file via `read_live_file` (or strips an extracted
+// block via `strip_comment_lines`) so a commented-out line cannot satisfy the
+// assertion. These tests lock that mechanism in place: they prove the helper
+// removes `#`/`//` comment lines, preserves live config (including inline
+// trailing comments), and — crucially — that a guard built on the live view
+// would FAIL when the real config line is merely commented out. If someone
+// weakens `strip_comment_lines`/`read_live_file`, these go red first.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_strip_comment_lines_removes_full_line_hash_and_slash_comments() {
+    let input = "\
+# a leading hash comment
+    # an indented hash comment
+keep: real-yaml-value
+// a leading slash comment
+    // an indented slash comment
+RUN cargo build  # inline trailing comment is preserved";
+
+    let live = strip_comment_lines(input);
+
+    // Full-line comment bodies are gone, in both `#` and `//` styles, indented
+    // or not — so a token that survives only inside such a line is dropped.
+    assert!(
+        !live.contains("leading hash comment"),
+        "strip_comment_lines must drop full-line `#` comments. live:\n{live}"
+    );
+    assert!(
+        !live.contains("indented hash comment"),
+        "strip_comment_lines must drop indented `#` comments. live:\n{live}"
+    );
+    assert!(
+        !live.contains("leading slash comment"),
+        "strip_comment_lines must drop full-line `//` comments (JSONC). live:\n{live}"
+    );
+    assert!(
+        !live.contains("indented slash comment"),
+        "strip_comment_lines must drop indented `//` comments. live:\n{live}"
+    );
+
+    // Live config lines survive untouched, and an inline trailing comment on a
+    // real line is deliberately preserved (that line is live config; stripping
+    // its tail could corrupt a token a guard looks for).
+    assert!(
+        live.contains("keep: real-yaml-value"),
+        "strip_comment_lines must keep live config lines. live:\n{live}"
+    );
+    assert!(
+        live.contains("RUN cargo build  # inline trailing comment is preserved"),
+        "strip_comment_lines must preserve inline trailing comments on live lines. live:\n{live}"
+    );
+}
+
+#[test]
+fn test_read_live_file_is_strip_of_read_file() {
+    // read_live_file is exactly strip_comment_lines ∘ read_file. Lock the
+    // identity so the convenience reader can never drift from the primitive.
+    let root = repo_root();
+    let path = root.join("Dockerfile");
+    assert_eq!(
+        read_live_file(&path),
+        strip_comment_lines(&read_file(&path)),
+        "read_live_file must equal strip_comment_lines(read_file(..))."
+    );
+}
+
+#[test]
+fn test_drift_guards_reject_commented_out_config() {
+    // RED/GREEN proof for the whole class: when a required config line is merely
+    // commented out, the LIVE view a guard asserts against must NOT contain the
+    // token (so the guard fails), even though the RAW file still does.
+
+    // (1) A YAML setup-action commented out — the exact shape of regression the
+    // `test_docker_publish_builds_multi_arch_manifest` buildx/qemu checks guard.
+    let yaml_commented = "\
+steps:
+  - name: Set up Buildx
+    # uses: docker/setup-qemu-action@v3   # temporarily disabled";
+    assert!(
+        yaml_commented.contains("docker/setup-qemu-action"),
+        "sanity: the raw fixture still mentions the token in its comment"
+    );
+    assert!(
+        !strip_comment_lines(yaml_commented).contains("docker/setup-qemu-action"),
+        "a guard asserting the LIVE view must reject a commented-out setup-qemu-action line"
+    );
+
+    // (2) A Dockerfile builder-stage pin commented out — the regression shape
+    // the `test_dockerfile_cross_compiles_for_target_platform` BUILDPLATFORM
+    // check guards.
+    let dockerfile_commented = "\
+# FROM --platform=$BUILDPLATFORM chef AS builder
+FROM chef AS builder";
+    let live = strip_comment_lines(dockerfile_commented);
+    let has_pinned_builder = live.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("FROM ")
+            && trimmed.contains("--platform=$BUILDPLATFORM")
+            && trimmed.contains(" AS builder")
+    });
+    assert!(
+        !has_pinned_builder,
+        "a guard anchoring to the live `FROM --platform=$BUILDPLATFORM ... AS builder` line must \
+         reject a Dockerfile where that pin is only present in a comment. live:\n{live}"
+    );
+
+    // (3) A JSONC (devcontainer.json) feature commented out with `//`.
+    let jsonc_commented = "\
+{
+  // \"ghcr.io/devcontainers/features/docker-outside-of-docker\": {}
+}";
+    assert!(
+        !strip_comment_lines(jsonc_commented).contains("docker-outside-of-docker"),
+        "a guard asserting the LIVE view must reject a `//`-commented JSONC feature line"
+    );
+}
+
 #[test]
 fn test_release_workflow_builds_all_platform_binaries() {
     // release.yml must build a standalone executable for every supported
     // OS/arch and attach it to the GitHub Release, not just publish the crate.
     let root = repo_root();
-    let live = strip_comment_lines(&read_file(&root.join(".github/workflows/release.yml")));
+    let live = read_live_file(&root.join(".github/workflows/release.yml"));
 
     for (triple, label) in REQUIRED_RELEASE_TARGETS {
         // Require the triple on a live `- target:` matrix line, not merely
@@ -3758,7 +3914,7 @@ fn test_release_workflow_attaches_binaries_with_checksums() {
     // the concrete mechanisms, not loose tokens that an SBOM step or a comment
     // could satisfy.
     let root = repo_root();
-    let live = strip_comment_lines(&read_file(&root.join(".github/workflows/release.yml")));
+    let live = read_live_file(&root.join(".github/workflows/release.yml"));
 
     assert!(
         live.contains("softprops/action-gh-release"),
@@ -5400,7 +5556,7 @@ fn test_lychee_config_exists_and_is_valid() {
          See .github/workflows/link-check.yml"
     );
 
-    let content = read_file(&lychee_config);
+    let content = read_live_file(&lychee_config);
 
     // Check for required sections
     let required_fields = vec![
@@ -5443,7 +5599,7 @@ fn test_lychee_excludes_placeholder_urls() {
 
     let root = repo_root();
     let lychee_config = root.join(".lychee.toml");
-    let content = read_file(&lychee_config);
+    let content = read_live_file(&lychee_config);
 
     // Parse the exclude array from .lychee.toml by extracting quoted strings
     // between `exclude = [` and the closing `]`.
@@ -5857,6 +6013,7 @@ fn test_lychee_config_format_is_valid_toml() {
     let root = repo_root();
     let lychee_config = root.join(".lychee.toml");
     let content = read_file(&lychee_config);
+    let content_live = strip_comment_lines(&content);
 
     // Basic TOML validation (full validation would require a TOML parser)
     // Check for unbalanced quotes
@@ -5870,16 +6027,16 @@ fn test_lychee_config_format_is_valid_toml() {
     }
 
     // Check for required array syntax
-    if content.contains("exclude") {
+    if content_live.contains("exclude") {
         assert!(
-            content.contains("exclude = ["),
+            content_live.contains("exclude = ["),
             ".lychee.toml: 'exclude' should be an array (exclude = [...])"
         );
     }
 
-    if content.contains("accept") {
+    if content_live.contains("accept") {
         assert!(
-            content.contains("accept = ["),
+            content_live.contains("accept = ["),
             ".lychee.toml: 'accept' should be an array (accept = [...])"
         );
     }
@@ -6398,13 +6555,16 @@ fn test_doc_validation_awk_script_extraction() {
         );
     }
 
-    let workflow_content = read_file(&workflow);
+    // Live views: every check below asserts the AWK script CONTAINS a required
+    // construct. A `#` comment naming the construct (e.g. extract-rust-blocks.awk
+    // documents `in_other_block` in its header) must not satisfy the guard.
+    let workflow_content = read_live_file(&workflow);
 
     // The Rust block extraction AWK may be inline or in an external file.
     // Combine both sources for validation.
     let awk_content = if external_awk.exists() {
         // External AWK file is the preferred approach (avoids shell quoting issues)
-        read_file(&external_awk)
+        read_live_file(&external_awk)
     } else {
         // Fall back to checking inline AWK in the workflow
         workflow_content.clone()
@@ -6652,7 +6812,10 @@ fn test_awk_posix_compatibility() {
         );
     }
 
-    let content = read_file(&workflow);
+    // Live view: these checks reason about the AWK *code*, so a `#` comment that
+    // names a GNU construct (gensub/match) or the POSIX `printf "%c", 0` form must
+    // neither trigger a false violation nor satisfy the POSIX requirement.
+    let content = read_live_file(&workflow);
 
     // Extract AWK scripts (simplified check)
     let mut violations = Vec::new();
@@ -6841,7 +7004,7 @@ fn test_link_check_workflow_exists_and_is_configured() {
          Create .github/workflows/link-check.yml with lychee-action"
     );
 
-    let content = read_file(&workflow);
+    let content = read_live_file(&workflow);
 
     // Verify workflow uses lychee-action
     assert!(
@@ -6883,8 +7046,8 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
          Create .github/workflows/markdownlint.yml"
     );
 
-    let content = read_file(&workflow);
-    let script_content = read_file(&root.join("scripts/check-markdown.sh"));
+    let content = read_live_file(&workflow);
+    let script_content = read_live_file(&root.join("scripts/check-markdown.sh"));
 
     // Verify workflow uses markdownlint-cli2-action
     assert!(
@@ -6937,7 +7100,7 @@ fn test_doc_validation_workflow_has_shellcheck() {
         );
     }
 
-    let content = read_file(&workflow);
+    let content = read_live_file(&workflow);
 
     // Verify workflow has shellcheck job or step
     assert!(
@@ -12422,21 +12585,22 @@ fn expr_string_literal(expr: &Expr) -> Option<String> {
 fn test_internal_link_validators_check_tracked_targets() {
     let root = repo_root();
     let script_content = read_file(&root.join("scripts/check-internal-links.sh"));
-    let fast_link_content = read_file(&root.join("scripts/check-links-fast.sh"));
-    let validate_ci_content = read_file(&root.join("scripts/validate-ci.sh"));
-    let doc_validation_content = read_file(&root.join(".github/workflows/doc-validation.yml"));
+    let script_content_live = strip_comment_lines(&script_content);
+    let fast_link_content = read_live_file(&root.join("scripts/check-links-fast.sh"));
+    let validate_ci_content = read_live_file(&root.join("scripts/validate-ci.sh"));
+    let doc_validation_content = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
 
     assert!(
-        script_content.contains("git ls-files"),
+        script_content_live.contains("git ls-files"),
         "scripts/check-internal-links.sh must verify that local link targets are tracked by git.\n\
          This prevents links from passing locally because an untracked file exists while \
          failing in CI after a clean checkout."
     );
 
     assert!(
-        script_content.contains("TRACKED_FILE_LIST")
-            && script_content.contains("path_in_null_list")
-            && script_content.contains("load_tracked_paths"),
+        script_content_live.contains("TRACKED_FILE_LIST")
+            && script_content_live.contains("path_in_null_list")
+            && script_content_live.contains("load_tracked_paths"),
         "scripts/check-internal-links.sh must preload tracked Git paths once \
          into Bash 3.2-compatible null-delimited files instead of spawning \
          `git ls-files` for every link target. This keeps all-file validation \
@@ -12444,7 +12608,7 @@ fn test_internal_link_validators_check_tracked_targets() {
     );
 
     assert!(
-        script_content.contains("git ls-files -z -- '*.md'"),
+        script_content_live.contains("git ls-files -z -- '*.md'"),
         "scripts/check-internal-links.sh --all should discover tracked Markdown \
          files from git instead of scanning ignored local artifacts. CI checks \
          tracked files only, while explicit file arguments still allow local \
@@ -12452,7 +12616,7 @@ fn test_internal_link_validators_check_tracked_targets() {
     );
 
     assert!(
-        script_content.contains("target resolves outside the repository"),
+        script_content_live.contains("target resolves outside the repository"),
         "scripts/check-internal-links.sh must reject relative links that escape \
          the repository, even when the target exists on the local filesystem."
     );
@@ -12930,7 +13094,9 @@ fn test_validate_ci_script_exists() {
          Create it or restore it from the repository."
     );
 
-    let content = read_file(&validate_ci);
+    // Presence-only check on generic tokens (`awk`, `markdown`, `link`) that
+    // also appear in comments — assert against the live view.
+    let content = read_live_file(&validate_ci);
 
     // Verify it covers the three key validation areas
     assert!(
@@ -12974,9 +13140,14 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
     let content = read_file(&ci_workflow);
+    // Presence checks below assert against the LIVE view so a commented-out
+    // `deny:` job or MSRV-wiring line cannot satisfy them; the RUSTUP_TOOLCHAIN
+    // absence check stays on raw `content` (a commented occurrence is still a
+    // real occurrence worth flagging).
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains("  deny:"),
+        content_live.contains("  deny:"),
         "CI workflow must have a 'deny' job for dependency auditing.\n\
          File: {}",
         ci_workflow.display()
@@ -13001,7 +13172,7 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
 
     let mut missing = Vec::new();
     for (label, fragment) in required_fragments {
-        if !content.contains(fragment) {
+        if !content_live.contains(fragment) {
             missing.push(format!("Missing {label}: expected fragment `{fragment}`"));
         }
     }
@@ -13209,7 +13380,7 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
     ];
 
     for (workflow, required_fragments) in cases {
-        let content = read_file(&workflow);
+        let content = read_live_file(&workflow);
 
         assert!(
             content.contains("lycheeverse/lychee-action"),
@@ -13262,8 +13433,8 @@ fn test_lychee_cli_exclude_paths_match_config() {
     let lychee_config = root.join(".lychee.toml");
     let link_check = root.join(".github/workflows/link-check.yml");
 
-    let config_content = read_file(&lychee_config);
-    let workflow_content = read_file(&link_check);
+    let config_content = read_live_file(&lychee_config);
+    let workflow_content = read_live_file(&link_check);
 
     // Parse exclude_path entries from .lychee.toml
     let toml_exclude_paths = parse_lychee_exclude_path_patterns(&config_content);
@@ -13786,7 +13957,7 @@ fn test_release_workflow_requires_preflight() {
         return;
     }
 
-    let content = read_file(&release_yml);
+    let content = read_live_file(&release_yml);
 
     // Must have a preflight job
     assert!(
@@ -14538,7 +14709,9 @@ fn test_ci_safety_workflow_uses_pinned_nightly() {
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    // Live view: the header comment documents the nightly version too, so assert
+    // the pin is on a real toolchain line, not merely named in a comment.
+    let content = read_live_file(&workflow_path);
 
     // Must contain a pinned nightly version (e.g., "nightly-2026-01-15")
     let has_pinned_nightly = content.contains("nightly-20");
@@ -14600,7 +14773,9 @@ fn test_ci_safety_workflow_has_required_triggers() {
 fn test_ci_safety_pr_triggers_are_code_scoped() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    // Live view: the header comment references Cargo.toml/paths in prose, so
+    // assert the path filters are real config, not commented examples.
+    let content = read_live_file(&workflow_path);
 
     for required_path in ["src/**", "tests/**", "build.rs", "Cargo.toml", "Cargo.lock"] {
         assert!(
@@ -15190,10 +15365,11 @@ fn test_coverage_job_uses_locked_flag() {
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content_live = strip_comment_lines(&ci_content);
 
     // Both the coverage generation and report commands should use --locked
     assert!(
-        ci_content.contains("cargo llvm-cov --locked"),
+        ci_content_live.contains("cargo llvm-cov --locked"),
         "Coverage job must use 'cargo llvm-cov --locked' to ensure dependencies \
          match Cargo.lock.\n\
          Without --locked, cargo may re-resolve dependencies, producing coverage \
@@ -15202,7 +15378,7 @@ fn test_coverage_job_uses_locked_flag() {
     );
 
     assert!(
-        ci_content.contains("cargo llvm-cov report --locked"),
+        ci_content_live.contains("cargo llvm-cov report --locked"),
         "Coverage threshold check must use 'cargo llvm-cov report --locked' to \
          ensure the coverage report uses the same locked dependencies.\n\
          File: .github/workflows/ci.yml"
@@ -15235,9 +15411,10 @@ fn test_sbom_job_generates_cyclonedx_json() {
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content_live = strip_comment_lines(&ci_content);
 
     assert!(
-        ci_content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
+        ci_content_live.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
         "CI SBOM job must generate CycloneDX v1.5 JSON format.\n\
          Expected command: cargo sbom --output-format cyclone_dx_json_1_5\n\
          This ensures a standardized, machine-readable SBOM is produced."
@@ -15251,7 +15428,7 @@ fn test_sbom_job_generates_cyclonedx_json() {
     );
 
     assert!(
-        ci_content.contains("sbom.cdx.json"),
+        ci_content_live.contains("sbom.cdx.json"),
         "CI SBOM job must output to sbom.cdx.json.\n\
          The .cdx.json extension is the CycloneDX convention for JSON SBOMs."
     );
@@ -15263,7 +15440,7 @@ fn test_sbom_job_uploads_artifact() {
     // The artifact should be available for 90 days for audit and compliance purposes.
 
     let root = repo_root();
-    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     // Find the SBOM artifact upload section
     assert!(
@@ -15292,7 +15469,7 @@ fn test_sbom_job_upload_runs_on_success() {
     // The SBOM job should have an upload step with if: success()
     // We verify this by checking that within the sbom job context,
     // the upload-artifact action is preceded by an `if: success()` condition.
-    let sbom_section = extract_sbom_section(&ci_content);
+    let sbom_section = extract_sbom_section(&strip_comment_lines(&ci_content));
 
     assert!(
         !sbom_section.is_empty(),
@@ -15316,7 +15493,7 @@ fn test_sbom_job_installs_cargo_sbom() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let sbom_section = extract_sbom_section(&ci_content);
+    let sbom_section = extract_sbom_section(&strip_comment_lines(&ci_content));
 
     assert!(
         sbom_section.contains("tool: cargo-sbom"),
@@ -15334,7 +15511,7 @@ fn test_sbom_job_has_reasonable_timeout() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let sbom_section = extract_sbom_section(&ci_content);
+    let sbom_section = extract_sbom_section(&strip_comment_lines(&ci_content));
 
     assert!(
         sbom_section.contains("timeout-minutes: 10"),
@@ -15579,7 +15756,7 @@ fn test_nextest_config_exists_and_is_valid() {
          See: https://nexte.st/docs/configuration/"
     );
 
-    let content = read_file(&nextest_config);
+    let content = read_live_file(&nextest_config);
 
     // Must have a default profile
     assert!(
@@ -15661,7 +15838,7 @@ fn test_nextest_config_no_retries_by_default() {
 #[test]
 fn test_ci_nextest_uses_ci_profile() {
     let root = repo_root();
-    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     assert!(
         ci_content.contains("cargo nextest run --profile ci --locked --all-features"),
@@ -15732,7 +15909,11 @@ fn test_msrv_job_uses_single_verification_step() {
 
     let root = repo_root();
     let ci_yml = root.join(".github/workflows/ci.yml");
-    let content = read_file(&ci_yml);
+    // Live view: a `#` comment in the MSRV job mentions `cargo test`/`cargo
+    // check`, so derive the step inventory from live config only — otherwise a
+    // commented mention could both satisfy the `cargo test` requirement and trip
+    // the "no separate cargo check" guard.
+    let content = read_live_file(&ci_yml);
 
     // Extract the MSRV job block
     let lines: Vec<&str> = content.lines().collect();
@@ -15898,7 +16079,9 @@ fn test_pre_commit_runner_auto_repairs_skills_index() {
         "scripts/hooks/pre-commit.ps1 must exist to enforce local quality gates"
     );
 
-    let content = read_file(&hook_path);
+    // Presence-only structural check; assert against the live view so a
+    // commented-out function/marker cannot satisfy the guard.
+    let content = read_live_file(&hook_path);
 
     assert!(
         content.contains("Repair-SkillsIndexIfNeeded"),
@@ -15916,9 +16099,13 @@ fn test_pre_commit_runner_auto_repairs_skills_index() {
         content.contains("New-SkillsIndexContent")
             && content.contains(".llm/skills/index.md")
             && content.contains("Set-IndexText")
+            && content.contains("Set-WorktreeText")
+            && content.contains("Test-WorktreeTextMatchesIndexText")
+            && content.contains("unstaged edits")
             && content.contains("update-index")
             && content.contains("Get-IndexObjectId"),
-        "skills index drift must be auto-repaired in the Git index and verified by object id without clobbering unstaged files."
+        "skills index drift must be auto-repaired in the Git index and safely \
+         mirrored to the worktree when there are no unstaged edits, then verified by object id."
     );
 
     assert!(
@@ -15930,28 +16117,29 @@ fn test_pre_commit_runner_auto_repairs_skills_index() {
             && content.contains("MaxBatchedBlobBytes")
             && content.contains("PreloadBatchThreshold")
             && content.contains("PreloadError")
+            && content.contains("Test-SkillsIndexCoversChangedSkills")
             && content.contains("git cat-file --batch returned"),
         "skills index generation must batch staged Git index reads, cap aggregate blob size, verify batch object ids, and cache staged text with graceful preload failure handling; broad per-file git show fanout makes hooks too slow, while tiny preload sets should avoid unnecessary batch setup."
     );
 
-    let rust_budget_gate = content
-        .find("$hasProductionRust")
-        .expect("pre-commit must compute whether production Rust is staged");
+    let metadata_trigger_gate = content
+        .find("$metadataPolicyTriggered")
+        .expect("pre-commit must compute whether metadata policy paths changed");
     let metadata_preload = content
         .rfind("Add-StagedContentPreload")
         .expect("pre-commit must keep metadata preload logic");
     assert!(
-        rust_budget_gate < metadata_preload
-            && content[rust_budget_gate..metadata_preload].contains("Complete-PreCommit"),
-        "metadata and generated-file guards must stay behind the production-Rust \
-         budget gate so mixed code/docs commits remain sub-second."
+        metadata_trigger_gate < metadata_preload
+            && content[metadata_trigger_gate..metadata_preload].contains("Complete-PreCommit"),
+        "metadata and generated-file guards must run for mixed Rust/context commits, \
+         while ordinary Rust-only commits still exit before metadata preload."
     );
 }
 
 #[test]
 fn test_pre_commit_runner_accepts_empty_preload_path_sets() {
     let root = repo_root();
-    let content = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let content = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
 
     assert!(
         content.contains("[AllowEmptyCollection()][string[]]$Pathspecs")
@@ -15964,7 +16152,7 @@ fn test_pre_commit_runner_accepts_empty_preload_path_sets() {
 #[test]
 fn test_powershell_git_hook_helpers_force_utf8_output_decoding() {
     let root = repo_root();
-    let helper = read_file(&root.join("scripts/hooks/native-process.ps1"));
+    let helper = read_live_file(&root.join("scripts/hooks/native-process.ps1"));
     assert!(
         helper.contains("[System.Text.UTF8Encoding]::new($false)")
             && helper.contains("StandardOutputEncoding")
@@ -15977,7 +16165,7 @@ fn test_powershell_git_hook_helpers_force_utf8_output_decoding() {
         "scripts/hooks/pre-push.ps1",
         "scripts/check-hook-readiness.ps1",
     ] {
-        let content = read_file(&root.join(script));
+        let content = read_live_file(&root.join(script));
         assert!(
             content.contains("native-process.ps1"),
             "{script} must use the shared UTF-8 native process helper."
@@ -15986,10 +16174,37 @@ fn test_powershell_git_hook_helpers_force_utf8_output_decoding() {
 }
 
 #[test]
+fn test_hook_readiness_default_is_required_hook_health_only() {
+    let root = repo_root();
+    let content = read_live_file(&root.join("scripts/check-hook-readiness.ps1"));
+    let workflow_tools_gate = content
+        .find("if ($WorkflowTools)")
+        .expect("hook readiness must gate optional workflow inventory behind -WorkflowTools");
+
+    assert!(
+        content.contains("[switch]$WorkflowTools")
+            && content[..workflow_tools_gate].contains("$requiredTools = @(\"git\", \"pwsh\")")
+            && content[workflow_tools_gate..].contains("$optionalTools = @(")
+            && content[workflow_tools_gate..].contains(".markdownlint-version"),
+        "scripts/check-hook-readiness.ps1 default mode must check only required hook \
+         health. Optional workflow tools and markdownlint version probes belong behind \
+         -WorkflowTools so native hook setup stays fast and dependency-light."
+    );
+
+    let run_local_ci = read_live_file(&root.join("scripts/run-local-ci.sh"));
+    assert!(
+        run_local_ci.contains("scripts/check-hook-readiness.ps1")
+            && !run_local_ci.contains("check-hook-readiness.ps1 -WorkflowTools"),
+        "run-local-ci should use the fast default hook readiness check; optional \
+         workflow inventory is explicit via -WorkflowTools."
+    );
+}
+
+#[test]
 fn test_powershell_native_process_helpers_are_shared_and_deadlock_safe() {
     let root = repo_root();
     let helper_path = root.join("scripts/hooks/native-process.ps1");
-    let helper = read_file(&helper_path);
+    let helper = read_live_file(&helper_path);
     let invoke_native_re = Regex::new(r"(?m)^function Invoke-Native\s*\{").unwrap();
 
     assert!(
@@ -16010,8 +16225,9 @@ fn test_powershell_native_process_helpers_are_shared_and_deadlock_safe() {
         "scripts/check-hook-readiness.ps1",
     ] {
         let content = read_file(&root.join(script));
+        let content_live = strip_comment_lines(&content);
         assert!(
-            content.contains("native-process.ps1"),
+            content_live.contains("native-process.ps1"),
             "{script} must dot-source scripts/hooks/native-process.ps1 instead of duplicating helpers."
         );
         assert!(
@@ -16028,11 +16244,12 @@ fn test_powershell_native_process_helpers_are_shared_and_deadlock_safe() {
 fn test_powershell_native_process_helpers_do_not_pollute_pipeline() {
     let root = repo_root();
     let helper = read_file(&root.join("scripts/hooks/native-process.ps1"));
+    let helper_live = strip_comment_lines(&helper);
     let bare_task_result_re =
         Regex::new(r"(?m)^\s*\$[A-Za-z0-9_]+Task\.GetAwaiter\(\)\.GetResult\(\)\s*$").unwrap();
 
     assert!(
-        helper.contains("[void]$stdoutTask.GetAwaiter().GetResult()"),
+        helper_live.contains("[void]$stdoutTask.GetAwaiter().GetResult()"),
         "Invoke-NativeBytesWithInput must explicitly discard CopyToAsync task completion output.\n\
          Leaving a task GetResult() on the PowerShell pipeline makes callers receive \
          Object[] instead of a single result object with ExitCode/StdoutBytes."
@@ -16795,6 +17012,7 @@ fn test_powershell_hooks_do_not_use_synchronous_process_stream_reads() {
     for script in [
         "scripts/hooks/native-process.ps1",
         "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-commit-rust.ps1",
         "scripts/hooks/pre-push.ps1",
         "scripts/check-hook-readiness.ps1",
     ] {
@@ -16812,9 +17030,10 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains(
+        content_live.contains(
             "\"diff\", \"--cached\", \"--name-only\", \"-z\", \"--diff-filter=ACDMR\", \"--\""
         ),
         "pre-commit runner should discover staged paths with NUL-delimited git diff output, \
@@ -16826,7 +17045,7 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
         ":(glob).llm/skills/*.md",
     ] {
         assert!(
-            content.contains(required_trigger),
+            content_live.contains(required_trigger),
             "skills index trigger list must include: {required_trigger}"
         );
     }
@@ -16837,7 +17056,7 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     );
 
     assert!(
-        content.contains("Skip \"Skills index freshness\""),
+        content_live.contains("Skip \"Skills index freshness\""),
         "skills index check should skip cleanly when no skills/index inputs are staged."
     );
 }
@@ -16845,8 +17064,19 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
 #[test]
 fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
     let root = repo_root();
-    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-    let content = read_file(&hook_path);
+    let runner = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let rust_policy = read_live_file(&root.join("scripts/hooks/pre-commit-rust.ps1"));
+    let content = format!("{runner}\n{rust_policy}");
+
+    assert!(
+        runner.contains("pre-commit-rust.ps1")
+            && runner.contains("$changedProductionRustFiles")
+            && runner.contains("Test-RustAddedPanicPatterns")
+            && runner.contains("RustPanicPolicyLoaded")
+            && !runner.contains("function Get-RustTestLineSet"),
+        "pre-commit must lazy-load the Rust panic policy only when production Rust \
+         files changed, keeping metadata-only hook runs fast."
+    );
 
     assert!(
         content.contains("Test-ProductionRustSourcePath")
@@ -16892,12 +17122,24 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
 #[test]
 fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
     let root = repo_root();
-    let content = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let runner = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let rust_policy = read_live_file(&root.join("scripts/hooks/pre-commit-rust.ps1"));
+    let content = format!("{runner}\n{rust_policy}");
 
     assert!(
         content.contains("[switch]$Worktree")
             && content.contains("Get-WorktreeChangedFiles")
-            && content.contains("\"status\", \"--porcelain=v1\", \"-z\"")
+            && content.contains(
+                "\"diff\", \"--cached\", \"--name-only\", \"-z\", \"--diff-filter=ACDMR\""
+            )
+            && content
+                .contains("\"ls-files\", \"-z\", \"-m\", \"-d\", \"-o\", \"--exclude-standard\"")
+            && content.contains("StagedChangedFileSet")
+            && content.contains("WorktreeChangedFileSet")
+            && content.contains("Test-WorktreeIndexPolicyConsistency")
+            && content.contains("Worktree/index policy consistency")
+            && content.contains("Changed file discovery")
+            && content.contains("CheckTimings.Add")
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
             && content.contains("HookPolicyChangedFiles")
             && content.contains("Hook speed policy")
@@ -16905,8 +17147,9 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
             && content.contains("WriteAllText($indexPath, $expected")
             && content.contains("Running fast worktree preflight checks"),
         "pre-commit runner must expose a worktree preflight mode so agents can run \
-         the same cheap policies before handoff without staging files. The actual \
-         git hook remains staged-index based."
+         the same cheap policies before handoff without staging files, while also \
+         failing closed when staged policy paths differ from the worktree. The \
+         actual git hook remains staged-index based."
     );
 }
 
@@ -16918,6 +17161,7 @@ fn test_git_hooks_reject_slow_semantic_commands() {
         ".githooks/pre-push",
         "scripts/hooks/native-process.ps1",
         "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-commit-rust.ps1",
         "scripts/hooks/pre-push.ps1",
     ];
 
@@ -16992,11 +17236,12 @@ fn test_root_pr_description_drafts_are_not_tracked() {
 fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-push.ps1");
-    let content = read_file(&hook_path);
+    let content = read_live_file(&hook_path);
 
     assert!(
         content.contains("Test-WorkflowDirectScriptInvocations")
             && content.contains("^\\.github/workflows/.*\\.ya?ml$")
+            && content.contains("scripts/hooks/pre-commit-rust.ps1")
             && content.contains("Get-CommitBlobText")
             && content.contains("Test-WorkflowContentForDirectScripts")
             && content.contains("Test-CommandTextForDirectScript")
@@ -17015,8 +17260,8 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
 #[test]
 fn test_git_hook_runners_use_null_delimited_git_paths() {
     let root = repo_root();
-    let pre_commit = read_file(&root.join("scripts/hooks/pre-commit.ps1"));
-    let pre_push = read_file(&root.join("scripts/hooks/pre-push.ps1"));
+    let pre_commit = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let pre_push = read_live_file(&root.join("scripts/hooks/pre-push.ps1"));
 
     assert!(
         pre_commit.contains("\"diff\", \"--cached\", \"--name-only\", \"-z\"")
@@ -17038,7 +17283,7 @@ fn test_git_hook_runners_use_null_delimited_git_paths() {
 #[test]
 fn test_validate_ci_shellcheck_covers_all_git_hook_wrappers() {
     let root = repo_root();
-    let validate_ci = read_file(&root.join("scripts/validate-ci.sh"));
+    let validate_ci = read_live_file(&root.join("scripts/validate-ci.sh"));
 
     assert!(
         validate_ci.contains("for hook in .githooks/*")
@@ -17051,7 +17296,7 @@ fn test_validate_ci_shellcheck_covers_all_git_hook_wrappers() {
 fn test_workflow_hygiene_ci_runs_awk_validator() {
     let root = repo_root();
     let workflow = root.join(".github/workflows/workflow-hygiene.yml");
-    let content = read_file(&workflow);
+    let content = read_live_file(&workflow);
 
     assert!(
         content.contains("scripts/validate-workflow-awk.sh"),
@@ -17078,8 +17323,8 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
         "scripts/hooks/pre-push.ps1 must contain fast push-time policy checks."
     );
 
-    let hook = read_file(&hook_path);
-    let runner = read_file(&runner_path);
+    let hook = read_live_file(&hook_path);
+    let runner = read_live_file(&runner_path);
 
     assert!(
         hook.contains("pwsh") && hook.contains("scripts/hooks/pre-push.ps1"),
@@ -17313,8 +17558,10 @@ fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
     assert!(
         content.contains("$script:StagedFiles")
             && content.contains("$_.StartsWith(\".llm/\")")
-            && content.contains("$_.EndsWith(\".md\")"),
-        "LLM file size check must scope itself to all staged .llm/**/*.md files."
+            && content.contains("$_.EndsWith(\".md\")")
+            && content.contains("$_ -ne \".llm/skills/index.md\""),
+        "LLM file size check must scope itself to staged .llm/**/*.md files \
+         while exempting the generated skills index, matching scripts/check-llm-file-sizes.sh."
     );
     assert!(
         content.contains("Skip \"LLM file sizes\""),
@@ -17491,7 +17738,7 @@ fn line_has_fast_mode_false_guard_before_marker(content: &str, marker: &str) -> 
 #[test]
 fn test_run_local_ci_fast_mode_skips_slow_checks() {
     let root = repo_root();
-    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+    let script = read_live_file(&root.join("scripts/run-local-ci.sh"));
 
     let missing_guards = LOCAL_CI_FAST_SKIPPED_CHECKS
         .iter()
@@ -18426,7 +18673,7 @@ fn test_audit_job_installs_cargo_audit() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let audit_section = extract_audit_section(&ci_content);
+    let audit_section = extract_audit_section(&strip_comment_lines(&ci_content));
 
     assert!(
         audit_section.contains("tool: cargo-audit"),
@@ -18446,9 +18693,10 @@ fn test_audit_job_runs_cargo_audit() {
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
     let audit_section = extract_audit_section(&ci_content);
+    let audit_section_live = extract_audit_section(&strip_comment_lines(&ci_content));
 
     assert!(
-        audit_section.contains("cargo audit"),
+        audit_section_live.contains("cargo audit"),
         "Audit job must run `cargo audit` to scan for vulnerabilities.\n\
          The audit job should invoke cargo-audit against the RustSec advisory database."
     );
@@ -18468,7 +18716,7 @@ fn test_audit_job_configuration() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let audit_section = extract_audit_section(&ci_content);
+    let audit_section = extract_audit_section(&strip_comment_lines(&ci_content));
 
     assert!(
         audit_section.contains("timeout-minutes: 10"),
@@ -19565,7 +19813,7 @@ fn test_deny_toml_exists_and_has_required_sections() {
          Create it with: cargo deny init"
     );
 
-    let content = read_file(&deny_path);
+    let content = read_live_file(&deny_path);
 
     let required_sections = [
         (
@@ -19590,7 +19838,7 @@ fn test_deny_toml_exists_and_has_required_sections() {
 #[test]
 fn test_deny_toml_advisories_section_denies_yanked() {
     let root = repo_root();
-    let content = read_file(&root.join("deny.toml"));
+    let content = read_live_file(&root.join("deny.toml"));
 
     assert!(
         content.contains("yanked = \"deny\""),
@@ -19602,7 +19850,7 @@ fn test_deny_toml_advisories_section_denies_yanked() {
 #[test]
 fn test_deny_toml_uses_version_2() {
     let root = repo_root();
-    let content = read_file(&root.join("deny.toml"));
+    let content = read_live_file(&root.join("deny.toml"));
 
     let in_advisories = content
         .lines()
@@ -19637,7 +19885,7 @@ fn test_no_rustls_pemfile_dependency() {
 #[test]
 fn test_tls_feature_uses_rustls_pki_types() {
     let root = repo_root();
-    let cargo_toml = read_file(&root.join("Cargo.toml"));
+    let cargo_toml = read_live_file(&root.join("Cargo.toml"));
 
     // The tls feature should include rustls-pki-types as the PEM parsing provider
     let tls_line = cargo_toml
@@ -19669,7 +19917,7 @@ fn test_check_advisories_script_exists() {
          before pushing to CI."
     );
 
-    let content = read_file(&script_path);
+    let content = read_live_file(&script_path);
 
     assert!(
         content.contains("cargo deny check advisories"),
@@ -19685,7 +19933,7 @@ fn test_check_advisories_script_exists() {
 #[test]
 fn test_run_local_ci_includes_advisory_check() {
     let root = repo_root();
-    let script = read_file(&root.join("scripts/run-local-ci.sh"));
+    let script = read_live_file(&root.join("scripts/run-local-ci.sh"));
 
     assert!(
         script.contains("check-advisories.sh"),
@@ -19754,7 +20002,7 @@ fn test_optional_feature_compile_matrix() {
 #[test]
 fn test_optional_feature_matrix_runs_once_in_ci_lint_job() {
     let root = repo_root();
-    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
     let script_path = root.join("scripts/check-feature-matrix.sh");
 
     assert!(
@@ -19846,7 +20094,7 @@ const REQUIRED_DENY_BANS: &[(&str, &str)] = &[
 #[test]
 fn test_deny_toml_bans_known_problematic_crates() {
     let root = repo_root();
-    let content = read_file(&root.join("deny.toml"));
+    let content = read_live_file(&root.join("deny.toml"));
 
     let mut missing = Vec::new();
     let mut bad_reason = Vec::new();
@@ -19888,7 +20136,7 @@ fn test_deny_toml_bans_known_problematic_crates() {
 #[test]
 fn test_deny_toml_bans_deny_wildcards() {
     let root = repo_root();
-    let content = read_file(&root.join("deny.toml"));
+    let content = read_live_file(&root.join("deny.toml"));
 
     assert!(
         content.contains("wildcards = \"deny\""),
@@ -19900,7 +20148,7 @@ fn test_deny_toml_bans_deny_wildcards() {
 #[test]
 fn test_deny_toml_sources_deny_unknown() {
     let root = repo_root();
-    let content = read_file(&root.join("deny.toml"));
+    let content = read_live_file(&root.join("deny.toml"));
 
     let required_settings = [
         ("unknown-registry = \"deny\"", "unknown registries"),
@@ -19965,7 +20213,7 @@ fn test_check_outdated_script_exists() {
          available. It is informational only (not a CI gate)."
     );
 
-    let content = read_file(&script_path);
+    let content = read_live_file(&script_path);
 
     assert!(
         content.contains("cargo outdated"),
@@ -19996,7 +20244,7 @@ fn test_check_outdated_script_has_shebang() {
 #[test]
 fn test_check_outdated_script_required_flags_and_patterns() {
     let root = repo_root();
-    let content = read_file(&root.join("scripts/check-outdated.sh"));
+    let content = read_live_file(&root.join("scripts/check-outdated.sh"));
 
     // (pattern, description) — each must appear in the script
     let required_patterns: &[(&str, &str)] = &[
@@ -20034,7 +20282,7 @@ fn test_check_outdated_script_required_flags_and_patterns() {
 #[test]
 fn test_check_outdated_script_handles_unknown_options() {
     let root = repo_root();
-    let content = read_file(&root.join("scripts/check-outdated.sh"));
+    let content = read_live_file(&root.join("scripts/check-outdated.sh"));
 
     assert!(
         content.contains("*)") && content.contains("Unknown option"),
@@ -20047,7 +20295,7 @@ fn test_check_outdated_script_handles_unknown_options() {
 #[test]
 fn test_check_outdated_script_has_tty_color_detection() {
     let root = repo_root();
-    let content = read_file(&root.join("scripts/check-outdated.sh"));
+    let content = read_live_file(&root.join("scripts/check-outdated.sh"));
 
     assert!(
         content.contains("[ -t 1 ]"),
@@ -20060,11 +20308,12 @@ fn test_check_outdated_script_has_tty_color_detection() {
 fn test_check_outdated_script_is_informational_only() {
     let root = repo_root();
     let content = read_file(&root.join("scripts/check-outdated.sh"));
+    let content_live = strip_comment_lines(&content);
 
     // The script must always exit 0 (informational only).
     // It should contain "exit 0" and NOT use a FAILED variable to gate exit codes.
     assert!(
-        content.contains("exit 0"),
+        content_live.contains("exit 0"),
         "scripts/check-outdated.sh must exit 0 (informational only — \
          outdated deps are not errors)."
     );
@@ -20331,11 +20580,12 @@ fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
     let dep_detect_step = extract_ci_dep_detect_step(&ci_content);
+    let dep_detect_step_live = strip_comment_lines(&dep_detect_step);
 
     assert!(
-        dep_detect_step.contains("HAS_CARGO_CHANGE=\"false\"")
-            && dep_detect_step.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
-            && dep_detect_step
+        dep_detect_step_live.contains("HAS_CARGO_CHANGE=\"false\"")
+            && dep_detect_step_live.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
+            && dep_detect_step_live
                 .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
         "dep-detect must skip changelog for dependency-only Cargo changes using file classification, \
          not commit message heuristics.\n\
@@ -20428,8 +20678,8 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
 #[test]
 fn test_internal_path_patterns_synced_between_script_and_ci() {
     let root = repo_root();
-    let script_content = read_file(&root.join("scripts/check-doc-consistency.sh"));
-    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let script_content = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
 
     let mut missing_from_script = Vec::new();
     let mut missing_from_ci = Vec::new();
@@ -20644,7 +20894,7 @@ fn glob_matches_inner(pattern: &[u8], path: &[u8]) -> bool {
 #[test]
 fn test_internal_path_classification_data_driven() {
     let root = repo_root();
-    let script_content = read_file(&root.join("scripts/check-doc-consistency.sh"));
+    let script_content = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
 
     // Extract the case patterns from is_internal_path().
     // Find the block between "case \"$path\" in" and the closing "esac".
@@ -20714,8 +20964,8 @@ fn test_internal_path_classification_data_driven() {
 #[test]
 fn test_doc_validation_tool_versions_match_devcontainer_args() {
     let root = repo_root();
-    let workflow_content = read_file(&root.join(".github/workflows/doc-validation.yml"));
-    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+    let workflow_content = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
+    let dockerfile_content = read_live_file(&root.join(".devcontainer/Dockerfile"));
 
     let workflow_yq = extract_yaml_version(&workflow_content, "YQ_VERSION")
         .expect("doc-validation.yml must define env.YQ_VERSION");
@@ -20745,8 +20995,8 @@ fn test_doc_validation_tool_versions_match_devcontainer_args() {
 #[test]
 fn test_devcontainer_installs_required_modern_ci_tools() {
     let root = repo_root();
-    let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
-    let devcontainer_json = read_file(&root.join(".devcontainer/devcontainer.json"));
+    let dockerfile_content = read_live_file(&root.join(".devcontainer/Dockerfile"));
+    let devcontainer_json = read_live_file(&root.join(".devcontainer/devcontainer.json"));
 
     let required_fragments = [
         (
@@ -20809,7 +21059,7 @@ fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
         "scripts/check-tooling-parity.sh must exist to enforce CI/devcontainer tooling parity."
     );
 
-    let parity_script_content = read_file(&parity_script_path);
+    let parity_script_content = read_live_file(&parity_script_path);
     assert!(
         parity_script_content.contains("YQ_VERSION")
             && parity_script_content.contains("TAPLO_CLI_VERSION")
@@ -20817,21 +21067,21 @@ fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
         "scripts/check-tooling-parity.sh must validate yq/taplo version parity and docker feature parity."
     );
 
-    let validate_ci_content = read_file(&root.join("scripts/validate-ci.sh"));
+    let validate_ci_content = read_live_file(&root.join("scripts/validate-ci.sh"));
     assert!(
         validate_ci_content.contains("check-tooling-parity.sh")
             && validate_ci_content.contains("--tools"),
         "scripts/validate-ci.sh must include tooling parity validation and expose a --tools mode."
     );
 
-    let run_local_ci_content = read_file(&root.join("scripts/run-local-ci.sh"));
+    let run_local_ci_content = read_live_file(&root.join("scripts/run-local-ci.sh"));
     assert!(
         run_local_ci_content.contains("tooling parity")
             && run_local_ci_content.contains("scripts/validate-ci.sh --quiet"),
         "scripts/run-local-ci.sh must route CI config checks through validate-ci.sh, including tooling parity checks."
     );
 
-    let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
     assert!(
         ci_content.contains("Validate CI/devcontainer tool parity")
             && ci_content.contains("bash scripts/check-tooling-parity.sh"),
@@ -20842,7 +21092,7 @@ fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
 #[test]
 fn test_devcontainer_docker_feature_avoids_moby_repo_path() {
     let root = repo_root();
-    let devcontainer_json = read_file(&root.join(".devcontainer/devcontainer.json"));
+    let devcontainer_json = read_live_file(&root.join(".devcontainer/devcontainer.json"));
 
     assert!(
         devcontainer_json.contains("ghcr.io/devcontainers/features/docker-outside-of-docker:1"),
@@ -20860,6 +21110,7 @@ fn test_devcontainer_docker_feature_avoids_moby_repo_path() {
 fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
     let root = repo_root();
     let dockerfile_content = read_file(&root.join(".devcontainer/Dockerfile"));
+    let dockerfile_content_live = strip_comment_lines(&dockerfile_content);
 
     let required_fragments = [
         "cargo install --locked cargo-binstall",
@@ -20888,7 +21139,7 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
 
     for fragment in required_fragments {
         assert!(
-            dockerfile_content.contains(fragment),
+            dockerfile_content_live.contains(fragment),
             ".devcontainer/Dockerfile must include fast heavy-tool install fragment: {fragment}"
         );
     }
@@ -20903,7 +21154,7 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
 #[test]
 fn test_post_create_verifies_required_rust_tools() {
     let root = repo_root();
-    let post_create_content = read_file(&root.join(".devcontainer/post-create.sh"));
+    let post_create_content = read_live_file(&root.join(".devcontainer/post-create.sh"));
 
     let required_fragments = [
         "verify_required_rust_tools",
@@ -20931,7 +21182,7 @@ fn test_post_create_verifies_required_rust_tools() {
 #[test]
 fn test_post_create_uses_opt_in_cargo_check_warmup() {
     let root = repo_root();
-    let post_create_content = read_file(&root.join(".devcontainer/post-create.sh"));
+    let post_create_content = read_live_file(&root.join(".devcontainer/post-create.sh"));
 
     assert!(
         post_create_content.contains("SIGNAL_FISH_WARM_CARGO_CHECK"),
@@ -21065,20 +21316,6 @@ fn parse_toml_string_array(content: &str, key: &str) -> Vec<String> {
     values
 }
 
-/// Drop whole-line `#` comments (lines whose first non-whitespace char is `#`),
-/// returning only the active lines joined by newlines.
-///
-/// Used to test for forbidden FLAGS in TOML / shell bodies without matching the
-/// prose in explanatory comments (which deliberately NAME the forbidden flag,
-/// e.g. ".cargo/mutants.toml: deliberately do NOT pass `--all-features`").
-fn strip_full_line_hash_comments(content: &str) -> String {
-    content
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Read `.github/workflows/mutation.yml`.
 fn read_mutation_workflow() -> String {
     read_file(&repo_root().join(".github/workflows/mutation.yml"))
@@ -21149,6 +21386,13 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
 
     let script = read_run_mutants_script();
     let workflow = read_mutation_workflow();
+    // Presence checks assert against the LIVE views: scripts/run-mutants.sh and
+    // mutation.yml both name these flags/commands in explanatory comments, so a
+    // raw `contains` would pass on prose even if the real invocation were removed
+    // or commented out. The `run: cargo mutants` MUST-NOT-appear check below
+    // stays on raw `workflow` (a commented occurrence is still worth flagging).
+    let script_live = strip_comment_lines(&script);
+    let workflow_live = strip_comment_lines(&workflow);
 
     // Vacuous-pass guard: a guard that inspects nothing is worse than no guard.
     // Prove we actually read both files and that the script really does invoke
@@ -21163,7 +21407,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         ".github/workflows/mutation.yml is empty or unreadable."
     );
     assert!(
-        script.contains("cargo mutants"),
+        script_live.contains("cargo mutants"),
         "scripts/run-mutants.sh must contain a `cargo mutants` invocation (it is the single\n\
          source of truth for the mutation command). A missing invocation means the parser\n\
          or the script regressed; failing instead of vacuously passing.\n\
@@ -21174,7 +21418,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
 
     // (1) The mutants job must run the mutation via the script, not a raw inline
     //     `cargo mutants` whose flags would bypass the locked-in speed levers.
-    if !workflow.contains("bash scripts/run-mutants.sh --shard") {
+    if !workflow_live.contains("bash scripts/run-mutants.sh --shard") {
         violations.push(
             "mutation.yml mutants job must run mutation via `bash scripts/run-mutants.sh --shard \
              ...`, not an inline `cargo mutants` command (inline flags bypass the single source \
@@ -21194,7 +21438,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     }
 
     // (2) mold linker in RUSTFLAGS (exported by the script).
-    if !script.contains("-fuse-ld=mold") {
+    if !script_live.contains("-fuse-ld=mold") {
         violations.push(
             "scripts/run-mutants.sh must export `-fuse-ld=mold` in RUSTFLAGS to cut per-mutant \
              relink time."
@@ -21203,14 +21447,14 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     }
 
     // (3) --in-place + slice sharding in the script's shard command.
-    if !script.contains("--in-place") {
+    if !script_live.contains("--in-place") {
         violations.push(
             "scripts/run-mutants.sh shard command must use `--in-place` so each shard reuses the \
              warm ./target instead of a cold /tmp scratch build."
                 .to_string(),
         );
     }
-    if !script.contains("--sharding slice") {
+    if !script_live.contains("--sharding slice") {
         violations.push(
             "scripts/run-mutants.sh shard command must use `--sharding slice` to preserve \
              incremental-compilation locality across a shard's mutants."
@@ -21229,8 +21473,8 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
                 && l.contains("clang")
         }) || body.to_lowercase().contains("setup-mold")
     };
-    let baseline_block = extract_yaml_mapping_block(&workflow, "baseline", 2);
-    let mutants_block = extract_yaml_mapping_block(&workflow, "mutants", 2);
+    let baseline_block = extract_yaml_mapping_block(&workflow_live, "baseline", 2);
+    let mutants_block = extract_yaml_mapping_block(&workflow_live, "mutants", 2);
     match &baseline_block {
         Some(block) if installs_mold_and_clang(block) => {}
         _ => violations.push(
@@ -21269,10 +21513,14 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
     // a near-clean rebuild every mutant).
 
     let script = read_run_mutants_script();
+    // Live view: the script's header comments name `--profile mutants`, so assert
+    // the flag is really wired, not merely mentioned in prose.
+    let script_live = strip_comment_lines(&script);
     let cargo_toml = read_file(&repo_root().join("Cargo.toml"));
 
     assert!(
-        script.contains("--profile mutants") || script.contains("--profile \"$MUTANTS_PROFILE\""),
+        script_live.contains("--profile mutants")
+            || script_live.contains("--profile \"$MUTANTS_PROFILE\""),
         "scripts/run-mutants.sh must build with `--profile mutants` (the trimmed mutation \
          profile).\n\
          Fix: keep MUTANTS_PROFILE=\"mutants\" and `--profile \"$MUTANTS_PROFILE\"` in the script.\n\
@@ -21281,7 +21529,8 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
     // Also confirm the profile name is literally "mutants" so it maps to the
     // Cargo.toml section asserted below.
     assert!(
-        script.contains("MUTANTS_PROFILE=\"mutants\"") || script.contains("--profile mutants"),
+        script_live.contains("MUTANTS_PROFILE=\"mutants\"")
+            || script_live.contains("--profile mutants"),
         "scripts/run-mutants.sh must select the `mutants` profile by name so it maps to \
          [profile.mutants] in Cargo.toml.\n\
          File: scripts/run-mutants.sh"
@@ -21298,10 +21547,11 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
              File: Cargo.toml"
         )
     });
+    let section_live = strip_comment_lines(&section);
 
     let mut violations = Vec::new();
 
-    if !section.contains("inherits = \"dev\"") {
+    if !section_live.contains("inherits = \"dev\"") {
         violations.push(
             "[profile.mutants] must set `inherits = \"dev\"` (it reuses the per-job target dir \
              incrementally across mutants)."
@@ -21318,14 +21568,14 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
                 .to_string(),
         );
     }
-    if !section.contains("debug = 0") {
+    if !section_live.contains("debug = 0") {
         violations.push(
             "[profile.mutants] must set `debug = 0` (debuginfo is dead weight to generate and \
              link on every per-mutant relink)."
                 .to_string(),
         );
     }
-    if !section.contains("incremental = true") {
+    if !section_live.contains("incremental = true") {
         violations.push(
             "[profile.mutants] must set `incremental = true` so cargo-mutants reuses the \
              incremental cache across mutants instead of rebuilding from clean."
@@ -21555,8 +21805,8 @@ fn test_mutation_oracle_does_not_use_all_features() {
     // --all-features must appear in NEITHER surface. Strip whole-line comments
     // first: both files deliberately NAME `--all-features` in explanatory prose
     // ("do NOT pass --all-features"), which must not be mistaken for actual use.
-    let mutants_toml_active = strip_full_line_hash_comments(&mutants_toml);
-    let script_active = strip_full_line_hash_comments(&script);
+    let mutants_toml_active = strip_comment_lines(&mutants_toml);
+    let script_active = strip_comment_lines(&script);
     if mutants_toml_active.contains("--all-features") {
         violations.push(
             ".cargo/mutants.toml must NOT contain `--all-features`: the scoped modules have no \
