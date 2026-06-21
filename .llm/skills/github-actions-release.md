@@ -246,7 +246,7 @@ string `''` → `0`**. So on a leg where `matrix.linker_pkg` is undefined,
 `matrix.linker_pkg != ''` is `0 != 0` → **false**, and the step is correctly
 skipped. The belief that "`null != ''` is true, so the step runs on macOS/Windows"
 is wrong. Do NOT bolt on redundant `matrix.foo != null` guards to "fix" a
-non-problem. (A `runner.os == 'Linux'` guard is fine as *intent* documentation, but
+non-problem. (A `runner.os == 'Linux'` guard is fine as _intent_ documentation, but
 is not required for correctness.)
 
 ### `!cancelled()` already overrides the implicit `needs` success gate
@@ -283,7 +283,8 @@ redundant here and strictly worse, because `always()` also runs on cancellation
 - [ ] `PATH_FILTERED_WORKFLOWS` patterns kept in sync with each workflow's `paths:` block
 - [ ] Release-binary matrix covers every `REQUIRED_RELEASE_TARGETS` triple with `fail-fast: false`
 - [ ] Each release archive ships a `.sha256` checksum and is uploaded to the Release
-- [ ] Partial-success attach jobs gate on `!cancelled()` (NOT `always()`); no redundant `matrix.foo != null` guards added on sparse-matrix steps (see §7)
+- [ ] Partial-success attach jobs gate on `!cancelled()` (NOT `always()`);
+      no redundant `matrix.foo != null` guards added on sparse-matrix steps (see §7)
 - [ ] `actionlint` is green (proves sparse-matrix property references are valid)
 
 ---

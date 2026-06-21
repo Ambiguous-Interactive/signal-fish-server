@@ -206,13 +206,13 @@ validate_signal_fish_dependency_versions() {
 # avoid `grep -Z` here because BSD/macOS grep treats `-Z` as zgrep (decompress),
 # not GNU's --null -- the same portable idiom used by check-internal-links.sh.
 find_markdown_docs() {
-    find . -type f -name '*.md' \
-        -not -path '*/target/*' \
-        -not -path '*/node_modules/*' \
-        -not -path '*/site/*' \
-        -not -path '*/.git/*' \
-        -not -path '*/mutants.out/*' \
-        -print0
+    find . \
+        \( -type d \( -name 'target' \
+        -o -name 'node_modules' \
+        -o -name 'site' \
+        -o -name '.git' \
+        -o -name 'mutants.out' \) \) -prune \
+        -o -type f -name '*.md' -print0
 }
 
 if [ -n "$CARGO_VERSION" ]; then

@@ -195,7 +195,7 @@ list_markdown_files() {
     if [ "$CHECK_TRACKED" = "true" ]; then
         while IFS= read -r -d '' tracked_file; do
             case "$tracked_file" in
-                target/*|third_party/*|.git/*|.github/test-fixtures/*|test-fixtures/*|node_modules/*|lychee/*)
+                target/*|*/target/*|third_party/*|*/third_party/*|.git/*|*/.git/*|test-fixtures/*|*/test-fixtures/*|node_modules/*|*/node_modules/*|lychee/*|*/lychee/*)
                     continue
                     ;;
             esac
@@ -214,15 +214,14 @@ list_markdown_files() {
         [ -d "$root" ] || return
     fi
 
-    find "$root" -type f -name "*.md" \
-        -not -path "./target/*" \
-        -not -path "./third_party/*" \
-        -not -path "./.git/*" \
-        -not -path "./.github/test-fixtures/*" \
-        -not -path "./test-fixtures/*" \
-        -not -path "./node_modules/*" \
-        -not -path "./lychee/*" \
-        -print0
+    find "$root" \
+        \( -type d \( -name "target" \
+        -o -name "third_party" \
+        -o -name ".git" \
+        -o -name "test-fixtures" \
+        -o -name "node_modules" \
+        -o -name "lychee" \) \) -prune \
+        -o -type f -name "*.md" -print0
 }
 
 extract_markdown_links() {

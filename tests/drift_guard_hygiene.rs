@@ -242,8 +242,8 @@ fn scan_violations(raw_src: &str) -> Vec<String> {
             // Resolve the read path: literals on the read_file line itself, or
             // (when the arg is a `&path`/`path` variable) on that variable's
             // `let` line elsewhere in the function.
-            let mut path_lits = string_literals(raw_line);
-            if path_lits.is_empty() {
+            let mut path_literals = string_literals(raw_line);
+            if path_literals.is_empty() {
                 // arg is a variable — find its binding line.
                 let arg = after_let[eq + 1..]
                     .split("read_file(")
@@ -259,13 +259,13 @@ fn scan_violations(raw_src: &str) -> Vec<String> {
                     for cand in body.lines() {
                         let t = cand.trim_start();
                         if t.starts_with(&needle) || t.starts_with(&needle_eq) {
-                            path_lits.extend(string_literals(cand));
+                            path_literals.extend(string_literals(cand));
                         }
                     }
                 }
             }
 
-            let reads_config = path_lits.iter().any(|l| is_config_path_literal(l));
+            let reads_config = path_literals.iter().any(|l| is_config_path_literal(l));
             if !reads_config {
                 continue;
             }
@@ -285,7 +285,7 @@ fn scan_violations(raw_src: &str) -> Vec<String> {
                         "  - fn `{fn_name}`: `{var}` is read with raw `read_file` from a \
                          comment-bearing config path ({}) and used in a positive \
                          `{var}.contains(..)` presence check.",
-                        path_lits.join(", ")
+                        path_literals.join(", ")
                     ));
                     break;
                 }

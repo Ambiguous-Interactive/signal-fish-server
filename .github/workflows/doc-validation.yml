@@ -234,12 +234,13 @@ jobs:
           # Counter file format: 2 space-separated integers (total failed)
           echo "0 0" > "$COUNTER_FILE"
 
-          find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
+          find . \
+            \( -type d \( -name "target" \
+            -o -name "third_party" \
+            -o -name ".git" \
+            -o -name "node_modules" \
+            -o -name "test-fixtures" \) \) -prune \
+            -o -type f -name "*.md" -print | sort | while read -r md_file; do
 
             awk '
               # Skip content inside outer fences (4+ backticks) which may contain
@@ -332,12 +333,13 @@ jobs:
           # Counter file format: 2 space-separated integers (total failed)
           echo "0 0" > "$COUNTER_FILE"
 
-          find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
+          find . \
+            \( -type d \( -name "target" \
+            -o -name "third_party" \
+            -o -name ".git" \
+            -o -name "node_modules" \
+            -o -name "test-fixtures" \) \) -prune \
+            -o -type f -name "*.md" -print | sort | while read -r md_file; do
 
             awk '
               # Skip content inside outer fences (4+ backticks)
@@ -428,12 +430,13 @@ jobs:
           # Counter file format: 2 space-separated integers (total failed)
           echo "0 0" > "$COUNTER_FILE"
 
-          find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
+          find . \
+            \( -type d \( -name "target" \
+            -o -name "third_party" \
+            -o -name ".git" \
+            -o -name "node_modules" \
+            -o -name "test-fixtures" \) \) -prune \
+            -o -type f -name "*.md" -print | sort | while read -r md_file; do
 
             awk '
               # Skip content inside outer fences (4+ backticks)
@@ -523,12 +526,13 @@ jobs:
           # Counter file format: 2 space-separated integers (total failed)
           echo "0 0" > "$COUNTER_FILE"
 
-          find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" | sort | while read -r md_file; do
+          find . \
+            \( -type d \( -name "target" \
+            -o -name "third_party" \
+            -o -name ".git" \
+            -o -name "node_modules" \
+            -o -name "test-fixtures" \) \) -prune \
+            -o -type f -name "*.md" -print | sort | while read -r md_file; do
 
             awk '
               # Skip content inside outer fences (4+ backticks)

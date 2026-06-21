@@ -267,6 +267,52 @@ fn evaluate_script_cases_in_batches(cases: Vec<ScriptCase>) -> Vec<String> {
 }
 
 #[test]
+fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
+    let stale_dependency_doc =
+        "# Generated\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n";
+    let generated_files = [
+        "target/generated.md",
+        "clients/native/target/generated.md",
+        "node_modules/package/generated.md",
+        "clients/browser/node_modules/package/generated.md",
+        "site/generated.md",
+        "docs/site/generated.md",
+        ".git/generated.md",
+        "mutants.out/generated.md",
+        "fuzz/mutants.out/generated.md",
+    ];
+
+    let generated_stale_docs = generated_files
+        .iter()
+        .map(|path| (*path, stale_dependency_doc))
+        .collect::<Vec<_>>();
+    let (exit_code, output) = run_checker_with_fixture(&[], &generated_stale_docs, &[]);
+    assert_eq!(
+        exit_code, 0,
+        "Generated/dependency Markdown trees must be pruned before version scanning.\n\
+         Output:\n{output}"
+    );
+
+    let mut mixed_docs = generated_stale_docs;
+    mixed_docs.push(("docs/normal-extra.md", stale_dependency_doc));
+    let (exit_code, output) = run_checker_with_fixture(&[], &mixed_docs, &[]);
+    assert_eq!(
+        exit_code, 1,
+        "A stale normal Markdown doc must still be validated.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("docs/normal-extra.md has stale signal-fish-server version '0.0.9'"),
+        "The normal extra doc should be the reported stale dependency.\nOutput:\n{output}"
+    );
+    for generated_file in generated_files {
+        assert!(
+            !output.contains(generated_file),
+            "Generated file {generated_file} should be pruned from diagnostics.\nOutput:\n{output}"
+        );
+    }
+}
+
+#[test]
 fn test_doc_consistency_script_data_driven_cases() {
     let cases = vec![
         // ---------------------------------------------------------------
