@@ -224,6 +224,54 @@ job that builds a standalone binary per OS/arch and attaches each (with a checks
 
 ---
 
+## 7. Expression, Matrix, and `needs` Gotchas (verified semantics)
+
+These three patterns look buggy at a glance and attract "fixes" that are wrong or
+regressive. The behavior below is the GitHub Actions documented contract — do not
+"correct" working code based on the misreadings noted. `actionlint` (run in CI and
+`scripts/run-local-ci.sh`) validates the matrix case.
+
+### Sparse matrix properties are not an error
+
+A property set on only SOME `matrix.include` entries (e.g. `linker_pkg` only on the
+`aarch64-unknown-linux-gnu` leg) is legal. Referencing `matrix.linker_pkg` from a
+step `if:` on a leg that does not define it yields an EMPTY value, not an error.
+`actionlint` knows every leg's property set and stays silent — so a green
+`actionlint` run is proof the reference is valid.
+
+### `null`/empty coercion: `matrix.foo != ''` is FALSE when `foo` is unset
+
+GitHub coerces across types to a number for `==`/`!=`: **`null` → `0`** and **empty
+string `''` → `0`**. So on a leg where `matrix.linker_pkg` is undefined,
+`matrix.linker_pkg != ''` is `0 != 0` → **false**, and the step is correctly
+skipped. The belief that "`null != ''` is true, so the step runs on macOS/Windows"
+is wrong. Do NOT bolt on redundant `matrix.foo != null` guards to "fix" a
+non-problem. (A `runner.os == 'Linux'` guard is fine as *intent* documentation, but
+is not required for correctness.)
+
+### `!cancelled()` already overrides the implicit `needs` success gate
+
+A job with `needs:` is, by default, gated on `success()` of every needed job. That
+default is replaced the moment the job's `if:` contains ANY status function —
+`success()`, `failure()`, `cancelled()`, or `always()`. So
+
+```yaml
+attach-binaries:
+  needs: [publish, build-binaries]
+  if: ${{ !cancelled() && needs.publish.result == 'success' }}
+```
+
+DOES run when a `build-binaries` matrix leg fails (publish succeeded, run not
+cancelled) — that is the partial-success design. Do NOT add `always()`: it is
+redundant here and strictly worse, because `always()` also runs on cancellation
+(GitHub explicitly recommends `!cancelled()` over `always()`). `always() &&
+!cancelled()` simplifies to `!cancelled()` anyway.
+
+**Validated by:** `actionlint` (matrix), and the release drift tests that assert the
+`attach-binaries` gate string.
+
+---
+
 ## Agent Checklist
 
 - [ ] All `cargo` commands in CI use `--locked` consistently
@@ -235,6 +283,8 @@ job that builds a standalone binary per OS/arch and attaches each (with a checks
 - [ ] `PATH_FILTERED_WORKFLOWS` patterns kept in sync with each workflow's `paths:` block
 - [ ] Release-binary matrix covers every `REQUIRED_RELEASE_TARGETS` triple with `fail-fast: false`
 - [ ] Each release archive ships a `.sha256` checksum and is uploaded to the Release
+- [ ] Partial-success attach jobs gate on `!cancelled()` (NOT `always()`); no redundant `matrix.foo != null` guards added on sparse-matrix steps (see §7)
+- [ ] `actionlint` is green (proves sparse-matrix property references are valid)
 
 ---
 

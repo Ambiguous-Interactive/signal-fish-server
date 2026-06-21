@@ -65,6 +65,17 @@ The final test is the red/green proof: a token that appears only in a commented
 line must disappear from the live view, so a presence guard fails instead of
 silently passing.
 
+## Automated Enforcement
+
+`tests/drift_guard_hygiene.rs` scans `ci_config_tests.rs` and fails if a new guard
+reintroduces the footgun: a variable read via raw `read_file` from a
+comment-bearing config path used in a *positive* `.contains(` presence check,
+without the function deriving a comment-stripped view. It is conservative by
+design (ignores `!v.contains` absence checks, ignores Markdown, skips functions
+that already call `read_live_file`/`strip_comment_lines`). A genuinely structural
+raw read whose positive `.contains(` is not a drift guard opts out with an inline
+`// live-view-exempt: <reason>` comment in the function.
+
 ---
 
 ## Related Skills

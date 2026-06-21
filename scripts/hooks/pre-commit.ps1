@@ -104,6 +104,10 @@ function Skip {
 function Get-StagedFiles {
     param([string[]]$Pathspecs = @())
 
+    # --diff-filter=ACDMR already includes C (Copied): the letters are
+    # A(dded) C(opied) D(eleted) M(odified) R(enamed). It is not "missing" C.
+    # We also do not pass -C/--find-copies (omitted for speed), so git never
+    # emits C anyway — a copied file surfaces as A — making any extra "C" a no-op.
     $arguments = @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $Pathspecs
     $result = Invoke-Git -Arguments $arguments
     if ([string]::IsNullOrEmpty($result.Stdout)) {

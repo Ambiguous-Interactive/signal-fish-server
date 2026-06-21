@@ -1049,7 +1049,7 @@ fn validate_workflow_has_required_jobs(
     required_jobs: &[(&str, &str, &str)],
     workflow_description: &str,
 ) {
-    let content = read_file(workflow_path);
+    let content = read_live_file(workflow_path);
 
     let mut missing_jobs = Vec::new();
     let mut found_jobs = Vec::new();
@@ -2682,7 +2682,7 @@ fn test_typos_config_covers_known_files() {
          Fix: Create .typos.toml with [default.extend-identifiers] section."
     );
 
-    let config_content = read_file(&typos_config);
+    let config_content = read_live_file(&typos_config);
 
     // Files known to contain technical terms that require .typos.toml entries
     let known_technical_files: &[(&str, &[&str])] = &[("docs/authentication.md", &["HashiCorp"])];
@@ -3170,7 +3170,7 @@ fn test_check_markdown_script_common_issue_guidance_is_data_driven() {
 
     let root = repo_root();
     let script = root.join("scripts/check-markdown.sh");
-    let content = read_file(&script);
+    let content = read_live_file(&script);
 
     let cases = [
         GuidanceCase {
@@ -3219,7 +3219,7 @@ fn test_check_markdown_script_md013_diagnostics_are_data_driven() {
 
     let root = repo_root();
     let script = root.join("scripts/check-markdown.sh");
-    let content = read_file(&script);
+    let content = read_live_file(&script);
 
     let cases = [
         DiagnosticCase {
@@ -3268,9 +3268,10 @@ fn test_run_local_ci_fails_closed_when_markdownlint_is_unavailable() {
     let root = repo_root();
     let script_path = root.join("scripts/run-local-ci.sh");
     let content = read_file(&script_path);
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains(
+        content_live.contains(
             "FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)",
         ),
         "scripts/run-local-ci.sh must mark markdown as FAIL when markdownlint-cli2 is unavailable.\n\
@@ -3299,7 +3300,14 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
 
     for relative_path in guidance_files {
         let path = root.join(relative_path);
-        let content = read_file(&path);
+        let raw = read_file(&path);
+        // `.sh` guidance can be commented out and still match a raw substring search;
+        // strip its comments. Markdown (`#` = heading) must stay raw.
+        let content = if relative_path.ends_with(".md") {
+            raw
+        } else {
+            strip_comment_lines(&raw)
+        };
 
         if !content.contains("npm install --save-dev --save-exact markdownlint-cli2@") {
             missing_local.push(relative_path.to_string());
@@ -4465,7 +4473,7 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/doc-validation.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     // Critical paths that doc-validation must trigger on.
     // These ensure documentation changes are always validated.
@@ -4524,7 +4532,7 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
 fn test_doc_validation_invokes_rust_markdown_validator_via_bash() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/doc-validation.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     assert!(
         content.contains("bash .github/scripts/validate-rust-markdown-blocks.sh"),
@@ -4583,7 +4591,7 @@ fn test_doc_validation_strict_rustdocflags() {
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/doc-validation.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     // Required RUSTDOCFLAGS for strict documentation validation.
     // Each flag maps to a specific documentation quality gate.
@@ -4874,7 +4882,7 @@ fn test_required_workflow_triggers() {
 
     for (workflow_file, _workflow_name) in REQUIRED_WORKFLOW_NAMES {
         let workflow_path = root.join(".github/workflows").join(workflow_file);
-        let content = read_file(&workflow_path);
+        let content = read_live_file(&workflow_path);
 
         // Check for pull_request trigger with main branch
         let has_pull_request = content.contains("pull_request:");
@@ -6903,6 +6911,11 @@ fn test_awk_script_syntax_validation() {
         );
     }
 
+    // live-view-exempt: this is structural awk-syntax validation, not a config
+    // drift guard. It parses the embedded awk script bodies out of the RAW
+    // workflow (split on `awk '`, char-by-char quote balancing), so comments must
+    // stay — stripping a `#`-leading line could corrupt an embedded script. The
+    // `content.contains("awk '")` below merely gates that raw parsing.
     let content = read_file(&workflow);
 
     // Verify AWK scripts have basic structural correctness
@@ -7271,7 +7284,7 @@ fn test_workflow_hygiene_requirements() {
         .map(|entry| {
             let path = entry.path();
             let filename = path.file_name().unwrap().to_string_lossy().to_string();
-            let content = read_file(&path);
+            let content = read_live_file(&path);
             (filename, content)
         })
         .collect();
@@ -13887,7 +13900,7 @@ fn test_release_workflow_conventions() {
         return;
     }
 
-    let content = read_file(&release_yml);
+    let content = read_live_file(&release_yml);
 
     // Must have a name
     assert!(
@@ -14304,7 +14317,7 @@ fn test_release_workflow_handles_path_filtered_workflows() {
         return;
     }
 
-    let content = read_file(&release_yml);
+    let content = read_live_file(&release_yml);
 
     // Must declare the PATH_FILTERED_WORKFLOWS associative array
     assert!(
@@ -14741,7 +14754,7 @@ fn test_ci_safety_workflow_has_required_triggers() {
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     let required_triggers = [
         ("push:", "push to main"),
@@ -14800,7 +14813,7 @@ fn test_ci_safety_runs_miri_with_isolation_disabled() {
     // Guard the flag here so the class cannot silently regress.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     assert!(
         content.contains("-Zmiri-disable-isolation"),
@@ -14823,7 +14836,7 @@ fn test_ci_safety_uses_isolated_target_dirs_and_fresh_cache_epoch() {
     // `test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir`.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     for required in [
         "CARGO_TARGET_DIR: target/miri",
@@ -15056,6 +15069,7 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
+    let content_live = strip_comment_lines(&content);
 
     for required in [
         "Run Miri on library tests",
@@ -15065,7 +15079,7 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
         "--all-features --no-fail-fast 2>&1 | tee asan-output.txt",
     ] {
         assert!(
-            content.contains(required),
+            content_live.contains(required),
             "ci-safety.yml must keep broad Miri/ASan coverage; the nested Cargo \
              failure class is handled by env scrubbing, not by dropping test \
              targets from the safety jobs.\n\
@@ -15101,7 +15115,7 @@ fn test_ci_safety_workflow_uploads_artifacts() {
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     let expected_artifacts = [
         ("miri-output", "Miri analysis output"),
@@ -15205,7 +15219,7 @@ fn test_ci_safety_workflow_artifact_uploads_always_run() {
 fn test_ci_safety_failure_diagnostics_include_markers() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
 
     for required in [
         "Diagnose Miri failures",
@@ -15534,9 +15548,10 @@ fn test_release_workflow_generates_sbom() {
     }
 
     let content = read_file(&release_yml);
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
+        content_live.contains("cargo sbom --output-format cyclone_dx_json_1_5"),
         "release.yml must generate a CycloneDX v1.5 JSON SBOM.\n\
          This provides supply-chain provenance metadata with every release.\n\
          File: {}",
@@ -15552,7 +15567,7 @@ fn test_release_workflow_generates_sbom() {
     );
 
     assert!(
-        content.contains("tool: cargo-sbom"),
+        content_live.contains("tool: cargo-sbom"),
         "release.yml must install cargo-sbom for SBOM generation.\n\
          File: {}",
         release_yml.display()
@@ -15627,7 +15642,7 @@ fn test_release_workflow_attaches_sbom_to_release() {
         return;
     }
 
-    let content = read_file(&release_yml);
+    let content = read_live_file(&release_yml);
 
     // The SBOM must be attached via a dedicated "Attach SBOM to release" step
     assert!(
@@ -15969,7 +15984,7 @@ fn test_docker_health_check_uses_exponential_backoff() {
 
     let root = repo_root();
     let ci_yml = root.join(".github/workflows/ci.yml");
-    let content = read_file(&ci_yml);
+    let content = read_live_file(&ci_yml);
 
     // The Docker smoke test step should have exponential backoff logic
     assert!(
@@ -16051,7 +16066,7 @@ fn test_pre_commit_hook_delegates_to_fast_powershell_runner() {
         "scripts/hooks/pre-commit.ps1 must contain cross-platform hook logic."
     );
 
-    let hook = read_file(&hook_path);
+    let hook = read_live_file(&hook_path);
     let runner = read_file(&runner_path);
 
     assert!(
@@ -17223,7 +17238,7 @@ fn test_root_pr_description_drafts_are_not_tracked() {
         tracked_existing.join("\n")
     );
 
-    let gitignore = read_file(&root.join(".gitignore"));
+    let gitignore = read_live_file(&root.join(".gitignore"));
     for draft_path in draft_paths {
         assert!(
             gitignore.contains(&format!("/{draft_path}")),
@@ -17388,7 +17403,7 @@ fn test_hook_and_script_line_endings_are_repository_enforced() {
         ".gitattributes must enforce hook and script line endings across native platforms."
     );
 
-    let content = read_file(&attributes_path);
+    let content = read_live_file(&attributes_path);
     for expected in [
         ".githooks/* text eol=lf",
         "*.sh text eol=lf",
@@ -17535,7 +17550,7 @@ fn test_pre_commit_hook_includes_llm_file_size_check_18() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     assert!(hook_path.exists(), ".githooks/pre-commit must exist");
-    let content = read_file(&hook_path);
+    let content = read_live_file(&hook_path);
     assert!(
         content.contains("Test-LlmFileSizes"),
         "Pre-commit runner must define a fast LLM file size check."
@@ -17554,7 +17569,7 @@ fn test_pre_commit_hook_includes_llm_file_size_check_18() {
 fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-    let content = read_file(&hook_path);
+    let content = read_live_file(&hook_path);
     assert!(
         content.contains("$script:StagedFiles")
             && content.contains("$_.StartsWith(\".llm/\")")
@@ -17587,7 +17602,7 @@ fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     assert!(hook_path.exists(), ".githooks/pre-commit must exist");
-    let content = read_file(&hook_path);
+    let content = read_live_file(&hook_path);
 
     assert!(
         content.contains("Test-ReadmeBadges"),
@@ -17603,7 +17618,7 @@ fn test_pre_commit_hook_includes_readme_badge_style_check_20() {
 fn test_pre_commit_hook_readme_badge_style_trigger_includes_checker_script() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-    let content = read_file(&hook_path);
+    let content = read_live_file(&hook_path);
 
     assert!(
         content.contains("$script:StagedFiles -notcontains \"README.md\""),
@@ -17619,7 +17634,7 @@ fn test_pre_commit_hook_readme_badge_style_trigger_includes_checker_script() {
 fn test_run_local_ci_includes_readme_badge_style_check() {
     let root = repo_root();
     let script_path = root.join("scripts/run-local-ci.sh");
-    let content = read_file(&script_path);
+    let content = read_live_file(&script_path);
 
     assert!(
         content.contains("readme-badges"),
@@ -17636,32 +17651,33 @@ fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
     let root = repo_root();
     let script_path = root.join("scripts/run-local-ci.sh");
     let content = read_file(&script_path);
+    let content_live = strip_comment_lines(&content);
 
     assert!(
-        content.contains("check-hook-readiness.ps1")
-            && content.contains("scripts/hooks/pre-commit.ps1 -Worktree")
-            && content.contains("scripts/hooks/pre-push.ps1 -Worktree")
-            && content.contains("grep -qE")
-            && content.contains("WARN:")
-            && content.contains("hook-readiness")
-            && content.contains("pre-commit-preflight")
-            && content.contains("pre-push-preflight"),
+        content_live.contains("check-hook-readiness.ps1")
+            && content_live.contains("scripts/hooks/pre-commit.ps1 -Worktree")
+            && content_live.contains("scripts/hooks/pre-push.ps1 -Worktree")
+            && content_live.contains("grep -qE")
+            && content_live.contains("WARN:")
+            && content_live.contains("hook-readiness")
+            && content_live.contains("pre-commit-preflight")
+            && content_live.contains("pre-push-preflight"),
         "run-local-ci.sh must run hook readiness plus worktree-scoped pre-commit \
          and pre-push preflights so agents catch cheap hook failures before \
          staging, committing, or pushing."
     );
 
     assert!(
-        content.contains("scripts/check-llm-file-sizes.sh")
-            && content.contains("scripts/check-llm-example-files.sh")
-            && content.contains("llm-file-sizes")
-            && content.contains("llm-example-files"),
+        content_live.contains("scripts/check-llm-file-sizes.sh")
+            && content_live.contains("scripts/check-llm-example-files.sh")
+            && content_live.contains("llm-file-sizes")
+            && content_live.contains("llm-example-files"),
         "run-local-ci.sh must include the LLM policies that CI already runs; \
          they stay out of git hooks but must not first fail in GitHub CI."
     );
 
     assert!(
-        content.contains("scripts/check-no-panics.sh")
+        content_live.contains("scripts/check-no-panics.sh")
             && !content.contains("scripts/check-no-panics.sh patterns"),
         "run-local-ci.sh must run the full panic policy, including clippy \
          .expect/.unwrap enforcement. The git hook only keeps the sub-second \
@@ -17673,7 +17689,7 @@ fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
 fn test_run_local_ci_runs_actionlint_when_available() {
     let root = repo_root();
     let script_path = root.join("scripts/run-local-ci.sh");
-    let content = read_file(&script_path);
+    let content = read_live_file(&script_path);
 
     assert!(
         content.contains("command -v actionlint") && content.contains("run_check_quiet \"actionlint\""),
@@ -17929,6 +17945,7 @@ fn test_check_no_panics_script_structure() {
     );
 
     let content = read_file(&script_path);
+    let content_live = strip_comment_lines(&content);
     let scanner_path = root.join("tests/no_panic_policy_scan.rs");
     let scanner_content = read_file(&scanner_path);
 
@@ -17950,7 +17967,7 @@ fn test_check_no_panics_script_structure() {
 
     let missing_required_markers = NO_PANIC_SCRIPT_REQUIRED_MARKERS
         .iter()
-        .filter(|(marker, _)| !content.contains(marker))
+        .filter(|(marker, _)| !content_live.contains(marker))
         .map(|(marker, reason)| format!("  - `{marker}`: {reason}"))
         .collect::<Vec<_>>();
 

@@ -48,8 +48,13 @@ pub fn read_file(path: &Path) -> String {
         .replace("\r\n", "\n")
 }
 
-/// Drop full-line `#` comments from config text, returning only the *live*
-/// (uncommented) lines.
+/// Drop full-line `#` and `//` comments from config text, returning only the
+/// *live* (uncommented) lines.
+///
+/// Both markers are stripped because the config formats these tests guard use
+/// one or the other for line comments: `#` (YAML, Dockerfile, TOML, POSIX shell,
+/// PowerShell) and `//` (JSONC, e.g. `.devcontainer/devcontainer.json`). See the
+/// *Scope and contract* section below for the exact rules.
 ///
 /// # Why this exists
 ///

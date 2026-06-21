@@ -40,8 +40,15 @@ if [ "$CURRENT" = "$DESIRED" ]; then
     exit 0
 fi
 
-# Set local hooks path
-git config --local core.hooksPath "$DESIRED" 2>/dev/null
+# Set local hooks path. Do not swallow git's stderr here: this is the script's
+# one critical mutation, and `set -e` would otherwise abort SILENTLY on failure
+# (e.g. an unwritable .git/config), leaving hooks disabled with no explanation.
+# An explicit "enable hooks" action must fail loudly, not vanish.
+if ! git config --local core.hooksPath "$DESIRED"; then
+    echo "[hooks] ERROR: failed to set core.hooksPath to '$DESIRED'." >&2
+    echo "[hooks] Ensure this is a writable git repository (check .git/config permissions)." >&2
+    exit 1
+fi
 
 log "Configured core.hooksPath to $DESIRED"
 log ""
