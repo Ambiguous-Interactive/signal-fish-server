@@ -285,7 +285,8 @@ redundant here and strictly worse, because `always()` also runs on cancellation
 - [ ] `PATH_FILTERED_WORKFLOWS` patterns kept in sync with each workflow's `paths:` block
 - [ ] Release-binary matrix covers every `REQUIRED_RELEASE_TARGETS` triple with `fail-fast: false`
 - [ ] Each release archive ships a `.sha256` checksum and is uploaded to the Release
-- [ ] Partial-success attach jobs gate on `!cancelled()`; list artifacts before download; avoid redundant sparse-matrix null guards (see §7)
+- [ ] Partial-success attach jobs gate on `!cancelled()`; list artifacts before
+  download; avoid redundant sparse-matrix null guards (see §7)
 - [ ] `actionlint` is green (proves sparse-matrix property references are valid)
 
 ---
