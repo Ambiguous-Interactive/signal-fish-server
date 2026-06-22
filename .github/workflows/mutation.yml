@@ -71,7 +71,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
 
       - name: Read Rust toolchain
         id: toolchain
@@ -140,7 +140,7 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
 
       - name: Read Rust toolchain
         id: toolchain
@@ -169,7 +169,7 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.81.10
+        uses: taiki-e/install-action@v2.82.2
         with:
           tool: cargo-mutants
 
