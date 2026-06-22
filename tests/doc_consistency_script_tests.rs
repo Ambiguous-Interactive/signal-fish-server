@@ -273,11 +273,15 @@ fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
     let generated_files = [
         "target/generated.md",
         "clients/native/target/generated.md",
+        "third_party/rmp/generated.md",
+        "clients/native/third_party/generated.md",
         "node_modules/package/generated.md",
         "clients/browser/node_modules/package/generated.md",
         "site/generated.md",
         "docs/site/generated.md",
         ".git/generated.md",
+        ".github/test-fixtures/generated.md",
+        "test-fixtures/generated.md",
         "mutants.out/generated.md",
         "fuzz/mutants.out/generated.md",
     ];
@@ -310,6 +314,30 @@ fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
             "Generated file {generated_file} should be pruned from diagnostics.\nOutput:\n{output}"
         );
     }
+}
+
+#[test]
+fn test_markdown_discovery_keeps_llm_guidance_in_version_sync_scope() {
+    let stale_llm_doc =
+        "# Agent Guidance\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n";
+
+    let (exit_code, output) = run_checker_with_fixture(
+        &[],
+        &[(".llm/skills/dependency-example.md", stale_llm_doc)],
+        &[],
+    );
+
+    assert_eq!(
+        exit_code, 1,
+        "First-party .llm Markdown guidance that quotes the crate dependency \
+         must remain in version-sync scope.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains(
+            ".llm/skills/dependency-example.md has stale signal-fish-server version '0.0.9'"
+        ),
+        "The stale .llm dependency example should be reported explicitly.\nOutput:\n{output}"
+    );
 }
 
 #[test]
@@ -368,18 +396,29 @@ fn test_doc_consistency_script_data_driven_cases() {
             ],
             must_not_contain: vec![],
         },
-        // No false positives: a sourceless (path) dependency example has no
-        // version to pin and must not be flagged.
+        // Versionless dependency examples cannot be auto-synced when
+        // Cargo.toml changes and must not be allowed to pass silently.
         ScriptCase {
-            name: "allows_path_dependency_example_without_version",
+            name: "fails_on_path_dependency_example_without_version",
             overrides: vec![(
                 "docs/contributing.md",
                 "# Contributing\n\n```toml\nsignal-fish-server = { path = \"../signal-fish-server\" }\n```\n",
             )],
             args: vec![],
-            expected_exit: 0,
-            must_contain: vec!["Doc consistency checks passed"],
-            must_not_contain: vec!["without a parseable version"],
+            expected_exit: 1,
+            must_contain: vec!["without a parseable version"],
+            must_not_contain: vec!["Doc consistency checks passed"],
+        },
+        ScriptCase {
+            name: "fails_on_git_dependency_example_without_version_even_with_matching_tag",
+            overrides: vec![(
+                "docs/contributing.md",
+                "# Contributing\n\n```toml\nsignal-fish-server = { git = \"https://example.invalid/repo.git\", tag = \"0.1.1\" }\n```\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["without a parseable version"],
+            must_not_contain: vec!["Doc consistency checks passed"],
         },
         ScriptCase {
             name: "passes_context_version_check_with_crlf_line_endings",

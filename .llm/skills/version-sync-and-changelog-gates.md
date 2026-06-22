@@ -17,6 +17,21 @@
 3. `CHANGELOG.md` must remain Keep a Changelog compliant.
 4. If non-internal files change, `CHANGELOG.md` must be updated in the same change.
 
+## Version Scan Scope
+
+`scripts/check-doc-consistency.sh` scans first-party Markdown for
+`signal-fish-server = "<version>"` dependency examples, including `.llm` guidance.
+It intentionally prunes generated, vendored, and fixture directories such as
+`target/`, `third_party/`, `node_modules/`, `site/`, `.git/`, `test-fixtures/`,
+and `mutants.out/` at any depth so copied upstream docs or generated output do
+not false-fail against this crate's `Cargo.toml`.
+
+Versionless dependency examples using `path`, `git`, `workspace`, or `registry`
+without a `version = "..."` key are rejected. They cannot be auto-synced on a
+version bump and would make the hook and CI disagree. In prose, describe local
+path dependencies without writing a TOML assignment; in templates, use the
+`<version>` placeholder.
+
 ---
 
 ## Commands

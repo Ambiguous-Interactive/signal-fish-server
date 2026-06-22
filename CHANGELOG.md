@@ -438,6 +438,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hardened release and documentation validation: `release.yml` now skips binary
+  attachment with a clear diagnostic when no `release-binary-*` artifacts exist,
+  uses an existing `actions/download-artifact` tag, and the workflow hygiene job
+  can verify pinned GitHub Action tags exist upstream. Documentation version
+  scans now prune vendored `third_party/` Markdown while rejecting unsyncable
+  versionless `signal-fish-server` dependency examples.
 - Fixed [#122](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/122): the
   published `ghcr.io/ambiguous-interactive/signal-fish-server` image was built only for
   `linux/amd64`, so pulling it on ARM64 Linux (AWS Graviton, Ampere, Raspberry Pi, Apple Silicon

@@ -376,6 +376,37 @@ HASH_REF_COUNT=0
 FLOATING_REF_COUNT=0
 INVALID_REF_COUNT=0
 MALFORMED_REF_COUNT=0
+MISSING_TAG_REF_COUNT=0
+
+REMOTE_ACTION_KEYS=()
+REMOTE_ACTION_SITES=()
+
+is_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+record_remote_action_ref() {
+    local action_key="$1"
+    local site="$2"
+    local index
+
+    for index in "${!REMOTE_ACTION_KEYS[@]}"; do
+        if [ "${REMOTE_ACTION_KEYS[$index]}" = "$action_key" ]; then
+            REMOTE_ACTION_SITES[$index]+="${site}"$'\n'
+            return
+        fi
+    done
+
+    REMOTE_ACTION_KEYS+=("$action_key")
+    REMOTE_ACTION_SITES+=("${site}"$'\n')
+}
 
 for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
     [ -f "$workflow" ] || continue
@@ -393,6 +424,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
             USES_VALUE="${USES_VALUE#\"}"
             USES_VALUE="${USES_VALUE%\'}"
             USES_VALUE="${USES_VALUE#\'}"
+            USES_VALUE="${USES_VALUE//$'\r'/}"
 
             # Skip local and docker actions.
             if [[ "$USES_VALUE" == ./* ]] || [[ "$USES_VALUE" == docker://* ]]; then
@@ -441,6 +473,10 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
             # Allow explicit version tags.
             if [[ "$REF" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
                 VALID_REF_COUNT=$((VALID_REF_COUNT + 1))
+                IFS='/' read -r ACTION_OWNER ACTION_REPO_NAME _ <<< "$ACTION_NAME"
+                ACTION_REPO="${ACTION_OWNER}/${ACTION_REPO_NAME}"
+                ACTION_KEY="${ACTION_REPO}@${REF}"
+                record_remote_action_ref "$ACTION_KEY" "${WORKFLOW_NAME}:${line_num} ${ACTION_NAME}@${REF}"
             else
                 error "$WORKFLOW_NAME:$line_num: Action uses invalid ref format: $ACTION_NAME@$REF"
                 error "  Allowed refs: vX, vX.Y, vX.Y.Z (optionally with prerelease/build suffix)."
@@ -452,6 +488,43 @@ done
 
 if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$FLOATING_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ] && [ "$MALFORMED_REF_COUNT" -eq 0 ]; then
     success "All $VALID_REF_COUNT GitHub Actions use explicit version tags"
+fi
+
+if is_truthy "${SIGNAL_FISH_CHECK_ACTION_REF_TAGS:-0}"; then
+    info "Checking GitHub Actions version tags exist upstream..."
+    if ! command -v git >/dev/null 2>&1; then
+        error "Cannot validate GitHub Actions tags because git is not available"
+    else
+        for index in "${!REMOTE_ACTION_KEYS[@]}"; do
+            action_key="${REMOTE_ACTION_KEYS[$index]}"
+            action_repo="${action_key%@*}"
+            action_ref="${action_key#*@}"
+            action_url="https://github.com/${action_repo}.git"
+            tag_ref="refs/tags/${action_ref}"
+
+            if command -v timeout >/dev/null 2>&1; then
+                if ! timeout 15 git ls-remote --exit-code --tags "$action_url" "$tag_ref" >/dev/null 2>&1; then
+                    error "GitHub Actions tag does not exist upstream: ${action_repo}@${action_ref}"
+                    while IFS= read -r site; do
+                        [ -n "$site" ] && error "  referenced at $site"
+                    done <<< "${REMOTE_ACTION_SITES[$index]}"
+                    MISSING_TAG_REF_COUNT=$((MISSING_TAG_REF_COUNT + 1))
+                fi
+            elif ! git ls-remote --exit-code --tags "$action_url" "$tag_ref" >/dev/null 2>&1; then
+                error "GitHub Actions tag does not exist upstream: ${action_repo}@${action_ref}"
+                while IFS= read -r site; do
+                    [ -n "$site" ] && error "  referenced at $site"
+                done <<< "${REMOTE_ACTION_SITES[$index]}"
+                MISSING_TAG_REF_COUNT=$((MISSING_TAG_REF_COUNT + 1))
+            fi
+        done
+
+        if [ "$MISSING_TAG_REF_COUNT" -eq 0 ]; then
+            success "All checked GitHub Actions version tags exist upstream"
+        fi
+    fi
+else
+    info "Skipping live GitHub Actions tag existence check (set SIGNAL_FISH_CHECK_ACTION_REF_TAGS=1 to enable)"
 fi
 echo ""
 

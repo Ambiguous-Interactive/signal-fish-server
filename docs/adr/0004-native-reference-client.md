@@ -57,7 +57,7 @@ than through `matchbox_socket` is deliberate:
 ### Protocol types via path dependency
 
 The client consumes `ClientMessage` / `ServerMessage` straight from the server crate
-(`signal-fish-server = { path = "../.." }`): the reference client can never drift from the server's wire contract,
+through a local path dependency: the reference client can never drift from the server's wire contract,
 and a protocol change that breaks clients fails this crate's build immediately. The trade-off — the client does
 not independently prove the _documentation_ is implementable — is covered by the existing golden wire tests and
 canonical JSONL samples (`.llm/code-samples/protocol/`), which pin the exact bytes against `docs/protocol.md`

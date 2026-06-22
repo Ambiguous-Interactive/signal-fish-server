@@ -5,10 +5,23 @@ mod common;
 use common::{bash_command, repo_root, unique_temp_dir, write_file};
 use std::fs;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn run_hygiene_with_fixture(
     workflow_name: &str,
     workflow_content: &str,
     extra_files: &[(&str, &str)],
+) -> (bool, String) {
+    run_hygiene_with_fixture_env(workflow_name, workflow_content, extra_files, &[], None)
+}
+
+fn run_hygiene_with_fixture_env(
+    workflow_name: &str,
+    workflow_content: &str,
+    extra_files: &[(&str, &str)],
+    envs: &[(&str, &str)],
+    path_prefix: Option<&std::path::Path>,
 ) -> (bool, String) {
     let temp_root = unique_temp_dir("workflow-hygiene");
     let script_src = repo_root().join("scripts/check-workflow-hygiene.sh");
@@ -26,16 +39,27 @@ fn run_hygiene_with_fixture(
         write_file(&temp_root.path().join(relative_path), content);
     }
 
-    let output = bash_command()
+    let mut command = bash_command();
+    command
         .arg("scripts/check-workflow-hygiene.sh")
-        .current_dir(temp_root.path())
-        .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "Failed to run workflow hygiene script in {}: {e}",
-                temp_root.path().display()
-            )
-        });
+        .current_dir(temp_root.path());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    if let Some(path_prefix) = path_prefix {
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![path_prefix.to_path_buf()];
+        paths.extend(std::env::split_paths(&existing_path));
+        let joined = std::env::join_paths(paths).expect("failed to join PATH for fixture");
+        command.env("PATH", joined);
+    }
+
+    let output = command.output().unwrap_or_else(|e| {
+        panic!(
+            "Failed to run workflow hygiene script in {}: {e}",
+            temp_root.path().display()
+        )
+    });
 
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -524,6 +548,99 @@ jobs:
     assert!(
         !output.contains("Action uses invalid ref format"),
         "Did not expect invalid-ref errors for explicit version tags.\nOutput:\n{output}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_workflow_hygiene_validates_action_tags_when_enabled() {
+    let temp_root = unique_temp_dir("workflow-hygiene-fake-git");
+    let fake_bin = temp_root.path().join("bin");
+    fs::create_dir_all(&fake_bin).expect("failed to create fake bin dir");
+    let fake_git = fake_bin.join("git");
+    write_file(
+        &fake_git,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "remote" ]; then
+  exit 1
+fi
+
+if [ "${1:-}" = "ls-remote" ]; then
+  tag_ref="${@: -1}"
+  case "$tag_ref" in
+    refs/tags/v1.2.3)
+      exit 0
+      ;;
+    *)
+      exit 2
+      ;;
+  esac
+fi
+
+exit 1
+"#,
+    );
+    let mut perms = fs::metadata(&fake_git)
+        .expect("failed to stat fake git")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_git, perms).expect("failed to chmod fake git");
+
+    let valid_workflow = r#"name: Existing Action Tag
+on: [push]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v1.2.3
+      - run: echo ok
+"#
+    .replace('\n', "\r\n");
+    let (success, output) = run_hygiene_with_fixture_env(
+        "existing-action-tag.yml",
+        &valid_workflow,
+        &[],
+        &[("SIGNAL_FISH_CHECK_ACTION_REF_TAGS", "1")],
+        Some(&fake_bin),
+    );
+    assert!(
+        success,
+        "Workflow hygiene script should accept existing action tags when live tag \
+         validation is enabled.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("All checked GitHub Actions version tags exist upstream"),
+        "Expected live tag validation success message.\nOutput:\n{output}"
+    );
+
+    let invalid_workflow = r#"name: Missing Action Tag
+on: [push]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v9.9.9
+      - run: echo ok
+"#;
+    let (success, output) = run_hygiene_with_fixture_env(
+        "missing-action-tag.yml",
+        invalid_workflow,
+        &[],
+        &[("SIGNAL_FISH_CHECK_ACTION_REF_TAGS", "1")],
+        Some(&fake_bin),
+    );
+    assert!(
+        !success,
+        "Workflow hygiene script must fail when an explicit action tag does not \
+         exist upstream and live validation is enabled.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("GitHub Actions tag does not exist upstream: actions/checkout@v9.9.9"),
+        "Expected missing tag diagnostic.\nOutput:\n{output}"
     );
 }
 

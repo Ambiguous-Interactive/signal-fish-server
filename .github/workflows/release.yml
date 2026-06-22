@@ -582,8 +582,9 @@ jobs:
   # run was not cancelled, EVEN IF some `build-binaries` legs failed. Combined
   # with `fail-fast: false`, that delivers the stated intent: one platform's
   # toolchain hiccup attaches the binaries that DID build rather than stripping
-  # every platform's binary off the release. `download-artifact` collects only
-  # the artifacts that successfully uploaded.
+  # every platform's binary off the release. The artifact discovery step below
+  # also handles the zero-success case explicitly so `download-artifact` is never
+  # asked to resolve an unmatched `release-binary-*` pattern.
   # ---------------------------------------------------------------------------
   attach-binaries:
     name: Attach binaries to release
@@ -593,18 +594,43 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: read
     steps:
+      - name: Find binary artifacts
+        id: binary-artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          artifact_names=$(gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select((.expired | not) and (.name | startswith("release-binary-"))) | .name')
+          artifact_count=$(printf '%s\n' "$artifact_names" | awk 'NF { count++ } END { print count + 0 }')
+          echo "count=$artifact_count" >> "$GITHUB_OUTPUT"
+
+          if [ "$artifact_count" -eq 0 ]; then
+            echo "No release-binary-* artifacts were uploaded by build-binaries; skipping binary attachment."
+          else
+            echo "Found $artifact_count release-binary-* artifact(s):"
+            printf '%s\n' "$artifact_names" | awk 'NF { print "  - " $0 }'
+          fi
+
       - name: Checkout repository
+        if: steps.binary-artifacts.outputs.count != '0'
         uses: actions/checkout@v6.0.3
 
       - name: Download all binary artifacts
-        uses: actions/download-artifact@v7.0.1
+        if: steps.binary-artifacts.outputs.count != '0'
+        uses: actions/download-artifact@v7.0.0
         with:
           path: dist
           pattern: release-binary-*
           merge-multiple: true
 
       - name: Resolve release tag
+        if: steps.binary-artifacts.outputs.count != '0'
         id: tag
         shell: bash
         run: |
@@ -622,6 +648,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Attach binaries to release
+        if: steps.binary-artifacts.outputs.count != '0'
         uses: softprops/action-gh-release@v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.tag }}

@@ -182,12 +182,10 @@ validate_signal_fish_dependency_versions() {
         fi
 
         if [ -z "$observed" ]; then
-            # A sourceless dependency (path/git/workspace/registry, no version
-            # key) is a legitimate example with nothing to pin -- skip it.
-            # Anything else is a malformed version example and must be fixed.
-            if [[ "$line" =~ (path|git|workspace|registry)[[:space:]]*= ]]; then
-                continue
-            fi
+            # Versionless path/git/workspace/registry examples cannot be
+            # auto-synced when Cargo.toml changes, so they are rejected just
+            # like malformed dependency examples. Use an explicit current
+            # version or the `<version>` placeholder in template docs.
             action_error "$file contains a signal-fish-server dependency line without a parseable version: $line"
             continue
         fi
@@ -199,18 +197,24 @@ validate_signal_fish_dependency_versions() {
     done < <(grep -E "$SFS_DEP_PATTERN" "$file" || true)
 }
 
-# All Markdown docs, discovered from the filesystem (works in the non-git fixture
-# harness too) and excluding generated/vendored trees. NUL-delimited (-print0)
-# for path-safety and identical behavior on GNU and BSD/macOS find. The version
-# filter is applied per-file in the loop with a plain `grep -qE`; we deliberately
-# avoid `grep -Z` here because BSD/macOS grep treats `-Z` as zgrep (decompress),
-# not GNU's --null -- the same portable idiom used by check-internal-links.sh.
+# All first-party Markdown docs, discovered from the filesystem (works in the
+# non-git fixture harness too) and excluding generated, vendored, and fixture
+# trees. NUL-delimited (-print0) for path-safety and identical behavior on GNU
+# and BSD/macOS find. The version filter is applied per-file in the loop with a
+# plain `grep -qE`; we deliberately avoid `grep -Z` here because BSD/macOS grep
+# treats `-Z` as zgrep (decompress), not GNU's --null -- the same portable idiom
+# used by check-internal-links.sh.
+#
+# `.llm` is intentionally NOT pruned: it is first-party agent guidance, and a
+# dependency example there should drift-fail just like docs/ or README.md.
 find_markdown_docs() {
     find . \
         \( -type d \( -name 'target' \
+        -o -name 'third_party' \
         -o -name 'node_modules' \
         -o -name 'site' \
         -o -name '.git' \
+        -o -name 'test-fixtures' \
         -o -name 'mutants.out' \) \) -prune \
         -o -type f -name '*.md' -print0
 }

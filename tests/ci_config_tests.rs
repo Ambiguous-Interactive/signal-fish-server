@@ -3959,6 +3959,93 @@ fn test_release_workflow_attaches_binaries_with_checksums() {
 }
 
 #[test]
+fn test_release_binary_attach_job_preserves_partial_success_gate() {
+    let root = repo_root();
+    let live = read_live_file(&root.join(".github/workflows/release.yml"));
+    let attach_job = extract_workflow_job_block(&live, "attach-binaries")
+        .expect("release.yml must define the attach-binaries job");
+    let attach_if = extract_job_if_condition(&live, "attach-binaries")
+        .expect("attach-binaries must define an explicit job-level if condition");
+
+    assert!(
+        attach_job.contains("needs: [publish, build-binaries]"),
+        "attach-binaries must depend on both `publish` and `build-binaries` so \
+         the Release exists and all binary matrix legs have finished before the \
+         single release upload starts.\nJob block:\n{attach_job}"
+    );
+    assert!(
+        attach_if.contains("!cancelled()")
+            && attach_if.contains("needs.publish.result == 'success'"),
+        "attach-binaries must use the documented partial-success gate with \
+         `!cancelled()` and `needs.publish.result == 'success'`. That lets \
+         it attach binaries from successful matrix legs while still skipping \
+         cancelled runs and failed publishes.\nActual if: {attach_if}"
+    );
+    assert!(
+        !attach_if.contains("always()"),
+        "attach-binaries must not use `always()` in its job-level condition. \
+         `!cancelled()` preserves cancellation behavior while still overriding \
+         the implicit needs success gate for partial-success binary attachment.\n\
+         Actual if: {attach_if}"
+    );
+}
+
+#[test]
+fn test_release_workflow_skips_binary_attach_when_no_artifacts_exist() {
+    // The attach job deliberately runs after `build-binaries` failures so it can
+    // upload partial-success binaries. If every matrix leg fails, however, there
+    // are no `release-binary-*` artifacts and download-artifact's unmatched
+    // pattern behavior must not add a second, misleading failure. The job should
+    // list artifacts first, log a clear no-op diagnostic, and guard every
+    // artifact-consuming step on a nonzero count.
+    let root = repo_root();
+    let live = read_live_file(&root.join(".github/workflows/release.yml"));
+    let attach_job = extract_workflow_job_block(&live, "attach-binaries")
+        .expect("release.yml must define the attach-binaries job");
+
+    for required in [
+        "actions: read",
+        "id: binary-artifacts",
+        "gh api --paginate",
+        "actions/runs/${{ github.run_id }}/artifacts",
+        "startswith(\"release-binary-\")",
+        "count=$artifact_count",
+        "No release-binary-* artifacts were uploaded",
+    ] {
+        assert!(
+            attach_job.contains(required),
+            "attach-binaries must contain `{required}` so it can distinguish \
+             partial-success artifact attachment from the zero-artifact no-op.\n\
+             Job block:\n{attach_job}"
+        );
+    }
+
+    for step_name in [
+        "Checkout repository",
+        "Download all binary artifacts",
+        "Resolve release tag",
+        "Attach binaries to release",
+    ] {
+        let marker = format!("      - name: {step_name}");
+        let step_start = attach_job
+            .find(&marker)
+            .unwrap_or_else(|| panic!("attach-binaries must include step `{step_name}`"));
+        let after_step_start = &attach_job[step_start + marker.len()..];
+        let step_end = after_step_start
+            .find("\n      - name:")
+            .map(|offset| step_start + marker.len() + offset)
+            .unwrap_or(attach_job.len());
+        let step_block = &attach_job[step_start..step_end];
+
+        assert!(
+            step_block.contains("if: steps.binary-artifacts.outputs.count != '0'"),
+            "attach-binaries step `{step_name}` must be skipped when no binary \
+             artifacts exist.\nStep block:\n{step_block}"
+        );
+    }
+}
+
+#[test]
 fn test_permissions_guidance_avoids_incorrect_default_claim() {
     let root = repo_root();
     let skill_path = root.join(".llm/skills/github-actions-workflow-config.md");

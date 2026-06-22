@@ -208,6 +208,9 @@ job that builds a standalone binary per OS/arch and attaches each (with a checks
   `if: ${{ !cancelled() && needs.publish.result == 'success' }}` so one platform's toolchain
   hiccup attaches the binaries that DID build instead of skipping the attach job entirely (a
   plain `needs:` on a failed matrix job would skip it and strip every binary off the release).
+- **Guard the zero-artifact case before downloading.** List current-run artifacts with the
+  GitHub API, count non-expired `release-binary-*` artifacts, and skip checkout/download/tag/attach
+  steps when the count is zero. This needs `actions: read` plus release `contents: write`.
 - **Cross-compile the awkward targets instead of chasing runners:** build both macOS targets on
   Apple Silicon (`macos-14`) — the native toolchain cross-compiles `x86_64` and avoids the
   deprecating Intel runners. For Linux `aarch64`, install `gcc-aarch64-linux-gnu` **and**
@@ -219,8 +222,7 @@ job that builds a standalone binary per OS/arch and attaches each (with a checks
 - Build with **default features** to match the container image and dodge C-crypto cross-toolchain
   pain (`aws-lc-sys`/`ring` only arrive via the optional `tls` feature).
 
-**Validated by:** `test_release_workflow_builds_all_platform_binaries` and
-`test_release_workflow_attaches_binaries_with_checksums`.
+**Validated by:** release workflow tests in `tests/ci_config_tests.rs`.
 
 ---
 
@@ -283,8 +285,7 @@ redundant here and strictly worse, because `always()` also runs on cancellation
 - [ ] `PATH_FILTERED_WORKFLOWS` patterns kept in sync with each workflow's `paths:` block
 - [ ] Release-binary matrix covers every `REQUIRED_RELEASE_TARGETS` triple with `fail-fast: false`
 - [ ] Each release archive ships a `.sha256` checksum and is uploaded to the Release
-- [ ] Partial-success attach jobs gate on `!cancelled()` (NOT `always()`);
-      no redundant `matrix.foo != null` guards added on sparse-matrix steps (see §7)
+- [ ] Partial-success attach jobs gate on `!cancelled()`; list artifacts before download; avoid redundant sparse-matrix null guards (see §7)
 - [ ] `actionlint` is green (proves sparse-matrix property references are valid)
 
 ---
