@@ -17,7 +17,7 @@ multiple file contents.
 
 | Hook | Fast Checks |
 |------|-------------|
-| pre-commit | production Rust commits: explicit panic-macro additions only (`panic!`, `todo!`, `unimplemented!`, `unreachable!`) with test-code ranges excluded; non-production-Rust commits: metadata guards such as skills index auto-repair, `.llm` file size, README badge style, and hook speed policy |
+| pre-commit | production Rust commits: explicit panic-macro additions only (`panic!`, `todo!`, `unimplemented!`, `unreachable!`) with test-code ranges excluded; matching metadata paths always trigger skills index auto-repair, `.llm` file size, README badge style, and hook speed policy |
 | pre-push | pushed-file discovery, workflow direct-script invocation policy, hook speed policy |
 
 ## Required Agent Checks
@@ -33,6 +33,9 @@ pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktr
 ./scripts/run-local-ci.sh
 ```
 
+`pre-commit.ps1 -Worktree` includes staged policy paths as well as worktree
+changes and fails closed when staged policy content differs from the worktree.
+
 ## Hook Readiness
 
 ```bash
@@ -40,8 +43,9 @@ pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1 -Repair
 ```
 
-The readiness check verifies `core.hooksPath`, executable bits, required tools
-(`git`, `pwsh`), and optional local-CI tools.
+The default readiness check verifies `core.hooksPath`, executable bits, and
+required tools (`git`, `pwsh`). Add `-WorkflowTools` to inventory optional
+local-CI tools.
 
 ## Markdownlint
 

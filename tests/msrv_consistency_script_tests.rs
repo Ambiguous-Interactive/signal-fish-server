@@ -172,3 +172,75 @@ fn test_msrv_script_fails_when_client_manifest_is_missing() {
         "the diagnostic should name the missing client manifest.\nOutput:\n{output}"
     );
 }
+
+#[test]
+fn test_msrv_script_parses_dockerfile_from_line_variants() {
+    // The Dockerfile rust base may carry build flags (multi-arch
+    // `FROM --platform=$BUILDPLATFORM rust:...`), an `AS <stage>` suffix, a
+    // digest, or a 1.88.0 patch form. Version extraction must be tolerant of all
+    // of these. A `--platform` prefix silently read as an EMPTY version is
+    // exactly what broke the MSRV job after the container-image upgrade, so each
+    // shape is pinned here as a regression guard for the whole parser class.
+    let dockerfiles = [
+        ("plain", "FROM rust:1.88-bookworm\n"),
+        ("stage-suffix", "FROM rust:1.88-bookworm AS chef\n"),
+        (
+            "platform-flag",
+            "FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS chef\n",
+        ),
+        ("patch-version", "FROM rust:1.88.0-bookworm\n"),
+        (
+            "multi-stage",
+            "FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS chef\n\
+             FROM debian:bookworm-slim AS runtime\n",
+        ),
+    ];
+
+    for (name, dockerfile) in dockerfiles {
+        let (exit_code, output) = run_msrv_script_with_files(&[
+            ("Cargo.toml", "[package]\nrust-version = \"1.88.0\"\n"),
+            ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.88.0\"\n"),
+            ("clippy.toml", "msrv = \"1.88.0\"\n"),
+            ("Dockerfile", dockerfile),
+            (
+                "clients/native/Cargo.toml",
+                "[package]\nrust-version = \"1.88.0\"\n",
+            ),
+        ]);
+
+        assert_eq!(
+            exit_code, 0,
+            "Dockerfile variant '{name}' should parse cleanly.\nOutput:\n{output}"
+        );
+        assert!(
+            output.contains("Dockerfile (rust=1.88)"),
+            "variant '{name}' must extract rust=1.88 from the FROM line.\nOutput:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn test_repository_passes_msrv_consistency_script() {
+    // Run the checker against the REAL repository tree (not a synthetic
+    // fixture), mirroring test_repository_passes_doc_consistency_script. The
+    // fixture-based tests above cannot catch drift in the ACTUAL Dockerfile or
+    // manifests -- this guard does, and it fails locally via `cargo test` before
+    // the dedicated CI job ever runs. It is the test that would have caught the
+    // `FROM --platform=... rust:` regression at its source.
+    let root = repo_root();
+    let output = bash_command()
+        .arg("scripts/check-msrv-consistency.sh")
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run MSRV consistency script: {e}"));
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Repository must satisfy scripts/check-msrv-consistency.sh (MSRV pinned \
+         consistently across rust-toolchain.toml, clippy.toml, Dockerfile, and \
+         clients/native/Cargo.toml).\nOutput:\n{combined}",
+    );
+}

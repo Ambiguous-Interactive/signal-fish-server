@@ -57,11 +57,32 @@ The server starts on port 3536 by default.
 docker run -p 3536:3536 ghcr.io/ambiguous-interactive/signal-fish-server:latest
 ```
 
+The published image is a multi-architecture manifest, so the same tag pulls the
+right build automatically on `linux/amd64`, `linux/arm64` (AWS Graviton, Ampere,
+Raspberry Pi 64-bit, Apple Silicon under Docker), and `linux/arm/v7` (32-bit
+ARM / Raspberry Pi).
+
 ### Docker Compose
 
 ```bash
 docker compose up
 ```
+
+### Prebuilt binaries
+
+Each [GitHub Release](https://github.com/Ambiguous-Interactive/signal-fish-server/releases)
+ships standalone, self-contained executables — no Rust toolchain or Docker
+required — for:
+
+| OS | Architectures |
+| --- | --- |
+| Linux | x86_64, aarch64 (ARM64) |
+| macOS | x86_64 (Intel), aarch64 (Apple Silicon) |
+| Windows | x86_64, aarch64 (ARM64) |
+
+Every archive is accompanied by a `.sha256` checksum for verification. Download
+the archive for your platform, extract it, and run the `signal-fish-server`
+binary.
 
 ### Connect
 

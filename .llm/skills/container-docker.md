@@ -66,6 +66,25 @@ ENTRYPOINT ["/usr/local/bin/server"]
 
 ---
 
+## Multi-Architecture Images (cross-compile, not emulate)
+
+Publish one manifest list (e.g. `linux/amd64,linux/arm64`) so every arch pulls the same tag.
+Cross-compile the heavy Rust build; reserve QEMU for the trivial runtime stage only.
+
+- **Pin the builder to the host:** `FROM --platform=$BUILDPLATFORM rust:... AS builder`, then
+  cross-compile to `$TARGETARCH`. The compile runs at native speed; emulated Rust builds are
+  minutes-to-tens-of-minutes slower and flakier.
+- **Decide native-vs-cross by `$TARGETARCH` == `$BUILDARCH`** — never hard-code one arch as native;
+  the runner may be amd64 (arm cross) or arm64 (amd64 cross).
+- **Name the cross libc dev package explicitly** under `--no-install-recommends`
+  (`gcc-aarch64-linux-gnu` **+** `libc6-dev-arm64-cross`); otherwise linking fails with
+  `cannot find Scrt1.o`.
+- **`docker/setup-qemu-action` is still required** for the runtime stage's `useradd`/`apt-get`.
+- Pin the exact `platforms:` and supported target triples in a drift test so a "simplification"
+  can't silently drop an arch (see `tests/ci_config_tests.rs` in this repo).
+
+---
+
 ## Container Hardening
 
 ### Docker Run Flags

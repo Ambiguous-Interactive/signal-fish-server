@@ -32,6 +32,10 @@
 #   5. Create git tag (for workflow_dispatch)
 #   6. Generate SBOM (CycloneDX JSON) for supply-chain provenance
 #   7. Extract changelog section and create GitHub Release (with SBOM attached)
+#   8. build-binaries: cross-compile standalone binaries for every supported
+#      OS/arch (Linux/macOS/Windows x86_64+aarch64) in parallel with publish
+#   9. attach-binaries: download all binary artifacts and attach them (with
+#      SHA-256 checksums) to the GitHub Release in a single upload
 
 name: Release - Publish Crate
 
@@ -413,5 +417,252 @@ jobs:
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
           files: sbom.cdx.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Cross-platform standalone binaries
+  #
+  # Builds a standalone `signal-fish-server` executable for every supported
+  # OS/architecture so Windows / macOS / ARM users can run the server without a
+  # Rust toolchain or Docker.
+  #
+  # Build and upload are deliberately SPLIT into two jobs:
+  #   - `build-binaries` (this job): a `fail-fast: false` matrix that compiles
+  #     each target and uploads its archive + checksum as a workflow artifact.
+  #     It depends only on `preflight`, so it runs in PARALLEL with `publish`.
+  #   - `attach-binaries` (below): a single job that downloads every artifact
+  #     and performs ONE `action-gh-release` upload. Funnelling all assets
+  #     through one release API call avoids the race where N parallel matrix
+  #     jobs PATCH/upload to the same Release concurrently (intermittent 422s /
+  #     clobbering).
+  #
+  # Binaries are built with DEFAULT features (no `tls`) to match the published
+  # container image and to keep cross-compilation free of C-crypto toolchain
+  # requirements (aws-lc-sys / ring are only pulled in by the optional `tls`
+  # feature). Keep the matrix target list in lockstep with
+  # REQUIRED_RELEASE_TARGETS in tests/ci_config_tests.rs.
+  #
+  # `fail-fast: false` so one platform's toolchain hiccup does not strip
+  # binaries for every other platform off the release.
+  # ---------------------------------------------------------------------------
+  build-binaries:
+    name: Binary (${{ matrix.target }})
+    needs: [preflight]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            # libc6-dev-arm64-cross supplies the C runtime startup objects
+            # (Scrt1.o/crti.o); it is only a recommends of the cross GCC, so it
+            # must be named explicitly under --no-install-recommends.
+            linker_pkg: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            linker: aarch64-linux-gnu-gcc
+          # Both macOS targets build on Apple Silicon (macos-14): the native
+          # Apple toolchain cross-compiles x86_64 from arm64 without extra
+          # setup, and avoids the deprecating Intel macOS runner images.
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml" >&2
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.target }}
+
+      - name: Install cross linker (Linux cross targets)
+        if: matrix.linker_pkg != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # matrix.linker_pkg may name multiple packages (cross GCC + cross
+          # libc dev); GitHub interpolates it to a literal list before the shell
+          # runs, so word-splitting here is intentional and safe.
+          sudo apt-get install -y --no-install-recommends ${{ matrix.linker_pkg }}
+          # cargo reads CARGO_TARGET_<TRIPLE>_LINKER (triple upcased, '-' -> '_').
+          ENV_KEY="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER"
+          echo "${ENV_KEY}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package binary and checksum
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Resolve version: tag pushes carry it in the ref; dispatch reads it
+          # from Cargo.toml.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          BIN=signal-fish-server
+          EXE=""
+          if [ "${{ runner.os }}" = "Windows" ]; then EXE=".exe"; fi
+
+          NAME="signal-fish-server-v${VERSION}-${{ matrix.target }}"
+          mkdir "$NAME"
+          cp "target/${{ matrix.target }}/release/${BIN}${EXE}" "$NAME/"
+          # LICENSE is required in every redistributable archive — fail loudly if
+          # it is missing rather than silently shipping an unlicensed binary.
+          cp LICENSE "$NAME/"
+          cp README.md "$NAME/"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ARCHIVE="${NAME}.zip"
+            7z a "$ARCHIVE" "$NAME" > /dev/null
+          else
+            ARCHIVE="${NAME}.tar.gz"
+            tar czf "$ARCHIVE" "$NAME"
+          fi
+
+          # SHA-256 checksum (sha256sum on Linux / Git-Bash, shasum on macOS).
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+          fi
+
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-binary-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Attach all built binaries to the GitHub Release in a single upload.
+  # Depends on `publish` (so the Release/tag exists) and on every matrix build.
+  #
+  # The `if:` runs this job as long as the release was actually published and the
+  # run was not cancelled, EVEN IF some `build-binaries` legs failed. Combined
+  # with `fail-fast: false`, that delivers the stated intent: one platform's
+  # toolchain hiccup attaches the binaries that DID build rather than stripping
+  # every platform's binary off the release. The artifact discovery step below
+  # also handles the zero-success case explicitly so `download-artifact` is never
+  # asked to resolve an unmatched `release-binary-*` pattern.
+  # ---------------------------------------------------------------------------
+  attach-binaries:
+    name: Attach binaries to release
+    needs: [publish, build-binaries]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Find binary artifacts
+        id: binary-artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          artifact_names=$(gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select((.expired | not) and (.name | startswith("release-binary-"))) | .name')
+          artifact_count=$(printf '%s\n' "$artifact_names" | awk 'NF { count++ } END { print count + 0 }')
+          echo "count=$artifact_count" >> "$GITHUB_OUTPUT"
+
+          if [ "$artifact_count" -eq 0 ]; then
+            echo "No release-binary-* artifacts were uploaded by build-binaries; skipping binary attachment."
+          else
+            echo "Found $artifact_count release-binary-* artifact(s):"
+            printf '%s\n' "$artifact_names" | awk 'NF { print "  - " $0 }'
+          fi
+
+      - name: Checkout repository
+        if: steps.binary-artifacts.outputs.count != '0'
+        uses: actions/checkout@v6.0.3
+
+      - name: Download all binary artifacts
+        if: steps.binary-artifacts.outputs.count != '0'
+        uses: actions/download-artifact@v7.0.0
+        with:
+          path: dist
+          pattern: release-binary-*
+          merge-multiple: true
+
+      - name: Resolve release tag
+        if: steps.binary-artifacts.outputs.count != '0'
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
+              exit 1
+            fi
+            TAG="v${VERSION}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Attach binaries to release
+        if: steps.binary-artifacts.outputs.count != '0'
+        uses: softprops/action-gh-release@v3.0.0
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          # MUST be false: action-gh-release evaluates fail_on_unmatched_files
+          # PER glob, so `true` would fail the whole attach (stripping every
+          # binary) whenever an entire format class is absent — e.g. if both
+          # Windows legs (the only *.zip producers, sharing windows-latest) fail
+          # together. That directly contradicts the fail-fast:false /
+          # partial-success intent above. Per-artifact presence is already
+          # enforced upstream by `if-no-files-found: error` on each upload.
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

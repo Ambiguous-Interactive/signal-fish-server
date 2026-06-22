@@ -190,6 +190,90 @@ ensures every required workflow with `paths:` filters appears in `PATH_FILTERED_
 
 ---
 
+## 6. Cross-Platform Release Binaries
+
+A crate-only release leaves Windows / macOS / ARM users with nothing to download. Add a matrix
+job that builds a standalone binary per OS/arch and attaches each (with a checksum) to the Release.
+
+- **Split build from upload into two jobs.** A `build-binaries` matrix (one leg per target)
+  compiles and uploads each archive + checksum as a workflow artifact via
+  `actions/upload-artifact`; a single `attach-binaries` job then `download-artifact`s all of them
+  and performs ONE `softprops/action-gh-release` upload. Funnelling every asset through one release
+  API call avoids the race where N parallel matrix legs PATCH/upload to the same Release
+  concurrently (intermittent 422s / clobbered assets).
+- **Pin the target list in a drift test** (`REQUIRED_RELEASE_TARGETS`) so a platform can't silently
+  vanish from the matrix. Covered triples here: Linux `x86_64`/`aarch64`, macOS `x86_64`/`aarch64`,
+  Windows `x86_64`/`aarch64`.
+- **`fail-fast: false` + run attach on partial success.** Give `attach-binaries` an
+  `if: ${{ !cancelled() && needs.publish.result == 'success' }}` so one platform's toolchain
+  hiccup attaches the binaries that DID build instead of skipping the attach job entirely (a
+  plain `needs:` on a failed matrix job would skip it and strip every binary off the release).
+- **Guard the zero-artifact case before downloading.** List current-run artifacts with the
+  GitHub API, count non-expired `release-binary-*` artifacts, and skip checkout/download/tag/attach
+  steps when the count is zero. This needs `actions: read` plus release `contents: write`.
+- **Cross-compile the awkward targets instead of chasing runners:** build both macOS targets on
+  Apple Silicon (`macos-14`) — the native toolchain cross-compiles `x86_64` and avoids the
+  deprecating Intel runners. For Linux `aarch64`, install `gcc-aarch64-linux-gnu` **and**
+  `libc6-dev-arm64-cross` (the latter is only a _recommends_, so `--no-install-recommends` drops it
+  and linking fails with `cannot find Scrt1.o`).
+- **Ship a `.sha256` next to each archive.**
+- **Run `build-binaries` in parallel with `publish`** (`needs: [preflight]`), and gate
+  `attach-binaries` on `needs: [publish, build-binaries]` so the Release/tag exists before upload.
+- Build with **default features** to match the container image and dodge C-crypto cross-toolchain
+  pain (`aws-lc-sys`/`ring` only arrive via the optional `tls` feature).
+
+**Validated by:** release workflow tests in `tests/ci_config_tests.rs`.
+
+---
+
+## 7. Expression, Matrix, and `needs` Gotchas (verified semantics)
+
+These three patterns look buggy at a glance and attract "fixes" that are wrong or
+regressive. The behavior below is the GitHub Actions documented contract — do not
+"correct" working code based on the misreadings noted. `actionlint` (run in CI and
+`scripts/run-local-ci.sh`) validates the matrix case.
+
+### Sparse matrix properties are not an error
+
+A property set on only SOME `matrix.include` entries (e.g. `linker_pkg` only on the
+`aarch64-unknown-linux-gnu` leg) is legal. Referencing `matrix.linker_pkg` from a
+step `if:` on a leg that does not define it yields an EMPTY value, not an error.
+`actionlint` knows every leg's property set and stays silent — so a green
+`actionlint` run is proof the reference is valid.
+
+### `null`/empty coercion: `matrix.foo != ''` is FALSE when `foo` is unset
+
+GitHub coerces across types to a number for `==`/`!=`: **`null` → `0`** and **empty
+string `''` → `0`**. So on a leg where `matrix.linker_pkg` is undefined,
+`matrix.linker_pkg != ''` is `0 != 0` → **false**, and the step is correctly
+skipped. The belief that "`null != ''` is true, so the step runs on macOS/Windows"
+is wrong. Do NOT bolt on redundant `matrix.foo != null` guards to "fix" a
+non-problem. (A `runner.os == 'Linux'` guard is fine as _intent_ documentation, but
+is not required for correctness.)
+
+### `!cancelled()` already overrides the implicit `needs` success gate
+
+A job with `needs:` is, by default, gated on `success()` of every needed job. That
+default is replaced the moment the job's `if:` contains ANY status function —
+`success()`, `failure()`, `cancelled()`, or `always()`. So
+
+```yaml
+attach-binaries:
+  needs: [publish, build-binaries]
+  if: ${{ !cancelled() && needs.publish.result == 'success' }}
+```
+
+DOES run when a `build-binaries` matrix leg fails (publish succeeded, run not
+cancelled) — that is the partial-success design. Do NOT add `always()`: it is
+redundant here and strictly worse, because `always()` also runs on cancellation
+(GitHub explicitly recommends `!cancelled()` over `always()`). `always() &&
+!cancelled()` simplifies to `!cancelled()` anyway.
+
+**Validated by:** `actionlint` (matrix), and the release drift tests that assert the
+`attach-binaries` gate string.
+
+---
+
 ## Agent Checklist
 
 - [ ] All `cargo` commands in CI use `--locked` consistently
@@ -199,6 +283,11 @@ ensures every required workflow with `paths:` filters appears in `PATH_FILTERED_
 - [ ] Required workflow ID lists asserted unique at start of preflight
 - [ ] Path-filtered required workflows registered in `PATH_FILTERED_WORKFLOWS`
 - [ ] `PATH_FILTERED_WORKFLOWS` patterns kept in sync with each workflow's `paths:` block
+- [ ] Release-binary matrix covers every `REQUIRED_RELEASE_TARGETS` triple with `fail-fast: false`
+- [ ] Each release archive ships a `.sha256` checksum and is uploaded to the Release
+- [ ] Partial-success attach jobs gate on `!cancelled()`; list artifacts before
+  download; avoid redundant sparse-matrix null guards (see §7)
+- [ ] `actionlint` is green (proves sparse-matrix property references are valid)
 
 ---
 

@@ -16,6 +16,15 @@
 #   - :1.2.3       — semver without 'v' prefix (on v* tag pushes)
 #   - :1.2         — major.minor only (on v* tag pushes)
 #
+# Multi-architecture (issue #122):
+#   The image is published as a single multi-arch manifest list covering
+#   linux/amd64, linux/arm64, and linux/arm/v7 so ARM consumers (AWS Graviton,
+#   Ampere, Raspberry Pi, Apple Silicon under Docker) can pull it. The Rust
+#   build is cross-compiled natively on the amd64 runner (see Dockerfile);
+#   QEMU only emulates the tiny runtime stage. Keep the `platforms:` list below
+#   in sync with the Dockerfile arch map and with REQUIRED_CONTAINER_PLATFORMS
+#   in tests/ci_config_tests.rs.
+#
 # ⚠️  Making the package public (one-time manual step):
 #   After the first successful workflow run, the package will be private by
 #   default. An owner must make it public at:
@@ -64,6 +73,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.3
 
+      - name: Set up QEMU
+        # Provides binfmt handlers so buildx can execute the target-arch runtime
+        # stage (useradd + apt-get). The Rust compile itself is cross-compiled
+        # natively on this amd64 runner and never runs under emulation.
+        uses: docker/setup-qemu-action@v4.1.0
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.1.0
 
@@ -99,6 +114,7 @@ jobs:
         uses: docker/build-push-action@v7.2.0
         with:
           context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

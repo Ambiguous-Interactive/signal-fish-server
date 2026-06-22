@@ -98,6 +98,29 @@ Config and binary wire-format drift rules:
   external cargo-chef artifact. `cargo install cargo-chef` is pinned to an explicit version in the
   `Dockerfile` (currently `0.1.77`, the latest stable, which also trims lints from the recipe) for
   reproducibility — bump it deliberately, not implicitly via "latest".
+- **Multi-arch container builds cross-compile; the gotchas are toolchain-shaped, not Rust-shaped** --
+  the release image (`docker-publish.yml` + `Dockerfile`) is a `linux/amd64,linux/arm64,linux/arm/v7`
+  manifest. The strategy is cross-compilation, NOT QEMU emulation of the compile: the `builder`
+  stage is pinned to `--platform=$BUILDPLATFORM` and cross-compiles to `$TARGETARCH`; only the tiny
+  runtime stage (`useradd` + a 2-package `apt-get`) runs under QEMU (hence `docker/setup-qemu-action`
+  is still required). Hard-won specifics, all enforced by the
+  `tests/ci_config_tests.rs::test_docker_publish_builds_multi_arch_manifest` /
+  `test_dockerfile_cross_compiles_for_target_platform` guards and
+  `REQUIRED_CONTAINER_PLATFORMS`/`REQUIRED_RELEASE_TARGETS`:
+  (1) Native-vs-cross is decided by comparing `$TARGETARCH` to `$BUILDARCH`, NOT by hard-coding
+  amd64 as "native" — GitHub's runner is amd64 (so arm64/armv7 are cross) but a dev box may be
+  arm64 (so amd64 is the cross target); hard-coding breaks one or the other.
+  (2) Under `--no-install-recommends` you MUST name the cross libc dev package explicitly
+  (`libc6-dev-arm64-cross` / `libc6-dev-armhf-cross` / `libc6-dev-amd64-cross`) alongside the cross
+  GCC; it is only a _recommends_ of the compiler, and without it linking dies with `cannot find
+  Scrt1.o`. This bites the `aarch64-unknown-linux-gnu` job in `release.yml` too.
+  (3) The image ships DEFAULT features (no `tls`), which keeps `aws-lc-sys`/`ring` (C-crypto needing
+  cmake/nasm + a cross sysroot) out of the build entirely — cross-compiling stays pure-Rust +
+  `getrandom` syscall + `libc`. Build release binaries with default features for the same reason.
+  (4) `mold` is intentionally dropped from the multi-arch `Dockerfile` (it is still used in the
+  devcontainer / mutation job): cross-link correctness across three arches beats the marginal
+  link-time win. (5) `armv7-unknown-linux-gnueabihf` links fine once (2) is satisfied — armv7-A has
+  64-bit atomics (LDREXD), so there is no `__atomic_*`/`-latomic` problem despite it being 32-bit.
 - **`rustls-pemfile` (RUSTSEC-2025-0134) is banned proactively, not because it is present** --
   `deny.toml` carries a `[[bans.deny]]` for the unmaintained `rustls-pemfile`, but the crate is
   NOT in the dependency tree (`cargo tree -i rustls-pemfile` matches nothing) on the default build

@@ -33,6 +33,7 @@ or when reviewing own work for correctness.
 
 - Run cargo check → clippy → test → fmt after every change
 - Run worktree hook preflights before handoff; do not rely on staged/push hook dry runs
+- After `.llm` edits, run `scripts/check-llm-file-sizes.sh` before handoff
 - Use Deep Review checklist for significant changes
 - Walk the "Am I Done?" decision tree before committing
 - Never modify test expectations to make tests pass
@@ -120,6 +121,12 @@ For changes in `.github/workflows/` or CI configuration:
 - [ ] **Local scripts use interpreters**: Workflow `run:` commands use `bash`,
   `pwsh -File`, `awk -f`, or `node` for repo scripts, never direct
   `scripts/foo.sh` / `./scripts/foo.sh` execution
+- [ ] **Config drift guards assert the live view**: presence checks
+  (`assert!(c.contains(..))`) on comment-bearing config (`.yml`, `Dockerfile`,
+  `.sh`, `.ps1`, `.toml`, JSONC) read via `read_live_file` / `strip_comment_lines`,
+  never raw `read_file` — a commented-out line must not satisfy the guard. Absence
+  checks (`!c.contains`) and Markdown (`#` = heading) stay raw. See
+  [CI Config Live View Tests](./ci-config-live-view-tests.md)
 - [ ] **MSRV consistency**: If Rust version changed, updated in ALL files (`Cargo.toml`, `rust-toolchain.toml`,
 
   clippy.toml, Dockerfile)

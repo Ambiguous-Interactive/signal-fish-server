@@ -21,6 +21,7 @@
 - [CI/CD Troubleshooting - Linting & Documentation Patterns](./ci-cd-troubleshooting-linting.md)
 - [CI/CD Troubleshooting - Script & Test Validation Patterns](./ci-cd-troubleshooting-scripts.md)
 - [CI/CD Troubleshooting - Supply Chain & Stale Reference Patterns](./ci-cd-troubleshooting-supply-chain.md)
+- [CI Config Live View Tests](./ci-config-live-view-tests.md)
 - [Classify User-Visible Changes](./classify-user-visible-changes.md)
 - [Clippy and Linting](./clippy-and-linting.md)
 - [Code Review Checklist](./code-review-checklist.md)

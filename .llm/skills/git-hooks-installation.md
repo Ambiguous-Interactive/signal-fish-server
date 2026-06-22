@@ -195,14 +195,16 @@ cross-platform logic in versioned PowerShell scripts.
 ### Platform-Specific Checks
 
 Keep platform-specific and optional-tool checks out of git hooks. Use
-`scripts/check-hook-readiness.ps1` for hook setup and `scripts/run-local-ci.sh`
-for slower workflow validation.
+`scripts/check-hook-readiness.ps1` for fast hook setup, `-WorkflowTools` for an
+optional tool inventory, and `scripts/run-local-ci.sh` for slower workflow
+validation.
 
 ### Windows Considerations
 
 - Require Git and PowerShell 7+ (`pwsh`) as the only hook runtime dependencies
 - Do not require Node, Cargo, devcontainers, WSL, or auto-installed toolchains in hooks
-- Validate optional workflow tools in readiness/local CI, not in pre-commit
+- Validate optional workflow tools with `check-hook-readiness.ps1 -WorkflowTools`
+  or local CI, not in pre-commit
 
 ---
 

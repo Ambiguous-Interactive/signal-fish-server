@@ -89,7 +89,7 @@ elif [ "$MODE" = "all" ]; then
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         while IFS= read -r -d '' markdown_file; do
             case "$markdown_file" in
-                target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*)
+                target/*|*/target/*|third_party/*|*/third_party/*|node_modules/*|*/node_modules/*|test-fixtures/*|*/test-fixtures/*)
                     continue
                     ;;
             esac
@@ -98,14 +98,13 @@ elif [ "$MODE" = "all" ]; then
     else
         while IFS= read -r -d '' markdown_file; do
             TO_CHECK+=("$markdown_file")
-        done < <(find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./node_modules/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" \
-            -print0)
+        done < <(find . \
+            \( -type d \( -name "target" \
+            -o -name "third_party" \
+            -o -name ".git" \
+            -o -name "node_modules" \
+            -o -name "test-fixtures" \) \) -prune \
+            -o -type f -name "*.md" -print0)
     fi
 elif [ "$MODE" = "staged" ]; then
     echo "Checking staged markdown files..."
@@ -121,14 +120,13 @@ else
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         while IFS= read -r -d '' markdown_file; do
             TO_CHECK+=("$markdown_file")
-        done < <(find . -type f -name "*.md" \
-            -not -path "./target/*" \
-            -not -path "./third_party/*" \
-            -not -path "./.git/*" \
-            -not -path "./node_modules/*" \
-            -not -path "./.github/test-fixtures/*" \
-            -not -path "./test-fixtures/*" \
-            -print0)
+        done < <(find . \
+            \( -type d \( -name "target" \
+            -o -name "third_party" \
+            -o -name ".git" \
+            -o -name "node_modules" \
+            -o -name "test-fixtures" \) \) -prune \
+            -o -type f -name "*.md" -print0)
     else
         while IFS= read -r -d '' entry; do
             [ "${#entry}" -ge 4 ] || continue

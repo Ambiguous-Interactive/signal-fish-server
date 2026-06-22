@@ -87,8 +87,10 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
    (with `--no-shuffle`); never round-robin.
 3. **`mold` linker.** `scripts/run-mutants.sh` sets the linker via the per-target
    `CARGO_TARGET_<triple>_LINKER=clang` env and the mold link-arg via
-   `RUSTFLAGS="-C link-arg=-fuse-ld=mold"`, mirroring the Dockerfile /
-   `.devcontainer`. **Rule:** keep the linker in the per-target var, NOT a bare
+   `RUSTFLAGS="-C link-arg=-fuse-ld=mold"`, mirroring the `.devcontainer`
+   (the release `Dockerfile` deliberately drops mold so multi-arch
+   cross-linking stays simple — see `.llm/context-docs-and-ci-pitfalls.md`).
+   **Rule:** keep the linker in the per-target var, NOT a bare
    `-C linker=clang` in RUSTFLAGS — cargo-mutants re-encodes RUSTFLAGS
    (`CARGO_ENCODED_RUSTFLAGS`), which would override a devcontainer's per-target
    linker and diverge the shard fingerprint from the `cargo test` warm build,

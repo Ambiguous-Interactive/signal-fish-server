@@ -18,7 +18,7 @@
 mod common;
 
 #[cfg(unix)]
-use common::{bash_command, repo_root};
+use common::{bash_command, repo_root, strip_comment_lines};
 
 /// Run `scripts/run-mutants.sh` with `args` from the repository root and return
 /// `(success, stdout, stderr)`.
@@ -57,6 +57,10 @@ fn test_run_mutants_script_exists_and_has_strict_mode() {
     );
 
     let body = common::read_file(&script_path);
+    // The shebang is itself a `#`-prefixed line, so assert it on the raw body;
+    // the live (comment-stripped) view is used only for the strict-mode presence
+    // check so commenting the real `set -euo pipefail` line cannot pass silently.
+    let body_live = strip_comment_lines(&body);
 
     assert!(
         body.starts_with("#!/usr/bin/env bash"),
@@ -67,7 +71,7 @@ fn test_run_mutants_script_exists_and_has_strict_mode() {
     );
 
     assert!(
-        body.contains("set -euo pipefail"),
+        body_live.contains("set -euo pipefail"),
         "scripts/run-mutants.sh must enable strict mode (`set -euo pipefail`) so an unset\n\
          variable or a failing command aborts the script instead of silently running a\n\
          malformed mutation command.\n\

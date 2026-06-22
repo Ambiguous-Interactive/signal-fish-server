@@ -60,11 +60,13 @@ jobs:
   workflow-hygiene:
     name: Validate Workflow Configuration
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.3
       - name: Run workflow hygiene checks
+        env:
+          SIGNAL_FISH_CHECK_ACTION_REF_TAGS: "1"
         run: bash scripts/check-workflow-hygiene.sh
 
       - name: Validate toolchain inputs
@@ -85,5 +87,6 @@ jobs:
           echo "  - Dependency audit workflows are present"
           echo "  - Jobs have timeout configurations"
           echo "  - GitHub Actions use explicit version tags (no moving channels)"
+          echo "  - GitHub Actions version tags exist upstream"
           echo "  - dtolnay/rust-toolchain usages specify explicit toolchain input"
           echo "  - Inline AWK snippets in workflow files are portable"

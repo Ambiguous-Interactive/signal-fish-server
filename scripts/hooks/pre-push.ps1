@@ -243,6 +243,7 @@ function Test-FastHookSource {
         ".githooks/pre-push",
         "scripts/hooks/native-process.ps1",
         "scripts/hooks/pre-commit.ps1",
+        "scripts/hooks/pre-commit-rust.ps1",
         "scripts/hooks/pre-push.ps1"
     )
     $slowCommandPattern = "^\s*(&\s*)?[""']?cargo[""']?\s+(fmt|clippy|test|doc|check|build|install)\b|^\s*(&\s*)?[""']?npm[""']?\s+(install|ci)\b|^\s*(&\s*)?[""']?npx[""']?\b|Invoke-Native\s+-FileName\s+[""'](cargo|npm|npx)[""']|Start-Process\s+[""']?(cargo|npm|npx)[""']?"
