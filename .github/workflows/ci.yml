@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -107,7 +107,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -184,7 +184,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -217,14 +217,14 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.81.10
+        uses: taiki-e/install-action@v2.82.2
         with:
           tool: cargo-nextest
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.81.10
+        uses: taiki-e/install-action@v2.82.2
         with:
           tool: cargo-nextest
 
@@ -250,7 +250,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
 
@@ -348,7 +348,7 @@ jobs:
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Extract MSRV for cargo-deny toolchain
         id: deny-msrv
         run: |
@@ -377,7 +377,7 @@ jobs:
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -397,7 +397,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.81.10
+        uses: taiki-e/install-action@v2.82.2
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -415,7 +415,7 @@ jobs:
     # across all configuration files (rust-toolchain.toml, clippy.toml, Dockerfile, etc.)
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Extract MSRV from Cargo.toml
         id: msrv
         run: |
@@ -469,7 +469,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Set up Docker Buildx
         # Buildx unlocks the GitHub Actions layer cache below. Mirrors the proven
         # pattern in docker-publish.yml (same pinned action versions), turning a
@@ -525,7 +525,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -547,7 +547,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.81.10
+        uses: taiki-e/install-action@v2.82.2
         with:
           tool: cargo-llvm-cov
 
@@ -587,7 +587,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -619,7 +619,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -639,7 +639,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.81.10
+        uses: taiki-e/install-action@v2.82.2
         with:
           tool: cargo-sbom
 
