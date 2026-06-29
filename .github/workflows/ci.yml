@@ -217,14 +217,14 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.82.2
+        uses: taiki-e/install-action@v2.82.6
         with:
           tool: cargo-nextest
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.82.2
+        uses: taiki-e/install-action@v2.82.6
         with:
           tool: cargo-nextest
 
@@ -397,7 +397,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.82.2
+        uses: taiki-e/install-action@v2.82.6
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -547,7 +547,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.82.2
+        uses: taiki-e/install-action@v2.82.6
         with:
           tool: cargo-llvm-cov
 
@@ -639,7 +639,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.82.2
+        uses: taiki-e/install-action@v2.82.6
         with:
           tool: cargo-sbom
 
