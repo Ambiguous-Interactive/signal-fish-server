@@ -99,6 +99,8 @@
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
-    "idle_timeout_secs": 300
+    "idle_timeout_secs": 300,
+    "send_queue_capacity": 1024,
+    "slow_consumer_timeout_ms": 5000
   }
 }

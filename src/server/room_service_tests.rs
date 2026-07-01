@@ -40,7 +40,12 @@ async fn register_client(
     let (sender, receiver) = mpsc::channel(8);
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
     (player_id, receiver)
@@ -54,7 +59,12 @@ async fn leave_room_sends_confirmation_and_clears_membership() {
     let addr: SocketAddr = "127.0.0.1:48000".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 

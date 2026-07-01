@@ -94,6 +94,34 @@ impl EnhancedGameServer {
                     .add_expired_players_cleaned(expired_client_count);
             }
 
+            // Loud eviction: tell each expired client WHY it is being closed
+            // before the unregister tears its socket down. Sends run
+            // concurrently so one backpressured (already-dead) connection
+            // cannot serialize the whole sweep; the delivery layer's
+            // slow-consumer handling bounds each attempt.
+            futures_util::future::join_all(expired_clients.iter().map(|player_id| {
+                let timeout_secs = self.config.ping_timeout.as_secs();
+                async move {
+                    if let Err(err) = self
+                        .send_error_to_player(
+                            player_id,
+                            format!(
+                                "Disconnected: no activity received for {timeout_secs} seconds"
+                            ),
+                            Some(crate::protocol::ErrorCode::ConnectionIdleTimeout),
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            %player_id,
+                            error = %err,
+                            "Failed to notify expired client before unregistering"
+                        );
+                    }
+                }
+            }))
+            .await;
+
             for player_id in expired_clients {
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
                 self.unregister_client(&player_id).await;

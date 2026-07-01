@@ -37,7 +37,12 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
     let addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 
@@ -75,7 +80,12 @@ async fn client_protocol_round_trips_through_server() {
     let addr: SocketAddr = "127.0.0.1:50050".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 
@@ -110,7 +120,12 @@ async fn duplicate_transport_status_reports_do_not_inflate_metrics() {
     let addr: SocketAddr = "127.0.0.1:50060".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 
@@ -160,7 +175,12 @@ async fn transport_status_for_unnegotiated_transport_is_ignored() {
     let addr: SocketAddr = "127.0.0.1:50062".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 
@@ -273,7 +293,12 @@ async fn transport_status_update_results_are_distinct() {
     let addr: SocketAddr = "127.0.0.1:50061".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 
@@ -331,7 +356,12 @@ async fn join_room_request_is_forwarded_to_room_service() {
     let addr: SocketAddr = "127.0.0.1:50001".parse().unwrap();
     let player_id = server
         .connection_manager
-        .register_client(sender, addr, server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
 

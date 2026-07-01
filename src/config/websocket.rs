@@ -2,7 +2,8 @@
 
 use super::defaults::{
     default_auth_timeout_secs, default_batch_interval_ms, default_batch_size,
-    default_enable_batching, default_idle_timeout_secs,
+    default_enable_batching, default_idle_timeout_secs, default_send_queue_capacity,
+    default_slow_consumer_timeout_ms,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,24 @@ pub struct WebSocketConfig {
     /// [`auth_timeout_secs`](Self::auth_timeout_secs).
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// Per-connection outbound message queue capacity.
+    ///
+    /// Bounds how many undelivered server messages may queue for one
+    /// connection before delivery applies backpressure to senders. Larger
+    /// values absorb bigger relay bursts without slowing senders; the cost is
+    /// only pointer-sized per slot until messages actually queue.
+    #[serde(default = "default_send_queue_capacity")]
+    pub send_queue_capacity: usize,
+    /// How long (milliseconds) delivery may wait for space in a full outbound
+    /// queue before the recipient is disconnected as a slow consumer.
+    ///
+    /// This is the loud alternative to silently dropping messages: a
+    /// connection that cannot absorb traffic for this long (on top of the
+    /// buffering provided by [`send_queue_capacity`](Self::send_queue_capacity))
+    /// is closed with a best-effort `SLOW_CONSUMER` error, and the room is
+    /// notified through the normal disconnect flow.
+    #[serde(default = "default_slow_consumer_timeout_ms")]
+    pub slow_consumer_timeout_ms: u64,
 }
 
 impl Default for WebSocketConfig {
@@ -40,6 +59,8 @@ impl Default for WebSocketConfig {
             batch_interval_ms: default_batch_interval_ms(),
             auth_timeout_secs: default_auth_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
+            send_queue_capacity: default_send_queue_capacity(),
+            slow_consumer_timeout_ms: default_slow_consumer_timeout_ms(),
         }
     }
 }
@@ -76,6 +97,152 @@ impl WebSocketConfig {
                  is true (it is the batch-flush interval, which cannot be zero)"
             );
         }
+        // A zero-capacity queue cannot accept any message (`mpsc::channel`
+        // panics on 0), and delivery semantics require at least one slot of
+        // real buffering per connection.
+        if self.send_queue_capacity == 0 {
+            anyhow::bail!(
+                "websocket.send_queue_capacity must be at least 1 (configured: 0); \
+                 it bounds the per-connection outbound message queue"
+            );
+        }
+        // A zero timeout would disconnect a peer the instant its queue fills,
+        // turning routine bursts into disconnect storms; a multi-minute value
+        // lets one dead connection stall room senders far past any useful
+        // recovery window. Bound it to a sane operational range.
+        if self.slow_consumer_timeout_ms == 0 {
+            anyhow::bail!(
+                "websocket.slow_consumer_timeout_ms must be greater than 0; \
+                 it is the grace period before a backpressured connection is disconnected"
+            );
+        }
+        if self.slow_consumer_timeout_ms > 600_000 {
+            anyhow::bail!(
+                "websocket.slow_consumer_timeout_ms must not exceed 600000 (10 minutes); \
+                 configured: {}",
+                self.slow_consumer_timeout_ms
+            );
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Data-driven validation coverage: each case mutates one field on an
+    /// otherwise-default config and states whether validation must accept it
+    /// (plus a substring the rejection message must contain, so error text
+    /// stays actionable).
+    #[test]
+    fn validate_accepts_and_rejects_expected_configurations() {
+        struct Case {
+            name: &'static str,
+            mutate: fn(&mut WebSocketConfig),
+            expect_ok: bool,
+            expect_error_containing: &'static str,
+        }
+
+        let cases = [
+            Case {
+                name: "defaults are valid",
+                mutate: |_config| {},
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "auth timeout below floor",
+                mutate: |config| config.auth_timeout_secs = 4,
+                expect_ok: false,
+                expect_error_containing: "auth_timeout_secs must be at least 5",
+            },
+            Case {
+                name: "auth timeout above ceiling",
+                mutate: |config| config.auth_timeout_secs = 61,
+                expect_ok: false,
+                expect_error_containing: "auth_timeout_secs must not exceed 60",
+            },
+            Case {
+                name: "zero batch interval rejected only while batching",
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.batch_interval_ms = 0;
+                },
+                expect_ok: false,
+                expect_error_containing: "batch_interval_ms must be greater than 0",
+            },
+            Case {
+                name: "zero batch interval accepted when batching disabled",
+                mutate: |config| {
+                    config.enable_batching = false;
+                    config.batch_interval_ms = 0;
+                },
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "zero send queue capacity",
+                mutate: |config| config.send_queue_capacity = 0,
+                expect_ok: false,
+                expect_error_containing: "send_queue_capacity must be at least 1",
+            },
+            Case {
+                name: "single-slot send queue is the floor",
+                mutate: |config| config.send_queue_capacity = 1,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "zero slow-consumer timeout",
+                mutate: |config| config.slow_consumer_timeout_ms = 0,
+                expect_ok: false,
+                expect_error_containing: "slow_consumer_timeout_ms must be greater than 0",
+            },
+            Case {
+                name: "slow-consumer timeout at ceiling",
+                mutate: |config| config.slow_consumer_timeout_ms = 600_000,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "slow-consumer timeout above ceiling",
+                mutate: |config| config.slow_consumer_timeout_ms = 600_001,
+                expect_ok: false,
+                expect_error_containing: "slow_consumer_timeout_ms must not exceed 600000",
+            },
+        ];
+
+        for case in cases {
+            let mut config = WebSocketConfig::default();
+            (case.mutate)(&mut config);
+            let result = config.validate();
+            match (case.expect_ok, result) {
+                (true, Ok(())) => {}
+                (true, Err(err)) => panic!("case `{}` should validate, got: {err}", case.name),
+                (false, Ok(())) => panic!("case `{}` should be rejected", case.name),
+                (false, Err(err)) => {
+                    let message = err.to_string();
+                    assert!(
+                        message.contains(case.expect_error_containing),
+                        "case `{}`: rejection message `{message}` should contain `{}`",
+                        case.name,
+                        case.expect_error_containing
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn defaults_match_documented_values() {
+        let config = WebSocketConfig::default();
+        assert!(config.enable_batching);
+        assert_eq!(config.batch_size, 10);
+        assert_eq!(config.batch_interval_ms, 16);
+        assert_eq!(config.auth_timeout_secs, 10);
+        assert_eq!(config.idle_timeout_secs, 300);
+        assert_eq!(config.send_queue_capacity, 1024);
+        assert_eq!(config.slow_consumer_timeout_ms, 5_000);
     }
 }

@@ -278,7 +278,9 @@ size and flush interval.
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
-    "idle_timeout_secs": 300
+    "idle_timeout_secs": 300,
+    "send_queue_capacity": 1024,
+    "slow_consumer_timeout_ms": 5000
   }
 }
 ```
@@ -300,6 +302,19 @@ frame interval at 60 fps) suit most games. Raise `batch_size` and
 per-flush delay matters more than syscall amortization. Keep `idle_timeout_secs`
 positive in production — it reclaims zombie sockets (`0` disables it);
 `auth_timeout_secs` must be between 5 and 60.
+
+High-rate game data (rollback netcode): the server never silently drops a
+relayed message — a recipient whose outbound queue fills paces its senders via
+backpressure instead of losing messages. Size `send_queue_capacity` for your
+worst-case burst headroom: the default `1024` messages is roughly 17 seconds of
+buffering at 60 messages/second from a sending peer, and queue slots hold
+pointers, so a generous capacity costs almost nothing until messages actually
+queue. `slow_consumer_timeout_ms` (default `5000`) trades tolerance for pacing:
+higher values ride out longer client stalls (GC pauses, Wi-Fi hiccups) but let
+one unresponsive recipient slow its room's senders for longer; lower values
+evict slow consumers sooner. A dead recipient costs senders at most one timeout
+window before it is disconnected with a `SLOW_CONSUMER` error (see
+[delivery semantics](protocol.md#delivery-semantics)).
 
 ## Rate limits
 

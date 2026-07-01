@@ -438,6 +438,7 @@ components:
         - CONNECTION_IDLE_TIMEOUT
         - GAME_START_NOT_READY
         - GAME_START_FORBIDDEN
+        - SLOW_CONSUMER
 
     # ---------------------------------------------------------------------
     # Shared object schemas

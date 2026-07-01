@@ -1,6 +1,10 @@
+use crate::coordination::{
+    deliver_or_disconnect, ClientDeliveryHandle, CloseReason, ConnectionCloseSignal,
+    DeliveryOutcome,
+};
 use crate::protocol::{
-    ClientMessage, ErrorCode, GameDataEncoding, PlayerNameRulesPayload, ProtocolInfoPayload,
-    RateLimitInfo, ServerMessage, Topology, Transport,
+    ClientMessage, ErrorCode, GameDataEncoding, PlayerId, PlayerNameRulesPayload,
+    ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
 };
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
@@ -8,13 +12,167 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, MessageBatcher};
 use super::sending::{send_immediate_server_message, send_single_message};
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
+
+/// Upper bound on the farewell error frame + close handshake writes issued
+/// while force-closing a connection. The client's TCP window is often already
+/// full when this runs (that is usually why its queue overflowed), so these
+/// writes are strictly best-effort.
+const CLOSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Enqueue a message on this connection's own outbound queue, honoring the
+/// server-wide no-silent-drop contract: backpressure while the queue is
+/// momentarily full, then a loud slow-consumer close if it never drains.
+/// Used for control messages (auth responses, protocol info, timeout errors)
+/// that are sent outside the message coordinator.
+async fn enqueue_connection_message(
+    tx: &mpsc::Sender<Arc<ServerMessage>>,
+    close_signal: &ConnectionCloseSignal,
+    server: &Arc<EnhancedGameServer>,
+    slow_consumer_timeout: Duration,
+    player_id: &PlayerId,
+    message: ServerMessage,
+    context: &'static str,
+) {
+    let handle = ClientDeliveryHandle {
+        sender: tx.clone(),
+        close: close_signal.clone(),
+    };
+    let outcome = deliver_or_disconnect(
+        &server.metrics(),
+        slow_consumer_timeout,
+        player_id,
+        &handle,
+        Arc::new(message),
+    )
+    .await;
+    if outcome != DeliveryOutcome::Delivered {
+        tracing::warn!(
+            %player_id,
+            ?outcome,
+            context,
+            "Connection control message was not delivered"
+        );
+    }
+}
+
+/// Final actions of the send task once a server-side close was requested.
+///
+/// - Slow consumer: the queue contents are abandoned **by design** (the
+///   recipient proved unable to drain them); they are counted as dropped, and
+///   a best-effort farewell error tells the client why it is being closed.
+/// - Unregistration (or all delivery handles dropped): the recipient is
+///   healthy — flush whatever is already queued (e.g. a final error emitted
+///   just before unregistering), then close.
+async fn finalize_closed_connection(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    rx: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    batcher: Option<&mut MessageBatcher>,
+    reason: Option<CloseReason>,
+    player_id: &PlayerId,
+    server: &Arc<EnhancedGameServer>,
+) {
+    match reason {
+        Some(CloseReason::SlowConsumer) => {
+            let abandoned = rx.len() + batcher.map_or(0, |batcher| batcher.len());
+            server
+                .metrics()
+                .add_websocket_messages_dropped(abandoned as u64);
+            tracing::warn!(
+                %player_id,
+                abandoned_messages = abandoned,
+                "Closing slow-consumer connection; abandoning its undeliverable queue"
+            );
+
+            let farewell = ServerMessage::Error {
+                message: format!(
+                    "Disconnected as a slow consumer: this connection's outbound queue \
+                     stayed full for more than {} ms",
+                    server.config().websocket_config.slow_consumer_timeout_ms
+                ),
+                error_code: Some(ErrorCode::SlowConsumer),
+            };
+            match tokio::time::timeout(
+                CLOSE_WRITE_TIMEOUT,
+                send_immediate_server_message(sender, &farewell),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::debug!(%player_id, error = %err, "Failed to write slow-consumer farewell frame");
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(%player_id, "Timed out writing slow-consumer farewell frame");
+                }
+            }
+        }
+        Some(CloseReason::Unregistered) | None => {
+            // Drain whatever is already buffered. Both terminal channel states
+            // end the drain: `Empty` means the flush is complete, and
+            // `Disconnected` means every delivery handle is gone AND the
+            // buffer is empty — also a completed flush.
+            if let Some(batcher) = batcher {
+                // Not a `while let`: the repo-wide try_recv policy
+                // (tests/async_timeout_policy_scan.rs) requires both terminal
+                // channel states to be matched explicitly.
+                #[allow(clippy::while_let_loop)]
+                loop {
+                    match rx.try_recv() {
+                        Ok(message) => batcher.queue(message),
+                        Err(
+                            mpsc::error::TryRecvError::Empty
+                            | mpsc::error::TryRecvError::Disconnected,
+                        ) => break,
+                    }
+                }
+                if !batcher.is_empty() {
+                    if let Err(()) = send_batch(sender, batcher, player_id, server).await {
+                        tracing::debug!(
+                            %player_id,
+                            "Failed to flush queued messages while closing unregistered connection"
+                        );
+                    }
+                }
+            } else {
+                loop {
+                    let message = match rx.try_recv() {
+                        Ok(message) => message,
+                        Err(
+                            mpsc::error::TryRecvError::Empty
+                            | mpsc::error::TryRecvError::Disconnected,
+                        ) => break,
+                    };
+                    if send_single_message(sender, message, player_id, server)
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            %player_id,
+                            "Failed to flush queued messages while closing unregistered connection"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::debug!(%player_id, error = %err, "WebSocket close handshake failed");
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%player_id, "Timed out closing WebSocket sink");
+        }
+    }
+}
 
 /// Resolve the negotiated transport/topology capability sets for a connection.
 ///
@@ -75,14 +233,32 @@ pub(super) async fn handle_socket(
     default_protocol_version: u16,
 ) {
     let (mut sender, mut receiver) = socket.split();
-    let queue_capacity = server.config().websocket_config.batch_size.max(1) * 4;
+    // Validated >= 1 at startup; clamp anyway because `mpsc::channel` panics on 0.
+    let queue_capacity = server.config().websocket_config.send_queue_capacity.max(1);
+    let slow_consumer_timeout = Duration::from_millis(
+        server
+            .config()
+            .websocket_config
+            .slow_consumer_timeout_ms
+            .max(1),
+    );
     let (tx, mut rx) = mpsc::channel::<Arc<ServerMessage>>(queue_capacity);
+
+    // One close signal per connection: the delivery layer requests closes
+    // through its registered handle (slow consumer) or via unregistration;
+    // both socket tasks listen and tear the connection down.
+    let (close_signal, close_listener) = ConnectionCloseSignal::channel();
+    let mut send_task_close = close_listener.clone();
+    let mut receive_task_close = close_listener;
 
     // Keep a clone of tx for sending auth responses
     let tx_clone = tx.clone();
 
     // Register client with server
-    let player_id = match server.register_client(tx, addr).await {
+    let player_id = match server
+        .register_client_with_close(tx, close_signal.clone(), addr)
+        .await
+    {
         Ok(player_id) => {
             tracing::info!(%player_id, client_addr = %addr, "WebSocket connection established");
             player_id
@@ -214,17 +390,60 @@ pub(super) async fn handle_socket(
                             break;
                         }
                     }
+                    // Server-side close request (slow consumer, unregistration)
+                    reason = send_task_close.closed() => {
+                        let current_player_id = *effective_player_id_for_send.read().await;
+                        finalize_closed_connection(
+                            &mut sender,
+                            &mut rx,
+                            Some(&mut batcher),
+                            reason,
+                            &current_player_id,
+                            &server_clone,
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
         } else {
             // Non-batching mode: send each message immediately (legacy behavior)
-            while let Some(message) = rx.recv().await {
-                let current_player_id = *effective_player_id_for_send.read().await;
-                if send_single_message(&mut sender, message, &current_player_id, &server_clone)
-                    .await
-                    .is_err()
-                {
-                    break;
+            loop {
+                tokio::select! {
+                    message_opt = rx.recv() => {
+                        match message_opt {
+                            Some(message) => {
+                                let current_player_id =
+                                    *effective_player_id_for_send.read().await;
+                                if send_single_message(
+                                    &mut sender,
+                                    message,
+                                    &current_player_id,
+                                    &server_clone,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            None => break, // Channel closed
+                        }
+                    }
+                    // Server-side close request (slow consumer, unregistration)
+                    reason = send_task_close.closed() => {
+                        let current_player_id = *effective_player_id_for_send.read().await;
+                        finalize_closed_connection(
+                            &mut sender,
+                            &mut rx,
+                            None,
+                            reason,
+                            &current_player_id,
+                            &server_clone,
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
         }
@@ -239,9 +458,11 @@ pub(super) async fn handle_socket(
     let server_clone = server.clone();
     let effective_player_id_for_receive = Arc::clone(&effective_player_id);
     let auth_timeout_secs = server.config().websocket_config.auth_timeout_secs;
+    let close_signal_for_receive = close_signal.clone();
     let receive_task = tokio::spawn(async move {
         let mut active_player_id = player_id;
         let token_binding = token_binding_for_receive;
+        let close_signal = close_signal_for_receive;
         // Create authentication timeout timer
         let auth_deadline = tokio::time::sleep_until(connection_start + auth_timeout);
         tokio::pin!(auth_deadline);
@@ -256,9 +477,26 @@ pub(super) async fn handle_socket(
         loop {
             let msg = if authenticated {
                 // If authenticated, enforce only the idle timeout (when enabled)
-                let next_frame = match idle_timeout {
-                    Some(window) => match tokio::time::timeout(window, receiver.next()).await {
-                        Ok(frame_opt) => frame_opt,
+                tokio::select! {
+                    // Server-side close request (slow consumer, unregistration):
+                    // stop reading; the send task writes the farewell and
+                    // closes the sink.
+                    reason = receive_task_close.closed() => {
+                        tracing::debug!(
+                            %active_player_id,
+                            ?reason,
+                            "Connection close requested; ending receive task"
+                        );
+                        break;
+                    }
+                    next_frame = async {
+                        match idle_timeout {
+                            Some(window) => tokio::time::timeout(window, receiver.next()).await,
+                            None => Ok(receiver.next().await),
+                        }
+                    } => match next_frame {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => break, // Connection closed
                         Err(_elapsed) => {
                             // Idle timeout: deliver the error through this
                             // connection's OWN outbound channel, not the
@@ -266,48 +504,47 @@ pub(super) async fn handle_socket(
                             // `server.ping_timeout` reaper (30s) unregisters a
                             // silent client from the coordinator long before
                             // the idle window (300s) elapses, so a
-                            // coordinator-routed error would be silently
-                            // dropped. The send task drains this channel and
-                            // flushes before the socket is torn down, so the
-                            // frame reaches the client regardless of
-                            // registration state. Then close via the normal
-                            // disconnect path so the reconnection grace period
-                            // still applies.
+                            // coordinator-routed error would be unroutable.
+                            // The send task flushes this channel before the
+                            // socket is torn down, so the frame reaches the
+                            // client regardless of registration state. Then
+                            // close via the normal disconnect path so the
+                            // reconnection grace period still applies.
                             tracing::info!(
                                 %active_player_id,
                                 timeout_secs = idle_timeout_secs,
                                 "Idle timeout - no frames received, closing connection"
                             );
-                            let idle_error = Arc::new(ServerMessage::Error {
-                                message: format!(
-                                    "Idle timeout - no messages received for {idle_timeout_secs} seconds"
-                                ),
-                                error_code: Some(ErrorCode::ConnectionIdleTimeout),
-                            });
-                            if let Err(err) = tx_clone.try_send(idle_error) {
-                                if matches!(err, TrySendError::Full(_)) {
-                                    server_clone
-                                        .metrics()
-                                        .increment_websocket_messages_dropped();
-                                }
-                                tracing::warn!(
-                                    %active_player_id,
-                                    error = %err,
-                                    "Failed to enqueue idle timeout error"
-                                );
-                            }
+                            enqueue_connection_message(
+                                &tx_clone,
+                                &close_signal,
+                                &server_clone,
+                                slow_consumer_timeout,
+                                &active_player_id,
+                                ServerMessage::Error {
+                                    message: format!(
+                                        "Idle timeout - no messages received for {idle_timeout_secs} seconds"
+                                    ),
+                                    error_code: Some(ErrorCode::ConnectionIdleTimeout),
+                                },
+                                "idle timeout error",
+                            )
+                            .await;
                             break;
                         }
-                    },
-                    None => receiver.next().await,
-                };
-                match next_frame {
-                    Some(msg) => msg,
-                    None => break, // Connection closed
+                    }
                 }
             } else {
                 // If not authenticated, enforce timeout
                 tokio::select! {
+                    reason = receive_task_close.closed() => {
+                        tracing::debug!(
+                            %active_player_id,
+                            ?reason,
+                            "Connection close requested during authentication; ending receive task"
+                        );
+                        break;
+                    }
                     msg_opt = receiver.next() => {
                         match msg_opt {
                             Some(msg) => msg,
@@ -428,23 +665,19 @@ pub(super) async fn handle_socket(
                                                 error = %error_message,
                                                 "SDK compatibility check failed"
                                             );
-                                            if let Err(err) = tx_clone.try_send(Arc::new(
+                                            enqueue_connection_message(
+                                                &tx_clone,
+                                                &close_signal,
+                                                &server_clone,
+                                                slow_consumer_timeout,
+                                                &active_player_id,
                                                 ServerMessage::AuthenticationError {
                                                     error: error_message,
                                                     error_code: ErrorCode::SdkVersionUnsupported,
                                                 },
-                                            )) {
-                                                if matches!(err, TrySendError::Full(_)) {
-                                                    server_clone
-                                                        .metrics()
-                                                        .increment_websocket_messages_dropped();
-                                                }
-                                                tracing::warn!(
-                                                    %active_player_id,
-                                                    error = %err,
-                                                    "Failed to enqueue SDK compatibility error"
-                                                );
-                                            }
+                                                "SDK compatibility error",
+                                            )
+                                            .await;
                                             continue;
                                         }
                                     };
@@ -478,25 +711,21 @@ pub(super) async fn handle_socket(
                                                 "Client requested unsupported game_data_format"
                                             );
                                             // Send error message to client about capability mismatch
-                                            if let Err(err) =
-                                                tx_clone.try_send(Arc::new(ServerMessage::Error {
+                                            enqueue_connection_message(
+                                                &tx_clone,
+                                                &close_signal,
+                                                &server_clone,
+                                                slow_consumer_timeout,
+                                                &active_player_id,
+                                                ServerMessage::Error {
                                                     message: error_message,
                                                     error_code: Some(
                                                         ErrorCode::UnsupportedGameDataFormat,
                                                     ),
-                                                }))
-                                            {
-                                                if matches!(err, TrySendError::Full(_)) {
-                                                    server_clone
-                                                        .metrics()
-                                                        .increment_websocket_messages_dropped();
-                                                }
-                                                tracing::warn!(
-                                                    %active_player_id,
-                                                    error = %err,
-                                                    "Failed to enqueue game data format error"
-                                                );
-                                            }
+                                                },
+                                                "game data format error",
+                                            )
+                                            .await;
                                             GameDataEncoding::Json
                                         }
                                         None => GameDataEncoding::Json,
@@ -592,30 +821,26 @@ pub(super) async fn handle_socket(
                                             max_protocol_version: response_max_protocol_version,
                                         });
 
-                                    if let Err(err) = tx_clone.try_send(Arc::new(auth_response)) {
-                                        if matches!(err, TrySendError::Full(_)) {
-                                            server_clone
-                                                .metrics()
-                                                .increment_websocket_messages_dropped();
-                                        }
-                                        tracing::warn!(
-                                            %active_player_id,
-                                            error = %err,
-                                            "Failed to enqueue authentication success response"
-                                        );
-                                    }
-                                    if let Err(err) = tx_clone.try_send(Arc::new(protocol_info)) {
-                                        if matches!(err, TrySendError::Full(_)) {
-                                            server_clone
-                                                .metrics()
-                                                .increment_websocket_messages_dropped();
-                                        }
-                                        tracing::warn!(
-                                            %active_player_id,
-                                            error = %err,
-                                            "Failed to enqueue protocol info response"
-                                        );
-                                    }
+                                    enqueue_connection_message(
+                                        &tx_clone,
+                                        &close_signal,
+                                        &server_clone,
+                                        slow_consumer_timeout,
+                                        &active_player_id,
+                                        auth_response,
+                                        "authentication success response",
+                                    )
+                                    .await;
+                                    enqueue_connection_message(
+                                        &tx_clone,
+                                        &close_signal,
+                                        &server_clone,
+                                        slow_consumer_timeout,
+                                        &active_player_id,
+                                        protocol_info,
+                                        "protocol info response",
+                                    )
+                                    .await;
                                 }
                                 Err(e) => {
                                     tracing::warn!(%active_player_id, %app_id, "Authentication failed: {:?}", e);
@@ -645,23 +870,19 @@ pub(super) async fn handle_socket(
                                         _ => ErrorCode::InternalError,
                                     };
 
-                                    let auth_error = Arc::new(ServerMessage::AuthenticationError {
-                                        error: format!("{e:?}"),
-                                        error_code,
-                                    });
-
-                                    if let Err(err) = tx_clone.try_send(auth_error) {
-                                        if matches!(err, TrySendError::Full(_)) {
-                                            server_clone
-                                                .metrics()
-                                                .increment_websocket_messages_dropped();
-                                        }
-                                        tracing::warn!(
-                                            %active_player_id,
-                                            error = %err,
-                                            "Failed to enqueue authentication failure response"
-                                        );
-                                    }
+                                    enqueue_connection_message(
+                                        &tx_clone,
+                                        &close_signal,
+                                        &server_clone,
+                                        slow_consumer_timeout,
+                                        &active_player_id,
+                                        ServerMessage::AuthenticationError {
+                                            error: format!("{e:?}"),
+                                            error_code,
+                                        },
+                                        "authentication failure response",
+                                    )
+                                    .await;
 
                                     // Close connection after auth failure
                                     break;

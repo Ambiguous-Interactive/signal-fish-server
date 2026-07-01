@@ -1,6 +1,6 @@
 [package]
 name = "signal-fish-server"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
@@ -25,8 +25,15 @@ legacy-fullmesh = ["matchbox_signaling"]
 tls = ["axum-server", "rustls", "rustls-pki-types"]
 
 [dependencies]
-# Async runtime
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+# Async runtime. `sync` (mpsc/watch delivery channels) and `time` (backpressure
+# timeouts) are load-bearing for the no-silent-drop delivery path — keep them
+# explicit rather than relying on feature unification from other dependencies.
+tokio = { version = "1.52", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+] }
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }

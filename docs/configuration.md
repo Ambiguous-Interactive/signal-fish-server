@@ -196,6 +196,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
+| `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection outbound message queue capacity in messages (must be ≥ 1); a full queue applies backpressure to senders |
+| `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds delivery may wait on a full outbound queue before the recipient is disconnected as a slow consumer (must be > 0 and ≤ `600000`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
 ## Common Configurations
@@ -299,7 +301,9 @@ Complete reference of all configuration options with environment variable overri
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
-    "idle_timeout_secs": 300
+    "idle_timeout_secs": 300,
+    "send_queue_capacity": 1024,
+    "slow_consumer_timeout_ms": 5000
   }
 }
 
@@ -320,6 +324,20 @@ Complete reference of all configuration options with environment variable overri
   that heartbeat (which `server.ping_timeout` already requires) are never
   affected by the 300s default. Keep this enabled in production — it reclaims
   zombie sockets that would otherwise hold file descriptors open indefinitely.
+- `send_queue_capacity` - Per-connection outbound message queue capacity in
+  messages (default: 1024; must be ≥ 1). Bounds how many undelivered server
+  messages may queue for one connection before delivery applies backpressure
+  to senders. Larger values absorb bigger relay bursts without slowing
+  senders; queue slots hold pointers, so a generous capacity costs almost
+  nothing until messages actually queue.
+- `slow_consumer_timeout_ms` - How long (milliseconds) delivery may wait for
+  space in a full outbound queue before the recipient is disconnected as a
+  slow consumer (default: 5000; must be > 0 and ≤ 600000). This is the loud
+  alternative to silently dropping messages: a connection that cannot absorb
+  traffic for this long — on top of the buffering `send_queue_capacity`
+  provides — is closed with a best-effort `SLOW_CONSUMER` error through the
+  normal disconnect flow. The server never silently drops a delivery; see
+  [Delivery semantics](protocol.md#delivery-semantics).
 
 ## Session Topology (Protocol v3)
 

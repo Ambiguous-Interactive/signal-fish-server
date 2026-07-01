@@ -1,10 +1,20 @@
-use crate::protocol::{GameDataEncoding, PlayerId, ServerMessage};
+use crate::protocol::{ErrorCode, GameDataEncoding, PlayerId, ServerMessage};
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::SinkExt;
 use rmp_serde::{from_slice, to_vec_named};
 use serde::Serialize;
 use std::sync::Arc;
+
+/// Why a binary game-data fallback could not be delivered.
+enum BinaryFallbackError {
+    /// The payload cannot be represented for this recipient (e.g. an rkyv
+    /// payload relayed to a JSON-only client). The connection is healthy; the
+    /// recipient must be told loudly instead of silently receiving nothing.
+    Undeliverable(String),
+    /// The socket write failed; the connection is closing.
+    ConnectionClosed,
+}
 
 pub(super) async fn send_immediate_server_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -56,35 +66,37 @@ pub(super) async fn send_single_message(
                             error = %err,
                             "Failed to encode binary game data; attempting JSON fallback"
                         );
-                        if let Err(fallback_err) = send_binary_fallback(
+                        let fallback = send_binary_fallback(
                             sender,
                             *from_player,
                             *encoding,
                             payload,
                             player_id,
                         )
-                        .await
-                        {
-                            tracing::warn!(
-                                %player_id,
-                                %from_player,
-                                encoding = ?encoding,
-                                error = %fallback_err,
-                                "Dropping binary game data message after fallback failure"
-                            );
-                        }
+                        .await;
+                        notify_or_close_on_fallback_failure(
+                            sender,
+                            fallback,
+                            *from_player,
+                            *encoding,
+                            player_id,
+                            server,
+                        )
+                        .await?;
                     }
                 }
-            } else if let Err(err) =
-                send_binary_fallback(sender, *from_player, *encoding, payload, player_id).await
-            {
-                tracing::warn!(
-                    %player_id,
-                    %from_player,
-                    encoding = ?encoding,
-                    error = %err,
-                    "Client does not support binary payloads; message dropped"
-                );
+            } else {
+                let fallback =
+                    send_binary_fallback(sender, *from_player, *encoding, payload, player_id).await;
+                notify_or_close_on_fallback_failure(
+                    sender,
+                    fallback,
+                    *from_player,
+                    *encoding,
+                    player_id,
+                    server,
+                )
+                .await?;
             }
         }
         other => {
@@ -101,12 +113,58 @@ async fn send_binary_fallback(
     encoding: GameDataEncoding,
     payload: &[u8],
     player_id: &PlayerId,
-) -> Result<(), String> {
-    let data = decode_binary_to_json(encoding, payload)?;
+) -> Result<(), BinaryFallbackError> {
+    let data =
+        decode_binary_to_json(encoding, payload).map_err(BinaryFallbackError::Undeliverable)?;
     let fallback = ServerMessage::GameData { from_player, data };
     send_text_message(sender, &fallback, player_id)
         .await
-        .map_err(|()| "failed to write JSON fallback frame".to_string())
+        .map_err(|()| BinaryFallbackError::ConnectionClosed)
+}
+
+/// Handle a failed binary fallback without ever silently dropping game data:
+/// a dead socket closes the connection (propagated as `Err`), while a payload
+/// that genuinely cannot be represented for this recipient is counted as
+/// dropped and replaced by an explicit error frame so the recipient knows it
+/// is missing data (e.g. an rkyv-encoded room relayed to a JSON-only client).
+async fn notify_or_close_on_fallback_failure(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    fallback: Result<(), BinaryFallbackError>,
+    from_player: PlayerId,
+    encoding: GameDataEncoding,
+    player_id: &PlayerId,
+    server: &Arc<EnhancedGameServer>,
+) -> Result<(), ()> {
+    match fallback {
+        Ok(()) => Ok(()),
+        Err(BinaryFallbackError::ConnectionClosed) => {
+            tracing::warn!(
+                %player_id,
+                %from_player,
+                "Failed to write binary game data fallback, connection closed"
+            );
+            Err(())
+        }
+        Err(BinaryFallbackError::Undeliverable(reason)) => {
+            server.metrics().increment_websocket_messages_dropped();
+            tracing::warn!(
+                %player_id,
+                %from_player,
+                encoding = ?encoding,
+                reason = %reason,
+                "Game data undeliverable to this recipient; sending an error notice instead"
+            );
+            let notice = ServerMessage::Error {
+                message: format!(
+                    "Undeliverable game data from player {from_player} \
+                     ({} payload cannot be converted for this connection): {reason}",
+                    encoding.as_wire_str()
+                ),
+                error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+            };
+            send_text_message(sender, &notice, player_id).await
+        }
+    }
 }
 
 pub(super) async fn send_text_message(

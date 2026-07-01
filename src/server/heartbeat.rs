@@ -89,7 +89,12 @@ mod tests {
 
         let player_id = server
             .connection_manager
-            .register_client(sender, addr, server.instance_id)
+            .register_client(
+                sender,
+                crate::coordination::ConnectionCloseSignal::detached(),
+                addr,
+                server.instance_id,
+            )
             .await
             .expect("client registration");
 

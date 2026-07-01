@@ -370,15 +370,15 @@ impl EnhancedGameServer {
         self.metrics.increment_players_left();
 
         // Update client connection and coordinator
-        let existing_sender = self.connection_manager.clear_room_assignment(player_id);
+        let existing_delivery = self.connection_manager.clear_room_assignment(player_id);
 
-        if let Some(sender) = existing_sender {
+        if let Some(delivery) = existing_delivery {
             let _ = self
                 .message_coordinator
-                .register_local_client(*player_id, None, sender)
+                .register_local_client(*player_id, None, delivery)
                 .await;
         } else {
-            tracing::warn!(%player_id, "Could not find existing sender for player when leaving room");
+            tracing::warn!(%player_id, "Could not find existing delivery handle for player when leaving room");
         }
 
         // First send confirmation to the leaving player

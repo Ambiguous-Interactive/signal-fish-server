@@ -416,7 +416,7 @@ impl EnhancedGameServer {
         };
 
         // Update client connection to use the reconnecting player's original id.
-        let Some(reassigned_sender) = self.connection_manager.reassign_connection(
+        let Some(reassigned_delivery) = self.connection_manager.reassign_connection(
             current_player_id,
             reconnect_player_id,
             *room_id,
@@ -449,7 +449,7 @@ impl EnhancedGameServer {
             .await;
         if let Err(err) = self
             .message_coordinator
-            .register_local_client(*reconnect_player_id, Some(*room_id), reassigned_sender)
+            .register_local_client(*reconnect_player_id, Some(*room_id), reassigned_delivery)
             .await
         {
             tracing::warn!(

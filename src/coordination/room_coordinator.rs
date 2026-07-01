@@ -805,7 +805,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::{BTreeMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{mpsc, Mutex, Notify};
+    use tokio::sync::{Mutex, Notify};
     use tokio::time::{sleep, timeout};
 
     use crate::protocol::ErrorCode;
@@ -949,7 +949,7 @@ mod tests {
             &self,
             _player_id: PlayerId,
             _room_id: Option<RoomId>,
-            _sender: mpsc::Sender<Arc<ServerMessage>>,
+            _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
             Ok(())
         }
@@ -1030,7 +1030,7 @@ mod tests {
             &self,
             _player_id: PlayerId,
             _room_id: Option<RoomId>,
-            _sender: mpsc::Sender<Arc<ServerMessage>>,
+            _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
             Ok(())
         }

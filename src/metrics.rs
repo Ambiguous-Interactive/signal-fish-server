@@ -15,6 +15,13 @@ pub struct ServerMetrics {
     pub disconnections: AtomicU64,
     pub connection_errors: AtomicU64,
     pub websocket_messages_dropped: AtomicU64,
+    /// Times a full outbound queue forced delivery to wait for capacity
+    /// (the send eventually succeeded; nothing was lost). A rising rate means
+    /// clients are close to the slow-consumer limit.
+    pub websocket_backpressure_events: AtomicU64,
+    /// Connections force-closed because their outbound queue stayed full past
+    /// `websocket.slow_consumer_timeout_ms`.
+    pub websocket_slow_consumer_disconnects: AtomicU64,
 
     // Room operation metrics
     pub rooms_created: AtomicU64,
@@ -225,6 +232,8 @@ pub struct ConnectionMetrics {
     pub disconnections: u64,
     pub connection_errors: u64,
     pub websocket_messages_dropped: u64,
+    pub websocket_backpressure_events: u64,
+    pub websocket_slow_consumer_disconnects: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -400,6 +409,8 @@ impl ServerMetrics {
             disconnections: AtomicU64::new(0),
             connection_errors: AtomicU64::new(0),
             websocket_messages_dropped: AtomicU64::new(0),
+            websocket_backpressure_events: AtomicU64::new(0),
+            websocket_slow_consumer_disconnects: AtomicU64::new(0),
             rooms_created: AtomicU64::new(0),
             rooms_joined: AtomicU64::new(0),
             room_creation_failures: AtomicU64::new(0),
@@ -515,6 +526,25 @@ impl ServerMetrics {
 
     pub fn increment_websocket_messages_dropped(&self) {
         self.websocket_messages_dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record several dropped messages at once (e.g. a slow consumer's
+    /// abandoned queue at disconnect), keeping the drop counter honest.
+    pub fn add_websocket_messages_dropped(&self, count: u64) {
+        if count > 0 {
+            self.websocket_messages_dropped
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    pub fn increment_websocket_backpressure_events(&self) {
+        self.websocket_backpressure_events
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_websocket_slow_consumer_disconnects(&self) {
+        self.websocket_slow_consumer_disconnects
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1035,6 +1065,12 @@ impl ServerMetrics {
                 disconnections: self.disconnections.load(Ordering::Relaxed),
                 connection_errors: self.connection_errors.load(Ordering::Relaxed),
                 websocket_messages_dropped: self.websocket_messages_dropped.load(Ordering::Relaxed),
+                websocket_backpressure_events: self
+                    .websocket_backpressure_events
+                    .load(Ordering::Relaxed),
+                websocket_slow_consumer_disconnects: self
+                    .websocket_slow_consumer_disconnects
+                    .load(Ordering::Relaxed),
             },
             rooms: RoomMetrics {
                 rooms_created: self.rooms_created.load(Ordering::Relaxed),

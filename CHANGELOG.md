@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added two WebSocket delivery config fields: `websocket.send_queue_capacity` (default `1024`
+  messages; must be ≥ 1) bounds the per-connection outbound message queue — previously
+  hard-derived as `batch_size * 4` (40) — and `websocket.slow_consumer_timeout_ms` (default
+  `5000`; must be > 0 and ≤ 600000) bounds how long delivery may wait on a full queue before the
+  recipient is disconnected as a slow consumer. Both are documented in `docs/configuration.md`
+  and pinned by the config-reference drift guards in `tests/config_and_endpoints_tests.rs`.
+- Added the `SLOW_CONSUMER` error code (connection lifecycle): sent best-effort as a final
+  `Error` frame before the server closes a connection whose outbound queue stayed full past
+  `websocket.slow_consumer_timeout_ms`, so clients can distinguish "you could not keep up" from
+  other disconnects.
+- Added two Prometheus counters for delivery health:
+  `signal_fish_websocket_backpressure_events_total` (times a full outbound queue forced delivery
+  to wait for capacity; the message was still delivered) and
+  `signal_fish_websocket_slow_consumer_disconnects_total` (connections force-closed because
+  their outbound queue stayed full past the timeout). The existing
+  `signal_fish_websocket_messages_dropped_total` help text now clarifies it counts server
+  messages abandoned together with a closed or closing connection.
 - Cross-platform prebuilt release binaries: `release.yml` now builds a standalone
   `signal-fish-server` executable for Linux (x86_64, aarch64), macOS (x86_64, Apple
   Silicon), and Windows (x86_64, aarch64) and attaches each as a SHA-256-checksummed
@@ -438,6 +455,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed [#131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/131): the relay
+  silently dropped `GameData` under burst — each connection's outbound queue was a small bounded
+  channel (`batch_size * 4` = 40 messages) written with a fire-and-forget `try_send`, so a burst
+  that outpaced one recipient's drain rate discarded messages with only a metric to show for it.
+  The server now NEVER silently drops a delivery: the fast path is still a lock-free `try_send`,
+  but a full queue makes delivery wait (true backpressure) for up to
+  `websocket.slow_consumer_timeout_ms`, and only a recipient that stays full past that timeout is
+  disconnected as a slow consumer (metrics + warning log + best-effort `SLOW_CONSUMER` error
+  frame, then the close). Room senders are paced to their slowest healthy recipient; a dead
+  recipient costs senders at most one timeout window before it is evicted. Covered end to end by
+  `tests/relay_backpressure_e2e.rs`; delivery semantics are documented in `docs/protocol.md`.
+- Undeliverable binary game data is no longer silently dropped by the send path: a payload that
+  cannot be converted for a recipient (e.g. an internal binary encoding relayed to a JSON-only
+  client) now surfaces an explicit `Error` frame with code `UNSUPPORTED_GAME_DATA_FORMAT` to that
+  recipient in place of each undeliverable payload, and the drop metric still increments.
 - Hardened release and documentation validation: `release.yml` now skips binary
   attachment with a clear diagnostic when no `release-binary-*` artifacts exist,
   uses an existing `actions/download-artifact` tag, and the workflow hygiene job

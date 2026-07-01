@@ -521,7 +521,15 @@ impl ReconnectionManager {
         true
     }
 
-    /// Get missed events for a reconnecting player
+    /// Get missed events for a reconnecting player.
+    ///
+    /// HONESTY NOTE: nothing on the production delivery path calls
+    /// [`Self::buffer_event`] today, so this always returns an empty list and
+    /// the `missed_events` field of the `Reconnected` payload is always empty.
+    /// Messages sent while a player is disconnected are NOT replayed; clients
+    /// must treat reconnection as requiring an application-level resync. The
+    /// buffer machinery is retained for embedders that wire `buffer_event`
+    /// into their own delivery layer.
     pub async fn get_missed_events(
         &self,
         room_id: &RoomId,

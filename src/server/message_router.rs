@@ -7,6 +7,12 @@ use super::{EnhancedGameServer, TransportStatusUpdate};
 impl EnhancedGameServer {
     /// Handle incoming client message with enhanced coordination.
     pub async fn handle_client_message(&self, player_id: &PlayerId, message: ClientMessage) {
+        // EVERY inbound message is liveness, not just `Ping`: the activity
+        // reaper (`server.ping_timeout`) must never disconnect a client that
+        // is actively streaming GameData/Signal traffic but not heartbeating.
+        // This matches the socket-level idle timeout, which already counts
+        // any inbound frame as activity.
+        self.record_client_activity(player_id);
         match message {
             ClientMessage::Authenticate { app_id, .. } => {
                 tracing::warn!(

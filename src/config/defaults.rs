@@ -405,3 +405,27 @@ pub const fn default_auth_timeout_secs() -> u64 {
 pub const fn default_idle_timeout_secs() -> u64 {
     300
 }
+
+/// Default per-connection outbound queue capacity (messages).
+///
+/// Sized to absorb realistic relay bursts (e.g. rollback-netcode input
+/// catch-up at 60 Hz) without engaging backpressure: 1024 messages is ~17
+/// seconds of headroom at 60 messages/second from a sending peer. Queue slots
+/// hold `Arc` pointers, so a generous default costs almost nothing until
+/// messages actually queue.
+pub const fn default_send_queue_capacity() -> usize {
+    1024
+}
+
+/// Default slow-consumer disconnect timeout in milliseconds.
+///
+/// When a recipient's outbound queue is full, delivery waits up to this long
+/// for capacity before the recipient is disconnected as a slow consumer.
+/// Messages are never silently dropped: each is delivered, or the
+/// unresponsive connection is closed loudly (metric + log + best-effort error
+/// frame). 5s tolerates transient stalls (GC pauses, WiFi hiccups) on top of
+/// the buffering the queue itself provides, while bounding how long one dead
+/// connection can stall senders in the same room.
+pub const fn default_slow_consumer_timeout_ms() -> u64 {
+    5_000
+}

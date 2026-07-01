@@ -283,7 +283,7 @@ mod tests {
     use crate::distributed::SequencedMessage;
     use anyhow::Result;
     use async_trait::async_trait;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::Mutex;
 
     struct RecordingCoordinator {
         sent: Mutex<Vec<(PlayerId, ServerMessage)>>,
@@ -350,7 +350,7 @@ mod tests {
             &self,
             _player_id: PlayerId,
             _room_id: Option<RoomId>,
-            _sender: mpsc::Sender<Arc<ServerMessage>>,
+            _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
             Ok(())
         }

@@ -46,7 +46,6 @@ impl MessageBatcher {
     }
 
     /// Get pending message count
-    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.pending.len()
     }

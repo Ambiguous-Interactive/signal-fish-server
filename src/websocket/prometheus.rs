@@ -108,8 +108,20 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_websocket_messages_dropped_total",
-        "Server messages dropped because the outbound WebSocket buffer was full",
+        "Server messages abandoned together with a connection that was closed (slow consumer) or already closing",
         snapshot.connections.websocket_messages_dropped,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_backpressure_events_total",
+        "Times a full outbound queue forced delivery to wait for capacity (message still delivered)",
+        snapshot.connections.websocket_backpressure_events,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_slow_consumer_disconnects_total",
+        "Connections force-closed because their outbound queue stayed full past websocket.slow_consumer_timeout_ms",
+        snapshot.connections.websocket_slow_consumer_disconnects,
     );
 
     counter(
