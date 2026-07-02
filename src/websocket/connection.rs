@@ -43,8 +43,9 @@ async fn enqueue_connection_message(
         sender: tx.clone(),
         close: close_signal.clone(),
     };
+    let metrics = server.metrics();
     let outcome = deliver_or_disconnect(
-        &server.metrics(),
+        &metrics,
         slow_consumer_timeout,
         player_id,
         &handle,
@@ -425,19 +426,39 @@ pub(super) async fn handle_socket(
 
         // A close was requested (slow consumer, unregistration): the write
         // loop above was cancelled wherever it was; run the bounded farewell/
-        // flush/close sequence. When the loop ended by itself (socket error or
-        // channel closed after a full flush) there is nothing more to write.
-        if let Some(reason) = close_request {
-            let current_player_id = *effective_player_id_for_send.read().await;
-            finalize_closed_connection(
-                &mut sender,
-                &mut rx,
-                &mut batcher,
-                reason,
-                &current_player_id,
-                &server_clone,
-            )
-            .await;
+        // flush/close sequence. When the loop ended by itself there is nothing
+        // more to write, but the drop metric must stay honest: a clean
+        // channel-close exits only after a full flush (nothing buffered),
+        // while a socket write error abandons whatever is still buffered with
+        // the dead connection — count that instead of losing it silently from
+        // an observability standpoint.
+        match close_request {
+            Some(reason) => {
+                let current_player_id = *effective_player_id_for_send.read().await;
+                finalize_closed_connection(
+                    &mut sender,
+                    &mut rx,
+                    &mut batcher,
+                    reason,
+                    &current_player_id,
+                    &server_clone,
+                )
+                .await;
+            }
+            None => {
+                let abandoned = rx.len() + batcher.len();
+                if abandoned > 0 {
+                    server_clone
+                        .metrics()
+                        .add_websocket_messages_dropped(abandoned as u64);
+                    let current_player_id = *effective_player_id_for_send.read().await;
+                    tracing::warn!(
+                        player_id = %current_player_id,
+                        abandoned_messages = abandoned,
+                        "Connection ended with a failed socket write; abandoning its buffered messages"
+                    );
+                }
+            }
         }
 
         // Cleanup when send task ends
