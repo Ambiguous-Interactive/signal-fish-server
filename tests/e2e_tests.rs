@@ -1574,32 +1574,21 @@ async fn collect_frames_until_closed(
 }
 
 /// An authenticated connection that sends no frames at all is closed once the
-/// idle timeout elapses, after receiving a `CONNECTION_IDLE_TIMEOUT` error.
-/// (Auth is disabled in `test_server_config`, so the connection counts as
-/// authenticated from the first frame — the idle window applies immediately.)
+/// socket-level idle timeout elapses, after receiving a
+/// `CONNECTION_IDLE_TIMEOUT` error. (Auth is disabled in `test_server_config`,
+/// so the connection counts as authenticated from the first frame — the idle
+/// window applies immediately.)
 ///
-/// `ping_timeout` is deliberately SHORTER than the idle window — the
-/// production-default ordering (30s reaper vs 300s idle). The state reaper
-/// therefore unregisters the silent client from the message coordinator well
-/// before the idle timeout fires, so this test proves the idle-timeout error
-/// is delivered on the connection's own outbound channel rather than via the
-/// coordinator (a coordinator-routed error would be silently dropped here).
+/// The maintenance reaper is deliberately NOT running here (the e2e harness
+/// does not spawn it), so the socket-level idle mechanism — the backstop for
+/// reaper-less deployments and library embedders — is what closes the
+/// connection. The reaper-driven eviction path is covered separately by
+/// `test_silent_client_is_reaped_with_activity_timeout`.
 #[tokio::test]
 async fn test_idle_client_is_disconnected_after_idle_timeout() {
     let mult = idle_timeout_test_multiplier();
-    let mut config = idle_timeout_server_config(2 * mult);
-    // Reaper window (500ms) + cleanup interval (1s, from `test_server_config`)
-    // elapse before the (2 * mult)s idle window: the client is reaped first,
-    // exactly as with production defaults. ping_timeout stays at 500ms so the
-    // reaper-before-idle ordering holds at every multiplier.
-    config.ping_timeout = tokio::time::Duration::from_millis(500);
+    let config = idle_timeout_server_config(2 * mult);
     let game_server = create_test_server_with_config(config, test_protocol_config()).await;
-    // Run the maintenance reaper (main.rs spawns it the same way); the e2e
-    // harness does not start it by default.
-    let cleanup_server = Arc::clone(&game_server);
-    tokio::spawn(async move {
-        cleanup_server.cleanup_task().await;
-    });
     let addr = start_server_with_instance(game_server).await;
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
@@ -1645,6 +1634,76 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
     assert!(
         idle_error_seen,
         "expected an Error frame with CONNECTION_IDLE_TIMEOUT before close, got frames: {frames:?}"
+    );
+}
+
+/// A completely silent client is evicted by the maintenance reaper
+/// (`server.ping_timeout`) with a loud `ACTIVITY_TIMEOUT` farewell, and its
+/// socket is closed promptly — long before the (much larger) socket-level
+/// idle window. This is the production-default ordering (30s reaper vs 300s
+/// idle) scaled down, and it pins two behaviors at once: the reaper's
+/// distinct disconnect reason (not `CONNECTION_IDLE_TIMEOUT`, which is the
+/// socket-level close), and the positive socket teardown on unregistration
+/// (reaped connections must not linger half-alive until the idle window).
+#[tokio::test]
+async fn test_silent_client_is_reaped_with_activity_timeout() {
+    let mult = idle_timeout_test_multiplier();
+    // Idle window far beyond the test deadline: only the reaper can close
+    // this connection.
+    let mut config = idle_timeout_server_config(300);
+    config.ping_timeout = tokio::time::Duration::from_millis(500);
+    let game_server = create_test_server_with_config(config, test_protocol_config()).await;
+    // Run the maintenance reaper (main.rs spawns it the same way); the e2e
+    // harness does not start it by default.
+    let cleanup_server = Arc::clone(&game_server);
+    tokio::spawn(async move {
+        cleanup_server.cleanup_task().await;
+    });
+    let addr = start_server_with_instance(game_server).await;
+    let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+
+    // Prove the connection works, then go silent.
+    let response = send_and_receive(
+        &mut sender,
+        &mut receiver,
+        ClientMessage::JoinRoom {
+            game_name: "reaper-eviction-game".to_string(),
+            room_code: None,
+            player_name: "Silent".to_string(),
+            max_players: Some(4),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await
+    .expect("join before going silent");
+    assert!(
+        matches!(response, ServerMessage::RoomJoined(_)),
+        "expected RoomJoined, got {response:?}"
+    );
+
+    // Reaper window (500ms) + cleanup interval (1s, from `test_server_config`)
+    // elapse well within this deadline; the idle window (300s) never can.
+    let frames = collect_frames_until_closed(
+        &mut receiver,
+        tokio::time::Duration::from_secs(15 * mult),
+        "reaped silent client",
+    )
+    .await;
+
+    let activity_timeout_seen = frames.iter().any(|frame| match frame {
+        Message::Text(text) => matches!(
+            serde_json::from_str::<ServerMessage>(text),
+            Ok(ServerMessage::Error {
+                error_code: Some(ErrorCode::ActivityTimeout),
+                ..
+            })
+        ),
+        _ => false,
+    });
+    assert!(
+        activity_timeout_seen,
+        "expected an Error frame with ACTIVITY_TIMEOUT before close, got frames: {frames:?}"
     );
 }
 

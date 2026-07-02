@@ -474,6 +474,39 @@ MessagePack map:
 Clients that did not negotiate `game_data_format: "message_pack"` receive the
 JSON `GameData` fallback instead.
 
+### Delivery semantics
+
+Relayed messages — `GameData`, `GameDataBinary`, and every other server
+message — are delivered reliably and in order per connection over the
+WebSocket. The server never silently drops a delivery: when a recipient
+cannot keep up, its bounded outbound queue
+(`websocket.send_queue_capacity`, default 1024 messages) fills and delivery
+applies backpressure to senders, waiting up to
+`websocket.slow_consumer_timeout_ms` (default 5000) for space. A recipient
+whose queue stays full past that timeout is disconnected as a slow consumer:
+the server sends a best-effort `Error` with code `SLOW_CONSUMER`, then
+closes the socket through the normal disconnect flow (so the reconnection
+grace period still applies).
+
+Practical consequences:
+
+- Clients driving async runtimes must continuously poll/drive their
+  connection. A runtime that is merely "ticked" occasionally starves the
+  transport: inbound frames back up on the server side and manifest as
+  apparent stalls, ending in a `SLOW_CONSUMER` disconnect.
+- Sustainable throughput is bounded by the slowest recipient's ability to
+  drain its connection: room senders are paced to their slowest healthy
+  recipient, and a dead recipient costs senders at most one timeout window
+  before it is evicted. Operators can watch the
+  `signal_fish_websocket_backpressure_events_total` and
+  `signal_fish_websocket_slow_consumer_disconnects_total` Prometheus
+  counters to spot backpressure and slow-consumer evictions in production.
+
+A binary game-data payload that cannot be converted for a recipient (for
+example, an internal binary encoding relayed to a JSON-only client) is not
+silently dropped either: the recipient receives an explicit `Error` with
+code `UNSUPPORTED_GAME_DATA_FORMAT` in place of each undeliverable payload.
+
 ### LobbyStateChanged
 
 Lobby state transitioned.
@@ -604,7 +637,10 @@ Response to client `Ping`.
 
 ### Reconnected
 
-Reconnection successful. Includes current room state and missed events.
+Reconnection successful. Includes current room state. The `missed_events`
+field is reserved for future use and is always an empty list today — messages
+sent while the player was disconnected are not buffered or replayed (see
+[Reconnection Flow](#reconnection-flow)).
 
 ```json
 
@@ -631,15 +667,7 @@ Reconnection successful. Includes current room state and missed events.
     "ready_players": ["player-id-1"],
     "relay_type": "matchbox",
     "current_spectators": [],
-    "missed_events": [
-      {
-        "type": "GameData",
-        "data": {
-          "from_player": "player-id",
-          "data": {"action": "move"}
-        }
-      }
-    ]
+    "missed_events": []
   }
 }
 
@@ -855,8 +883,13 @@ and `room_id` (from the original `RoomJoined` response) to reconnect:
 
 ```
 
-On successful reconnection, the server sends a `Reconnected` message with the current room state and any
-missed events that occurred during the disconnection.
+On successful reconnection, the server sends a `Reconnected` message with the current room state.
+
+Note: messages sent while a player is disconnected are **not** buffered or
+replayed — the `missed_events` field in the `Reconnected` payload is always
+empty today. Clients must treat reconnection as requiring an
+application-level state resync (for example, have the authority or another
+peer re-send the current game state after `PlayerReconnected`).
 
 ## Protocol v3 additions
 

@@ -39,7 +39,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, GameDataEncoding, IceServer, LobbyState, PlayerId, ServerMessage, Transport,
+    ClientMessage, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId, ServerMessage,
+    Transport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -547,6 +548,20 @@ impl Orchestrator<'_> {
                     peer: peer_id,
                     transport,
                     connected,
+                });
+            }
+            ServerMessage::Error {
+                message,
+                error_code: Some(ErrorCode::SlowConsumer),
+            } => {
+                // The server is closing this connection because it could not
+                // drain its outbound queue in time. Surface it distinctly so a
+                // run failure is attributable to consumption speed rather than
+                // a generic server error; the imminent socket close (not this
+                // frame) decides the outcome.
+                tracing::warn!(%message, "server disconnected this client as a slow consumer");
+                emit(&Event::Error {
+                    message: format!("server disconnecting us as a slow consumer: {message}"),
                 });
             }
             ServerMessage::Error {

@@ -374,7 +374,11 @@ Current ADRs:
 ### Graceful Degradation
 
 - Handle partial failures
-- Implement backpressure
+- Apply backpressure instead of dropping data: message delivery waits on a
+  full per-connection outbound queue (`websocket.send_queue_capacity`) for up
+  to `websocket.slow_consumer_timeout_ms`, then disconnects the recipient as
+  a slow consumer (best-effort `SLOW_CONSUMER` error) rather than silently
+  dropping messages
 - Timeout on slow operations
 
 ### Observable by Default

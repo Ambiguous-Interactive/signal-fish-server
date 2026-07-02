@@ -1066,7 +1066,13 @@ fn golden_enum_spectator_state_change_reason_all_variants() {
 
 #[test]
 fn golden_enum_error_code_all_variants() {
-    // `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` — exhaustive.
+    // `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`.
+    //
+    // Exhaustiveness is COMPILER-ENFORCED by the `match` guard after the
+    // table: adding an `ErrorCode` variant fails compilation here until the
+    // variant is listed in the guard — and the guard's comment directs the
+    // author to freeze its wire token in this table at the same time. (The
+    // table itself was previously hand-maintained and had silently drifted.)
     let cases: &[(ErrorCode, &str)] = &[
         (ErrorCode::Unauthorized, r#""UNAUTHORIZED""#),
         (ErrorCode::InvalidToken, r#""INVALID_TOKEN""#),
@@ -1147,10 +1153,77 @@ fn golden_enum_error_code_all_variants() {
         (ErrorCode::InternalError, r#""INTERNAL_ERROR""#),
         (ErrorCode::StorageError, r#""STORAGE_ERROR""#),
         (ErrorCode::ServiceUnavailable, r#""SERVICE_UNAVAILABLE""#),
+        (ErrorCode::GameStartNotReady, r#""GAME_START_NOT_READY""#),
+        (ErrorCode::GameStartForbidden, r#""GAME_START_FORBIDDEN""#),
+        (ErrorCode::SlowConsumer, r#""SLOW_CONSUMER""#),
+        (ErrorCode::ActivityTimeout, r#""ACTIVITY_TIMEOUT""#),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
     }
+
+    // Compile-time exhaustiveness guard: a new `ErrorCode` variant fails this
+    // match until added — ADD ITS GOLDEN WIRE TOKEN TO THE TABLE ABOVE at the
+    // same time, and keep the count assertion below in sync.
+    let covered = |code: ErrorCode| match code {
+        ErrorCode::Unauthorized
+        | ErrorCode::InvalidToken
+        | ErrorCode::AuthenticationRequired
+        | ErrorCode::InvalidAppId
+        | ErrorCode::AppIdExpired
+        | ErrorCode::AppIdRevoked
+        | ErrorCode::AppIdSuspended
+        | ErrorCode::MissingAppId
+        | ErrorCode::AuthenticationTimeout
+        | ErrorCode::SdkVersionUnsupported
+        | ErrorCode::UnsupportedGameDataFormat
+        | ErrorCode::InvalidInput
+        | ErrorCode::InvalidGameName
+        | ErrorCode::InvalidRoomCode
+        | ErrorCode::InvalidPlayerName
+        | ErrorCode::InvalidMaxPlayers
+        | ErrorCode::MessageTooLarge
+        | ErrorCode::RoomNotFound
+        | ErrorCode::RoomFull
+        | ErrorCode::AlreadyInRoom
+        | ErrorCode::NotInRoom
+        | ErrorCode::RoomCreationFailed
+        | ErrorCode::MaxRoomsPerGameExceeded
+        | ErrorCode::InvalidRoomState
+        | ErrorCode::AuthorityNotSupported
+        | ErrorCode::AuthorityConflict
+        | ErrorCode::AuthorityDenied
+        | ErrorCode::RateLimitExceeded
+        | ErrorCode::TooManyConnections
+        | ErrorCode::ReconnectionFailed
+        | ErrorCode::ReconnectionTokenInvalid
+        | ErrorCode::ReconnectionExpired
+        | ErrorCode::PlayerAlreadyConnected
+        | ErrorCode::SpectatorNotAllowed
+        | ErrorCode::TooManySpectators
+        | ErrorCode::NotASpectator
+        | ErrorCode::SpectatorJoinFailed
+        | ErrorCode::InternalError
+        | ErrorCode::StorageError
+        | ErrorCode::ServiceUnavailable
+        | ErrorCode::CrossRoomSignal
+        | ErrorCode::UnsupportedTransport
+        | ErrorCode::SignalTargetNotFound
+        | ErrorCode::SignalRateLimited
+        | ErrorCode::SignalTooLarge
+        | ErrorCode::ConnectionIdleTimeout
+        | ErrorCode::GameStartNotReady
+        | ErrorCode::GameStartForbidden
+        | ErrorCode::SlowConsumer
+        | ErrorCode::ActivityTimeout => (),
+    };
+    covered(ErrorCode::Unauthorized);
+    assert_eq!(
+        cases.len(),
+        50,
+        "golden table entry count must track the ErrorCode variant count \
+         (update alongside the exhaustive guard above)"
+    );
 }
 
 #[test]

@@ -1,7 +1,8 @@
 use crate::auth::AppInfo;
 use crate::config::AppAuthEntry;
 use crate::coordination::{
-    InMemoryRoomOperationCoordinator, MessageCoordinator, RoomOperationCoordinatorTrait,
+    ClientDeliveryHandle, ConnectionCloseSignal, DeliveryOutcome, InMemoryRoomOperationCoordinator,
+    MessageCoordinator, RoomOperationCoordinatorTrait,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
@@ -221,7 +222,10 @@ impl EnhancedGameServer {
 
         // Setup distributed coordination - in-memory only
         let distributed_lock = Arc::new(InMemoryDistributedLock::new());
-        let message_coordinator = Arc::new(InMemoryMessageCoordinator::new());
+        let message_coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_millis(config.websocket_config.slow_consumer_timeout_ms),
+            metrics.clone(),
+        ));
 
         let connection_manager = ConnectionManager::new(
             config.max_connections_per_ip,
@@ -320,15 +324,41 @@ impl EnhancedGameServer {
         )
     }
 
-    /// Register a new client connection
+    /// Register a new client connection.
+    ///
+    /// The connection is registered with a detached close signal: delivery
+    /// failures still prune it from routing, but there are no socket tasks to
+    /// tear down. The WebSocket layer uses
+    /// [`register_client_with_close`](Self::register_client_with_close) so
+    /// slow-consumer disconnects actually close the socket.
     pub async fn register_client(
         &self,
         sender: mpsc::Sender<Arc<ServerMessage>>,
         client_addr: SocketAddr,
     ) -> Result<PlayerId, RegisterClientError> {
-        self.connection_manager
-            .register_client(sender, client_addr, self.instance_id)
+        self.register_client_with_close(sender, ConnectionCloseSignal::detached(), client_addr)
             .await
+    }
+
+    /// Register a new client connection along with the close signal that lets
+    /// the delivery layer terminate it (slow consumer, server-side eviction).
+    pub async fn register_client_with_close(
+        &self,
+        sender: mpsc::Sender<Arc<ServerMessage>>,
+        close: ConnectionCloseSignal,
+        client_addr: SocketAddr,
+    ) -> Result<PlayerId, RegisterClientError> {
+        self.connection_manager
+            .register_client(sender, close, client_addr, self.instance_id)
+            .await
+    }
+
+    /// Record inbound activity for a client so the activity reaper
+    /// (`server.ping_timeout`) treats it as alive. Called for every routed
+    /// client message — not just `Ping` — because a client streaming game
+    /// data at a high rate without heartbeats is emphatically alive.
+    pub(crate) fn record_client_activity(&self, player_id: &PlayerId) {
+        self.connection_manager.record_ping(player_id);
     }
 
     /// Update a client's preferred game data encoding.
@@ -509,18 +539,20 @@ impl EnhancedGameServer {
             // Tests should properly handle the asynchronous nature of message delivery
         }
 
-        // Remove client connection
-        if self.connection_manager.remove_client(player_id).is_some() {
-            self.metrics.decrement_active_connections();
-        }
-
-        // Unregister from message coordinator
+        // Unregister from the message coordinator BEFORE tearing the socket
+        // down: once routing stops, no new message can be enqueued into a
+        // connection whose send task is already flushing its final drain.
         if let Err(e) = self
             .message_coordinator
             .unregister_local_client(player_id)
             .await
         {
             tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+        }
+
+        // Remove client connection (also requests the socket tasks to close)
+        if self.connection_manager.remove_client(player_id).is_some() {
+            self.metrics.decrement_active_connections();
         }
 
         tracing::info!(%player_id, instance_id = %self.instance_id, "Client unregistered");
@@ -563,10 +595,22 @@ impl EnhancedGameServer {
     }
 }
 
-/// In-memory message coordinator for testing
+/// In-memory message coordinator: the production (single-instance) delivery
+/// layer that routes server messages onto per-connection outbound queues.
+///
+/// Delivery contract: **a message is never silently dropped.** Each delivery
+/// either enqueues the message (waiting — backpressure — for queue space when
+/// the recipient is momentarily full) or, if the recipient cannot absorb a
+/// single message for the whole `slow_consumer_timeout`, disconnects that
+/// recipient loudly (metrics + log + close signal). Senders in the same room
+/// are therefore paced to their slowest healthy recipient instead of having
+/// messages vanish, and an unhealthy recipient costs the room at most one
+/// timeout window before being evicted.
 pub struct InMemoryMessageCoordinator {
-    local_clients: Arc<RwLock<HashMap<PlayerId, mpsc::Sender<Arc<ServerMessage>>>>>,
+    local_clients: Arc<RwLock<HashMap<PlayerId, ClientDeliveryHandle>>>,
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
+    metrics: Arc<crate::metrics::ServerMetrics>,
+    slow_consumer_timeout: Duration,
     #[allow(dead_code)]
     instance_id: Uuid,
 }
@@ -574,12 +618,113 @@ pub struct InMemoryMessageCoordinator {
 use std::collections::HashSet;
 
 impl InMemoryMessageCoordinator {
+    /// Create a coordinator with default delivery policy and private metrics.
+    ///
+    /// Production wiring uses [`Self::with_delivery_policy`] so backpressure
+    /// events surface in the server-wide metrics; this constructor remains for
+    /// tests and embedders that only need routing behavior.
     pub fn new() -> Self {
+        Self::with_delivery_policy(
+            Duration::from_millis(crate::config::defaults::default_slow_consumer_timeout_ms()),
+            Arc::new(crate::metrics::ServerMetrics::new()),
+        )
+    }
+
+    /// Create a coordinator with an explicit slow-consumer timeout and shared
+    /// metrics sink.
+    pub fn with_delivery_policy(
+        slow_consumer_timeout: Duration,
+        metrics: Arc<crate::metrics::ServerMetrics>,
+    ) -> Self {
         Self {
             local_clients: Arc::new(RwLock::new(HashMap::new())),
             room_players: Arc::new(RwLock::new(HashMap::new())),
+            metrics,
+            slow_consumer_timeout,
             instance_id: Uuid::new_v4(),
         }
+    }
+
+    /// Deliver a message to many recipients concurrently, then prune every
+    /// recipient flagged as a slow consumer so subsequent deliveries stop
+    /// waiting on a connection that is already being torn down.
+    ///
+    /// Concurrency here bounds a broadcast's latency to the *slowest single
+    /// recipient* rather than the sum over recipients, while per-recipient
+    /// ordering is preserved because each caller awaits the whole broadcast
+    /// before issuing its next message.
+    async fn deliver_to_all(
+        &self,
+        recipients: Vec<(PlayerId, ClientDeliveryHandle)>,
+        message: Arc<ServerMessage>,
+    ) {
+        if recipients.is_empty() {
+            return;
+        }
+
+        let outcomes =
+            futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
+                let message = Arc::clone(&message);
+                async move {
+                    let outcome = crate::coordination::deliver_or_disconnect(
+                        &self.metrics,
+                        self.slow_consumer_timeout,
+                        player_id,
+                        handle,
+                        message,
+                    )
+                    .await;
+                    (*player_id, outcome)
+                }
+            }))
+            .await;
+
+        let slow_consumers: Vec<PlayerId> = outcomes
+            .into_iter()
+            .filter(|(_, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
+            .map(|(player_id, _)| player_id)
+            .collect();
+
+        if !slow_consumers.is_empty() {
+            // Remove immediately so senders stop paying the timeout for a
+            // connection that is already closing; the connection's own
+            // unregister flow performs the full cleanup (room membership,
+            // reconnection window, peer notifications).
+            let mut clients = self.local_clients.write().await;
+            for player_id in &slow_consumers {
+                clients.remove(player_id);
+            }
+        }
+    }
+
+    /// Snapshot the delivery handles for a room's members (optionally skipping
+    /// one player) and release both locks before any await on delivery, so a
+    /// backpressured recipient can never stall registration or other
+    /// broadcasts through held locks.
+    async fn collect_room_recipients(
+        &self,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+    ) -> Vec<(PlayerId, ClientDeliveryHandle)> {
+        // Lock ordering: room_players first, then local_clients (matches
+        // register/unregister to prevent ABBA deadlocks).
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+
+        room_players
+            .get(room_id)
+            .map(|players| {
+                players
+                    .iter()
+                    .filter(|player_id| Some(*player_id) != except_player)
+                    .filter_map(|player_id| {
+                        clients
+                            .get(player_id)
+                            .map(|handle| (*player_id, handle.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -590,16 +735,45 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         player_id: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
-        let clients = self.local_clients.read().await;
-        if let Some(sender) = clients.get(player_id) {
-            if sender.try_send(Arc::clone(&message)).is_err() {
-                tracing::warn!(%player_id, "Failed to send message to local client");
-            }
-            tracing::info!(%player_id, ?message, "Message sent to player");
+        let handle = { self.local_clients.read().await.get(player_id).cloned() };
+        if let Some(handle) = handle {
+            self.deliver_to_all(vec![(*player_id, handle)], message)
+                .await;
         } else {
-            tracing::warn!(%player_id, ?message, "Player not found in local_clients map, message not sent");
+            // Normal during disconnect races (e.g. a room notification issued
+            // while the target is unregistering); nothing to deliver to.
+            tracing::debug!(%player_id, "Player not registered with coordinator; message unroutable");
         }
         Ok(())
+    }
+
+    async fn try_send_to_player(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        let handle = { self.local_clients.read().await.get(player_id).cloned() };
+        let Some(handle) = handle else {
+            tracing::debug!(%player_id, "Farewell skipped: player not registered with coordinator");
+            return Ok(false);
+        };
+        match handle.sender.try_send(message) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Advisory frame to a connection that is being closed anyway:
+                // do not wait, do not escalate, do not overwrite the close
+                // reason. The teardown itself is the loud signal.
+                tracing::debug!(
+                    %player_id,
+                    "Farewell skipped: outbound queue full on a closing connection"
+                );
+                Ok(false)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(%player_id, "Farewell skipped: connection already closed");
+                Ok(false)
+            }
+        }
     }
 
     async fn broadcast_to_room(
@@ -607,18 +781,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: &RoomId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
-
-        if let Some(players) = room_players.get(room_id) {
-            for player_id in players {
-                if let Some(sender) = clients.get(player_id) {
-                    if sender.try_send(Arc::clone(&message)).is_err() {
-                        tracing::warn!(%player_id, "Failed to broadcast message to player in room");
-                    }
-                }
-            }
-        }
+        let recipients = self.collect_room_recipients(room_id, None).await;
+        self.deliver_to_all(recipients, message).await;
         Ok(())
     }
 
@@ -628,20 +792,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
-
-        if let Some(players) = room_players.get(room_id) {
-            for player_id in players {
-                if player_id != except_player {
-                    if let Some(sender) = clients.get(player_id) {
-                        if sender.try_send(Arc::clone(&message)).is_err() {
-                            tracing::warn!(%player_id, "Failed to broadcast message to player in room");
-                        }
-                    }
-                }
-            }
-        }
+        let recipients = self
+            .collect_room_recipients(room_id, Some(except_player))
+            .await;
+        self.deliver_to_all(recipients, message).await;
         Ok(())
     }
 
@@ -649,7 +803,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         &self,
         player_id: PlayerId,
         room_id: Option<RoomId>,
-        sender: mpsc::Sender<Arc<ServerMessage>>,
+        delivery: ClientDeliveryHandle,
     ) -> anyhow::Result<()> {
         // Lock ordering: room_players first, then local_clients
         // (consistent with broadcast_to_room / broadcast_to_room_except read paths
@@ -661,11 +815,11 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .or_insert_with(HashSet::new)
                 .insert(player_id);
             let mut clients = self.local_clients.write().await;
-            clients.insert(player_id, sender);
+            clients.insert(player_id, delivery);
         } else {
             // No room_players lock needed when room_id is None
             let mut clients = self.local_clients.write().await;
-            clients.insert(player_id, sender);
+            clients.insert(player_id, delivery);
         }
         Ok(())
     }

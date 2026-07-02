@@ -495,6 +495,16 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         path: "websocket.idle_timeout_secs",
         default: Some("300"),
     },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY",
+        path: "websocket.send_queue_capacity",
+        default: Some("1024"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS",
+        path: "websocket.slow_consumer_timeout_ms",
+        default: Some("5000"),
+    },
 ];
 
 const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[

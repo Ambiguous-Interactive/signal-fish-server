@@ -89,6 +89,20 @@ pub enum ErrorCode {
     /// `StartGame` was sent by a player not permitted to start the game (the
     /// room has a designated authority and the sender is not it).
     GameStartForbidden,
+
+    // Connection lifecycle errors (1xxx category, appended at the END for rkyv
+    // discriminant stability — see the signaling-errors note above).
+    /// The connection's outbound queue stayed full past
+    /// `websocket.slow_consumer_timeout_ms`, so the server disconnected it
+    /// rather than silently dropping relayed messages. Sent best-effort as a
+    /// final `Error` frame before the close.
+    SlowConsumer,
+    /// The server's activity reaper (`server.ping_timeout`) evicted this
+    /// connection because no messages of any kind were received within the
+    /// window. Distinct from [`Self::ConnectionIdleTimeout`], which is the
+    /// socket-level `websocket.idle_timeout_secs` close. Sent best-effort as
+    /// a final `Error` frame before the close.
+    ActivityTimeout,
 }
 
 impl ErrorCode {
@@ -263,6 +277,14 @@ impl ErrorCode {
             Self::GameStartForbidden => {
                 "You are not permitted to start the game. Only the room's authority player may start it."
             }
+
+            // Connection lifecycle errors (1xxx), continued
+            Self::SlowConsumer => {
+                "This connection could not keep up with the messages sent to it, so the server closed it instead of silently dropping data. Drain messages faster (or reconnect) and consider pacing senders."
+            }
+            Self::ActivityTimeout => {
+                "The server received no messages from this connection within its activity window and evicted it. Send periodic Ping messages (or any traffic) to stay connected."
+            }
         }
     }
 }
@@ -329,6 +351,8 @@ mod tests {
             ErrorCode::ConnectionIdleTimeout,
             ErrorCode::GameStartNotReady,
             ErrorCode::GameStartForbidden,
+            ErrorCode::SlowConsumer,
+            ErrorCode::ActivityTimeout,
         ];
 
         for error_code in &error_codes {

@@ -53,7 +53,12 @@ async fn register_client(
     let (sender, receiver) = mpsc::channel(16);
     let player_id = server
         .connection_manager
-        .register_client(sender, next_addr(), server.instance_id)
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            next_addr(),
+            server.instance_id,
+        )
         .await
         .expect("client registration succeeds");
     (player_id, receiver)

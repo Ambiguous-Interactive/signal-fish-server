@@ -69,6 +69,10 @@ impl EnhancedGameServer {
         encoding: GameDataEncoding,
         payload: Bytes,
     ) {
+        // Binary frames bypass the message router, so record liveness here
+        // (mirrors `handle_client_message`): a client streaming binary game
+        // data must never be reaped as inactive.
+        self.record_client_activity(player_id);
         if payload.len() > self.config.max_message_size {
             tracing::warn!(
                 %player_id,

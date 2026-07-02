@@ -1,5 +1,6 @@
 use crate::protocol::{PlayerId, ServerMessage};
 use axum::extract::ws::{Message, WebSocket};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -11,7 +12,7 @@ use super::sending::send_single_message;
 /// Message batcher for WebSocket connections
 /// Batches multiple messages together to reduce syscall overhead
 pub(super) struct MessageBatcher {
-    pending: Vec<Arc<ServerMessage>>,
+    pending: VecDeque<Arc<ServerMessage>>,
     batch_size: usize,
     batch_interval: Duration,
     last_flush: Instant,
@@ -20,7 +21,7 @@ pub(super) struct MessageBatcher {
 impl MessageBatcher {
     pub(super) fn new(batch_size: usize, batch_interval_ms: u64) -> Self {
         Self {
-            pending: Vec::with_capacity(batch_size),
+            pending: VecDeque::with_capacity(batch_size),
             batch_size,
             batch_interval: Duration::from_millis(batch_interval_ms),
             last_flush: Instant::now(),
@@ -29,7 +30,7 @@ impl MessageBatcher {
 
     /// Queue a message for batching
     pub(super) fn queue(&mut self, message: Arc<ServerMessage>) {
-        self.pending.push(message);
+        self.pending.push_back(message);
     }
 
     /// Check if batch should be flushed
@@ -39,14 +40,27 @@ impl MessageBatcher {
             || (!self.pending.is_empty() && self.last_flush.elapsed() >= self.batch_interval)
     }
 
-    /// Flush all pending messages
+    /// Flush all pending messages at once (unit-test convenience; production
+    /// sends drain incrementally via [`Self::pop_front`] so a cancelled write
+    /// cannot lose the rest of the batch).
+    #[cfg(test)]
     pub(super) fn flush(&mut self) -> Vec<Arc<ServerMessage>> {
         self.last_flush = Instant::now();
-        std::mem::take(&mut self.pending)
+        std::mem::take(&mut self.pending).into_iter().collect()
+    }
+
+    /// Take the oldest pending message (FIFO), if any.
+    pub(super) fn pop_front(&mut self) -> Option<Arc<ServerMessage>> {
+        self.pending.pop_front()
+    }
+
+    /// Record that a (possibly incremental) flush completed, resetting the
+    /// batch-interval timer.
+    pub(super) fn mark_flushed(&mut self) {
+        self.last_flush = Instant::now();
     }
 
     /// Get pending message count
-    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.pending.len()
     }
@@ -58,30 +72,33 @@ impl MessageBatcher {
 }
 
 /// Helper function to send a batch of messages
+///
+/// Messages are popped one at a time rather than taken out wholesale, so that
+/// cancellation (the send task's close-signal select racing an in-flight
+/// socket write) leaves every unsent message inside the batcher where the
+/// finalize path can still flush or count it. Only the single message
+/// actively being written can be lost with the connection — it is already
+/// (partially) on the wire.
 pub(super) async fn send_batch(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     batcher: &mut MessageBatcher,
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
 ) -> Result<(), ()> {
-    let messages = batcher.flush();
-    if messages.is_empty() {
-        return Ok(());
-    }
-
-    let batch_size = messages.len();
-
-    // Send each message in the batch
-    for message in messages {
+    let mut batch_size = 0_usize;
+    while let Some(message) = batcher.pop_front() {
         if send_single_message(sender, message, player_id, server)
             .await
             .is_err()
         {
             return Err(());
         }
+        batch_size += 1;
     }
-
-    tracing::trace!(%player_id, batch_size, "Flushed message batch");
+    if batch_size > 0 {
+        tracing::trace!(%player_id, batch_size, "Flushed message batch");
+    }
+    batcher.mark_flushed();
     Ok(())
 }
 

@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::AppInfo;
-use crate::coordination::MessageCoordinator;
+use crate::coordination::{ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator};
 use crate::metrics::ServerMetrics;
 use crate::protocol::{GameDataEncoding, PlayerId, RoomId, ServerMessage, Topology, Transport};
 
@@ -46,6 +46,10 @@ pub(crate) struct ClientConnection {
     /// than the configured threshold (default 30 seconds).
     pub last_heartbeat_update: Option<Instant>,
     pub sender: mpsc::Sender<Arc<ServerMessage>>,
+    /// Kill switch for this connection's socket tasks (slow-consumer
+    /// disconnects, server-side eviction). Paired with `sender`: together they
+    /// form the connection's [`ClientDeliveryHandle`].
+    pub close: ConnectionCloseSignal,
     pub client_addr: SocketAddr,
     pub game_data_format: GameDataEncoding,
     pub app_info: Option<AppInfo>,
@@ -56,6 +60,17 @@ pub(crate) struct ClientConnection {
     /// (v3 only). `None` until the client reports — the relay floor is the implicit
     /// default and never closes regardless of what is (or is not) reported.
     pub transport_status: Option<(Transport, bool)>,
+}
+
+impl ClientConnection {
+    /// The pair (outbound queue, close signal) the delivery layer needs to
+    /// reach — or, failing that, terminate — this connection.
+    pub fn delivery_handle(&self) -> ClientDeliveryHandle {
+        ClientDeliveryHandle {
+            sender: self.sender.clone(),
+            close: self.close.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +108,7 @@ impl ConnectionManager {
     pub async fn register_client(
         &self,
         sender: mpsc::Sender<Arc<ServerMessage>>,
+        close: ConnectionCloseSignal,
         client_addr: SocketAddr,
         instance_id: Uuid,
     ) -> Result<PlayerId, RegisterClientError> {
@@ -116,6 +132,7 @@ impl ConnectionManager {
             last_ping: Instant::now(),
             last_heartbeat_update: None,
             sender: sender.clone(),
+            close: close.clone(),
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_info: None,
@@ -128,7 +145,7 @@ impl ConnectionManager {
 
         if let Err(err) = self
             .message_coordinator
-            .register_local_client(player_id, None, sender)
+            .register_local_client(player_id, None, ClientDeliveryHandle { sender, close })
             .await
         {
             warn!(%player_id, %err, "Failed to register client with coordinator");
@@ -144,11 +161,13 @@ impl ConnectionManager {
         sender: mpsc::Sender<Arc<ServerMessage>>,
         client_addr: SocketAddr,
     ) {
+        let close = ConnectionCloseSignal::detached();
         let connection = ClientConnection {
             room_id: None,
             last_ping: Instant::now(),
             last_heartbeat_update: None,
             sender: sender.clone(),
+            close: close.clone(),
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_info: None,
@@ -162,7 +181,7 @@ impl ConnectionManager {
 
         if let Err(err) = self
             .message_coordinator
-            .register_local_client(player_id, None, sender)
+            .register_local_client(player_id, None, ClientDeliveryHandle { sender, close })
             .await
         {
             warn!(%player_id, %err, "Failed to register test client with coordinator");
@@ -172,11 +191,11 @@ impl ConnectionManager {
     pub async fn assign_client_to_room(&self, player_id: &PlayerId, room_id: RoomId) {
         if let Some(mut client) = self.clients.get_mut(player_id) {
             client.room_id = Some(room_id);
-            let sender = client.sender.clone();
+            let delivery = client.delivery_handle();
             drop(client);
             if let Err(err) = self
                 .message_coordinator
-                .register_local_client(*player_id, Some(room_id), sender)
+                .register_local_client(*player_id, Some(room_id), delivery)
                 .await
             {
                 warn!(
@@ -294,13 +313,10 @@ impl ConnectionManager {
         self.app_info(player_id).map(|info| info.id)
     }
 
-    pub fn clear_room_assignment(
-        &self,
-        player_id: &PlayerId,
-    ) -> Option<mpsc::Sender<Arc<ServerMessage>>> {
+    pub fn clear_room_assignment(&self, player_id: &PlayerId) -> Option<ClientDeliveryHandle> {
         self.clients.get_mut(player_id).map(|mut client| {
             client.room_id = None;
-            client.sender.clone()
+            client.delivery_handle()
         })
     }
 
@@ -354,15 +370,16 @@ impl ConnectionManager {
         current_player_id: &PlayerId,
         reconnect_player_id: &PlayerId,
         room_id: RoomId,
-    ) -> Option<mpsc::Sender<Arc<ServerMessage>>> {
+    ) -> Option<ClientDeliveryHandle> {
         // Atomically remove the old entry (no separate get-then-remove race)
         if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
-            let sender = old_connection.sender.clone();
+            let delivery = old_connection.delivery_handle();
             let new_client = ClientConnection {
                 room_id: Some(room_id),
                 last_ping: Instant::now(),
                 last_heartbeat_update: None, // Reset on reconnection, will update immediately
-                sender: sender.clone(),
+                sender: delivery.sender.clone(),
+                close: delivery.close.clone(),
                 client_addr: old_connection.client_addr,
                 game_data_format: old_connection.game_data_format,
                 app_info: old_connection.app_info,
@@ -377,7 +394,7 @@ impl ConnectionManager {
             // IP slot is already reserved from the old entry -- no need to
             // release and re-reserve for the same IP address.
             self.clients.insert(*reconnect_player_id, new_client);
-            Some(sender)
+            Some(delivery)
         } else {
             None
         }
@@ -386,6 +403,16 @@ impl ConnectionManager {
     pub fn remove_client(&self, player_id: &PlayerId) -> Option<ClientConnection> {
         self.clients.remove(player_id).map(|(_, connection)| {
             self.release_ip_slot(connection.client_addr.ip());
+            // Every unregistration positively tears down the socket tasks:
+            // without this, a connection unregistered by the activity reaper
+            // lingers half-alive (undeliverable but still holding its socket)
+            // until an idle timeout fires. First requested reason wins, so a
+            // slow-consumer close initiated by the delivery layer is not
+            // overwritten. Reconnection reassignment deliberately bypasses
+            // this method, so surviving connections are never closed here.
+            connection
+                .close
+                .request_close(crate::coordination::CloseReason::Unregistered);
             connection
         })
     }
@@ -484,6 +511,17 @@ mod tests {
             Ok(())
         }
 
+        async fn try_send_to_player(
+            &self,
+            player_id: &PlayerId,
+            message: Arc<ServerMessage>,
+        ) -> Result<bool> {
+            // Test double: send_to_player is non-blocking here, so delegating
+            // honors the non-waiting farewell contract while preserving
+            // whatever recording/blocking behavior the double implements.
+            self.send_to_player(player_id, message).await.map(|()| true)
+        }
+
         async fn broadcast_to_room(
             &self,
             _room_id: &RoomId,
@@ -505,7 +543,7 @@ mod tests {
             &self,
             player_id: PlayerId,
             room_id: Option<RoomId>,
-            _sender: mpsc::Sender<Arc<ServerMessage>>,
+            _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
             self.registrations.lock().await.push((player_id, room_id));
             Ok(())
@@ -553,13 +591,13 @@ mod tests {
 
         let (tx1, _rx1) = channel();
         let first_id = manager
-            .register_client(tx1, addr, Uuid::new_v4())
+            .register_client(tx1, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("first registration succeeds");
 
         let (tx2, _rx2) = channel();
         let err = manager
-            .register_client(tx2, addr, Uuid::new_v4())
+            .register_client(tx2, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect_err("second client hits per-IP limit");
         match err {
@@ -573,7 +611,7 @@ mod tests {
 
         let (tx3, _rx3) = channel();
         manager
-            .register_client(tx3, addr, Uuid::new_v4())
+            .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("registrations resume after slot release");
     }
@@ -591,7 +629,7 @@ mod tests {
         let (tx, _rx) = channel();
         let addr: SocketAddr = "127.0.0.1:6000".parse().unwrap();
         let player_id = manager
-            .register_client(tx, addr, Uuid::new_v4())
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("registration succeeds");
 
@@ -632,7 +670,9 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 let (tx, _rx) = channel();
-                manager.register_client(tx, addr, Uuid::new_v4()).await
+                manager
+                    .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                    .await
             }));
         }
 
@@ -660,7 +700,9 @@ mod tests {
 
         // After removal, new registrations should work (counter is back to 0)
         let (tx, _rx) = channel();
-        let result = manager.register_client(tx, addr, Uuid::new_v4()).await;
+        let result = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await;
         assert!(
             result.is_ok(),
             "Registration should succeed after all clients removed"
@@ -680,7 +722,7 @@ mod tests {
 
         let (tx, _rx) = channel();
         let original_id = manager
-            .register_client(tx, addr, Uuid::new_v4())
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("registration should succeed");
 
@@ -707,7 +749,12 @@ mod tests {
             let port = 9001 + i;
             let new_addr: SocketAddr = format!("10.0.0.2:{port}").parse().unwrap();
             manager
-                .register_client(tx, new_addr, Uuid::new_v4())
+                .register_client(
+                    tx,
+                    ConnectionCloseSignal::detached(),
+                    new_addr,
+                    Uuid::new_v4(),
+                )
                 .await
                 .expect("should succeed within limit");
         }
@@ -715,7 +762,14 @@ mod tests {
         // 5th attempt from same IP should fail (already at limit)
         let (tx, _rx) = channel();
         let new_addr: SocketAddr = "10.0.0.2:10000".parse().unwrap();
-        let result = manager.register_client(tx, new_addr, Uuid::new_v4()).await;
+        let result = manager
+            .register_client(
+                tx,
+                ConnectionCloseSignal::detached(),
+                new_addr,
+                Uuid::new_v4(),
+            )
+            .await;
         assert!(
             result.is_err(),
             "6th connection from same IP should be rejected"
@@ -733,7 +787,12 @@ mod tests {
         let (tx_verify, _rx_verify) = channel();
         let verify_addr: SocketAddr = "10.0.0.2:10001".parse().unwrap();
         let result = manager
-            .register_client(tx_verify, verify_addr, Uuid::new_v4())
+            .register_client(
+                tx_verify,
+                ConnectionCloseSignal::detached(),
+                verify_addr,
+                Uuid::new_v4(),
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -751,7 +810,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:7100".parse().unwrap();
         let (tx, _rx) = channel();
         let pid = manager
-            .register_client(tx, addr, Uuid::new_v4())
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("register");
 
@@ -771,7 +830,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:7101".parse().unwrap();
         let (tx, _rx) = channel();
         let pid = manager
-            .register_client(tx, addr, Uuid::new_v4())
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("register");
 
@@ -811,7 +870,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:7102".parse().unwrap();
         let (tx, _rx) = channel();
         let original = manager
-            .register_client(tx, addr, Uuid::new_v4())
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("register");
 
@@ -852,7 +911,12 @@ mod tests {
             let (tx, _rx) = channel();
             let port_addr: SocketAddr = format!("10.0.0.3:{}", 9000 + i).parse().unwrap();
             let pid = manager
-                .register_client(tx, port_addr, Uuid::new_v4())
+                .register_client(
+                    tx,
+                    ConnectionCloseSignal::detached(),
+                    port_addr,
+                    Uuid::new_v4(),
+                )
                 .await
                 .expect("registration should succeed");
             player_ids.push(pid);
@@ -879,7 +943,14 @@ mod tests {
         for i in 0..10u16 {
             let (tx, _rx) = channel();
             let port_addr: SocketAddr = format!("10.0.0.3:{}", 8000 + i).parse().unwrap();
-            let result = manager.register_client(tx, port_addr, Uuid::new_v4()).await;
+            let result = manager
+                .register_client(
+                    tx,
+                    ConnectionCloseSignal::detached(),
+                    port_addr,
+                    Uuid::new_v4(),
+                )
+                .await;
             assert!(
                 result.is_ok(),
                 "Registration #{} should succeed after complete removal (no underflow)",

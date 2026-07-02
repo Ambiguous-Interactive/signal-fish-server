@@ -836,11 +836,48 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
         let pid = Uuid::new_v4();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         coordinator
-            .register_local_client(pid, Some(room_id), tx)
+            .register_local_client(
+                pid,
+                Some(room_id),
+                signal_fish_server::coordination::ClientDeliveryHandle {
+                    sender: tx,
+                    close: signal_fish_server::coordination::ConnectionCloseSignal::detached(),
+                },
+            )
             .await
             .expect("register should succeed");
         initial_player_ids.push(pid);
         initial_receivers.push(rx);
+    }
+
+    // Healthy consumers: continuously drain the initial receivers during the
+    // storm. The delivery contract applies backpressure (and, after
+    // `slow_consumer_timeout`, a disconnect) when a recipient's queue stays
+    // full, so leaving these 16-slot queues undrained under 200 broadcasts
+    // would correctly slow the storm down — and this test would misreport
+    // that intended pacing as a lock deadlock. The property under test is
+    // unchanged: broadcast and register/unregister must interleave freely
+    // without deadlocking on the coordinator's internal locks.
+    let (stop_draining, _stop_rx) = tokio::sync::watch::channel(false);
+    let mut drain_handles = Vec::with_capacity(initial_receivers.len());
+    for mut rx in initial_receivers {
+        let mut stop = stop_draining.subscribe();
+        drain_handles.push(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    message = rx.recv() => {
+                        assert!(
+                            message.is_some(),
+                            "initial receiver channel closed during the storm"
+                        );
+                    }
+                    changed = stop.changed() => {
+                        changed.expect("stop signal sender dropped");
+                        return rx;
+                    }
+                }
+            }
+        }));
     }
 
     let task_count = 20;
@@ -871,7 +908,15 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
                 let pid = Uuid::new_v4();
                 let (tx, _rx) = tokio::sync::mpsc::channel(16);
                 let _ = coordinator
-                    .register_local_client(pid, Some(room_id), tx)
+                    .register_local_client(
+                        pid,
+                        Some(room_id),
+                        signal_fish_server::coordination::ClientDeliveryHandle {
+                            sender: tx,
+                            close:
+                                signal_fish_server::coordination::ConnectionCloseSignal::detached(),
+                        },
+                    )
                     .await;
                 tokio::task::yield_now().await;
                 let _ = coordinator.unregister_local_client(&pid).await;
@@ -891,6 +936,15 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
         timeout_result.is_ok(),
         "Deadlock detected: concurrent broadcast + register/unregister did not complete within 5 seconds"
     );
+
+    // Stop the drain tasks and reclaim the receivers for verification.
+    stop_draining
+        .send(true)
+        .expect("drain tasks should still be listening for the stop signal");
+    let mut initial_receivers = Vec::with_capacity(drain_handles.len());
+    for handle in drain_handles {
+        initial_receivers.push(handle.await.expect("drain task should not panic"));
+    }
 
     // Correctness check: the initial 5 clients should still be registered.
     // Drain any buffered messages, then send a fresh broadcast and verify
