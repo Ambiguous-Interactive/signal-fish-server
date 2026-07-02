@@ -111,9 +111,13 @@ impl EnhancedGameServer {
                             .send_error_to_player(
                                 player_id,
                                 format!(
-                                    "Disconnected: no activity received for {timeout_secs} seconds"
+                                    "Disconnected: no activity received for {timeout_secs} seconds \
+                                     (server.ping_timeout)"
                                 ),
-                                Some(crate::protocol::ErrorCode::ConnectionIdleTimeout),
+                                // Deliberately NOT ConnectionIdleTimeout: that code is
+                                // the socket-level `websocket.idle_timeout_secs` close;
+                                // this eviction is the activity reaper's.
+                                Some(crate::protocol::ErrorCode::ActivityTimeout),
                             )
                             .await
                         {

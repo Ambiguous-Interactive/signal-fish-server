@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Error` frame before the server closes a connection whose outbound queue stayed full past
   `websocket.slow_consumer_timeout_ms`, so clients can distinguish "you could not keep up" from
   other disconnects.
+- Added the `ACTIVITY_TIMEOUT` error code (connection lifecycle): sent best-effort by the
+  activity reaper before it evicts a connection that produced no messages within
+  `server.ping_timeout`, keeping it distinct from the socket-level `CONNECTION_IDLE_TIMEOUT`
+  close.
 - Added two Prometheus counters for delivery health:
   `signal_fish_websocket_backpressure_events_total` (times a full outbound queue forced delivery
   to wait for capacity; the message was still delivered) and

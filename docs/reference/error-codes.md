@@ -72,6 +72,7 @@ establishment.
 | `AUTHENTICATION_TIMEOUT` | Authentication took too long to complete. |
 | `CONNECTION_IDLE_TIMEOUT` | The connection was closed because no messages were received within the idle timeout (`websocket.idle_timeout_secs`). Send periodic `Ping` messages to keep the connection alive. |
 | `SLOW_CONSUMER` | The connection could not keep up with the messages sent to it -- its outbound queue stayed full past `websocket.slow_consumer_timeout_ms` -- so the server closed it instead of silently dropping data. Drain messages faster (or reconnect) and consider pacing senders. |
+| `ACTIVITY_TIMEOUT` | The server's activity reaper (`server.ping_timeout`) evicted the connection because no messages of any kind were received within the window. Distinct from `CONNECTION_IDLE_TIMEOUT` (the socket-level `websocket.idle_timeout_secs` close). Send periodic `Ping` messages (or any traffic) to stay connected. |
 | `SDK_VERSION_UNSUPPORTED` | The SDK version is no longer supported. Upgrade to the latest version. |
 | `UNSUPPORTED_GAME_DATA_FORMAT` | The requested game data format is not supported by this server. |
 

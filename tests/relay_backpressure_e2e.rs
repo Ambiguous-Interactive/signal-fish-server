@@ -195,7 +195,7 @@ async fn game_data_burst_is_relayed_completely_and_in_order() {
         let padding = "x".repeat(PAYLOAD_PADDING_BYTES);
         for seq in 0..BURST_MESSAGE_COUNT {
             let message = ClientMessage::GameData {
-                data: serde_json::json!({ "seq": seq as u64, "padding": padding }),
+                data: serde_json::json!({ "seq": seq as u64, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
             sender_sink
@@ -271,7 +271,7 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
         let padding = "x".repeat(STALL_PADDING_BYTES);
         for seq in 0..MESSAGE_COUNT {
             let message = ClientMessage::GameData {
-                data: serde_json::json!({ "seq": seq as u64, "padding": padding }),
+                data: serde_json::json!({ "seq": seq as u64, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
             sender_sink

@@ -439,6 +439,7 @@ components:
         - GAME_START_NOT_READY
         - GAME_START_FORBIDDEN
         - SLOW_CONSUMER
+        - ACTIVITY_TIMEOUT
 
     # ---------------------------------------------------------------------
     # Shared object schemas

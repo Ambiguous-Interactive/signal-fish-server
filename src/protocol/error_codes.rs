@@ -97,6 +97,12 @@ pub enum ErrorCode {
     /// rather than silently dropping relayed messages. Sent best-effort as a
     /// final `Error` frame before the close.
     SlowConsumer,
+    /// The server's activity reaper (`server.ping_timeout`) evicted this
+    /// connection because no messages of any kind were received within the
+    /// window. Distinct from [`Self::ConnectionIdleTimeout`], which is the
+    /// socket-level `websocket.idle_timeout_secs` close. Sent best-effort as
+    /// a final `Error` frame before the close.
+    ActivityTimeout,
 }
 
 impl ErrorCode {
@@ -276,6 +282,9 @@ impl ErrorCode {
             Self::SlowConsumer => {
                 "This connection could not keep up with the messages sent to it, so the server closed it instead of silently dropping data. Drain messages faster (or reconnect) and consider pacing senders."
             }
+            Self::ActivityTimeout => {
+                "The server received no messages from this connection within its activity window and evicted it. Send periodic Ping messages (or any traffic) to stay connected."
+            }
         }
     }
 }
@@ -343,6 +352,7 @@ mod tests {
             ErrorCode::GameStartNotReady,
             ErrorCode::GameStartForbidden,
             ErrorCode::SlowConsumer,
+            ErrorCode::ActivityTimeout,
         ];
 
         for error_code in &error_codes {
