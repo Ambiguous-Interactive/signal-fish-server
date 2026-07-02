@@ -312,9 +312,19 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
             }
 
-            // Persist Waiting -> Lobby, then broadcast the single transition.
+            // Persist Waiting -> Lobby under the lock; the broadcast happens
+            // after release (see below).
             self.database.transition_room_to_lobby(room_id).await?;
+            Ok(true)
+        }
+        .await;
 
+        // The room-operation lock protects state, never delivery: coordinator
+        // sends apply backpressure (bounded by the slow-consumer timeout) and
+        // must not extend a distributed-lock critical section past its TTL.
+        lock_guard.release().await;
+
+        if matches!(result, Ok(true)) {
             let message = crate::protocol::ServerMessage::LobbyStateChanged {
                 lobby_state: crate::protocol::LobbyState::Lobby,
                 ready_players: Vec::new(),
@@ -324,11 +334,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 .broadcast_to_room(room_id, Arc::new(message))
                 .await?;
             tracing::info!(%room_id, "Room transitioned to lobby state (in-memory)");
-            Ok(true)
         }
-        .await;
-
-        lock_guard.release().await;
         result
     }
 
@@ -347,23 +353,20 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         )
         .await?;
 
-        let result = async {
-            // Simulate successful authority transfer
-            let message = crate::protocol::ServerMessage::AuthorityChanged {
-                authority_player: Some(*new_authority),
-                you_are_authority: false, // Will be customized per client
-            };
-
-            self.coordinator
-                .broadcast_to_room(room_id, Arc::new(message))
-                .await?;
-            tracing::info!(%room_id, %new_authority, "Authority transferred (in-memory)");
-            Ok(true)
-        }
-        .await;
-
+        // Nothing to mutate for the in-memory simulation; release the
+        // room-operation lock before delivery (sends can be backpressured and
+        // must never run inside a TTL-bounded critical section).
         lock_guard.release().await;
-        result
+
+        let message = crate::protocol::ServerMessage::AuthorityChanged {
+            authority_player: Some(*new_authority),
+            you_are_authority: false, // Will be customized per client
+        };
+        self.coordinator
+            .broadcast_to_room(room_id, Arc::new(message))
+            .await?;
+        tracing::info!(%room_id, %new_authority, "Authority transferred (in-memory)");
+        Ok(true)
     }
 
     async fn execute_distributed_operation(&self, operation: &str, room_id: &RoomId) -> Result<()> {
@@ -398,6 +401,11 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         )
         .await?;
 
+        // The locked section performs the state mutation and *collects* the
+        // notifications; delivery happens after the lock is released because
+        // coordinator sends can be backpressured (bounded by the slow-consumer
+        // timeout) and must never stretch a TTL-bounded critical section.
+        let mut outbound: Vec<(PlayerId, crate::protocol::ServerMessage)> = Vec::new();
         let result = async {
             tracing::info!(%room_id, %player_id, %become_authority, "InMemory: Processing authority request");
 
@@ -417,30 +425,18 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                             None
                         };
 
-                        // First send specific authority response to the requesting player
-                        tracing::info!(%room_id, %player_id, "Sending AuthorityResponse to player");
-                        let response_message = crate::protocol::ServerMessage::AuthorityResponse {
-                            granted,
-                            reason: reason.clone(),
-                            error_code: if granted {
-                                None
-                            } else {
-                                Some(crate::protocol::ErrorCode::AuthorityDenied)
+                        // First queue the specific authority response for the requester
+                        outbound.push((
+                            *player_id,
+                            crate::protocol::ServerMessage::AuthorityResponse {
+                                granted,
+                                reason: reason.clone(),
+                                error_code: None,
                             },
-                        };
-
-                        if let Err(e) = self
-                            .coordinator
-                            .send_to_player(player_id, Arc::new(response_message))
-                            .await
-                        {
-                            tracing::error!("Failed to send authority response to player: {}", e);
-                        }
+                        ));
 
                         // Instead of broadcasting, we need to send a custom message to each player
-                        // to set the you_are_authority flag correctly
-                        tracing::info!(%room_id, "Sending customized AuthorityChanged messages");
-
+                        // to set the you_are_authority flag correctly.
                         // Get all player IDs in the room from database
                         let room = match self.database.get_room_by_id(room_id).await {
                             Ok(Some(room)) => room,
@@ -454,55 +450,29 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                             }
                         };
 
-                        // Send a customized message to each player in the room
                         for room_player_id in room.players.keys() {
                             // This player is the authority if they requested authority and it was granted
                             let is_authority = become_authority && room_player_id == player_id;
-
-                            let auth_message = crate::protocol::ServerMessage::AuthorityChanged {
-                                authority_player: new_authority,
-                                you_are_authority: is_authority,
-                            };
-
-                            tracing::info!(
-                                %room_id,
-                                %room_player_id,
-                                %is_authority,
-                                "Sending customized AuthorityChanged message"
-                            );
-
-                            if let Err(e) = self
-                                .coordinator
-                                .send_to_player(room_player_id, Arc::new(auth_message))
-                                .await
-                            {
-                                tracing::error!(%room_player_id, "Failed to send authority change: {}", e);
-                            }
+                            outbound.push((
+                                *room_player_id,
+                                crate::protocol::ServerMessage::AuthorityChanged {
+                                    authority_player: new_authority,
+                                    you_are_authority: is_authority,
+                                },
+                            ));
                         }
 
                         tracing::info!(%room_id, %player_id, %become_authority, "Authority request granted (in-memory)");
                     } else {
-                        // Send denial response to the requesting player
-                        let response_message = crate::protocol::ServerMessage::AuthorityResponse {
-                            granted,
-                            reason: reason.clone(),
-                            error_code: if granted {
-                                None
-                            } else {
-                                Some(crate::protocol::ErrorCode::AuthorityDenied)
+                        // Queue the denial response for the requester
+                        outbound.push((
+                            *player_id,
+                            crate::protocol::ServerMessage::AuthorityResponse {
+                                granted,
+                                reason: reason.clone(),
+                                error_code: Some(crate::protocol::ErrorCode::AuthorityDenied),
                             },
-                        };
-
-                        if let Err(e) = self
-                            .coordinator
-                            .send_to_player(player_id, Arc::new(response_message))
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to send authority denial response to player: {}",
-                                e
-                            );
-                        }
+                        ));
 
                         tracing::info!(%room_id, %player_id, %become_authority, ?reason, "Authority request denied (in-memory)");
                     }
@@ -512,20 +482,14 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 Err(e) => {
                     tracing::error!(%room_id, %player_id, %become_authority, "Authority request failed: {}", e);
 
-                    // Send error response to the requesting player
-                    let response_message = crate::protocol::ServerMessage::AuthorityResponse {
-                        granted: false,
-                        reason: Some("Storage error".to_string()),
-                        error_code: Some(crate::protocol::ErrorCode::StorageError),
-                    };
-
-                    if let Err(send_err) = self
-                        .coordinator
-                        .send_to_player(player_id, Arc::new(response_message))
-                        .await
-                    {
-                        tracing::error!("Failed to send error response to player: {}", send_err);
-                    }
+                    outbound.push((
+                        *player_id,
+                        crate::protocol::ServerMessage::AuthorityResponse {
+                            granted: false,
+                            reason: Some("Storage error".to_string()),
+                            error_code: Some(crate::protocol::ErrorCode::StorageError),
+                        },
+                    ));
 
                     Ok((false, Some("Storage error".to_string())))
                 }
@@ -534,6 +498,17 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         .await;
 
         lock_guard.release().await;
+
+        for (target, message) in outbound {
+            if let Err(e) = self
+                .coordinator
+                .send_to_player(&target, Arc::new(message))
+                .await
+            {
+                tracing::error!(%target, "Failed to send authority notification: {}", e);
+            }
+        }
+
         result
     }
 
@@ -611,31 +586,36 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
             drop(ready_map); // Release write lock
 
-            // Broadcast lobby state change
-            let message = crate::protocol::ServerMessage::LobbyStateChanged {
-                lobby_state: crate::protocol::LobbyState::Lobby,
-                ready_players: ready_players_vec.clone(),
-                all_ready,
-            };
-
-            self.coordinator
-                .broadcast_to_room(room_id, Arc::new(message))
-                .await
-                .map_err(PlayerReadyError::Internal)?;
-
             // Readiness no longer starts the game. `max_players` is a ceiling,
             // not a required count, and the game begins only on an explicit
             // `StartGame` (see `handle_start_game`) — so a `PlayerReady` toggle
-            // just records readiness and broadcasts the new lobby snapshot
-            // (with `all_ready` so clients know `StartGame` is now permitted).
-            let _ = all_ready;
+            // just records readiness; the new lobby snapshot (with `all_ready`
+            // so clients know `StartGame` is now permitted) is broadcast after
+            // the lock releases below.
             tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
-            Ok(())
+            Ok((ready_players_vec, all_ready))
         }
         .await;
 
+        // Broadcast outside the TTL-bounded critical section: delivery can be
+        // backpressured by a slow recipient and must never hold the room lock.
         lock_guard.release().await;
-        result
+
+        match result {
+            Ok((ready_players, all_ready)) => {
+                let message = crate::protocol::ServerMessage::LobbyStateChanged {
+                    lobby_state: crate::protocol::LobbyState::Lobby,
+                    ready_players,
+                    all_ready,
+                };
+                self.coordinator
+                    .broadcast_to_room(room_id, Arc::new(message))
+                    .await
+                    .map_err(PlayerReadyError::Internal)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Handle an explicit `StartGame`: finalize the room with its *current*
@@ -660,12 +640,15 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         )
         .await?;
 
+        // Captured under the lock for the post-release broadcast.
+        let mut relay_type_for_broadcast: Option<String> = None;
         let result = async {
             let room = match self.database.get_room_by_id(room_id).await {
                 Ok(Some(room)) => room,
                 Ok(None) => return Err(anyhow::anyhow!("Room not found")),
                 Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
             };
+            relay_type_for_broadcast = Some(room.relay_type.clone());
 
             // Already started: a finalized room cannot be started again.
             if room.lobby_state == crate::protocol::LobbyState::Finalized {
@@ -730,23 +713,6 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 _ => room_players,
             };
 
-            // Preserve the legacy GameStarting metadata; v3 transport proof comes
-            // from negotiation and TransportStatus, not this payload.
-            let peer_connections =
-                PeerConnectionInfo::from_players(&finalized_members, &room.relay_type);
-            let game_start_message =
-                Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
-            self.coordinator
-                .broadcast_to_room(room_id, game_start_message)
-                .await?;
-
-            // Clear ready players for this room since the game is starting.
-            let mut ready_map = self.ready_players.write().await;
-            ready_map.remove(room_id);
-            drop(ready_map);
-
-            tracing::info!(%room_id, %player_id, "Game started via explicit StartGame (in-memory)");
-
             Ok(StartGameOutcome::Started(FinalizedRoom {
                 game_name: room.game_name.clone(),
                 authority_player: room.authority_player,
@@ -755,7 +721,34 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         }
         .await;
 
+        // Broadcast + ready-set cleanup happen outside the TTL-bounded
+        // critical section: delivery can be backpressured by a slow recipient
+        // and must never hold the room lock. State is already consistent —
+        // the room is persisted `Finalized`, so a concurrent `PlayerReady`
+        // is rejected regardless of the ready-set contents, and clearing the
+        // set afterwards is idempotent cleanup.
         lock_guard.release().await;
+
+        if let Ok(StartGameOutcome::Started(finalized)) = &result {
+            // Preserve the legacy GameStarting metadata; v3 transport proof comes
+            // from negotiation and TransportStatus, not this payload.
+            let relay_type = relay_type_for_broadcast.unwrap_or_default();
+            let peer_connections =
+                PeerConnectionInfo::from_players(&finalized.members, &relay_type);
+            let game_start_message =
+                Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
+            self.coordinator
+                .broadcast_to_room(room_id, game_start_message)
+                .await?;
+
+            // Clear ready players for this room since the game has started.
+            let mut ready_map = self.ready_players.write().await;
+            ready_map.remove(room_id);
+            drop(ready_map);
+
+            tracing::info!(%room_id, %player_id, "Game started via explicit StartGame (in-memory)");
+        }
+
         result
     }
 
@@ -1464,12 +1457,18 @@ mod tests {
             coordinator.wait_for_broadcast_start(),
         )
         .await
-        .expect("ready operation should reach the post-acquire broadcast");
+        .expect("ready operation should reach the post-release broadcast");
+        // Delivery can be backpressured by a slow recipient (bounded by the
+        // slow-consumer timeout), so the TTL-bounded room-operation lock must
+        // be released BEFORE any coordinator send starts — otherwise a slow
+        // consumer could stretch the critical section past the lock TTL and
+        // break mutual exclusion for concurrent room operations.
         assert!(
-            lock.is_locked(&lock_key)
+            !lock
+                .is_locked(&lock_key)
                 .await
                 .expect("lock state can be read"),
-            "ready-state lock should be held while the operation is suspended after acquisition"
+            "ready-state lock must be released before the lobby broadcast starts"
         );
 
         ready_task.abort();

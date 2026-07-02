@@ -72,10 +72,14 @@ async fn matching_server_message_skips_noise_until_match() {
 #[tokio::test]
 async fn optional_matching_server_message_uses_absolute_deadline_for_noisy_stream() {
     let mut stream = RepeatingTextFrames::new(ServerMessage::Pong);
-    let deadline = deadline_after(Duration::from_millis(10));
+    // Wide enough that a task briefly starved on an oversubscribed full-suite
+    // runner still reads several frames before the deadline (a 10ms window
+    // flaked when the task was first scheduled after the deadline had already
+    // passed); the outer timeout only guards against an unbounded loop.
+    let deadline = deadline_after(Duration::from_millis(250));
 
     let result = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(10),
         maybe_next_matching_server_message_with_skipped_until(
             &mut stream,
             deadline,
@@ -114,7 +118,10 @@ async fn optional_matching_server_message_reports_skipped_non_text_frames() {
 
     let (value, skipped) = maybe_next_matching_server_message_with_skipped_until(
         &mut stream,
-        deadline_after(Duration::from_millis(10)),
+        // Wide enough to survive scheduler starvation under a parallel full
+        // suite (the frames are ready instantly; the deadline only ends the
+        // wait on the pending tail).
+        deadline_after(Duration::from_millis(250)),
         "test non-text diagnostics",
         |message| match message {
             ServerMessage::SessionPlan(_) => Some(()),
@@ -142,7 +149,9 @@ async fn no_server_message_skips_non_text_frames_until_timeout() {
 
     expect_no_server_message_within(
         &mut stream,
-        Duration::from_millis(10),
+        // Wide enough that the non-text frames are actually read (exercising
+        // the skip path) even when the task starts late under suite load.
+        Duration::from_millis(100),
         "test no server message",
     )
     .await;

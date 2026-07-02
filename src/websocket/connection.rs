@@ -72,14 +72,16 @@ async fn enqueue_connection_message(
 async fn finalize_closed_connection(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     rx: &mut mpsc::Receiver<Arc<ServerMessage>>,
-    batcher: Option<&mut MessageBatcher>,
+    batcher: &mut MessageBatcher,
     reason: Option<CloseReason>,
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
 ) {
     match reason {
         Some(CloseReason::SlowConsumer) => {
-            let abandoned = rx.len() + batcher.map_or(0, |batcher| batcher.len());
+            // Undercounts by at most one in-flight batch cancelled mid-write;
+            // the connection-level disconnect signal is the primary indicator.
+            let abandoned = rx.len() + batcher.len();
             server
                 .metrics()
                 .add_websocket_messages_dropped(abandoned as u64);
@@ -113,11 +115,15 @@ async fn finalize_closed_connection(
             }
         }
         Some(CloseReason::Unregistered) | None => {
-            // Drain whatever is already buffered. Both terminal channel states
-            // end the drain: `Empty` means the flush is complete, and
+            // Drain whatever is already buffered and flush it, bounded by the
+            // close-write budget: an unregistered connection is usually
+            // healthy (flush completes in milliseconds), but if its socket is
+            // wedged this must not pin the task — the whole point of the
+            // close path is to reclaim the connection. Both terminal channel
+            // states end the drain: `Empty` means the flush is complete, and
             // `Disconnected` means every delivery handle is gone AND the
             // buffer is empty — also a completed flush.
-            if let Some(batcher) = batcher {
+            let flush = tokio::time::timeout(CLOSE_WRITE_TIMEOUT, async {
                 // Not a `while let`: the repo-wide try_recv policy
                 // (tests/async_timeout_policy_scan.rs) requires both terminal
                 // channel states to be matched explicitly.
@@ -131,33 +137,25 @@ async fn finalize_closed_connection(
                         ) => break,
                     }
                 }
-                if !batcher.is_empty() {
-                    if let Err(()) = send_batch(sender, batcher, player_id, server).await {
-                        tracing::debug!(
-                            %player_id,
-                            "Failed to flush queued messages while closing unregistered connection"
-                        );
-                    }
+                if batcher.is_empty() {
+                    return Ok(());
                 }
-            } else {
-                loop {
-                    let message = match rx.try_recv() {
-                        Ok(message) => message,
-                        Err(
-                            mpsc::error::TryRecvError::Empty
-                            | mpsc::error::TryRecvError::Disconnected,
-                        ) => break,
-                    };
-                    if send_single_message(sender, message, player_id, server)
-                        .await
-                        .is_err()
-                    {
-                        tracing::debug!(
-                            %player_id,
-                            "Failed to flush queued messages while closing unregistered connection"
-                        );
-                        break;
-                    }
+                send_batch(sender, batcher, player_id, server).await
+            })
+            .await;
+            match flush {
+                Ok(Ok(())) => {}
+                Ok(Err(())) => {
+                    tracing::debug!(
+                        %player_id,
+                        "Failed to flush queued messages while closing unregistered connection"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        %player_id,
+                        "Timed out flushing queued messages while closing unregistered connection"
+                    );
                 }
             }
         }
@@ -319,133 +317,125 @@ pub(super) async fn handle_socket(
         let batch_size = config.websocket_config.batch_size;
         let batch_interval_ms = config.websocket_config.batch_interval_ms;
 
-        if batching_enabled {
-            // Batching mode: collect multiple messages and send together
-            let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
-            // Clamp to a 1ms floor: `batch_interval_ms` is validated `> 0` (when
-            // batching is enabled) at startup, but `tokio::time::interval`
-            // panics on a zero period, so guard the timer regardless of how this
-            // config was constructed.
-            let mut flush_interval =
-                tokio::time::interval(Duration::from_millis(batch_interval_ms.max(1)));
-            flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
 
-            loop {
-                tokio::select! {
-                    // Receive new message from channel
-                    message_opt = rx.recv() => {
-                        if let Some(message) = message_opt {
-                            batcher.queue(message);
+        // The write loop runs INSIDE this select so a close request interrupts
+        // it at ANY await point — including a socket write wedged against a
+        // peer that stopped reading, which is precisely the slow-consumer
+        // state that triggers the close. Handling the close as a sibling loop
+        // arm would only observe it BETWEEN writes, and a wedged write never
+        // finishes; the sink half would then never drop and the connection
+        // would linger as a zombie socket.
+        let close_request: Option<Option<CloseReason>> = tokio::select! {
+            reason = send_task_close.closed() => Some(reason),
+            () = async {
+                if batching_enabled {
+                    // Batching mode: collect multiple messages and send together.
+                    // Clamp to a 1ms floor: `batch_interval_ms` is validated `> 0`
+                    // (when batching is enabled) at startup, but
+                    // `tokio::time::interval` panics on a zero period, so guard
+                    // the timer regardless of how this config was constructed.
+                    let mut flush_interval =
+                        tokio::time::interval(Duration::from_millis(batch_interval_ms.max(1)));
+                    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                            // Flush if batch is full or time threshold exceeded
-                            if batcher.should_flush()
-                                && {
-                                    let current_player_id =
-                                        *effective_player_id_for_send.read().await;
-                                    send_batch(
-                                        &mut sender,
-                                        &mut batcher,
-                                        &current_player_id,
-                                        &server_clone,
-                                    )
-                                    .await
-                                    .is_err()
+                    loop {
+                        tokio::select! {
+                            // Receive new message from channel
+                            message_opt = rx.recv() => {
+                                if let Some(message) = message_opt {
+                                    batcher.queue(message);
+
+                                    // Flush if batch is full or time threshold exceeded
+                                    if batcher.should_flush()
+                                        && {
+                                            let current_player_id =
+                                                *effective_player_id_for_send.read().await;
+                                            send_batch(
+                                                &mut sender,
+                                                &mut batcher,
+                                                &current_player_id,
+                                                &server_clone,
+                                            )
+                                            .await
+                                            .is_err()
+                                        }
+                                    {
+                                        break;
+                                    }
+                                } else {
+                                    // Channel closed, flush remaining messages and exit
+                                    if !batcher.is_empty() {
+                                        let current_player_id =
+                                            *effective_player_id_for_send.read().await;
+                                        let _ = send_batch(
+                                            &mut sender,
+                                            &mut batcher,
+                                            &current_player_id,
+                                            &server_clone,
+                                        )
+                                        .await;
+                                    }
+                                    break;
                                 }
-                            {
-                                break;
                             }
-                        } else {
-                            // Channel closed, flush remaining messages and exit
-                            if !batcher.is_empty() {
-                                let current_player_id =
-                                    *effective_player_id_for_send.read().await;
-                                let _ = send_batch(
-                                    &mut sender,
-                                    &mut batcher,
-                                    &current_player_id,
-                                    &server_clone,
-                                )
-                                .await;
-                            }
-                            break;
-                        }
-                    }
-                    // Periodic flush based on time interval
-                    _ = flush_interval.tick() => {
-                        if !batcher.is_empty()
-                            && batcher.should_flush()
-                            && {
-                                let current_player_id =
-                                    *effective_player_id_for_send.read().await;
-                                send_batch(
-                                    &mut sender,
-                                    &mut batcher,
-                                    &current_player_id,
-                                    &server_clone,
-                                )
-                                .await
-                                .is_err()
-                            }
-                        {
-                            break;
-                        }
-                    }
-                    // Server-side close request (slow consumer, unregistration)
-                    reason = send_task_close.closed() => {
-                        let current_player_id = *effective_player_id_for_send.read().await;
-                        finalize_closed_connection(
-                            &mut sender,
-                            &mut rx,
-                            Some(&mut batcher),
-                            reason,
-                            &current_player_id,
-                            &server_clone,
-                        )
-                        .await;
-                        break;
-                    }
-                }
-            }
-        } else {
-            // Non-batching mode: send each message immediately (legacy behavior)
-            loop {
-                tokio::select! {
-                    message_opt = rx.recv() => {
-                        match message_opt {
-                            Some(message) => {
-                                let current_player_id =
-                                    *effective_player_id_for_send.read().await;
-                                if send_single_message(
-                                    &mut sender,
-                                    message,
-                                    &current_player_id,
-                                    &server_clone,
-                                )
-                                .await
-                                .is_err()
+                            // Periodic flush based on time interval
+                            _ = flush_interval.tick() => {
+                                if !batcher.is_empty()
+                                    && batcher.should_flush()
+                                    && {
+                                        let current_player_id =
+                                            *effective_player_id_for_send.read().await;
+                                        send_batch(
+                                            &mut sender,
+                                            &mut batcher,
+                                            &current_player_id,
+                                            &server_clone,
+                                        )
+                                        .await
+                                        .is_err()
+                                    }
                                 {
                                     break;
                                 }
                             }
-                            None => break, // Channel closed
                         }
                     }
-                    // Server-side close request (slow consumer, unregistration)
-                    reason = send_task_close.closed() => {
+                } else {
+                    // Non-batching mode: send each message immediately (legacy behavior)
+                    while let Some(message) = rx.recv().await {
                         let current_player_id = *effective_player_id_for_send.read().await;
-                        finalize_closed_connection(
+                        if send_single_message(
                             &mut sender,
-                            &mut rx,
-                            None,
-                            reason,
+                            message,
                             &current_player_id,
                             &server_clone,
                         )
-                        .await;
-                        break;
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
-            }
+            } => None,
+        };
+
+        // A close was requested (slow consumer, unregistration): the write
+        // loop above was cancelled wherever it was; run the bounded farewell/
+        // flush/close sequence. When the loop ended by itself (socket error or
+        // channel closed after a full flush) there is nothing more to write.
+        if let Some(reason) = close_request {
+            let current_player_id = *effective_player_id_for_send.read().await;
+            finalize_closed_connection(
+                &mut sender,
+                &mut rx,
+                &mut batcher,
+                reason,
+                &current_player_id,
+                &server_clone,
+            )
+            .await;
         }
 
         // Cleanup when send task ends

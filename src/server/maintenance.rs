@@ -97,30 +97,35 @@ impl EnhancedGameServer {
             // Loud eviction: tell each expired client WHY it is being closed
             // before the unregister tears its socket down. Sends run
             // concurrently so one backpressured (already-dead) connection
-            // cannot serialize the whole sweep; the delivery layer's
-            // slow-consumer handling bounds each attempt.
-            futures_util::future::join_all(expired_clients.iter().map(|player_id| {
-                let timeout_secs = self.config.ping_timeout.as_secs();
-                async move {
-                    if let Err(err) = self
-                        .send_error_to_player(
-                            player_id,
-                            format!(
-                                "Disconnected: no activity received for {timeout_secs} seconds"
-                            ),
-                            Some(crate::protocol::ErrorCode::ConnectionIdleTimeout),
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            %player_id,
-                            error = %err,
-                            "Failed to notify expired client before unregistering"
-                        );
+            // cannot serialize the whole sweep, but with bounded parallelism
+            // so a mass-expiry tick cannot spawn thousands of in-flight sends
+            // at once; the delivery layer's slow-consumer handling bounds each
+            // individual attempt.
+            const REAPER_NOTIFY_CONCURRENCY: usize = 64;
+            use futures_util::StreamExt as _;
+            futures_util::stream::iter(expired_clients.iter())
+                .for_each_concurrent(REAPER_NOTIFY_CONCURRENCY, |player_id| {
+                    let timeout_secs = self.config.ping_timeout.as_secs();
+                    async move {
+                        if let Err(err) = self
+                            .send_error_to_player(
+                                player_id,
+                                format!(
+                                    "Disconnected: no activity received for {timeout_secs} seconds"
+                                ),
+                                Some(crate::protocol::ErrorCode::ConnectionIdleTimeout),
+                            )
+                            .await
+                        {
+                            tracing::debug!(
+                                %player_id,
+                                error = %err,
+                                "Failed to notify expired client before unregistering"
+                            );
+                        }
                     }
-                }
-            }))
-            .await;
+                })
+                .await;
 
             for player_id in expired_clients {
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
