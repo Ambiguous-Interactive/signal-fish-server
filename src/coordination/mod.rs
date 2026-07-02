@@ -210,15 +210,15 @@ pub trait MessageCoordinator: Send + Sync {
     /// slow-consumer disconnect — the close itself, with its lifecycle
     /// reason, is the authoritative signal. Returns whether the message was
     /// enqueued.
+    ///
+    /// CONTRACT: implementations must not wait on recipient queue capacity.
+    /// There is deliberately no default implementation — falling back to the
+    /// reliable (backpressured) path would silently violate this contract.
     async fn try_send_to_player(
         &self,
         player_id: &PlayerId,
         message: Arc<ServerMessage>,
-    ) -> anyhow::Result<bool> {
-        // Default: fall back to the reliable delivery path (test doubles
-        // don't distinguish the two).
-        self.send_to_player(player_id, message).await.map(|()| true)
-    }
+    ) -> anyhow::Result<bool>;
 
     async fn broadcast_to_room(
         &self,

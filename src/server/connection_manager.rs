@@ -511,6 +511,17 @@ mod tests {
             Ok(())
         }
 
+        async fn try_send_to_player(
+            &self,
+            player_id: &PlayerId,
+            message: Arc<ServerMessage>,
+        ) -> Result<bool> {
+            // Test double: send_to_player is non-blocking here, so delegating
+            // honors the non-waiting farewell contract while preserving
+            // whatever recording/blocking behavior the double implements.
+            self.send_to_player(player_id, message).await.map(|()| true)
+        }
+
         async fn broadcast_to_room(
             &self,
             _room_id: &RoomId,

@@ -596,15 +596,22 @@ pub(super) async fn handle_socket(
                         }
                     }
                     () = &mut auth_deadline => {
-                        // Authentication timeout
+                        // Authentication timeout. Farewell semantics: the
+                        // connection closes right below, so this frame must
+                        // neither wait on queue capacity nor let a full queue
+                        // reclassify the close as a slow-consumer disconnect.
                         tracing::warn!(%active_player_id, timeout_secs = auth_timeout_secs, "Authentication timeout, closing connection");
-                        let _ = server_clone
-                            .send_error_to_player(
-                                &active_player_id,
-                                format!("Authentication timeout - must authenticate within {auth_timeout_secs} seconds"),
-                                Some(ErrorCode::AuthenticationTimeout),
-                            )
-                            .await;
+                        enqueue_farewell_message(
+                            &tx_clone,
+                            &active_player_id,
+                            ServerMessage::Error {
+                                message: format!(
+                                    "Authentication timeout - must authenticate within {auth_timeout_secs} seconds"
+                                ),
+                                error_code: Some(ErrorCode::AuthenticationTimeout),
+                            },
+                            "authentication timeout",
+                        );
                         break;
                     }
                 }
@@ -652,6 +659,22 @@ pub(super) async fn handle_socket(
                                 error = %err,
                                 "Rejected client WebSocket frame"
                             );
+                            if err.should_disconnect() {
+                                // Farewell semantics: closing immediately, so
+                                // never wait or escalate on a full queue.
+                                enqueue_farewell_message(
+                                    &tx_clone,
+                                    &active_player_id,
+                                    ServerMessage::Error {
+                                        message: err.user_message().to_string(),
+                                        error_code: Some(err.error_code()),
+                                    },
+                                    "rejected frame (disconnecting)",
+                                );
+                                break;
+                            }
+                            // Connection stays alive: the rejection notice
+                            // rides the reliable delivery path.
                             let _ = server_clone
                                 .send_error_to_player(
                                     &active_player_id,
@@ -659,9 +682,6 @@ pub(super) async fn handle_socket(
                                     Some(err.error_code()),
                                 )
                                 .await;
-                            if err.should_disconnect() {
-                                break;
-                            }
                             continue;
                         }
                     };
@@ -935,13 +955,16 @@ pub(super) async fn handle_socket(
                         other => {
                             if !authenticated {
                                 tracing::warn!(%active_player_id, "Received message before authentication");
-                                let _ = server_clone
-                                    .send_error_to_player(
-                                        &active_player_id,
-                                        "Authentication required".to_string(),
-                                        Some(ErrorCode::MissingAppId),
-                                    )
-                                    .await;
+                                // Farewell semantics: closing immediately.
+                                enqueue_farewell_message(
+                                    &tx_clone,
+                                    &active_player_id,
+                                    ServerMessage::Error {
+                                        message: "Authentication required".to_string(),
+                                        error_code: Some(ErrorCode::MissingAppId),
+                                    },
+                                    "message before authentication",
+                                );
                                 break;
                             }
 
@@ -978,13 +1001,17 @@ pub(super) async fn handle_socket(
                 Message::Binary(payload) => {
                     if !authenticated {
                         tracing::warn!(%active_player_id, "Received binary message before authentication");
-                        let _ = server_clone
-                            .send_error_to_player(
-                                &active_player_id,
-                                "Authentication required before sending binary data".to_string(),
-                                Some(ErrorCode::MissingAppId),
-                            )
-                            .await;
+                        // Farewell semantics: closing immediately.
+                        enqueue_farewell_message(
+                            &tx_clone,
+                            &active_player_id,
+                            ServerMessage::Error {
+                                message: "Authentication required before sending binary data"
+                                    .to_string(),
+                                error_code: Some(ErrorCode::MissingAppId),
+                            },
+                            "binary before authentication",
+                        );
                         break;
                     }
 

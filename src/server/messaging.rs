@@ -21,7 +21,10 @@ impl EnhancedGameServer {
             .await
     }
 
-    /// Best-effort pre-close farewell: never waits and never escalates.
+    /// Best-effort pre-close farewell: never waits on recipient queue
+    /// capacity and never escalates (a trait-level contract of
+    /// [`try_send_to_player`](crate::coordination::MessageCoordinator::try_send_to_player),
+    /// which deliberately has no default implementation).
     ///
     /// For connections the caller is about to terminate (reaper eviction and
     /// similar lifecycle closes): the close itself carries the authoritative
