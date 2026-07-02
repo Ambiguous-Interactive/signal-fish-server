@@ -108,7 +108,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_websocket_messages_dropped_total",
-        "Server messages abandoned together with a connection that was closed (slow consumer) or already closing",
+        "Server messages that could not be delivered: abandoned together with a slow-consumer or already-closing connection, or replaced by an error frame because a binary payload could not be converted for the recipient",
         snapshot.connections.websocket_messages_dropped,
     );
     counter(
