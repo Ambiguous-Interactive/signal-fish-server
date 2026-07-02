@@ -79,8 +79,10 @@ async fn finalize_closed_connection(
 ) {
     match reason {
         Some(CloseReason::SlowConsumer) => {
-            // Undercounts by at most one in-flight batch cancelled mid-write;
-            // the connection-level disconnect signal is the primary indicator.
+            // `send_batch` pops messages one at a time, so a cancelled
+            // in-flight write leaves everything unsent inside the batcher;
+            // the count below misses at most the single message that was
+            // actively (partially) on the wire when the close fired.
             let abandoned = rx.len() + batcher.len();
             server
                 .metrics()
