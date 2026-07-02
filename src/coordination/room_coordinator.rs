@@ -499,15 +499,33 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
         lock_guard.release().await;
 
+        // Deliver concurrently ACROSS recipients (a single backpressured
+        // recipient must not delay everyone else's notification by up to the
+        // slow-consumer timeout) while preserving each recipient's OWN
+        // message order (the requester sees AuthorityResponse before its
+        // AuthorityChanged). Rooms are small, so the quadratic grouping scan
+        // is trivially cheap and keeps first-queued-first-sent order.
+        let mut per_recipient: Vec<(PlayerId, Vec<crate::protocol::ServerMessage>)> = Vec::new();
         for (target, message) in outbound {
-            if let Err(e) = self
-                .coordinator
-                .send_to_player(&target, Arc::new(message))
-                .await
-            {
-                tracing::error!(%target, "Failed to send authority notification: {}", e);
+            match per_recipient.iter_mut().find(|(pid, _)| *pid == target) {
+                Some((_, messages)) => messages.push(message),
+                None => per_recipient.push((target, vec![message])),
             }
         }
+        futures_util::future::join_all(per_recipient.into_iter().map(
+            |(target, messages)| async move {
+                for message in messages {
+                    if let Err(e) = self
+                        .coordinator
+                        .send_to_player(&target, Arc::new(message))
+                        .await
+                    {
+                        tracing::error!(%target, "Failed to send authority notification: {}", e);
+                    }
+                }
+            },
+        ))
+        .await;
 
         result
     }

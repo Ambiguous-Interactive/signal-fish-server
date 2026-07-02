@@ -20,4 +20,29 @@ impl EnhancedGameServer {
             )
             .await
     }
+
+    /// Best-effort pre-close farewell: never waits and never escalates.
+    ///
+    /// For connections the caller is about to terminate (reaper eviction and
+    /// similar lifecycle closes): the close itself carries the authoritative
+    /// reason, so a full queue skips this advisory frame instead of stalling
+    /// the teardown or reclassifying the close as a slow-consumer disconnect.
+    /// Returns whether the frame was enqueued.
+    pub async fn send_farewell_to_player(
+        &self,
+        player_id: &PlayerId,
+        message: String,
+        error_code: Option<ErrorCode>,
+    ) -> bool {
+        self.message_coordinator
+            .try_send_to_player(
+                player_id,
+                Arc::new(ServerMessage::Error {
+                    message,
+                    error_code,
+                }),
+            )
+            .await
+            .unwrap_or(false)
+    }
 }

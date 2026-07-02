@@ -95,41 +95,33 @@ impl EnhancedGameServer {
             }
 
             // Loud eviction: tell each expired client WHY it is being closed
-            // before the unregister tears its socket down. Sends run
-            // concurrently so one backpressured (already-dead) connection
-            // cannot serialize the whole sweep, but with bounded parallelism
-            // so a mass-expiry tick cannot spawn thousands of in-flight sends
-            // at once; the delivery layer's slow-consumer handling bounds each
-            // individual attempt.
-            const REAPER_NOTIFY_CONCURRENCY: usize = 64;
-            use futures_util::StreamExt as _;
-            futures_util::stream::iter(expired_clients.iter())
-                .for_each_concurrent(REAPER_NOTIFY_CONCURRENCY, |player_id| {
-                    let timeout_secs = self.config.ping_timeout.as_secs();
-                    async move {
-                        if let Err(err) = self
-                            .send_error_to_player(
-                                player_id,
-                                format!(
-                                    "Disconnected: no activity received for {timeout_secs} seconds \
-                                     (server.ping_timeout)"
-                                ),
-                                // Deliberately NOT ConnectionIdleTimeout: that code is
-                                // the socket-level `websocket.idle_timeout_secs` close;
-                                // this eviction is the activity reaper's.
-                                Some(crate::protocol::ErrorCode::ActivityTimeout),
-                            )
-                            .await
-                        {
-                            tracing::debug!(
-                                %player_id,
-                                error = %err,
-                                "Failed to notify expired client before unregistering"
-                            );
-                        }
-                    }
-                })
-                .await;
+            // before the unregister tears its socket down. Farewells are
+            // best-effort by contract — they never wait on a full queue and
+            // never reclassify the close as a slow-consumer disconnect (the
+            // eviction itself is the authoritative signal) — so this sweep is
+            // non-blocking regardless of how many clients expired at once.
+            for player_id in &expired_clients {
+                let timeout_secs = self.config.ping_timeout.as_secs();
+                let enqueued = self
+                    .send_farewell_to_player(
+                        player_id,
+                        format!(
+                            "Disconnected: no activity received for {timeout_secs} seconds \
+                             (server.ping_timeout)"
+                        ),
+                        // Deliberately NOT ConnectionIdleTimeout: that code is
+                        // the socket-level `websocket.idle_timeout_secs` close;
+                        // this eviction is the activity reaper's.
+                        Some(crate::protocol::ErrorCode::ActivityTimeout),
+                    )
+                    .await;
+                if !enqueued {
+                    tracing::debug!(
+                        %player_id,
+                        "Expired client did not receive the eviction farewell (queue full or gone)"
+                    );
+                }
+            }
 
             for player_id in expired_clients {
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");

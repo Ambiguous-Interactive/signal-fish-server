@@ -747,6 +747,35 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(())
     }
 
+    async fn try_send_to_player(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        let handle = { self.local_clients.read().await.get(player_id).cloned() };
+        let Some(handle) = handle else {
+            tracing::debug!(%player_id, "Farewell skipped: player not registered with coordinator");
+            return Ok(false);
+        };
+        match handle.sender.try_send(message) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Advisory frame to a connection that is being closed anyway:
+                // do not wait, do not escalate, do not overwrite the close
+                // reason. The teardown itself is the loud signal.
+                tracing::debug!(
+                    %player_id,
+                    "Farewell skipped: outbound queue full on a closing connection"
+                );
+                Ok(false)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(%player_id, "Farewell skipped: connection already closed");
+                Ok(false)
+            }
+        }
+    }
+
     async fn broadcast_to_room(
         &self,
         room_id: &RoomId,

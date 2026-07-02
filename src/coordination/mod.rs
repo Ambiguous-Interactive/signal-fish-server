@@ -202,6 +202,24 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Best-effort, non-waiting delivery for pre-close farewells.
+    ///
+    /// Use ONLY for advisory frames sent to a connection that is about to be
+    /// terminated (reaper eviction, timeout notices): a full queue must
+    /// neither delay the teardown nor reclassify the close as a
+    /// slow-consumer disconnect — the close itself, with its lifecycle
+    /// reason, is the authoritative signal. Returns whether the message was
+    /// enqueued.
+    async fn try_send_to_player(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        // Default: fall back to the reliable delivery path (test doubles
+        // don't distinguish the two).
+        self.send_to_player(player_id, message).await.map(|()| true)
+    }
+
     async fn broadcast_to_room(
         &self,
         room_id: &RoomId,

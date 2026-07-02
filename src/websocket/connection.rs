@@ -62,6 +62,33 @@ async fn enqueue_connection_message(
     }
 }
 
+/// Best-effort enqueue of a pre-close farewell on this connection's own queue.
+///
+/// Never waits and never escalates to a slow-consumer close: the caller is
+/// about to terminate the connection, and the close itself (with its
+/// lifecycle reason) is the authoritative, loud signal — this frame is
+/// advisory. The send task's final drain flushes it when the queue has room.
+fn enqueue_farewell_message(
+    tx: &mpsc::Sender<Arc<ServerMessage>>,
+    player_id: &PlayerId,
+    message: ServerMessage,
+    context: &'static str,
+) {
+    match tx.try_send(Arc::new(message)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::debug!(
+                %player_id,
+                context,
+                "Farewell not enqueued: outbound queue full on a closing connection"
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!(%player_id, context, "Farewell not enqueued: connection already closed");
+        }
+    }
+}
+
 /// Final actions of the send task once a server-side close was requested.
 ///
 /// - Slow consumer: the queue contents are abandoned **by design** (the
@@ -146,18 +173,22 @@ async fn finalize_closed_connection(
                 send_batch(sender, batcher, player_id, server).await
             })
             .await;
+            let flush_timed_out = flush.is_err();
             match flush {
                 Ok(Ok(())) => {}
-                Ok(Err(())) => {
+                Ok(Err(())) | Err(_) => {
+                    // Whatever the flush could not deliver dies with the
+                    // connection; keep the drop counter honest (misses at
+                    // most the single frame that was actively on the wire).
+                    let abandoned = rx.len() + batcher.len();
+                    server
+                        .metrics()
+                        .add_websocket_messages_dropped(abandoned as u64);
                     tracing::debug!(
                         %player_id,
-                        "Failed to flush queued messages while closing unregistered connection"
-                    );
-                }
-                Err(_elapsed) => {
-                    tracing::debug!(
-                        %player_id,
-                        "Timed out flushing queued messages while closing unregistered connection"
+                        abandoned_messages = abandoned,
+                        flush_timed_out,
+                        "Flush failed while closing unregistered connection; abandoning remainder"
                     );
                 }
             }
@@ -528,11 +559,12 @@ pub(super) async fn handle_socket(
                                 timeout_secs = idle_timeout_secs,
                                 "Idle timeout - no frames received, closing connection"
                             );
-                            enqueue_connection_message(
+                            // Farewell semantics (best-effort, no waiting):
+                            // this connection is closing as idle; a full
+                            // queue must not stall the teardown nor
+                            // reclassify the close as a slow-consumer one.
+                            enqueue_farewell_message(
                                 &tx_clone,
-                                &close_signal,
-                                &server_clone,
-                                slow_consumer_timeout,
                                 &active_player_id,
                                 ServerMessage::Error {
                                     message: format!(
@@ -541,8 +573,7 @@ pub(super) async fn handle_socket(
                                     error_code: Some(ErrorCode::ConnectionIdleTimeout),
                                 },
                                 "idle timeout error",
-                            )
-                            .await;
+                            );
                             break;
                         }
                     }
@@ -883,19 +914,18 @@ pub(super) async fn handle_socket(
                                         _ => ErrorCode::InternalError,
                                     };
 
-                                    enqueue_connection_message(
+                                    // Farewell semantics: the connection is
+                                    // closed immediately below, so this frame
+                                    // is advisory and must not wait/escalate.
+                                    enqueue_farewell_message(
                                         &tx_clone,
-                                        &close_signal,
-                                        &server_clone,
-                                        slow_consumer_timeout,
                                         &active_player_id,
                                         ServerMessage::AuthenticationError {
                                             error: format!("{e:?}"),
                                             error_code,
                                         },
                                         "authentication failure response",
-                                    )
-                                    .await;
+                                    );
 
                                     // Close connection after auth failure
                                     break;
