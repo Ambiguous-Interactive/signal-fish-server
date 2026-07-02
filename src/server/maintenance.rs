@@ -101,12 +101,14 @@ impl EnhancedGameServer {
             // eviction itself is the authoritative signal) — so this sweep is
             // non-blocking regardless of how many clients expired at once.
             for player_id in &expired_clients {
-                let timeout_secs = self.config.ping_timeout.as_secs();
+                // Milliseconds, not truncated seconds: sub-second windows
+                // (tests, aggressive deployments) must not read as "0 seconds".
+                let timeout_ms = self.config.ping_timeout.as_millis();
                 let enqueued = self
                     .send_farewell_to_player(
                         player_id,
                         format!(
-                            "Disconnected: no activity received for {timeout_secs} seconds \
+                            "Disconnected: no activity received for {timeout_ms} ms \
                              (server.ping_timeout)"
                         ),
                         // Deliberately NOT ConnectionIdleTimeout: that code is
