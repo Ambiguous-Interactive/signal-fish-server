@@ -132,8 +132,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT` | `protocol.max_players_limit` | `100` | Hard ceiling on players per room |
 | `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames |
 | `SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION` | `protocol.min_protocol_version` | `2` | Lowest accepted protocol version |
-| `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION` | `protocol.max_protocol_version` | `3` | Highest negotiated protocol version |
-| `SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE` | `protocol.sdk_compatibility.enforce` | `true` | Enforce SDK compatibility checks |
+| `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION` | `protocol.max_protocol_version` | `4` | Highest negotiated protocol version (clamp back to `3` to disable v4 features) |
+| `SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE` | `protocol.sdk_compatibility.enforce` | `false` | Enforce SDK platform/version checks (opt-in: the default platform list would otherwise reject unregistered/custom clients) |
 | `SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__MINIMUM_VERSIONS` | `protocol.sdk_compatibility.minimum_versions` | `platform defaults` | JSON object of minimum SDK versions |
 | `SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__RECOMMENDED_VERSIONS` | `protocol.sdk_compatibility.recommended_versions` | `platform defaults` | JSON object of recommended SDK versions |
 | `SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__CAPABILITIES` | `protocol.sdk_compatibility.capabilities` | `platform defaults` | JSON object of advertised capability lists |
@@ -198,6 +198,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection outbound message queue capacity in messages (must be ≥ 1); a full queue applies backpressure to senders |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds delivery may wait on a full outbound queue before the recipient is disconnected as a slow consumer (must be > 0 and ≤ `600000`) |
+| `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between per-connection `RelayStats` frames for v4 clients (`0` disables; must be ≤ `3600`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
 ## Common Configurations

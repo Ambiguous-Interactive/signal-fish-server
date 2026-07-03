@@ -53,6 +53,32 @@ const RELAY_SEND_SETTLE_MS = 250;
 /** Grace period between meeting all success criteria and exiting. */
 const EXIT_LINGER_MS = 250;
 
+/**
+ * Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
+ * `Ping` mandatory for every client (the server evicts idle connections);
+ * this driver models that contract so anyone using it as a template inherits
+ * the keepalive rather than the idle-timeout eviction. Mirrors the native
+ * client's PING_INTERVAL.
+ */
+const PING_INTERVAL_MS = 10_000;
+
+/**
+ * How long a sent `Ping` may go unanswered before the run fails loudly. A
+ * missing `Pong` inside this generous window means the connection (or the
+ * server's control path) is broken. Mirrors the native client's PONG_TIMEOUT.
+ */
+const PONG_TIMEOUT_MS = 10_000;
+
+/**
+ * Local send-buffer ceiling. Browser `WebSocket.send()` never blocks and
+ * never fails on backpressure — it buffers unboundedly in `bufferedAmount`
+ * while the tab's memory grows and delivery silently stalls. A conformance
+ * driver must SURFACE local backpressure, not mask it, so crossing this
+ * ceiling is a loud connection failure. (A production client would pace or
+ * drop instead; the recipe lives in the building-a-client guide.)
+ */
+const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
+
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -140,6 +166,13 @@ class Orchestrator {
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
   private lingerUntil: number | null = null;
+  /** Next keepalive `Ping` send (the mandatory client keepalive contract). */
+  private nextPingAt = 0;
+  /**
+   * Deadline for the `Pong` answering the most recent `Ping`; `null` while no
+   * answer is outstanding.
+   */
+  private pongDeadline: number | null = null;
   private wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: RunConfig) {
@@ -185,6 +218,7 @@ class Orchestrator {
     // client's process-start semantics.
     this.runDeadline =
       Date.now() + this.config.runForSecs * 1000 - this.config.elapsedBeforeStartMs;
+    this.nextPingAt = Date.now() + PING_INTERVAL_MS;
 
     let ws: WebSocket;
     try {
@@ -477,6 +511,10 @@ class Orchestrator {
     if (this.lingerUntil !== null) {
       wake = Math.min(wake, this.lingerUntil);
     }
+    wake = Math.min(wake, this.nextPingAt);
+    if (this.pongDeadline !== null) {
+      wake = Math.min(wake, this.pongDeadline);
+    }
     return wake;
   }
 
@@ -501,6 +539,20 @@ class Orchestrator {
       return;
     }
     const now = Date.now();
+
+    // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
+    // An unanswered ping is a broken connection or control path — fail loudly
+    // rather than idle into the server's eviction.
+    if (this.pongDeadline !== null && now >= this.pongDeadline) {
+      throw FatalError.connection(`server did not answer Ping within ${PONG_TIMEOUT_MS}ms`);
+    }
+    if (now >= this.nextPingAt) {
+      this.sendFrame(clientFrame('Ping'));
+      this.nextPingAt = now + PING_INTERVAL_MS;
+      if (this.pongDeadline === null) {
+        this.pongDeadline = now + PONG_TIMEOUT_MS;
+      }
+    }
 
     if (!this.relaySent && this.relaySendAt !== null && now >= this.relaySendAt) {
       this.sendRelayPayload();
@@ -640,8 +692,23 @@ class Orchestrator {
         break;
       }
       case 'Error': {
-        // Server-reported errors are surfaced but non-fatal: the relay floor
-        // (and the run window) decide the outcome.
+        if (data['error_code'] === 'SLOW_CONSUMER') {
+          // The server is closing this connection because it could not drain
+          // its outbound queue in time. Surface it distinctly so a run
+          // failure is attributable to consumption speed rather than a
+          // generic server error; the imminent socket close (not this frame)
+          // decides the outcome. Mirrors the native client's dedicated arm.
+          console.error(
+            `server disconnecting us as a slow consumer: ${String(data['message'])}`,
+          );
+          emit({
+            event: 'error',
+            message: `server disconnecting us as a slow consumer: ${String(data['message'])}`,
+          });
+          break;
+        }
+        // Other server-reported errors are surfaced but non-fatal: the relay
+        // floor (and the run window) decide the outcome.
         emit({
           event: 'error',
           message: `server error: ${String(data['message'])} (${String(data['error_code'])})`,
@@ -660,6 +727,8 @@ class Orchestrator {
         break;
       }
       case 'Pong':
+        // Keepalive round-trip complete.
+        this.pongDeadline = null;
         break;
       default:
         console.error(`ignoring server message ${frame.type}`);
@@ -911,6 +980,16 @@ class Orchestrator {
   private sendFrame(frame: string): void {
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
       throw FatalError.connection('websocket is not open');
+    }
+    // Browser `send()` never blocks or errors on backpressure — it buffers
+    // unboundedly in `bufferedAmount`. Crossing the ceiling means the
+    // connection has silently stopped draining; surface it loudly (see
+    // SEND_BUFFER_LIMIT_BYTES).
+    if (this.ws.bufferedAmount > SEND_BUFFER_LIMIT_BYTES) {
+      throw FatalError.connection(
+        `local websocket send buffer saturated: bufferedAmount=${this.ws.bufferedAmount} ` +
+          `exceeds ${SEND_BUFFER_LIMIT_BYTES} bytes`,
+      );
     }
     try {
       this.ws.send(frame);

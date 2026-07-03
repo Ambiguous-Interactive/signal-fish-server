@@ -24,7 +24,14 @@ pub struct SecurityConfig {
     /// Authentication token for metrics endpoint (if required)
     #[serde(default)]
     pub metrics_auth_token: Option<String>,
-    /// Maximum WebSocket message size in bytes
+    /// Maximum WebSocket message size in bytes.
+    ///
+    /// Enforced twice, at two layers: messages over this value get a polite
+    /// `MessageTooLarge` error frame from the application-level check, and the
+    /// WebSocket upgrade itself caps frames/messages at `2 *
+    /// max_message_size` so grossly oversized frames are killed at the
+    /// transport layer before the server buffers them (the 2x headroom keeps
+    /// the polite path the authority near the limit). Must be greater than 0.
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
     /// Maximum serialized size in bytes of a v3 `Signal` payload (the opaque

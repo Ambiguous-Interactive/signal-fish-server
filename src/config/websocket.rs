@@ -2,8 +2,8 @@
 
 use super::defaults::{
     default_auth_timeout_secs, default_batch_interval_ms, default_batch_size,
-    default_enable_batching, default_idle_timeout_secs, default_send_queue_capacity,
-    default_slow_consumer_timeout_ms,
+    default_delivery_stats_interval_secs, default_enable_batching, default_idle_timeout_secs,
+    default_send_queue_capacity, default_slow_consumer_timeout_ms,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,15 @@ pub struct WebSocketConfig {
     /// notified through the normal disconnect flow.
     #[serde(default = "default_slow_consumer_timeout_ms")]
     pub slow_consumer_timeout_ms: u64,
+    /// How often (seconds) each connection that negotiated protocol v4+ is
+    /// sent a `RelayStats` frame with its cumulative delivery statistics
+    /// (`sent_to_you` / `dropped_for_you` / `backpressure_events`); `0`
+    /// (the default) disables emission entirely.
+    ///
+    /// Pre-v4 recipients never receive the frame regardless of this setting
+    /// (the version gate is enforced at emission). Must be at most `3600`.
+    #[serde(default = "default_delivery_stats_interval_secs")]
+    pub delivery_stats_interval_secs: u64,
 }
 
 impl Default for WebSocketConfig {
@@ -61,6 +70,7 @@ impl Default for WebSocketConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             send_queue_capacity: default_send_queue_capacity(),
             slow_consumer_timeout_ms: default_slow_consumer_timeout_ms(),
+            delivery_stats_interval_secs: default_delivery_stats_interval_secs(),
         }
     }
 }
@@ -121,6 +131,16 @@ impl WebSocketConfig {
                 "websocket.slow_consumer_timeout_ms must not exceed 600000 (10 minutes); \
                  configured: {}",
                 self.slow_consumer_timeout_ms
+            );
+        }
+        // `0` disables RelayStats emission; anything beyond an hour is
+        // indistinguishable from disabled and almost certainly a typo (e.g.
+        // milliseconds pasted into a seconds field).
+        if self.delivery_stats_interval_secs > 3_600 {
+            anyhow::bail!(
+                "websocket.delivery_stats_interval_secs must not exceed 3600 (1 hour); \
+                 configured: {} (0 disables RelayStats emission)",
+                self.delivery_stats_interval_secs
             );
         }
         Ok(())
@@ -211,6 +231,24 @@ mod tests {
                 expect_ok: false,
                 expect_error_containing: "slow_consumer_timeout_ms must not exceed 600000",
             },
+            Case {
+                name: "delivery stats disabled (0) is the valid default",
+                mutate: |config| config.delivery_stats_interval_secs = 0,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "delivery stats interval at ceiling",
+                mutate: |config| config.delivery_stats_interval_secs = 3_600,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "delivery stats interval above ceiling",
+                mutate: |config| config.delivery_stats_interval_secs = 3_601,
+                expect_ok: false,
+                expect_error_containing: "delivery_stats_interval_secs must not exceed 3600",
+            },
         ];
 
         for case in cases {
@@ -244,5 +282,9 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 300);
         assert_eq!(config.send_queue_capacity, 1024);
         assert_eq!(config.slow_consumer_timeout_ms, 5_000);
+        assert_eq!(
+            config.delivery_stats_interval_secs, 0,
+            "RelayStats emission is disabled by default"
+        );
     }
 }

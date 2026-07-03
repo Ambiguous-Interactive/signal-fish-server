@@ -60,6 +60,10 @@ tempfile = "3.27"
 # (PlayerId is a uuid::Uuid alias in the server crate; lib code never needs
 # the crate directly).
 uuid = { version = "1.23", features = ["serde"] }
+# The starved-runtime matrix (tests/starved_runtime_e2e.rs) floods a real
+# server process per test; serializing keeps the cells from CPU-starving each
+# other under plain `cargo test` (each cell is deliberately load-heavy).
+serial_test = "3.5"
 
 [[bin]]
 name = "signal-fish-reference-native"

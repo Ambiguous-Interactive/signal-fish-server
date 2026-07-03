@@ -64,6 +64,8 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--protocol-version <V>` | `3` | `2` omits every v3 `Authenticate` field — a pure v2 client for mixed-room tests |
 | `--supported-topologies <LIST>` | `relay,host,mesh` | Comma-separated topologies advertised in v3 `Authenticate` |
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |
+| `--runtime <FLAVOR>` | `multi` | Tokio runtime flavor: `multi` (multi-threaded) or `current` (single current-thread runtime — the shape most susceptible to being starved by a blocking game loop) |
+| `--tick-stall-ms <MS>` | `0` | **Fault injection**: block the orchestrator's executor thread for this many ms after each processed input (`std::thread::sleep`, deliberately not async), simulating a game loop that hogs the runtime instead of continuously driving it. Used by the starved-runtime conformance matrix to pin the server's slow-consumer contract and the docs' "continuously drive your runtime" requirement (`docs/protocol.md`, Delivery reliability and backpressure) |
 
 ## JSONL event contract
 
@@ -74,7 +76,7 @@ process continues to its normal bounded exit.
 
 | Event | Fields | Emitted when |
 |-------|--------|--------------|
-| `connected` | — | WebSocket connection established |
+| `connected` | `runtime`, `tick_stall_ms` | WebSocket connection established; echoes the `--runtime` token and `--tick-stall-ms` value so harnesses can assert the intended runtime/fault shape was in effect |
 | `authenticated` | — | Server accepted `Authenticate` |
 | `protocol_info` | `negotiated_version` | Negotiation result (v2 connections report `2`) |
 | `room_created` | `room_code` | This client created the room (harnesses scrape the code) |

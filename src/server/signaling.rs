@@ -201,11 +201,15 @@ impl EnhancedGameServer {
         // cross-room / rate-limited signal returns earlier and is never counted).
         self.metrics.increment_signals_relayed();
 
-        // Best-effort delivery: `send_to_player` returns `Ok(())` even if the
-        // target's channel is full or closed, so a backpressured peer may
-        // silently drop this signal. That is acceptable for trickle-ICE (the
-        // relay floor remains the fallback transport), so we deliberately
-        // ignore the result here.
+        // Delivery follows the server-wide contract (`deliver_or_disconnect`):
+        // never a silent drop — a backpressured recipient stalls this send for
+        // up to the slow-consumer grace window and is then loudly disconnected
+        // (metrics + close), abandoning its queue only with the connection.
+        // The Result is still ignored deliberately: `send_to_player` returns
+        // `Ok(())` regardless of the per-recipient outcome, and the SENDER has
+        // no corrective action for a recipient's disconnect (the recipient's
+        // teardown broadcasts `PlayerLeft`, and the relay floor remains the
+        // fallback transport for its trickle-ICE).
         let _ = self
             .message_coordinator
             .send_to_player(

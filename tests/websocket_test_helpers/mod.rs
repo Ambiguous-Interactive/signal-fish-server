@@ -1,9 +1,14 @@
 #![allow(dead_code)]
 
+pub mod chaos_proxy;
+pub mod delivery_ledger;
+pub mod prometheus_scrape;
+
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
+use signal_fish_server::metrics::ServerMetrics;
 use signal_fish_server::protocol::ServerMessage;
 use tokio::time::{timeout_at, Instant};
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
@@ -12,6 +17,75 @@ pub type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 const SKIPPED_MESSAGE_LIMIT: usize = 8;
+
+/// Assert the server's delivery-conservation law over its metrics.
+///
+/// Every delivery attempt routed through `coordination::deliver_or_disconnect`
+/// resolves as exactly one of: enqueued on the recipient's outbound queue,
+/// unroutable because the recipient's channel already closed, or abandoned as
+/// a slow-consumer drop. `websocket_messages_dropped` additionally counts
+/// messages abandoned with a closing connection *after* they were enqueued
+/// (a slow consumer's undrained queue, a failed close-time flush), so the law
+/// over the exported counters is two-sided rather than an exact equality:
+///
+/// `enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped`
+///
+/// Call this only at quiescent points — after every send in the test has
+/// completed and been observed by its recipients — because an in-flight
+/// delivery has its attempt counted before its outcome exists.
+pub fn assert_message_conservation(metrics: &ServerMetrics) {
+    use std::sync::atomic::Ordering;
+
+    let attempts = metrics.websocket_delivery_attempts.load(Ordering::Relaxed);
+    let enqueued = metrics
+        .websocket_deliveries_enqueued
+        .load(Ordering::Relaxed);
+    let channel_closed = metrics
+        .websocket_deliveries_channel_closed
+        .load(Ordering::Relaxed);
+    let dropped = metrics.websocket_messages_dropped.load(Ordering::Relaxed);
+
+    let resolved = enqueued + channel_closed;
+    assert!(
+        resolved <= attempts && attempts <= resolved + dropped,
+        "delivery conservation violated: expected \
+         enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped, got \
+         attempts={attempts} enqueued={enqueued} channel_closed={channel_closed} dropped={dropped}"
+    );
+}
+
+/// Connect a real WebSocket client to `ws://{addr}/ws` over a TCP socket whose
+/// kernel receive buffer is clamped to `recv_buffer_bytes` BEFORE the connect
+/// (the kernel typically doubles the requested value, and it cannot shrink an
+/// established connection's window — hence pre-connect).
+///
+/// A client built this way that simply stops reading wedges the server's
+/// socket writes after only a few kilobytes, which is exactly the
+/// slow-consumer state the delivery contract must pre-empt. Regular clients
+/// (default buffers) should use their suite's normal `connect` helper.
+pub async fn connect_with_small_recv_buffer(
+    addr: std::net::SocketAddr,
+    recv_buffer_bytes: u32,
+) -> WsStream {
+    let socket = tokio::net::TcpSocket::new_v4().expect("create IPv4 TCP socket");
+    socket
+        .set_recv_buffer_size(recv_buffer_bytes)
+        .expect("clamp SO_RCVBUF before connect");
+    let stream = tokio::time::timeout(Duration::from_secs(10), socket.connect(addr))
+        .await
+        .expect("small-rcvbuf TCP connect timed out")
+        .expect("small-rcvbuf TCP connect failed");
+
+    let url = format!("ws://{addr}/ws");
+    let (ws_stream, _response) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::client_async(url, tokio_tungstenite::MaybeTlsStream::Plain(stream)),
+    )
+    .await
+    .expect("small-rcvbuf websocket handshake timed out")
+    .expect("small-rcvbuf websocket handshake failed");
+    ws_stream
+}
 
 enum ServerReadEvent {
     ServerMessage(Box<ServerMessage>),
@@ -261,5 +335,6 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::SpectatorDisconnected { .. } => "SpectatorDisconnected",
         ServerMessage::Error { .. } => "Error",
         ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
+        ServerMessage::RelayStats { .. } => "RelayStats",
     }
 }

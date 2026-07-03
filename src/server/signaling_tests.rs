@@ -3970,7 +3970,9 @@ async fn game_data_still_relays_after_transport_status_disconnected() {
     server.handle_game_data(&alice, payload.clone()).await;
 
     match recv(&mut bob_rx).await.as_ref() {
-        ServerMessage::GameData { from_player, data } => {
+        ServerMessage::GameData {
+            from_player, data, ..
+        } => {
             assert_eq!(*from_player, alice);
             assert_eq!(*data, payload);
         }

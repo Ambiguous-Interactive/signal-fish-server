@@ -487,6 +487,7 @@ fn test_real_broadcast_message_zero_cost_cloning() {
     let message = ServerMessage::GameData {
         from_player: Uuid::new_v4(),
         data: serde_json::json!({"action": "move", "x": 100, "y": 200}),
+        seq: None,
     };
 
     let broadcast = BroadcastMessage::new(message);
@@ -547,6 +548,7 @@ fn test_real_broadcast_message_performance() {
     let message = ServerMessage::GameData {
         from_player: Uuid::new_v4(),
         data: serde_json::json!({"state": "x".repeat(1000)}),
+        seq: None,
     };
 
     let broadcast = BroadcastMessage::new(message);
@@ -578,6 +580,7 @@ fn test_real_server_message_serialization_roundtrip() {
         ServerMessage::GameData {
             from_player: player_id,
             data: serde_json::json!({"x": 1, "y": 2}),
+            seq: None,
         },
         ServerMessage::PlayerJoined {
             player: PlayerInfo {
@@ -615,6 +618,7 @@ fn test_real_broadcast_room_simulation() {
     let message = ServerMessage::GameData {
         from_player: room_players[0],
         data: serde_json::json!({"move": "forward", "speed": 5}),
+        seq: None,
     };
 
     let broadcast = BroadcastMessage::new(message);

@@ -11,6 +11,7 @@ use crate::protocol::{
     validation, ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage, SpectatorInfo,
     SpectatorJoinedPayload, SpectatorStateChangeReason,
 };
+use crate::reconnection::ReconnectionManager;
 
 #[cfg(test)]
 use crate::protocol::Room;
@@ -21,6 +22,10 @@ pub(crate) struct SpectatorService {
     message_coordinator: Arc<dyn MessageCoordinator>,
     room_applications: Arc<DashMap<RoomId, Uuid>>,
     protocol_config: ProtocolConfig,
+    /// Records this service's room-uniform broadcasts (`NewSpectatorJoined` /
+    /// `SpectatorDisconnected`) for reconnection replay; `None` when
+    /// reconnection is disabled.
+    reconnection_manager: Option<Arc<ReconnectionManager>>,
 }
 
 #[derive(Debug)]
@@ -44,6 +49,7 @@ impl SpectatorService {
         message_coordinator: Arc<dyn MessageCoordinator>,
         room_applications: Arc<DashMap<RoomId, Uuid>>,
         protocol_config: ProtocolConfig,
+        reconnection_manager: Option<Arc<ReconnectionManager>>,
     ) -> Self {
         Self {
             spectator_rooms: DashMap::new(),
@@ -51,7 +57,20 @@ impl SpectatorService {
             message_coordinator,
             room_applications,
             protocol_config,
+            reconnection_manager,
         }
+    }
+
+    /// Record a room-uniform broadcast for reconnection replay (no-op when
+    /// reconnection is disabled). Called right BEFORE delivery so the event is
+    /// buffered even if the broadcast partially fails.
+    async fn record_replayable_room_event(&self, room_id: &RoomId, message: &ServerMessage) {
+        let Some(reconnection_manager) = &self.reconnection_manager else {
+            return;
+        };
+        reconnection_manager
+            .record_room_event(room_id, message)
+            .await;
     }
 
     pub(crate) async fn join(
@@ -145,6 +164,8 @@ impl SpectatorService {
                     current_spectators: spectator_snapshot.clone(),
                     reason: Some(join_reason),
                 });
+                self.record_replayable_room_event(&room.id, notification.as_ref())
+                    .await;
 
                 let _ = self
                     .message_coordinator
@@ -257,6 +278,8 @@ impl SpectatorService {
                 reason: Some(reason),
                 current_spectators,
             });
+            self.record_replayable_room_event(&room.id, notification.as_ref())
+                .await;
 
             let _ = self
                 .message_coordinator
@@ -416,6 +439,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(DashMap::new()),
             ProtocolConfig::default(),
+            None,
         );
 
         (spectator_service, room, creator_id, coordinator, database)

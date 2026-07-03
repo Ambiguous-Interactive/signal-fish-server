@@ -1,4 +1,6 @@
-use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, ReconnectedPayload, RoomId, ServerMessage};
+use crate::protocol::{
+    ErrorCode, PlayerId, PlayerInfo, ReconnectedPayload, ReplayStatus, RoomId, ServerMessage,
+};
 use crate::reconnection::{ClaimedReconnection, DisconnectedPlayer, ReconnectionManager};
 use std::sync::Arc;
 
@@ -65,6 +67,59 @@ impl Drop for ReconnectionClaimGuard {
 }
 
 impl EnhancedGameServer {
+    /// Record a room-uniform broadcast for reconnection replay.
+    ///
+    /// The one-line hook every uniform broadcast site calls right BEFORE (or
+    /// beside) delivery — the event is recorded even if the broadcast
+    /// partially fails, matching "what a connected player would have been
+    /// sent". No-ops when reconnection is disabled; non-replayable messages
+    /// and rooms with nobody pending are filtered cheaply inside
+    /// [`ReconnectionManager::record_room_event`].
+    pub(crate) async fn record_replayable_room_event(
+        &self,
+        room_id: &RoomId,
+        message: &ServerMessage,
+    ) {
+        let Some(reconnection_manager) = &self.reconnection_manager else {
+            return;
+        };
+        reconnection_manager
+            .record_room_event(room_id, message)
+            .await;
+    }
+
+    /// Mint (or rotate) the reconnection token surfaced on `RoomJoined` /
+    /// `Reconnected` for a v3+ recipient joining `room_id` (issue #136, F4:
+    /// a token minted only at disconnect time can never legitimately reach
+    /// the client it is for). Returns `None` — keeping the field off the
+    /// wire — when reconnection is disabled or the recipient negotiated v2:
+    /// a v2 client could not receive the token anyway, so its disconnect
+    /// keeps the old mint-at-disconnect fallback unchanged.
+    pub(crate) async fn pre_issue_reconnection_token_for(
+        &self,
+        player_id: &PlayerId,
+        room_id: RoomId,
+    ) -> Option<String> {
+        let reconnection_manager = self.reconnection_manager.as_ref()?;
+        if self.client_protocol(player_id).version < 3 {
+            return None;
+        }
+        Some(
+            reconnection_manager
+                .pre_issue_token(*player_id, room_id)
+                .await,
+        )
+    }
+
+    /// Drop a player's pre-issued reconnection token (voluntary leave or a
+    /// roomless teardown — neither may leave a claimable token behind, and
+    /// the pre-issued map must stay bounded by currently-joined players).
+    pub(crate) async fn discard_pre_issued_reconnection_token(&self, player_id: &PlayerId) {
+        if let Some(reconnection_manager) = &self.reconnection_manager {
+            reconnection_manager.discard_pre_issued(player_id).await;
+        }
+    }
+
     pub(crate) async fn register_disconnection_for_reconnect(
         &self,
         player_id: &PlayerId,
@@ -308,7 +363,9 @@ impl EnhancedGameServer {
             }
         };
 
-        // Get missed events
+        // Get missed events (fetched before the claim completes below — the
+        // completion may release the room's replay ring when this player is
+        // the last one pending).
         let missed_events = reconnection_manager
             .get_missed_events(room_id, disconnected.last_sequence)
             .await;
@@ -484,6 +541,24 @@ impl EnhancedGameServer {
         }
         let is_authority = room.authority_player == Some(*reconnect_player_id);
 
+        // Replay completeness (v3+ recipients only; absent on the v2 wire,
+        // mirroring the per-recipient `ice_servers` gate below). The connection
+        // was reassigned above, so the reconnecting socket's negotiated
+        // protocol is queryable under the restored player id. `Unavailable`
+        // (ring disabled) wins over `Truncated`: a zero-capacity ring evicts
+        // everything, but the honest contract is "replay is off, resync".
+        let replay = if self.client_protocol(reconnect_player_id).version >= 3 {
+            Some(if reconnection_manager.event_buffer_size() == 0 {
+                ReplayStatus::Unavailable
+            } else if missed_events.truncated {
+                ReplayStatus::Truncated
+            } else {
+                ReplayStatus::Complete
+            })
+        } else {
+            None
+        };
+
         // Send reconnected message
         let _ = self
             .message_coordinator
@@ -509,24 +584,48 @@ impl EnhancedGameServer {
                     // reconnect into a Finalized room gets fresh ICE from the
                     // late-join SessionPlan below instead (never both).
                     ice_servers: self.pregather_ice_servers(&room, reconnect_player_id),
-                    missed_events,
+                    missed_events: missed_events.events,
+                    replay,
+                    // Rotate: the token just used was consumed with the
+                    // completed claim; the restored player gets a fresh one
+                    // for its NEXT unexpected disconnect (v3+ only).
+                    reconnection_token: self
+                        .pre_issue_reconnection_token_for(reconnect_player_id, *room_id)
+                        .await,
                 }))),
             )
             .await;
 
-        // Notify other players
+        // Notify other players. Recorded for replay BEFORE delivery (the
+        // room's ring persists when other players are still pending): a
+        // reconnector must learn this player came back exactly like a
+        // connected member would have.
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: *reconnect_player_id,
         });
+        self.record_replayable_room_event(room_id, notification.as_ref())
+            .await;
 
-        for other_player_id in room.players.keys() {
-            if other_player_id != reconnect_player_id {
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(other_player_id, Arc::clone(&notification))
-                    .await;
-            }
-        }
+        // Concurrent fan-out (issue #136, F2): a serial per-recipient loop
+        // lets one backpressured peer stall the notification for everyone
+        // after it by up to the slow-consumer window EACH; concurrently the
+        // whole fan-out is bounded by the single slowest recipient, like the
+        // coordinator's own broadcast path.
+        futures_util::future::join_all(
+            room.players
+                .keys()
+                .filter(|other_player_id| *other_player_id != reconnect_player_id)
+                .map(|other_player_id| {
+                    let notification = Arc::clone(&notification);
+                    async move {
+                        let _ = self
+                            .message_coordinator
+                            .send_to_player(other_player_id, notification)
+                            .await;
+                    }
+                }),
+        )
+        .await;
 
         // Re-entry into an active session: if the room is finalized with a
         // stored non-relay plan, the reconnector receives a fresh tailored

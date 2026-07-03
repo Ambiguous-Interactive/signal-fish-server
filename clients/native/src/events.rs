@@ -17,8 +17,12 @@ use signal_fish_server::protocol::{LobbyState, PlayerId, RoomId, Topology, Trans
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    /// WebSocket connection to the server established.
-    Connected,
+    /// WebSocket connection to the server established. Carries the run's
+    /// runtime configuration so starved-runtime harnesses can assert the
+    /// intended fault-injection shape was actually in effect: `runtime` is the
+    /// `--runtime` token (`multi`/`current`) and `tick_stall_ms` the
+    /// `--tick-stall-ms` value (0 = no stall).
+    Connected { runtime: String, tick_stall_ms: u64 },
     /// Server accepted `Authenticate`.
     Authenticated,
     /// Negotiation result echoed by the server (v2 connections report 2).
@@ -191,7 +195,13 @@ mod tests {
     #[test]
     fn event_tags_are_snake_case() {
         let cases: Vec<(Event, &str)> = vec![
-            (Event::Connected, "connected"),
+            (
+                Event::Connected {
+                    runtime: "multi".to_string(),
+                    tick_stall_ms: 0,
+                },
+                "connected",
+            ),
             (
                 Event::ProtocolInfo {
                     negotiated_version: 3,
@@ -223,6 +233,19 @@ mod tests {
                 "tag for {event:?}"
             );
         }
+    }
+
+    #[test]
+    fn connected_event_carries_runtime_configuration() {
+        let event = Event::Connected {
+            runtime: "current".to_string(),
+            tick_stall_ms: 750,
+        };
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(value["event"], "connected");
+        // The starved-runtime harness keys on these exact fields.
+        assert_eq!(value["runtime"], "current");
+        assert_eq!(value["tick_stall_ms"], 750);
     }
 
     #[test]

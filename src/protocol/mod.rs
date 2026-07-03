@@ -24,7 +24,8 @@ pub use types::{
 
 // From messages
 pub use messages::{
-    ClientMessage, ReconnectedPayload, RoomJoinedPayload, ServerMessage, SpectatorJoinedPayload,
+    ClientMessage, ReconnectedPayload, ReplayStatus, RoomJoinedPayload, ServerMessage,
+    SpectatorJoinedPayload,
 };
 
 // From room_state

@@ -63,6 +63,20 @@ async fn websocket_handler_with_default(
         Err(response) => return response,
     };
 
+    // Transport-layer frame/message cap. The application-level
+    // `security.max_message_size` check in the receive loop can only run after
+    // the WebSocket library has buffered an entire inbound message, so without
+    // this cap the library defaults (16 MiB frames / 64 MiB messages) let an
+    // unauthenticated peer force megabytes of buffering per connection before
+    // the polite `MessageTooLarge` rejection executes. The 2x headroom keeps
+    // the application check the authority for the polite error path
+    // (slightly-oversized messages still get an explicit error frame on a
+    // surviving connection); only grossly oversized frames die here.
+    let transport_cap = server.config().max_message_size.saturating_mul(2);
+    let ws = ws
+        .max_frame_size(transport_cap)
+        .max_message_size(transport_cap);
+
     let upgrade = if token_binding_cfg.enabled && client_offered_binding {
         ws.protocols([token_binding_cfg.subprotocol])
     } else {

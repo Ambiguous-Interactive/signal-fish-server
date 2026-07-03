@@ -10,6 +10,28 @@
 /// - Relay Packet Throughput: 10,000 packets/second
 /// - Concurrent Capacity: 10,000 concurrent connections
 /// - Memory Usage: < 2GB at max load
+///
+/// SCOPE — honest limits of this suite: these are IN-PROCESS throughput
+/// smoke tests. Their "clients" are bare `mpsc` channels handed to
+/// `connect_client` (with the receivers mostly dropped on the floor), not
+/// WebSocket connections: no sockets, no kernel buffers, no reads. They
+/// therefore CANNOT observe delivery — a relay that silently dropped every
+/// message would pass them unchanged, and they would not have caught the
+/// issue #131 delivery deficit. They exist to smoke-check handler-path
+/// throughput and latency only. The real delivery verification (zero loss or
+/// loud disconnect, over real sockets) lives in
+/// `tests/relay_backpressure_e2e.rs`, `tests/relay_chaos_e2e.rs`, and the
+/// nightly `tests/relay_delivery_soak.rs` /
+/// `tests/delivery_concurrency_stress.rs` lanes.
+///
+/// KNOWN-BROKEN (as of the nightly-verification lane's introduction):
+/// `test_load_room_creation_throughput` and
+/// `test_load_sustained_concurrent_connections` fail deterministically under
+/// the shared test-server defaults — they request 250-500 rooms in a single
+/// game against `max_rooms_per_game: 100` and trip the room-creation rate
+/// limits, so their ">=95% success" assertions cannot hold. They are
+/// excluded from `.github/workflows/verification-nightly.yml` until
+/// repaired; only `test_load_message_latency_distribution` runs there.
 mod test_helpers;
 
 use signal_fish_server::server::ServerConfig;

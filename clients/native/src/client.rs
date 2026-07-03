@@ -75,6 +75,20 @@ const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 /// unreliable-channel sends are not torn down mid-flight for slower siblings.
 const EXIT_LINGER: Duration = Duration::from_millis(250);
 
+/// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
+/// `Ping` mandatory for every client (the server evicts idle connections);
+/// this driver models that contract so anyone using it as a template
+/// inherits the keepalive rather than the idle-timeout eviction. Short
+/// enough that even a default 30-second conformance run exercises several
+/// round-trips.
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a sent `Ping` may go unanswered before the run fails loudly. A
+/// missing `Pong` inside this generous window means the connection (or the
+/// server's control path) is broken — surfacing that is exactly what a
+/// conformance driver is for.
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A failure that terminates the run with a specific exit code.
 #[derive(Debug)]
 struct FatalError {
@@ -120,7 +134,10 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     let mut ws = wire::connect(&cli.server_url)
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
-    emit(&Event::Connected);
+    emit(&Event::Connected {
+        runtime: cli.runtime.as_str().to_string(),
+        tick_stall_ms: cli.tick_stall_ms,
+    });
 
     authenticate(&mut ws, cli).await?;
     let (my_id, mut present, lobby_state) = join_room(&mut ws, cli).await?;
@@ -167,6 +184,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pending_signals: BTreeMap::new(),
         run_deadline,
         linger_until: None,
+        next_ping_at: Instant::now() + PING_INTERVAL,
+        pong_deadline: None,
     };
     orchestrator.maybe_send_ready().await?;
     orchestrator.run_loop().await
@@ -336,6 +355,11 @@ struct Orchestrator<'a> {
     run_deadline: Instant,
     /// Set once all criteria are met; exit 0 when it elapses.
     linger_until: Option<Instant>,
+    /// Next keepalive `Ping` send (the mandatory client keepalive contract).
+    next_ping_at: Instant,
+    /// Deadline for the `Pong` answering the most recent `Ping`; `None` while
+    /// no answer is outstanding.
+    pong_deadline: Option<Instant>,
 }
 
 impl Orchestrator<'_> {
@@ -379,6 +403,20 @@ impl Orchestrator<'_> {
                 }
                 LoopInput::Tick => {}
             }
+
+            // FAULT INJECTION (--tick-stall-ms): deliberately BLOCK this
+            // executor thread after every processed input — a `std::thread`
+            // sleep, never an async one, because the injected fault is a game
+            // loop that hogs the runtime instead of continuously driving it
+            // (docs/protocol.md, "Delivery reliability and backpressure":
+            // clients must continuously poll/drive their connection). On the
+            // `--runtime current` flavor this starves the entire client,
+            // reproducing the #131 reporter's client-side failure mode; the
+            // starved-runtime conformance matrix uses it to pin the server's
+            // slow-consumer contract as an executable boundary.
+            if self.cli.tick_stall_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.cli.tick_stall_ms));
+            }
         }
     }
 
@@ -399,12 +437,32 @@ impl Orchestrator<'_> {
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
         }
+        wake = wake.min(self.next_ping_at);
+        if let Some(at) = self.pong_deadline {
+            wake = wake.min(at);
+        }
         wake
     }
 
     /// Fire due timers; returns `Some(exit_code)` when the run is over.
     async fn process_timers(&mut self) -> Result<Option<i32>, FatalError> {
         let now = Instant::now();
+
+        // Mandatory keepalive: send `Ping` on cadence and demand a timely
+        // `Pong`. An unanswered ping is a broken connection or control path —
+        // fail loudly rather than idle into the server's eviction.
+        if self.pong_deadline.is_some_and(|at| now >= at) {
+            return Err(FatalError::connection(format!(
+                "server did not answer Ping within {PONG_TIMEOUT:?}"
+            )));
+        }
+        if now >= self.next_ping_at {
+            self.send_message(&ClientMessage::Ping).await?;
+            self.next_ping_at = now + PING_INTERVAL;
+            if self.pong_deadline.is_none() {
+                self.pong_deadline = Some(now + PONG_TIMEOUT);
+            }
+        }
 
         if !self.relay_sent && self.relay_send_at.is_some_and(|at| now >= at) {
             self.send_relay_payload().await?;
@@ -529,7 +587,12 @@ impl Orchestrator<'_> {
             ServerMessage::Signal { from, signal } => {
                 self.handle_signal(from, signal).await?;
             }
-            ServerMessage::GameData { from_player, data } => {
+            // `..`: newer protocol revisions may stamp extra relay metadata
+            // (e.g. a per-connection delivery sequence) on GameData; this
+            // driver's contract only concerns the payload and its sender.
+            ServerMessage::GameData {
+                from_player, data, ..
+            } => {
                 if data.get("relay_msg").is_some() {
                     self.relay_received_from.insert(from_player);
                 }
@@ -597,7 +660,10 @@ impl Orchestrator<'_> {
                     self.maybe_send_start_game(all_ready).await?;
                 }
             }
-            ServerMessage::Pong => {}
+            ServerMessage::Pong => {
+                // Keepalive round-trip complete.
+                self.pong_deadline = None;
+            }
             other => {
                 tracing::debug!(message = ?other, "ignoring server message");
             }

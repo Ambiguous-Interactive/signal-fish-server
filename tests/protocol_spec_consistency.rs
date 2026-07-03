@@ -166,11 +166,11 @@ fn collect_declared_tokens(node: &Yaml, out: &mut BTreeSet<String>) {
 ///
 /// Every wire token this guard checks — message `type` discriminators, error
 /// codes, the Transport / Topology / GameDataEncoding / RelayTransport /
-/// SpectatorStateChangeReason / LobbyState values, and the `ConnectionInfo`
-/// `type` discriminators — is a STRING in the spec, so `as_str()` is exact and
-/// complete; a non-string scalar there would be a spec authoring error, not a
-/// token to match. (Returns `None` for non-string scalars, which simply means
-/// they are not counted as tokens.)
+/// SpectatorStateChangeReason / LobbyState / ReplayStatus values, and the
+/// `ConnectionInfo` `type` discriminators — is a STRING in the spec, so
+/// `as_str()` is exact and complete; a non-string scalar there would be a spec
+/// authoring error, not a token to match. (Returns `None` for non-string
+/// scalars, which simply means they are not counted as tokens.)
 fn scalar_token(node: &Yaml) -> Option<String> {
     node.as_str().map(str::to_string)
 }
@@ -257,13 +257,13 @@ fn spec_documents_every_error_code_variant() {
 /// here, and is then checked against the spec. This closes the gap a
 /// hand-maintained token list left — a new `Transport` / `Topology` /
 /// `GameDataEncoding` / `RelayTransport` / `SpectatorStateChangeReason` /
-/// `LobbyState` value, or a new internally-tagged `ConnectionInfo` `type`
-/// discriminator, can no longer ship undocumented.
+/// `LobbyState` / `ReplayStatus` value, or a new internally-tagged
+/// `ConnectionInfo` `type` discriminator, can no longer ship undocumented.
 #[test]
 fn spec_documents_every_wire_token_enum_variant() {
     use signal_fish_server::protocol::{
-        ConnectionInfo, GameDataEncoding, LobbyState, RelayTransport, SpectatorStateChangeReason,
-        Topology, Transport,
+        ConnectionInfo, GameDataEncoding, LobbyState, RelayTransport, ReplayStatus,
+        SpectatorStateChangeReason, Topology, Transport,
     };
 
     let declared = spec_declared_tokens();
@@ -324,6 +324,15 @@ fn spec_documents_every_wire_token_enum_variant() {
         }
         let _exhaustive = |value: LobbyState| match value {
             Waiting | Lobby | Finalized => {}
+        };
+    }
+    {
+        use ReplayStatus::*;
+        for value in [Complete, Truncated, Unavailable] {
+            assert_wire_token(&declared, value, "ReplayStatus");
+        }
+        let _exhaustive = |value: ReplayStatus| match value {
+            Complete | Truncated | Unavailable => {}
         };
     }
     {

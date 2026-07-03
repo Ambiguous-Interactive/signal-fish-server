@@ -1,0 +1,827 @@
+//! End-to-end reconnection event-replay tests through the real WebSocket stack.
+//!
+//! `Reconnected.missed_events` must actually carry the room-uniform control
+//! events (PlayerJoined / PlayerLeft / LobbyStateChanged / ...) that were
+//! broadcast while the reconnecting player was away — in broadcast order — and
+//! the v3-only `replay` field must state whether that list is complete,
+//! truncated by the bounded per-room replay ring, or unavailable. High-rate
+//! data-path messages (GameData) and per-recipient payloads (GameStarting) are
+//! deliberately never replayed: reconnectors resync from the `Reconnected`
+//! snapshot and, for started sessions, the dedicated late-join `SessionPlan`.
+//!
+//! Models the harness in `tests/v3_ice_pregather_e2e.rs` (which already drives
+//! real reconnects): same connect/authenticate/join helpers, same
+//! `register_reconnect_token` pattern, and raw-JSON frame assertions where the
+//! scenario is about wire shape (the v2 wire must never grow a `replay` key).
+
+mod test_helpers;
+mod websocket_test_helpers;
+
+use futures_util::{SinkExt, StreamExt};
+use signal_fish_server::config::AppAuthEntry;
+use signal_fish_server::protocol::{ClientMessage, PlayerId, ReplayStatus, RoomId, ServerMessage};
+use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
+use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use test_helpers::{test_protocol_config, test_server_config};
+use tokio::net::TcpListener;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{
+    assert_message_conservation, deadline_after, next_matching_server_message_within,
+    next_server_message_within, WsStream,
+};
+
+const APP_ID: &str = "reconnection-replay-app";
+const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+
+fn app_entry() -> AppAuthEntry {
+    AppAuthEntry {
+        app_id: APP_ID.to_string(),
+        app_secret: "secret".to_string(),
+        app_name: "Reconnection Replay App".to_string(),
+        max_rooms: Some(10),
+        max_players_per_room: Some(8),
+        rate_limit_per_minute: Some(600),
+    }
+}
+
+/// Start a server with the given `ServerConfig` (lets a test shrink the replay
+/// ring via `event_buffer_size`), keeping the handle for metrics assertions.
+async fn start_server_with_config(
+    server_config: ServerConfig,
+) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+    let mut server_config = server_config;
+    server_config.auth_enabled = true;
+
+    let mut protocol_config = test_protocol_config();
+    protocol_config.sdk_compatibility.enforce = false;
+
+    let game_server = EnhancedGameServer::new(
+        server_config,
+        protocol_config,
+        signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::config::SessionConfig::default(),
+        signal_fish_server::config::TurnConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::AuthMaintenanceConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        vec![app_entry()],
+    )
+    .await
+    .expect("server builds");
+
+    let addr = start_server(game_server.clone()).await;
+    (addr, game_server)
+}
+
+async fn start_server_default() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+    start_server_with_config(test_server_config()).await
+}
+
+async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+    use axum::routing::get;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
+    let combined_router = axum::Router::new()
+        .nest("/v2", enhanced_router)
+        .route("/v3/ws", get(websocket_handler_v3))
+        .fallback(|| async { "Use /v2/ws or /v3/ws" })
+        .with_state(game_server);
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // No startup sleep: the listener is already bound above, so connections
+    // issued immediately are accepted by the kernel and served once the
+    // spawned `axum::serve` task polls them.
+    addr
+}
+
+async fn connect(addr: std::net::SocketAddr) -> WsStream {
+    let url = format!("ws://{addr}/v3/ws");
+    let (ws, _) = tokio::time::timeout(tokio::time::Duration::from_secs(10), connect_async(&url))
+        .await
+        .expect("connect timeout")
+        .expect("connect");
+    ws
+}
+
+async fn send(ws: &mut WsStream, msg: &ClientMessage) {
+    let json = serde_json::to_string(msg).unwrap();
+    ws.send(Message::Text(json.into())).await.unwrap();
+}
+
+async fn next_server_message(ws: &mut WsStream) -> ServerMessage {
+    next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "next server message").await
+}
+
+/// Read raw text frames until the next `ServerMessage`-shaped frame and assert
+/// its `type` tag is `expected_type`, returning the **raw JSON text** so wire
+/// shape (field presence/absence) can be asserted without deserialization.
+/// Non-text control frames are skipped; an unexpected message type is a hard
+/// failure (no silent skipping of protocol frames).
+async fn next_raw_server_message_of_type(
+    ws: &mut WsStream,
+    expected_type: &str,
+    context: &str,
+) -> String {
+    let deadline = deadline_after(SERVER_MESSAGE_TIMEOUT);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{context}: timed out waiting for a {expected_type} text frame")
+            })
+            .unwrap_or_else(|| panic!("{context}: websocket stream closed"))
+            .unwrap_or_else(|err| panic!("{context}: websocket error: {err}"));
+        let Message::Text(text) = frame else {
+            // Control frames (ping/pong) are transport noise, not protocol drift.
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("{context}: invalid JSON text frame: {err}; {text:?}"));
+        let actual_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{context}: text frame without a type tag: {text:?}"));
+        assert_eq!(
+            actual_type, expected_type,
+            "{context}: expected the next protocol frame to be {expected_type}, got {actual_type}: {text}"
+        );
+        return text.to_string();
+    }
+}
+
+/// Authenticate, advertising the given protocol version (relay-only capability
+/// set — replay is about control events, not the data path).
+async fn authenticate(ws: &mut WsStream, protocol_version: Option<u16>) {
+    send(
+        ws,
+        &ClientMessage::Authenticate {
+            app_id: APP_ID.to_string(),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version,
+            supported_transports: None,
+            supported_topologies: None,
+        },
+    )
+    .await;
+
+    let authed = next_server_message(ws).await;
+    assert!(
+        matches!(authed, ServerMessage::Authenticated { .. }),
+        "expected Authenticated, got {authed:?}"
+    );
+    let info = next_server_message(ws).await;
+    assert!(
+        matches!(info, ServerMessage::ProtocolInfo(_)),
+        "expected ProtocolInfo, got {info:?}"
+    );
+}
+
+async fn authenticate_v3(ws: &mut WsStream) {
+    authenticate(ws, Some(3)).await;
+}
+
+/// Authenticate as a pure v2 client (no v3 fields beyond the version).
+async fn authenticate_v2(ws: &mut WsStream) {
+    authenticate(ws, Some(2)).await;
+}
+
+/// Join (or create) a 4-player room, returning the typed payload.
+async fn join_room(
+    ws: &mut WsStream,
+    game_name: &str,
+    room_code: Option<String>,
+    player_name: &str,
+) -> Box<signal_fish_server::protocol::RoomJoinedPayload> {
+    send(
+        ws,
+        &ClientMessage::JoinRoom {
+            game_name: game_name.to_string(),
+            room_code,
+            player_name: player_name.to_string(),
+            max_players: Some(4),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await;
+
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "room join response",
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some(payload),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("room join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await
+}
+
+/// Disconnect `player_id` server-side and mint a reconnect token for it
+/// (mirrors `tests/v3_ice_pregather_e2e.rs`).
+async fn register_reconnect_token(
+    game_server: &Arc<EnhancedGameServer>,
+    player_id: PlayerId,
+    room_id: RoomId,
+) -> String {
+    let room = game_server
+        .database()
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    let player_info = room
+        .players
+        .get(&player_id)
+        .cloned()
+        .expect("player in room before disconnect");
+
+    game_server.disconnect_client(&player_id).await;
+
+    game_server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(player_id, room_id, false, Some(player_info))
+        .await
+}
+
+/// Send `Reconnect` on `ws` and return the typed `Reconnected` payload.
+async fn reconnect(
+    ws: &mut WsStream,
+    player_id: PlayerId,
+    room_id: RoomId,
+    auth_token: String,
+) -> Box<signal_fish_server::protocol::ReconnectedPayload> {
+    send(
+        ws,
+        &ClientMessage::Reconnect {
+            player_id,
+            room_id,
+            auth_token,
+        },
+    )
+    .await;
+
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "reconnect response",
+        |message| match message {
+            ServerMessage::Reconnected(payload) => Some(payload),
+            ServerMessage::ReconnectionFailed { reason, error_code } => {
+                panic!("reconnect failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await
+}
+
+/// Drain `ws` until it has observed `PlayerJoined` then `PlayerLeft` for
+/// `expected`: once a connected member saw the broadcasts, the server has
+/// already recorded them for any pending reconnector (events are buffered
+/// before they are broadcast), so this is the event-driven sync point.
+async fn await_join_leave_cycle(ws: &mut WsStream, expected: PlayerId, context: &str) {
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        context,
+        |message| match message {
+            ServerMessage::PlayerJoined { player } if player.id == expected => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        context,
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id } if player_id == expected => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+}
+
+/// Join `churn_name` into the room and immediately leave, waiting for both the
+/// leaver's own `RoomLeft` and the observer's broadcast pair, so every control
+/// event of the cycle is fully processed before the caller proceeds.
+async fn churn_join_leave(
+    addr: std::net::SocketAddr,
+    room_code: &str,
+    churn_name: &str,
+    observer: &mut WsStream,
+) -> PlayerId {
+    let mut churner = connect(addr).await;
+    authenticate_v3(&mut churner).await;
+    let joined = join_room(
+        &mut churner,
+        "replay-game",
+        Some(room_code.to_string()),
+        churn_name,
+    )
+    .await;
+    send(&mut churner, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut churner,
+        SERVER_MESSAGE_TIMEOUT,
+        "churner's RoomLeft",
+        |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
+    )
+    .await;
+    await_join_leave_cycle(observer, joined.player_id, "observer's churn broadcasts").await;
+    joined.player_id
+}
+
+// ---------------------------------------------------------------------------
+// 1. Happy path: every control event broadcast while away is replayed, in
+//    order, and the replay is reported complete.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn missed_control_events_are_replayed_completely() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    // B drops; a reconnection is now pending, so room control events buffer.
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    // While B is away, a third player joins and leaves.
+    let churner_id = churn_join_leave(addr, &joined_a.room_code, "Churner", &mut peer_a).await;
+
+    // B reconnects on a fresh v3 socket.
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        token,
+    )
+    .await;
+
+    // The missed control events arrive verbatim, in broadcast order.
+    assert_eq!(
+        reconnected.missed_events.len(),
+        2,
+        "exactly the churn cycle's two control events must be replayed: {:?}",
+        reconnected.missed_events
+    );
+    assert!(
+        matches!(
+            &reconnected.missed_events[0],
+            ServerMessage::PlayerJoined { player } if player.id == churner_id
+        ),
+        "first missed event must be the churner's PlayerJoined: {:?}",
+        reconnected.missed_events
+    );
+    assert!(
+        matches!(
+            &reconnected.missed_events[1],
+            ServerMessage::PlayerLeft { player_id } if *player_id == churner_id
+        ),
+        "second missed event must be the churner's PlayerLeft: {:?}",
+        reconnected.missed_events
+    );
+    assert_eq!(
+        reconnected.replay,
+        Some(ReplayStatus::Complete),
+        "nothing was evicted, so the v3 recipient is told the replay is complete"
+    );
+
+    assert_message_conservation(&game_server.metrics());
+}
+
+// ---------------------------------------------------------------------------
+// 2. Overflow: more control events than the ring holds => the replay is a
+//    suffix and is reported truncated; the eviction metric records the loss.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn overflowed_replay_ring_reports_truncated() {
+    let mut config = test_server_config();
+    config.event_buffer_size = 3;
+    let (addr, game_server) = start_server_with_config(config).await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    // Three join/leave cycles = 6 control events into a 3-slot ring.
+    let mut churner_ids = Vec::new();
+    for i in 0..3 {
+        churner_ids.push(
+            churn_join_leave(
+                addr,
+                &joined_a.room_code,
+                &format!("Churner{i}"),
+                &mut peer_a,
+            )
+            .await,
+        );
+    }
+
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        token,
+    )
+    .await;
+
+    // The ring keeps only the newest 3 of the 6 events: the suffix
+    // [PlayerLeft(c1), PlayerJoined(c2), PlayerLeft(c2)] (0-indexed churners).
+    assert_eq!(
+        reconnected.missed_events.len(),
+        3,
+        "the replay is capped at the ring size: {:?}",
+        reconnected.missed_events
+    );
+    assert!(
+        matches!(
+            &reconnected.missed_events[0],
+            ServerMessage::PlayerLeft { player_id } if *player_id == churner_ids[1]
+        ),
+        "oldest surviving event must be the second churner's PlayerLeft: {:?}",
+        reconnected.missed_events
+    );
+    assert!(
+        matches!(
+            &reconnected.missed_events[1],
+            ServerMessage::PlayerJoined { player } if player.id == churner_ids[2]
+        ) && matches!(
+            &reconnected.missed_events[2],
+            ServerMessage::PlayerLeft { player_id } if *player_id == churner_ids[2]
+        ),
+        "the newest churn cycle must survive intact: {:?}",
+        reconnected.missed_events
+    );
+    assert_eq!(
+        reconnected.replay,
+        Some(ReplayStatus::Truncated),
+        "evicted events the player needed => truncated"
+    );
+    // 7 events entered the ring, not 6: the production disconnect path
+    // (`unregister_client`) opens the replay gate BEFORE `leave_room`
+    // broadcasts the leaver's own PlayerLeft, so B's departure is captured
+    // too (any OTHER pending reconnector must see it; B itself filters it
+    // out via its `last_sequence`). 7 buffered - 3 ring slots = 4 evictions.
+    assert_eq!(
+        game_server
+            .metrics()
+            .reconnection_events_evicted
+            .load(Ordering::Relaxed),
+        4,
+        "7 buffered control events minus the 3-slot ring = 4 evictions"
+    );
+
+    assert_message_conservation(&game_server.metrics());
+}
+
+// ---------------------------------------------------------------------------
+// 3. v2 wire freeze: a v2 recipient's Reconnected frame must not grow a
+//    `replay` key (raw-JSON assertion; the events themselves still replay).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn v2_recipient_gets_no_replay_key() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    // B is a pure v2 client.
+    let mut peer_b = connect(addr).await;
+    authenticate_v2(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    // A churn cycle proves the replay itself is version-agnostic.
+    let _churner_id = churn_join_leave(addr, &joined_a.room_code, "Churner", &mut peer_a).await;
+
+    let mut replacement = connect(addr).await;
+    authenticate_v2(&mut replacement).await;
+    send(
+        &mut replacement,
+        &ClientMessage::Reconnect {
+            player_id: joined_b.player_id,
+            room_id: joined_b.room_id,
+            auth_token: token,
+        },
+    )
+    .await;
+
+    let raw =
+        next_raw_server_message_of_type(&mut replacement, "Reconnected", "raw v2 reconnect").await;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).expect("Reconnected frame is valid JSON");
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("expected a JSON object at /data: {raw}"));
+    assert!(
+        !data.contains_key("replay"),
+        "the v2 wire must stay byte-identical: no replay key allowed: {raw}"
+    );
+    assert!(
+        data.get("missed_events")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|events| !events.is_empty()),
+        "the replayed events themselves are not v3-gated: {raw}"
+    );
+
+    assert_message_conservation(&game_server.metrics());
+}
+
+// ---------------------------------------------------------------------------
+// 4. GameData is never replayed: the data path is high-rate and would purge
+//    the control events that matter; reconnectors resync via the snapshot.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn game_data_is_never_replayed() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    // A streams game data while B is away; a Ping/Pong round-trip on the same
+    // socket proves the server processed the sends (same-socket ordering).
+    for _ in 0..3 {
+        send(
+            &mut peer_a,
+            &ClientMessage::GameData {
+                data: serde_json::json!({ "tick": 1 }),
+            },
+        )
+        .await;
+    }
+    send(&mut peer_a, &ClientMessage::Ping).await;
+    next_matching_server_message_within(
+        &mut peer_a,
+        SERVER_MESSAGE_TIMEOUT,
+        "post-GameData pong",
+        |message| matches!(message, ServerMessage::Pong).then_some(()),
+    )
+    .await;
+
+    // A churn cycle gives the replay a real control event to carry.
+    let churner_id = churn_join_leave(addr, &joined_a.room_code, "Churner", &mut peer_a).await;
+
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        token,
+    )
+    .await;
+
+    assert!(
+        !reconnected.missed_events.iter().any(|event| matches!(
+            event,
+            ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+        )),
+        "GameData must never be replayed: {:?}",
+        reconnected.missed_events
+    );
+    assert!(
+        reconnected.missed_events.iter().any(|event| matches!(
+            event,
+            ServerMessage::PlayerJoined { player } if player.id == churner_id
+        )),
+        "the churn cycle's control events must still be replayed: {:?}",
+        reconnected.missed_events
+    );
+    assert_eq!(
+        reconnected.replay,
+        Some(ReplayStatus::Complete),
+        "skipping GameData is by design, not truncation"
+    );
+
+    assert_message_conservation(&game_server.metrics());
+}
+
+/// Issue #136 (F4 / proposal D): the reconnection token must reach the client
+/// on the WIRE at join time — a token minted only at disconnect can never be
+/// legitimately obtained, making reconnection unusable outside tests that
+/// reach into the server (as every test above this one historically did).
+/// This is the full user-visible flow with NO server backdoor: join, capture
+/// the token from `RoomJoined`, lose the socket, reconnect with that token.
+#[tokio::test]
+async fn reconnect_succeeds_with_only_the_wire_token() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "wire-token-game", None, "Anchor").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "wire-token-game",
+        Some(joined_a.room_code.clone()),
+        "Dropper",
+    )
+    .await;
+    let wire_token = joined_b
+        .reconnection_token
+        .clone()
+        .expect("a v3 joiner must receive its reconnection token on RoomJoined");
+
+    // Lose the socket abruptly (no LeaveRoom): the server registers the
+    // disconnection for reconnect. Event-driven sync: the anchor observes the
+    // PlayerLeft broadcast, which the disconnect flow emits after the
+    // reconnection record was registered.
+    drop(peer_b);
+    await_player_left(&mut peer_a, joined_b.player_id, "anchor sees the drop").await;
+
+    // Reconnect with ONLY what the wire provided.
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        wire_token.clone(),
+    )
+    .await;
+
+    // Rotation: the consumed token is replaced by a fresh one for the next
+    // unexpected disconnect.
+    let rotated = reconnected
+        .reconnection_token
+        .clone()
+        .expect("a v3 reconnector must receive a rotated token on Reconnected");
+    assert_ne!(
+        rotated, wire_token,
+        "the token used for this reconnect must be rotated, not re-issued"
+    );
+
+    // The rotated token is the live one: lose the socket again and reconnect
+    // with it — while the consumed original must now be rejected.
+    drop(replacement);
+    await_player_left(&mut peer_a, joined_b.player_id, "anchor sees the re-drop").await;
+
+    let mut second_replacement = connect(addr).await;
+    authenticate_v3(&mut second_replacement).await;
+    send(
+        &mut second_replacement,
+        &ClientMessage::Reconnect {
+            player_id: joined_b.player_id,
+            room_id: joined_b.room_id,
+            auth_token: wire_token,
+        },
+    )
+    .await;
+    let rejection = next_matching_server_message_within(
+        &mut second_replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "stale-token rejection",
+        |message| match message {
+            ServerMessage::ReconnectionFailed { error_code, .. } => Some(error_code),
+            ServerMessage::Reconnected(_) => {
+                panic!("a consumed token must never reconnect again")
+            }
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(
+        rejection,
+        signal_fish_server::protocol::ErrorCode::ReconnectionTokenInvalid,
+        "the pre-rotation token must be rejected as invalid"
+    );
+
+    let reconnected_again = reconnect(
+        &mut second_replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        rotated,
+    )
+    .await;
+    assert!(
+        reconnected_again.reconnection_token.is_some(),
+        "every successful reconnect rotates in a fresh token"
+    );
+
+    assert_message_conservation(&game_server.metrics());
+}
+
+/// The token field is v3+ only: a pure-v2 joiner's raw `RoomJoined` JSON must
+/// not contain a `reconnection_token` key (frozen v2 bytes).
+#[tokio::test]
+async fn v2_room_joined_has_no_reconnection_token_key() {
+    let (addr, _game_server) = start_server_default().await;
+
+    let mut peer = connect(addr).await;
+    authenticate_v2(&mut peer).await;
+    send(
+        &mut peer,
+        &ClientMessage::JoinRoom {
+            game_name: "wire-token-v2-game".to_string(),
+            room_code: None,
+            player_name: "PureV2".to_string(),
+            max_players: Some(4),
+            supports_authority: Some(false),
+            relay_transport: None,
+        },
+    )
+    .await;
+    let raw = next_raw_server_message_of_type(&mut peer, "RoomJoined", "v2 join").await;
+    assert!(
+        !raw.contains("reconnection_token"),
+        "v2 RoomJoined bytes must not gain a reconnection_token key: {raw}"
+    );
+}
+
+/// Drain `ws` until it observes `PlayerLeft` for `expected` — the disconnect
+/// flow broadcasts it after the reconnection record exists, so this is the
+/// event-driven "the server is ready for the reconnect" sync point.
+async fn await_player_left(ws: &mut WsStream, expected: PlayerId, context: &str) {
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        context,
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id } if player_id == expected => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+}

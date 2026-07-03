@@ -6,9 +6,38 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+/// Per-connection delivery bookkeeping backing the protocol v4 `RelayStats`
+/// frame (`ServerMessage::RelayStats`).
+///
+/// Counters are cumulative for the lifetime of one logical connection
+/// (carried across a reconnection's player-id reassignment) and are only
+/// tracked when `websocket.delivery_stats_interval_secs > 0` — a disabled
+/// deployment keeps the registry empty so the delivery hot path pays one
+/// cheap miss per attempt. All access is `Ordering::Relaxed`: these are
+/// monotonic diagnostics, never synchronization.
+#[derive(Debug, Default)]
+pub struct ConnectionDeliveryStats {
+    /// Messages the reliable delivery path enqueued for this connection.
+    pub sent_to_you: AtomicU64,
+    /// Messages abandoned for this connection (slow-consumer timeout drops
+    /// and undeliverable-encoding replacements).
+    pub dropped_for_you: AtomicU64,
+    /// Deliveries that had to wait on this connection's full outbound queue.
+    pub backpressure_events: AtomicU64,
+}
+
 /// Comprehensive metrics collection for in-memory signaling server
 #[derive(Debug)]
 pub struct ServerMetrics {
+    /// Per-connection delivery statistics keyed by player id (see
+    /// [`ConnectionDeliveryStats`]). Lives here — beside the server-wide
+    /// delivery counters — because `coordination::deliver_or_disconnect`
+    /// already receives `(metrics, player_id)` at every delivery site, so the
+    /// per-connection ledger needs no new plumbing through the delivery
+    /// handles. Populated only when RelayStats emission is enabled.
+    connection_delivery_stats:
+        dashmap::DashMap<crate::protocol::PlayerId, Arc<ConnectionDeliveryStats>>,
+
     // Connection metrics
     pub total_connections: AtomicU64,
     pub active_connections: AtomicU64,
@@ -22,6 +51,28 @@ pub struct ServerMetrics {
     /// Connections force-closed because their outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`.
     pub websocket_slow_consumer_disconnects: AtomicU64,
+    /// Delivery attempts routed through the reliable delivery path
+    /// (`coordination::deliver_or_disconnect`): one per message per recipient,
+    /// counted before the outcome is known. Together with
+    /// `websocket_deliveries_enqueued`, `websocket_deliveries_channel_closed`,
+    /// and `websocket_messages_dropped` this carries the delivery conservation
+    /// law — every attempt resolves as exactly one of enqueued, channel-closed,
+    /// or slow-consumer drop, so at any quiescent point
+    /// `enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped`
+    /// (the drop counter also tallies messages abandoned with a closing
+    /// connection *after* they were enqueued, hence the upper bound rather
+    /// than exact equality).
+    pub websocket_delivery_attempts: AtomicU64,
+    /// Delivery attempts enqueued on the recipient's outbound queue — the
+    /// try_send fast path and the post-backpressure success alike. Enqueued
+    /// does not mean written to the socket yet: a message abandoned later with
+    /// a closing connection is additionally counted in
+    /// `websocket_messages_dropped`.
+    pub websocket_deliveries_enqueued: AtomicU64,
+    /// Delivery attempts that found the recipient's connection already
+    /// closing (its queue receiver gone), whether up front or while
+    /// backpressured. A normal disconnect race, not a delivery fault.
+    pub websocket_deliveries_channel_closed: AtomicU64,
 
     // Room operation metrics
     pub rooms_created: AtomicU64,
@@ -97,6 +148,11 @@ pub struct ServerMetrics {
     pub reconnection_validations_failed: AtomicU64,
     pub reconnection_completions: AtomicU64,
     pub reconnection_events_buffered: AtomicU64,
+    /// Control events evicted from a room's bounded replay ring while a
+    /// reconnection was pending (the affected reconnector's `missed_events`
+    /// arrives with `replay: "truncated"`). A sustained non-zero rate means
+    /// `event_buffer_size` is too small for the room churn it serves.
+    pub reconnection_events_evicted: AtomicU64,
 
     // Distributed lock metrics
     pub distributed_lock_release_failures: AtomicU64,
@@ -234,6 +290,9 @@ pub struct ConnectionMetrics {
     pub websocket_messages_dropped: u64,
     pub websocket_backpressure_events: u64,
     pub websocket_slow_consumer_disconnects: u64,
+    pub websocket_delivery_attempts: u64,
+    pub websocket_deliveries_enqueued: u64,
+    pub websocket_deliveries_channel_closed: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -336,6 +395,9 @@ pub struct ReconnectionMetrics {
     pub validations_failed: u64,
     pub completions: u64,
     pub events_buffered: u64,
+    /// Control events evicted from a replay ring while a reconnection was
+    /// pending (that player's replay is reported truncated).
+    pub events_evicted: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -404,6 +466,7 @@ impl Default for ServerMetrics {
 impl ServerMetrics {
     pub fn new() -> Self {
         Self {
+            connection_delivery_stats: dashmap::DashMap::new(),
             total_connections: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
             disconnections: AtomicU64::new(0),
@@ -411,6 +474,9 @@ impl ServerMetrics {
             websocket_messages_dropped: AtomicU64::new(0),
             websocket_backpressure_events: AtomicU64::new(0),
             websocket_slow_consumer_disconnects: AtomicU64::new(0),
+            websocket_delivery_attempts: AtomicU64::new(0),
+            websocket_deliveries_enqueued: AtomicU64::new(0),
+            websocket_deliveries_channel_closed: AtomicU64::new(0),
             rooms_created: AtomicU64::new(0),
             rooms_joined: AtomicU64::new(0),
             room_creation_failures: AtomicU64::new(0),
@@ -468,6 +534,7 @@ impl ServerMetrics {
             reconnection_validations_failed: AtomicU64::new(0),
             reconnection_completions: AtomicU64::new(0),
             reconnection_events_buffered: AtomicU64::new(0),
+            reconnection_events_evicted: AtomicU64::new(0),
             distributed_lock_release_failures: AtomicU64::new(0),
             distributed_lock_extend_failures: AtomicU64::new(0),
             distributed_lock_cleanup_runs: AtomicU64::new(0),
@@ -546,6 +613,71 @@ impl ServerMetrics {
     pub fn increment_websocket_slow_consumer_disconnects(&self) {
         self.websocket_slow_consumer_disconnects
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one delivery attempt entering the reliable delivery path,
+    /// before its outcome is known (see the field doc for the conservation
+    /// law this anchors).
+    pub fn increment_websocket_delivery_attempts(&self) {
+        self.websocket_delivery_attempts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one delivery attempt enqueued on the recipient's outbound queue
+    /// (fast path or after backpressure).
+    pub fn increment_websocket_deliveries_enqueued(&self) {
+        self.websocket_deliveries_enqueued
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one delivery attempt that found the recipient's connection
+    /// already closing (queue receiver gone).
+    pub fn increment_websocket_deliveries_channel_closed(&self) {
+        self.websocket_deliveries_channel_closed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Per-connection delivery statistics (protocol v4 RelayStats)
+
+    /// Start tracking per-connection delivery statistics for `player_id`,
+    /// returning the (fresh) ledger. Called at connection registration only
+    /// when RelayStats emission is enabled.
+    pub fn register_connection_delivery_stats(
+        &self,
+        player_id: crate::protocol::PlayerId,
+    ) -> Arc<ConnectionDeliveryStats> {
+        let stats = Arc::new(ConnectionDeliveryStats::default());
+        self.connection_delivery_stats
+            .insert(player_id, Arc::clone(&stats));
+        stats
+    }
+
+    /// The per-connection delivery ledger for `player_id`, or `None` when
+    /// tracking is disabled or the connection is gone.
+    pub fn connection_delivery_stats(
+        &self,
+        player_id: &crate::protocol::PlayerId,
+    ) -> Option<Arc<ConnectionDeliveryStats>> {
+        self.connection_delivery_stats
+            .get(player_id)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Stop tracking `player_id` (connection removed).
+    pub fn unregister_connection_delivery_stats(&self, player_id: &crate::protocol::PlayerId) {
+        self.connection_delivery_stats.remove(player_id);
+    }
+
+    /// Re-key a connection's ledger across a reconnection reassignment so the
+    /// cumulative counters follow the surviving connection.
+    pub fn rekey_connection_delivery_stats(
+        &self,
+        current: &crate::protocol::PlayerId,
+        reassigned: crate::protocol::PlayerId,
+    ) {
+        if let Some((_, stats)) = self.connection_delivery_stats.remove(current) {
+            self.connection_delivery_stats.insert(reassigned, stats);
+        }
     }
 
     // Room operation metrics
@@ -860,6 +992,13 @@ impl ServerMetrics {
         }
     }
 
+    pub fn add_reconnection_events_evicted(&self, count: u64) {
+        if count > 0 {
+            self.reconnection_events_evicted
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
     // Distributed lock metrics
     pub fn increment_distributed_lock_release_failures(&self) {
         self.distributed_lock_release_failures
@@ -1071,6 +1210,15 @@ impl ServerMetrics {
                 websocket_slow_consumer_disconnects: self
                     .websocket_slow_consumer_disconnects
                     .load(Ordering::Relaxed),
+                websocket_delivery_attempts: self
+                    .websocket_delivery_attempts
+                    .load(Ordering::Relaxed),
+                websocket_deliveries_enqueued: self
+                    .websocket_deliveries_enqueued
+                    .load(Ordering::Relaxed),
+                websocket_deliveries_channel_closed: self
+                    .websocket_deliveries_channel_closed
+                    .load(Ordering::Relaxed),
             },
             rooms: RoomMetrics {
                 rooms_created: self.rooms_created.load(Ordering::Relaxed),
@@ -1181,6 +1329,7 @@ impl ServerMetrics {
                 validations_failed: self.reconnection_validations_failed.load(Ordering::Relaxed),
                 completions: self.reconnection_completions.load(Ordering::Relaxed),
                 events_buffered: self.reconnection_events_buffered.load(Ordering::Relaxed),
+                events_evicted: self.reconnection_events_evicted.load(Ordering::Relaxed),
             },
             distributed_lock: DistributedLockMetrics {
                 release_failures: self

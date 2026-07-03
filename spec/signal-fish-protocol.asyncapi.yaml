@@ -45,16 +45,26 @@
 #   TransportStatus, PeerTransportStatus. v3 messages are tagged `x-protocol: v3`
 #   below. A relay-only room never emits SessionPlan, so a v2 client never sees
 #   v3 messages.
+# * v4 is an OPTIONAL relay-observability upgrade: the server stamps relayed
+#   GameData / GameDataBinary with a per-(sender, room) `seq` (v4 recipients
+#   only — pre-v4 recipients' bytes are unchanged) so any server-side loss is
+#   detectable end-to-end as a gap, and can emit the opt-in periodic RelayStats
+#   frame for attribution. The delivery contract itself (deliver-or-disconnect,
+#   SLOW_CONSUMER) is version-independent; see the ServerGameData and
+#   RelayStats schema descriptions for the normative wording. The server's
+#   default negotiation ceiling is 4 (`protocol.max_protocol_version`).
 # See docs/concepts/protocol-versions.md and docs/guides/building-a-client.md.
 
 asyncapi: 3.0.0
 
 info:
   title: Signal Fish Signaling Protocol
-  version: 0.2.0
+  version: 0.3.0
   description: |
     JSON-over-WebSocket signaling protocol for peer-to-peer game networking.
-    v2 relay floor + optional v3 capability negotiation / WebRTC signaling.
+    v2 relay floor + optional v3 capability negotiation / WebRTC signaling +
+    optional v4 relay sequencing (GameData.seq) and delivery statistics
+    (RelayStats).
   license:
     name: MIT
 
@@ -124,6 +134,7 @@ channels:
       SpectatorDisconnected: { $ref: '#/components/messages/SpectatorDisconnected' }
       Error: { $ref: '#/components/messages/Error' }
       PeerTransportStatus: { $ref: '#/components/messages/PeerTransportStatus' }
+      RelayStats: { $ref: '#/components/messages/RelayStats' }
 
 operations:
   sendToServer:
@@ -178,6 +189,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/SpectatorDisconnected' }
       - { $ref: '#/channels/signaling/messages/Error' }
       - { $ref: '#/channels/signaling/messages/PeerTransportStatus' }
+      - { $ref: '#/channels/signaling/messages/RelayStats' }
 
 components:
   messages:
@@ -349,6 +361,12 @@ components:
       title: PeerTransportStatus
       summary: 'v3: a same-room peer''s reported data-path transport state changed.'
       payload: { $ref: '#/components/schemas/PeerTransportStatus' }
+    RelayStats:
+      title: RelayStats
+      summary: >-
+        v4: periodic per-connection relay-delivery statistics (opt-in via
+        websocket.delivery_stats_interval_secs; never sent to pre-v4 clients).
+      payload: { $ref: '#/components/schemas/RelayStats' }
 
   schemas:
     # ---------------------------------------------------------------------
@@ -376,6 +394,17 @@ components:
     SpectatorStateChangeReason:
       type: string
       enum: [joined, voluntary_leave, disconnected, removed, room_closed]
+    ReplayStatus:
+      type: string
+      description: >-
+        Completeness of Reconnected.missed_events (v3+ recipients only; the
+        field is absent on the v2 wire). complete: every replayable control
+        event since disconnect is present. truncated: the bounded replay ring
+        evicted events the player needed, so missed_events is a suffix —
+        resync from the Reconnected snapshot fields. unavailable: event replay
+        is not active on this deployment (event_buffer_size 0) — treat the
+        reconnection as a full resync from the snapshot.
+      enum: [complete, truncated, unavailable]
     PlayerId:
       type: string
       format: uuid
@@ -786,6 +815,16 @@ components:
               type: array
               description: 'v3 pre-gather only; superseded by SessionPlan.ice_servers.'
               items: { $ref: '#/components/schemas/IceServer' }
+            reconnection_token:
+              type: string
+              description: >-
+                Reconnection token for this room, minted at join (v3+
+                recipients only; absent on the v2 wire). Present it in a later
+                Reconnect after an unexpected disconnect. The string is stable
+                from join through the disconnect, but it only becomes
+                claimable for server.reconnection_window seconds counted from
+                the DISCONNECT. Rotated on every join and every successful
+                reconnect.
       required: [type, data]
     RoomJoinFailed:
       type: object
@@ -826,6 +865,17 @@ components:
       required: [type, data]
     ServerGameData:
       type: object
+      description: >-
+        DELIVERY CONTRACT (normative, all protocol versions): the relay never
+        silently drops a room-scoped message. Each relayed frame is either
+        enqueued for every connected room member (with backpressure applied to
+        the sender while a recipient's queue is momentarily full) or the
+        recipient that cannot absorb traffic for
+        websocket.slow_consumer_timeout_ms is disconnected LOUDLY — a
+        best-effort Error frame with error_code SLOW_CONSUMER followed by a
+        close, and a PlayerLeft broadcast to the room. Clients MUST treat a
+        SLOW_CONSUMER close as "you lost relayed messages" and resynchronize
+        after reconnecting.
       properties:
         type: { const: GameData }
         data:
@@ -835,9 +885,30 @@ components:
             from_player: { $ref: '#/components/schemas/PlayerId' }
             data:
               description: Opaque application game data (any JSON value).
+            seq:
+              type: integer
+              minimum: 1
+              description: >-
+                v4 only: server-stamped relay sequence number, per (sender,
+                room). Starts at 1 and is strictly contiguous per sender while
+                the recipient stays connected, so a gap can only mean (a) the
+                recipient's own SLOW_CONSUMER eviction (messages abandoned with
+                the disconnect it was told about), (b) the sender leaving and
+                rejoining (correlate with PlayerLeft + PlayerJoined) or
+                reconnecting (PlayerReconnected) — both RESTART the counter at
+                1 — or (c) the recipient's own reconnect. Absent for pre-v4
+                recipients (their bytes are byte-identical to v3 and earlier).
+                Client-to-server GameData carries no seq; stamping is purely
+                server-side.
       required: [type, data]
     GameDataBinary:
       type: object
+      description: >-
+        Same delivery contract and v4 seq semantics as GameData (text and
+        binary relay share one per-(sender, room) counter). On the bare binary
+        MessagePack frame actually sent to negotiated-MessagePack clients, the
+        stamp is the optional trailing `seq` map key; the json/rkyv binary
+        passthrough forms have no envelope and therefore carry no stamp.
       properties:
         type: { const: GameDataBinary }
         data:
@@ -847,6 +918,10 @@ components:
             from_player: { $ref: '#/components/schemas/PlayerId' }
             encoding: { $ref: '#/components/schemas/GameDataEncoding' }
             payload: { type: string, description: Byte payload (serde_bytes). }
+            seq:
+              type: integer
+              minimum: 1
+              description: 'v4 only: see ServerGameData seq (identical semantics).'
       required: [type, data]
     AuthorityChanged:
       type: object
@@ -1002,8 +1077,26 @@ components:
               items: { $ref: '#/components/schemas/IceServer' }
             missed_events:
               type: array
-              description: Events that occurred while disconnected (ServerMessage values).
+              description: >-
+                Room-uniform control events broadcast while disconnected
+                (ServerMessage values: PlayerJoined, PlayerLeft,
+                PlayerReconnected, NewSpectatorJoined, SpectatorDisconnected,
+                LobbyStateChanged, AuthorityChanged), oldest first. GameData,
+                Signal, and the per-recipient GameStarting are never replayed —
+                resync from this payload's snapshot fields and, for started
+                sessions, the late-join SessionPlan.
               items: { type: object }
+            replay:
+              # Completeness of missed_events; v3+ recipients only (absent on
+              # the v2 wire). See the ReplayStatus schema for the contract.
+              $ref: '#/components/schemas/ReplayStatus'
+            reconnection_token:
+              type: string
+              description: >-
+                Fresh (rotated) reconnection token replacing the one just
+                used (v3+ recipients only; absent on the v2 wire). Store it
+                for the next unexpected disconnect; the previous token is no
+                longer claimable.
       required: [type, data]
     ReconnectionFailed:
       type: object
@@ -1131,4 +1224,44 @@ components:
             peer_id: { $ref: '#/components/schemas/PlayerId' }
             transport: { $ref: '#/components/schemas/Transport' }
             connected: { type: boolean }
+      required: [type, data]
+    RelayStats:
+      type: object
+      description: >-
+        v4 only, config-gated (websocket.delivery_stats_interval_secs > 0;
+        default 0 = disabled) and never emitted to a connection that
+        negotiated below v4 (enforced at emission). Counters are CUMULATIVE
+        since the connection registered and survive a reconnection's
+        player-id reassignment, so a frame skipped while the connection's
+        queue is full (the frame is advisory and never waits) loses nothing.
+        Intended use: attribute a GameData seq gap — dropped_for_you rises
+        with messages the server abandoned for THIS connection, and
+        backpressure_events rising means this connection is draining too
+        slowly and is pacing its room's senders toward a SLOW_CONSUMER
+        disconnect.
+      properties:
+        type: { const: RelayStats }
+        data:
+          type: object
+          required: [interval_ms, sent_to_you, dropped_for_you, backpressure_events]
+          properties:
+            interval_ms:
+              type: integer
+              description: Configured emission interval in milliseconds.
+            sent_to_you:
+              type: integer
+              description: >-
+                Messages the delivery layer accepted (enqueued) for this
+                connection since it registered (excludes RelayStats itself).
+            dropped_for_you:
+              type: integer
+              description: >-
+                Messages abandoned for this connection: undeliverable-encoding
+                replacements while connected, plus slow-consumer timeout
+                drops (which coincide with this connection's disconnect).
+            backpressure_events:
+              type: integer
+              description: >-
+                Deliveries that had to wait on this connection's momentarily
+                full outbound queue.
       required: [type, data]

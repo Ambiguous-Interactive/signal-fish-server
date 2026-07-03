@@ -43,7 +43,18 @@ test_tool = "cargo"
 # allowed set.
 additional_cargo_args = ["--lib"]
 
-# High-signal pure-logic modules.
+# High-signal pure-logic modules, plus the delivery contract core.
+#
+# `src/coordination/mod.rs` (deliver_or_disconnect, ConnectionCloseSignal — the
+# #131 delivery contract) is in scope because its in-crate paused-clock unit
+# tests kill its mutants under the `--lib` oracle (measured 2026-07-02: 8
+# mutants, all caught/unviable except the provably-equivalent one excluded
+# below). `src/server/connection_manager.rs` and
+# `src/coordination/room_coordinator.rs` are deliberately NOT here: the same
+# sweep measured their mutants surviving the `--lib` oracle in bulk (their
+# behavior is pinned by the WebSocket e2e suites, which this oracle never
+# runs). They belong to the e2e-oracle mutation lane
+# (scripts/run-mutants.sh --profile delivery, monthly), not this config.
 examine_globs = [
     "src/server/session_policy.rs",
     "src/server/signaling.rs",
@@ -51,6 +62,7 @@ examine_globs = [
     "src/protocol/validation.rs",
     "src/protocol/room_codes.rs",
     "src/protocol/error_codes.rs",
+    "src/coordination/mod.rs",
 ]
 
 # Never mutate test code or generated/build files.
@@ -76,6 +88,13 @@ exclude_globs = [
 # pins the authority-preference contract regardless.
 exclude_re = [
     "replace == with != in EnhancedGameServer::replan_host_session",
+    # `MessageCoordinator::handle_membership_update`'s default body IS
+    # `let _ = update; Ok(())` — the "replace -> anyhow::Result<()> with
+    # Ok(())" mutant reproduces the original function verbatim, so it is
+    # provably equivalent and unkillable by any test. (The default is a
+    # deliberate no-op hook for single-instance deployments; distributed
+    # coordinators override it.)
+    "replace MessageCoordinator::handle_membership_update -> anyhow::Result<\\(\\)> with Ok\\(\\(\\)\\)",
 ]
 
 # The unit-test oracle is quick; give a generous floor so a loaded CI runner

@@ -112,6 +112,13 @@ pub struct EventBuffer {
     pub max_size: usize,
     /// Buffered events (oldest to newest)
     pub events: VecDeque<BufferedEvent>,
+    /// Highest sequence number ever evicted from this ring, or `None` if
+    /// nothing has been evicted. The truncation watermark: sequence numbers
+    /// are GLOBAL across rooms, so a *gap* in a room's buffered sequences is
+    /// benign (another room consumed the intervening numbers) — only an
+    /// explicit eviction record can prove a reconnecting player's replay is
+    /// incomplete (`evicted_watermark > last_sequence`).
+    pub evicted_watermark: Option<u64>,
 }
 
 /// A buffered event with metadata
@@ -132,11 +139,15 @@ impl EventBuffer {
             room_id,
             max_size,
             events: VecDeque::with_capacity(max_size),
+            evicted_watermark: None,
         }
     }
 
-    /// Add an event to the buffer
-    pub fn push(&mut self, message: ServerMessage, sequence: u64) {
+    /// Add an event to the buffer, evicting the oldest events when the ring is
+    /// full. Every evicted event raises [`Self::evicted_watermark`] so a later
+    /// replay can report truncation honestly. Returns the number of events
+    /// evicted by this push.
+    pub fn push(&mut self, message: ServerMessage, sequence: u64) -> usize {
         let event = BufferedEvent {
             message,
             timestamp: Utc::now(),
@@ -146,9 +157,17 @@ impl EventBuffer {
         self.events.push_back(event);
 
         // Remove oldest events if buffer is full
+        let mut evicted = 0;
         while self.events.len() > self.max_size {
-            self.events.pop_front();
+            if let Some(oldest) = self.events.pop_front() {
+                self.evicted_watermark = Some(
+                    self.evicted_watermark
+                        .map_or(oldest.sequence, |watermark| watermark.max(oldest.sequence)),
+                );
+                evicted += 1;
+            }
         }
+        evicted
     }
 
     /// Get events that occurred after a specific sequence number
@@ -229,10 +248,61 @@ pub struct ClaimedReconnection {
     claim_id: Uuid,
 }
 
+/// Missed-event lookup result for a reconnecting player.
+///
+/// `truncated` is true when the room's bounded replay ring evicted an event
+/// the player needed (an event with a sequence above their `last_sequence`),
+/// so `events` is only a suffix of what was broadcast while they were away.
+/// It is decided by the ring's eviction watermark, NOT by sequence gaps:
+/// sequence numbers are global across rooms, so another room's events create
+/// benign gaps in this room's buffered sequences.
+#[derive(Debug, Clone)]
+pub struct MissedEvents {
+    /// Replayable control events buffered after `last_sequence`, oldest first.
+    pub events: Vec<ServerMessage>,
+    /// Whether the ring evicted an event the player needed.
+    pub truncated: bool,
+}
+
+/// Whether a server message is a room-uniform control event eligible for
+/// reconnection replay via `Reconnected.missed_events`.
+///
+/// Replayable: events broadcast identically to every room member, describing
+/// membership/lobby transitions a reconnector must not miss. Explicitly NOT
+/// replayable:
+/// - `GameStarting`: its `peer_connections` are per-recipient (self-declared
+///   `ConnectionInfo` differs by viewer), so replaying another player's copy
+///   would be wrong. A reconnector into a started session is served by the
+///   `Reconnected` snapshot plus the dedicated late-join `SessionPlan` flow.
+/// - `GameData` / `GameDataBinary` / `Signal`: high-rate data-path traffic
+///   that would purge the control events that matter from the bounded ring.
+/// - Everything directed at a single recipient (errors, pongs, `RoomJoined`,
+///   `SessionPlan`, spectator self-confirmations, ...): a reconnector was
+///   never owed another player's directed messages.
+fn is_replayable_control_event(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::PlayerJoined { .. }
+            | ServerMessage::PlayerLeft { .. }
+            | ServerMessage::PlayerReconnected { .. }
+            | ServerMessage::NewSpectatorJoined { .. }
+            | ServerMessage::SpectatorDisconnected { .. }
+            | ServerMessage::LobbyStateChanged { .. }
+            | ServerMessage::AuthorityChanged { .. }
+    )
+}
+
 /// Reconnection manager
 pub struct ReconnectionManager {
     /// Disconnected players awaiting reconnection
     disconnected_players: RwLock<HashMap<PlayerId, ReconnectionRecord>>,
+    /// Tokens minted at room join, BEFORE any disconnect (issue #136, F4):
+    /// a token minted only at disconnect time can never legitimately reach
+    /// the client it is for, making reconnection unusable in practice. One
+    /// entry per currently-joined player; consumed by
+    /// [`Self::register_disconnection`], discarded on voluntary leave /
+    /// roomless teardown, and overwritten (rotated) by the next join.
+    pre_issued: RwLock<HashMap<PlayerId, ReconnectionToken>>,
     /// Event buffers per room
     event_buffers: RwLock<HashMap<RoomId, EventBuffer>>,
     /// Reconnection window in seconds
@@ -254,12 +324,40 @@ impl ReconnectionManager {
     ) -> Self {
         Self {
             disconnected_players: RwLock::new(HashMap::new()),
+            pre_issued: RwLock::new(HashMap::new()),
             event_buffers: RwLock::new(HashMap::new()),
             reconnection_window: reconnection_window as i64,
             event_buffer_size,
             next_sequence: RwLock::new(0),
             metrics,
         }
+    }
+
+    /// Mint (or rotate) the reconnection token for a player joining `room_id`
+    /// and return the token string to surface on the wire (`RoomJoined` /
+    /// `Reconnected`, v3+ recipients).
+    ///
+    /// The string is stable from join through a later disconnect, but its
+    /// EXPIRY is only armed by [`Self::register_disconnection`] (re-stamped to
+    /// `now + reconnection_window` at disconnect time), so pre-issuing does
+    /// not widen the reconnect window: the gate stays "window seconds from
+    /// the disconnect", exactly as before — the client just finally KNOWS the
+    /// token it will need.
+    pub async fn pre_issue_token(&self, player_id: PlayerId, room_id: RoomId) -> String {
+        let token = ReconnectionToken::new(player_id, room_id, self.reconnection_window);
+        let token_string = token.token.clone();
+        self.pre_issued.write().await.insert(player_id, token);
+        self.metrics.increment_reconnection_tokens_issued();
+        token_string
+    }
+
+    /// Discard a player's pre-issued token: a voluntary leave (or a teardown
+    /// with no room to reconnect into) is not a disconnect, so the token must
+    /// never become claimable — and the entry must not outlive the player
+    /// (the map is bounded by currently-joined players ONLY because every
+    /// exit path either consumes or discards).
+    pub async fn discard_pre_issued(&self, player_id: &PlayerId) {
+        self.pre_issued.write().await.remove(player_id);
     }
 
     /// Register a player disconnection
@@ -270,7 +368,32 @@ impl ReconnectionManager {
         was_authority: bool,
         player_info: Option<PlayerInfo>,
     ) -> String {
-        let token = ReconnectionToken::new(player_id, room_id, self.reconnection_window);
+        // Reuse the token STRING pre-issued at join (the client already holds
+        // it — issue #136, F4), re-stamping its expiry so the reconnect gate
+        // stays "window seconds from THIS disconnect". A missing or
+        // wrong-room entry falls back to minting fresh (embedders that never
+        // pre-issue keep the old disconnect-time semantics; such a token is
+        // unclaimable by an honest client, exactly as before).
+        let pre_issued = self.pre_issued.write().await.remove(&player_id);
+        let (token, minted_fresh) = match pre_issued {
+            Some(pre_issued) if pre_issued.room_id == room_id => {
+                let now = Utc::now();
+                (
+                    ReconnectionToken {
+                        token: pre_issued.token,
+                        player_id,
+                        room_id,
+                        created_at: pre_issued.created_at,
+                        expires_at: now + Duration::seconds(self.reconnection_window),
+                    },
+                    false,
+                )
+            }
+            _ => (
+                ReconnectionToken::new(player_id, room_id, self.reconnection_window),
+                true,
+            ),
+        };
         let token_string = token.token.clone();
 
         let last_sequence = *self.next_sequence.read().await;
@@ -291,9 +414,45 @@ impl ReconnectionManager {
 
         let mut players = self.disconnected_players.write().await;
         let previous = players.insert(player_id, record);
+        // A re-registration from a NEW room replaces the old pending record.
+        // If this player was the old room's last pending reconnector, nothing
+        // else ever releases that room's replay buffer (completion and expiry
+        // sweeps walk pending records, and the old room no longer has one) —
+        // it would capture control events forever and replay ghosts. Release
+        // it exactly like a completed reconnection would, while still holding
+        // the records lock so the others-waiting check cannot race.
+        let orphaned_room = previous
+            .as_ref()
+            .map(|record| record.disconnected.room_id)
+            .filter(|previous_room| *previous_room != room_id)
+            .filter(|previous_room| {
+                !players
+                    .values()
+                    .any(|pending| pending.disconnected.room_id == *previous_room)
+            });
         drop(players);
 
-        self.metrics.increment_reconnection_tokens_issued();
+        if let Some(orphaned_room) = orphaned_room {
+            let mut buffers = self.event_buffers.write().await;
+            buffers.remove(&orphaned_room);
+        }
+
+        // Gate ON: an (empty) buffer marks the room as having a pending
+        // reconnection, so `record_room_event` starts capturing its control
+        // events. Skipped when the ring is disabled (`event_buffer_size` 0) —
+        // replay is then reported `Unavailable` and nothing is captured.
+        if self.event_buffer_size > 0 {
+            let mut buffers = self.event_buffers.write().await;
+            buffers
+                .entry(room_id)
+                .or_insert_with(|| EventBuffer::new(room_id, self.event_buffer_size));
+        }
+
+        // A reused pre-issued token was already counted at its join-time
+        // mint; only a fresh fallback mint counts again.
+        if minted_fresh {
+            self.metrics.increment_reconnection_tokens_issued();
+        }
         if previous.is_none() {
             self.metrics.increment_reconnection_sessions_active();
         }
@@ -523,41 +682,97 @@ impl ReconnectionManager {
 
     /// Get missed events for a reconnecting player.
     ///
-    /// HONESTY NOTE: nothing on the production delivery path calls
-    /// [`Self::buffer_event`] today, so this always returns an empty list and
-    /// the `missed_events` field of the `Reconnected` payload is always empty.
-    /// Messages sent while a player is disconnected are NOT replayed; clients
-    /// must treat reconnection as requiring an application-level resync. The
-    /// buffer machinery is retained for embedders that wire `buffer_event`
-    /// into their own delivery layer.
-    pub async fn get_missed_events(
-        &self,
-        room_id: &RoomId,
-        last_sequence: u64,
-    ) -> Vec<ServerMessage> {
+    /// Returns the room's buffered replayable control events after
+    /// `last_sequence` plus whether that list was truncated by ring eviction
+    /// (see [`MissedEvents`]). No buffer for the room means no reconnection
+    /// was pending there — buffer existence IS the "someone is pending" gate
+    /// (`register_disconnection` creates it, the last completion/expiry
+    /// removes it) — so absence means no replayable event occurred while
+    /// anyone was pending: `events` empty, `truncated` false.
+    pub async fn get_missed_events(&self, room_id: &RoomId, last_sequence: u64) -> MissedEvents {
         let buffers = self.event_buffers.read().await;
-        buffers
-            .get(room_id)
-            .map(|buffer| buffer.get_events_after(last_sequence))
-            .unwrap_or_default()
+        match buffers.get(room_id) {
+            Some(buffer) => MissedEvents {
+                events: buffer.get_events_after(last_sequence),
+                truncated: buffer
+                    .evicted_watermark
+                    .is_some_and(|watermark| watermark > last_sequence),
+            },
+            None => MissedEvents {
+                events: Vec::new(),
+                truncated: false,
+            },
+        }
     }
 
-    /// Buffer an event for a room
+    /// Record a room broadcast on the production delivery path.
+    ///
+    /// The single entry point the server's uniform-broadcast sites call for
+    /// every room-wide control message. Cheap when idle: a non-replayable
+    /// message (see [`is_replayable_control_event`]) or a room with no pending
+    /// reconnection (no buffer — one read-lock lookup) returns immediately,
+    /// so the hot broadcast path never clones or takes the write lock unless
+    /// someone is actually waiting to reconnect. Events are recorded even if
+    /// the subsequent broadcast partially fails, matching "what a connected
+    /// player would have been sent".
+    pub async fn record_room_event(&self, room_id: &RoomId, message: &ServerMessage) {
+        if self.event_buffer_size == 0 || !is_replayable_control_event(message) {
+            return;
+        }
+        {
+            let buffers = self.event_buffers.read().await;
+            if !buffers.contains_key(room_id) {
+                return;
+            }
+        }
+        self.push_event(room_id, message.clone(), false).await;
+    }
+
+    /// Buffer an event for a room unconditionally (no replayable filter, no
+    /// pending-reconnection gate; creates the room's ring if absent). Retained
+    /// for embedders that wire their own delivery layer; the server itself
+    /// records via [`Self::record_room_event`]. GameData/Signal/GameStarting
+    /// are never replayed on the production path — reconnectors resync via the
+    /// `Reconnected` snapshot and, for started sessions, the late-join
+    /// `SessionPlan` flow.
     pub async fn buffer_event(&self, room_id: &RoomId, message: ServerMessage) {
+        self.push_event(room_id, message, true).await;
+    }
+
+    /// Shared push path for [`Self::record_room_event`] and
+    /// [`Self::buffer_event`]: assigns the next global sequence number, pushes
+    /// into the room's ring, and advances the buffered/evicted metrics.
+    async fn push_event(&self, room_id: &RoomId, message: ServerMessage, create_if_missing: bool) {
         let mut sequence = self.next_sequence.write().await;
         *sequence += 1;
         let seq = *sequence;
         drop(sequence);
 
         let mut buffers = self.event_buffers.write().await;
-        let buffer = buffers
-            .entry(*room_id)
-            .or_insert_with(|| EventBuffer::new(*room_id, self.event_buffer_size));
-
-        buffer.push(message, seq);
+        let evicted = if create_if_missing {
+            buffers
+                .entry(*room_id)
+                .or_insert_with(|| EventBuffer::new(*room_id, self.event_buffer_size))
+                .push(message, seq)
+        } else {
+            // The gate was checked without the write lock; the buffer may have
+            // been removed in between (reconnection completed) — then nobody
+            // is pending anymore and dropping the event is correct.
+            match buffers.get_mut(room_id) {
+                Some(buffer) => buffer.push(message, seq),
+                None => return,
+            }
+        };
         drop(buffers);
 
         self.metrics.add_reconnection_events_buffered(1);
+        self.metrics.add_reconnection_events_evicted(evicted as u64);
+    }
+
+    /// Configured per-room replay ring capacity (0 disables event replay; the
+    /// `Reconnected.replay` field then reports `Unavailable` to v3 clients).
+    pub fn event_buffer_size(&self) -> usize {
+        self.event_buffer_size
     }
 
     /// Clear event buffer for a room (when room is deleted)
@@ -566,24 +781,43 @@ impl ReconnectionManager {
         tracing::debug!(%room_id, "Event buffer cleared for room");
     }
 
-    /// Clean up expired disconnections
+    /// Clean up expired disconnections.
+    ///
+    /// Also releases a room's replay ring once its LAST pending player
+    /// expires (mirroring the "others_waiting" removal on completion): buffer
+    /// existence is the "someone is pending" gate for `record_room_event`, so
+    /// an expired-out room must stop capturing events immediately rather than
+    /// waiting for room deletion to sweep the buffer.
     pub async fn cleanup_expired(&self) -> usize {
         let mut disconnected = self.disconnected_players.write().await;
         let initial_count = disconnected.len();
-        let mut expired_ids = Vec::new();
+        let mut expired_rooms = Vec::new();
 
         disconnected.retain(|player_id, record| {
             let expired =
                 record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window);
             if expired {
                 tracing::info!(%player_id, "Removing expired reconnection record");
-                expired_ids.push(*player_id);
+                expired_rooms.push(record.disconnected.room_id);
             }
             !expired
         });
         let removed = initial_count - disconnected.len();
         let remaining = disconnected.len();
+        let rooms_still_pending: std::collections::HashSet<RoomId> = disconnected
+            .values()
+            .map(|record| record.disconnected.room_id)
+            .collect();
         drop(disconnected);
+
+        expired_rooms.retain(|room_id| !rooms_still_pending.contains(room_id));
+        if !expired_rooms.is_empty() {
+            let mut buffers = self.event_buffers.write().await;
+            for room_id in expired_rooms {
+                buffers.remove(&room_id);
+            }
+        }
+
         if removed > 0 {
             tracing::info!(count = removed, "Cleaned up expired reconnection records");
             self.metrics
@@ -888,7 +1122,377 @@ mod tests {
         manager.buffer_event(&room_id, ServerMessage::Pong).await;
 
         // Get all events
-        let events = manager.get_missed_events(&room_id, 0).await;
-        assert_eq!(events.len(), 3);
+        let missed = manager.get_missed_events(&room_id, 0).await;
+        assert_eq!(missed.events.len(), 3);
+        assert!(!missed.truncated, "nothing was evicted");
+    }
+
+    /// A room-uniform control event for the replay-path tests.
+    fn control_event() -> ServerMessage {
+        ServerMessage::PlayerLeft {
+            player_id: Uuid::new_v4(),
+        }
+    }
+
+    #[tokio::test]
+    async fn overflowed_ring_reports_truncation_and_counts_evictions() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 3, Arc::clone(&metrics));
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        manager
+            .register_disconnection(player_id, room_id, false, None)
+            .await;
+
+        // 5 events into a 3-slot ring: 2 evictions.
+        for _ in 0..5 {
+            manager.record_room_event(&room_id, &control_event()).await;
+        }
+
+        let missed = manager.get_missed_events(&room_id, 0).await;
+        assert_eq!(missed.events.len(), 3, "the ring keeps only the newest 3");
+        assert!(
+            missed.truncated,
+            "events the player needed were evicted, so the replay must report truncation"
+        );
+        assert_eq!(
+            metrics.reconnection_events_evicted.load(Ordering::Relaxed),
+            2,
+            "each ring eviction advances the eviction metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_room_sequence_gaps_are_not_truncation() {
+        // Sequence numbers are GLOBAL across rooms, so another room's events
+        // create benign gaps in this room's buffered sequence numbers. Only
+        // the explicit eviction watermark may report truncation — this pins
+        // why "gap in sequence numbers" is not a valid truncation predicate.
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, Arc::clone(&metrics));
+        let room_a = Uuid::new_v4();
+        let room_b = Uuid::new_v4();
+        manager
+            .register_disconnection(Uuid::new_v4(), room_a, false, None)
+            .await;
+        manager
+            .register_disconnection(Uuid::new_v4(), room_b, false, None)
+            .await;
+
+        // Interleave: room B consumes global sequence numbers between room
+        // A's events, so room A's buffered sequences are non-contiguous.
+        manager.record_room_event(&room_a, &control_event()).await;
+        manager.record_room_event(&room_b, &control_event()).await;
+        manager.record_room_event(&room_b, &control_event()).await;
+        manager.record_room_event(&room_a, &control_event()).await;
+
+        let missed = manager.get_missed_events(&room_a, 0).await;
+        assert_eq!(missed.events.len(), 2);
+        assert!(
+            !missed.truncated,
+            "nothing was evicted from room A; room B's global sequence numbers must not mark it truncated"
+        );
+        assert_eq!(
+            metrics.reconnection_events_evicted.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn record_room_event_buffers_only_while_a_reconnection_is_pending() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+
+        // No pending disconnection: the gate is closed, nothing buffers.
+        manager.record_room_event(&room_id, &control_event()).await;
+        assert!(
+            manager
+                .get_missed_events(&room_id, 0)
+                .await
+                .events
+                .is_empty(),
+            "a room with nobody pending must not accumulate events"
+        );
+
+        // Pending: the gate is open.
+        manager
+            .register_disconnection(player_id, room_id, false, None)
+            .await;
+        manager.record_room_event(&room_id, &control_event()).await;
+        assert_eq!(manager.get_missed_events(&room_id, 0).await.events.len(), 1);
+
+        // Last pending player completed: the buffer is released and the gate
+        // closes again.
+        manager.complete_reconnection(&player_id).await;
+        assert!(
+            !manager.event_buffers.read().await.contains_key(&room_id),
+            "completing the last pending reconnection must release the room buffer"
+        );
+        manager.record_room_event(&room_id, &control_event()).await;
+        assert!(manager
+            .get_missed_events(&room_id, 0)
+            .await
+            .events
+            .is_empty());
+    }
+
+    /// Issue #136 (F4): the token surfaced at join is the SAME string the
+    /// disconnect arms — reusing it re-stamps only the expiry (window counted
+    /// from the disconnect, not the join), so pre-issuing never widens the
+    /// reconnect window.
+    #[tokio::test]
+    async fn pre_issued_token_is_reused_at_disconnect_with_restamped_expiry() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics.clone());
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        let wire_token = manager.pre_issue_token(player, room).await;
+        assert_eq!(
+            metrics
+                .reconnection_tokens_issued
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        let armed_token = manager
+            .register_disconnection(player, room, false, None)
+            .await;
+        assert_eq!(
+            armed_token, wire_token,
+            "the disconnect must arm the SAME token the client already holds"
+        );
+        // Reuse must not double-count the mint.
+        assert_eq!(
+            metrics
+                .reconnection_tokens_issued
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        // Consumed: a second disconnect (no new join in between) mints fresh.
+        let fresh = manager
+            .register_disconnection(player, room, false, None)
+            .await;
+        assert_ne!(fresh, wire_token, "a consumed token is never re-armed");
+    }
+
+    /// A pre-issued token bound to a DIFFERENT room is not reused (the player
+    /// joined elsewhere without a clean leave): the disconnect mints fresh.
+    #[tokio::test]
+    async fn pre_issued_token_for_another_room_is_not_reused() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+
+        let stale = manager.pre_issue_token(player, Uuid::new_v4()).await;
+        let armed = manager
+            .register_disconnection(player, Uuid::new_v4(), false, None)
+            .await;
+        assert_ne!(armed, stale, "a wrong-room pre-issue must not be armed");
+    }
+
+    /// Voluntary leave discards the pre-issued token: it never becomes
+    /// claimable, and the map stays bounded by currently-joined players.
+    #[tokio::test]
+    async fn discarded_pre_issued_token_is_not_reused() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        let wire_token = manager.pre_issue_token(player, room).await;
+        manager.discard_pre_issued(&player).await;
+        let armed = manager
+            .register_disconnection(player, room, false, None)
+            .await;
+        assert_ne!(armed, wire_token, "a discarded token must never be armed");
+    }
+
+    /// Fuzz-found (fuzz_reconnect_tokens): re-registering a player from a NEW
+    /// room replaces its pending record, and if it was the old room's last
+    /// pending reconnector nothing else ever cleans that room's buffer — it
+    /// would keep capturing control events forever and replay ghosts to a
+    /// room with nobody pending.
+    #[tokio::test]
+    async fn re_registration_from_a_new_room_releases_the_orphaned_old_room_buffer() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let other_player = Uuid::new_v4();
+        let room_a = Uuid::new_v4();
+        let room_b = Uuid::new_v4();
+
+        // P pends in room A; the gate opens and captures events there.
+        manager
+            .register_disconnection(player, room_a, false, None)
+            .await;
+        manager.record_room_event(&room_a, &control_event()).await;
+
+        // P disconnects again from room B: the re-registration REPLACES its
+        // record. Nobody pends in room A anymore, so its buffer must go.
+        manager
+            .register_disconnection(player, room_b, false, None)
+            .await;
+        assert!(
+            !manager.event_buffers.read().await.contains_key(&room_a),
+            "re-registering the last pending player from a new room must \
+             release the old room's buffer"
+        );
+        let missed = manager.get_missed_events(&room_a, 0).await;
+        assert!(
+            missed.events.is_empty() && !missed.truncated,
+            "an orphaned room must replay nothing"
+        );
+
+        // But while ANOTHER player still pends in the old room, a sibling's
+        // re-registration must leave that room's buffer untouched.
+        manager
+            .register_disconnection(other_player, room_a, false, None)
+            .await;
+        manager.record_room_event(&room_a, &control_event()).await;
+        manager
+            .register_disconnection(player, room_a, false, None)
+            .await;
+        manager
+            .register_disconnection(player, room_b, false, None)
+            .await;
+        assert!(
+            manager.event_buffers.read().await.contains_key(&room_a),
+            "the old room's buffer must survive while another player pends there"
+        );
+        assert_eq!(manager.get_missed_events(&room_a, 0).await.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_cleanup_releases_the_room_buffer_when_last_pending_player_expires() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(1, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        manager
+            .register_disconnection(player_id, room_id, false, None)
+            .await;
+        assert!(
+            manager.event_buffers.read().await.contains_key(&room_id),
+            "registering a disconnection opens the room's replay gate"
+        );
+        {
+            let mut players = manager.disconnected_players.write().await;
+            players
+                .get_mut(&player_id)
+                .expect("registered disconnection record exists")
+                .disconnected
+                .disconnected_at = Utc::now() - Duration::seconds(5);
+        }
+
+        assert_eq!(manager.cleanup_expired().await, 1);
+        assert!(
+            !manager.event_buffers.read().await.contains_key(&room_id),
+            "expiring the last pending player must release the room buffer"
+        );
+        manager.record_room_event(&room_id, &control_event()).await;
+        assert!(
+            manager
+                .get_missed_events(&room_id, 0)
+                .await
+                .events
+                .is_empty(),
+            "an expired-out room must stop capturing events"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_room_uniform_control_events_are_replayable() {
+        use crate::protocol::{LobbyState, PlayerInfo, SpectatorInfo};
+
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let room_id = Uuid::new_v4();
+        let player_id = Uuid::new_v4();
+        manager
+            .register_disconnection(Uuid::new_v4(), room_id, false, None)
+            .await;
+
+        let player_info = PlayerInfo {
+            id: player_id,
+            name: "Player".to_string(),
+            is_authority: false,
+            is_ready: false,
+            connected_at: Utc::now(),
+            connection_info: None,
+            region_id: "test".to_string(),
+        };
+        let spectator = SpectatorInfo {
+            id: player_id,
+            name: "Spectator".to_string(),
+            connected_at: Utc::now(),
+        };
+
+        // Every room-uniform control event buffers.
+        let replayable = [
+            ServerMessage::PlayerJoined {
+                player: player_info,
+            },
+            ServerMessage::PlayerLeft { player_id },
+            ServerMessage::PlayerReconnected { player_id },
+            ServerMessage::NewSpectatorJoined {
+                spectator: spectator.clone(),
+                current_spectators: vec![spectator.clone()],
+                reason: None,
+            },
+            ServerMessage::SpectatorDisconnected {
+                spectator_id: player_id,
+                reason: None,
+                current_spectators: Vec::new(),
+            },
+            ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Lobby,
+                ready_players: Vec::new(),
+                all_ready: false,
+            },
+            ServerMessage::AuthorityChanged {
+                authority_player: Some(player_id),
+                you_are_authority: false,
+            },
+        ];
+        for message in &replayable {
+            manager.record_room_event(&room_id, message).await;
+        }
+        assert_eq!(
+            manager.get_missed_events(&room_id, 0).await.events.len(),
+            replayable.len(),
+            "every replayable control variant must buffer"
+        );
+
+        // High-rate data-path, per-recipient, and directed messages never do.
+        let not_replayable = [
+            ServerMessage::GameData {
+                from_player: player_id,
+                data: serde_json::json!({ "tick": 1 }),
+                seq: None,
+            },
+            ServerMessage::GameStarting {
+                peer_connections: Vec::new(),
+            },
+            ServerMessage::Signal {
+                from: player_id,
+                signal: serde_json::Value::Null,
+            },
+            ServerMessage::Pong,
+            ServerMessage::Error {
+                message: "directed".to_string(),
+                error_code: None,
+            },
+        ];
+        for message in &not_replayable {
+            manager.record_room_event(&room_id, message).await;
+        }
+        assert_eq!(
+            manager.get_missed_events(&room_id, 0).await.events.len(),
+            replayable.len(),
+            "GameData/GameStarting/Signal/directed messages must never buffer"
+        );
     }
 }

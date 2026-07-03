@@ -400,7 +400,9 @@ async fn relay_one_game_data(from: &mut WsStream, to: &mut WsStream, from_id: Pl
         SERVER_MESSAGE_TIMEOUT,
         "relayed GameData",
         |message| match message {
-            ServerMessage::GameData { from_player, data } => {
+            ServerMessage::GameData {
+                from_player, data, ..
+            } => {
                 assert_eq!(from_player, from_id, "{who} saw the wrong GameData sender");
                 assert_eq!(
                     data, payload,
@@ -1116,7 +1118,9 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
             SERVER_MESSAGE_TIMEOUT,
             "relayed GameData over the floor",
             |message| match message {
-                ServerMessage::GameData { from_player, data } => {
+                ServerMessage::GameData {
+                    from_player, data, ..
+                } => {
                     assert_eq!(
                         from_player, relay_only_id,
                         "{who} saw the wrong GameData sender"
