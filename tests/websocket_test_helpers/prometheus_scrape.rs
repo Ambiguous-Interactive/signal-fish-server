@@ -61,14 +61,19 @@ pub async fn fetch_prometheus_text(port: u16) -> String {
         .await
         .unwrap_or_else(|error| panic!("scrape {url} failed: {error}"));
     let status = response.status();
-    assert!(
-        status.is_success(),
-        "scrape {url} answered {status} (is require_metrics_auth disabled in the temp config?)"
-    );
-    response
+    // Always drain the body first — even on a non-2xx — so the shared client's
+    // connection is cleanly released (an undrained `Response` can leak it and
+    // disturb later scrapes in the same process) and the failure carries any
+    // server-provided error text.
+    let body = response
         .text()
         .await
-        .unwrap_or_else(|error| panic!("read {url} body failed: {error}"))
+        .unwrap_or_else(|error| panic!("read {url} body failed: {error}"));
+    assert!(
+        status.is_success(),
+        "scrape {url} answered {status} (is require_metrics_auth disabled in the temp config?): {body}"
+    );
+    body
 }
 
 /// Parse the single un-labelled sample `name value` from exposition text.

@@ -658,6 +658,13 @@ class Orchestrator {
   // -------------------------------------------------------------------------
 
   private async handleServerMessage(frame: ServerFrame): Promise<void> {
+    // ANY inbound frame proves the connection and the server are alive, so it
+    // satisfies the keepalive liveness check — not just `Pong`. Cleared BEFORE
+    // dispatch, so the very frame that kicks off a long handler (e.g. WebRTC
+    // pairing) already refreshes liveness; processTimers cannot then declare a
+    // still-pending ping dead just because that handler ran past the window.
+    this.pongDeadline = null;
+    this.pongGraceApplied = false;
     const data = frame.data;
     switch (frame.type) {
       case 'PlayerJoined': {

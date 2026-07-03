@@ -421,6 +421,15 @@ impl Orchestrator<'_> {
             };
             match input {
                 LoopInput::Server(Some(Ok(Message::Text(text)))) => {
+                    // ANY inbound frame proves the connection and the server
+                    // are alive, so it satisfies the keepalive liveness check —
+                    // not just `Pong`. This is cleared BEFORE dispatch, so the
+                    // very frame that kicks off a long handler (e.g. WebRTC
+                    // pairing) already refreshes liveness; the loop cannot then
+                    // declare a still-pending ping dead just because that
+                    // handler ran past the window.
+                    self.pong_deadline = None;
+                    self.pong_grace_applied = false;
                     let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
                         FatalError::protocol(format!(
                             "invalid ServerMessage frame: {error}; text={text}"
