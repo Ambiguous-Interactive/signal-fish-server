@@ -266,31 +266,63 @@ async fn join_room(
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
 
-    match next_handshake_message(ws).await? {
-        ServerMessage::RoomJoined(payload) => {
-            if cli.create_room {
-                emit(&Event::RoomCreated {
-                    room_code: payload.room_code.clone(),
+    // Read until `RoomJoined`, tolerating interleaved lobby MEMBERSHIP deltas.
+    //
+    // The server registers a joiner as a room-broadcast recipient before it
+    // finishes assembling and enqueuing that joiner's own `RoomJoined`, so a
+    // second player joining the same room in the same instant can have its
+    // `PlayerJoined` delivered ahead of our `RoomJoined`. That interleaving is
+    // benign: `present` is a set, and `RoomJoined.current_players` is the
+    // authoritative baseline, so a delta seen just before it is idempotent
+    // (a `PlayerJoined` for someone already in the baseline is a no-op; a
+    // `PlayerLeft` removes them). We fold such deltas in and keep waiting.
+    //
+    // ANY OTHER message before `RoomJoined` is still a genuine protocol
+    // violation and fails loudly — this only tolerates the one benign,
+    // documented race, it does not blanket-skip unexpected frames.
+    let mut early_joined: Vec<PlayerId> = Vec::new();
+    let mut early_left: Vec<PlayerId> = Vec::new();
+    loop {
+        match next_handshake_message(ws).await? {
+            ServerMessage::RoomJoined(payload) => {
+                if cli.create_room {
+                    emit(&Event::RoomCreated {
+                        room_code: payload.room_code.clone(),
+                    });
+                }
+                emit(&Event::RoomJoined {
+                    room_id: payload.room_id,
+                    player_id: payload.player_id,
+                    lobby_state: payload.lobby_state.clone(),
                 });
+                let mut present: BTreeSet<PlayerId> = payload
+                    .current_players
+                    .iter()
+                    .map(|player| player.id)
+                    .collect();
+                // Apply the deltas observed ahead of the baseline (set
+                // semantics make this order-independent and idempotent).
+                for id in early_joined {
+                    present.insert(id);
+                }
+                for id in early_left {
+                    present.remove(&id);
+                }
+                return Ok((payload.player_id, present, payload.lobby_state));
             }
-            emit(&Event::RoomJoined {
-                room_id: payload.room_id,
-                player_id: payload.player_id,
-                lobby_state: payload.lobby_state.clone(),
-            });
-            let present = payload
-                .current_players
-                .iter()
-                .map(|player| player.id)
-                .collect();
-            Ok((payload.player_id, present, payload.lobby_state))
+            ServerMessage::PlayerJoined { player } => early_joined.push(player.id),
+            ServerMessage::PlayerLeft { player_id } => early_left.push(player_id),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                return Err(FatalError::protocol(format!(
+                    "room join failed: {reason} ({error_code:?})"
+                )))
+            }
+            other => {
+                return Err(FatalError::protocol(format!(
+                    "expected RoomJoined, got {other:?}"
+                )))
+            }
         }
-        ServerMessage::RoomJoinFailed { reason, error_code } => Err(FatalError::protocol(format!(
-            "room join failed: {reason} ({error_code:?})"
-        ))),
-        other => Err(FatalError::protocol(format!(
-            "expected RoomJoined, got {other:?}"
-        ))),
     }
 }
 

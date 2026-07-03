@@ -337,15 +337,42 @@ class Orchestrator {
       }),
     );
 
-    const response = await this.nextHandshakeFrame();
-    if (response.type === 'RoomJoinFailed') {
-      throw FatalError.protocol(
-        `room join failed: ${String(response.data['reason'])} ` +
-          `(${String(response.data['error_code'])})`,
-      );
-    }
-    if (response.type !== 'RoomJoined') {
-      throw FatalError.protocol(`expected RoomJoined, got ${response.type}`);
+    // Read until `RoomJoined`, tolerating interleaved lobby MEMBERSHIP deltas.
+    //
+    // The server registers a joiner as a room-broadcast recipient before it
+    // finishes assembling and enqueuing that joiner's own `RoomJoined`, so a
+    // second player joining the same room in the same instant can have its
+    // `PlayerJoined` delivered ahead of our `RoomJoined`. That interleaving is
+    // benign: `present` is a set and `RoomJoined.current_players` is the
+    // authoritative baseline, so a delta seen just before it is idempotent.
+    // We fold such deltas in and keep waiting. Any OTHER pre-`RoomJoined`
+    // frame is still a genuine protocol violation and fails loudly. (Mirror
+    // of the native client's join handshake.)
+    const earlyJoined: string[] = [];
+    const earlyLeft: string[] = [];
+    let response = await this.nextHandshakeFrame();
+    while (response.type !== 'RoomJoined') {
+      if (response.type === 'RoomJoinFailed') {
+        throw FatalError.protocol(
+          `room join failed: ${String(response.data['reason'])} ` +
+            `(${String(response.data['error_code'])})`,
+        );
+      }
+      if (response.type === 'PlayerJoined') {
+        const player = response.data['player'] as Record<string, unknown> | undefined;
+        const id = player?.['id'];
+        if (typeof id === 'string') {
+          earlyJoined.push(id);
+        }
+      } else if (response.type === 'PlayerLeft') {
+        const id = response.data['player_id'];
+        if (typeof id === 'string') {
+          earlyLeft.push(id);
+        }
+      } else {
+        throw FatalError.protocol(`expected RoomJoined, got ${response.type}`);
+      }
+      response = await this.nextHandshakeFrame();
     }
     const payload = response.data;
     if (this.config.createRoom) {
@@ -367,6 +394,13 @@ class Orchestrator {
           this.present.add(id);
         }
       }
+    }
+    // Fold in deltas observed ahead of the baseline (set-idempotent).
+    for (const id of earlyJoined) {
+      this.present.add(id);
+    }
+    for (const id of earlyLeft) {
+      this.present.delete(id);
     }
     this.present.add(this.myId);
     for (const id of this.present) {
