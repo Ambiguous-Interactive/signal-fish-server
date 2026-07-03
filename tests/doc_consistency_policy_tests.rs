@@ -198,7 +198,7 @@ fn test_ci_dep_detect_allows_dependency_maintenance_touchpoints() {
     for path in dependency_maintenance_paths {
         assert!(
             dep_detect_step_live.contains(path),
-            "ci.yml dep-detect must treat '{path}' as dependency-maintenance touchpoints so dependency-only updates can skip changelog gating."
+            "ci.yml dep-detect must treat '{path}' as a dependency-maintenance touchpoint so dependency-only updates can skip changelog gating."
         );
     }
 }
