@@ -404,7 +404,7 @@ async fn rollback_profile_short() {
         })
         .collect();
     ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -512,7 +512,7 @@ async fn wifi_jitter_profile() {
         &metrics,
         &[expectation("Jittery", &[("Sender", SEND_TICKS)])],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +691,7 @@ async fn backgrounded_tab_profile() {
             expectation("Tab", &[("Sender", total_sent)]),
         ],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,7 +1086,7 @@ async fn reconnect_under_fire() {
             expectation("VictimReborn", &[("SenderPost", post_total)]),
         ],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,5 +1230,5 @@ async fn lobby_churn_during_relay() {
         }],
     }));
     ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }

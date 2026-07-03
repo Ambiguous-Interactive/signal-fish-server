@@ -283,7 +283,7 @@ async fn rst_during_relay_heals_room_and_conserves() {
             expectation("Victim", &[("Sender", total_sent)]),
         ],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// A consumer drip-fed through a throttled link repeatedly fills the (small)
@@ -405,7 +405,7 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
         &metrics,
         &[expectation("Dripped", &[("Sender", total_sent)])],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Connect/relay/kill churn must leak nothing: after eight clients join
@@ -542,7 +542,7 @@ async fn reconnect_churn_leaks_nothing() {
         .expect("reconnect-churn chaos test exceeded its deadline");
 
     ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Count this process's open file descriptors via `/proc/self/fd`. The

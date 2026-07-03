@@ -608,7 +608,7 @@ async fn test_game_data_broadcasting() {
 
     // The relayed payload has been observed end to end, so every delivery in
     // this test has resolved: the conservation counters must balance.
-    websocket_test_helpers::assert_message_conservation(&metrics);
+    websocket_test_helpers::assert_message_conservation(&metrics).await;
 }
 
 #[tokio::test]
@@ -676,7 +676,7 @@ async fn test_binary_game_data_broadcasting_uses_bare_message_pack_frame() {
     // The relayed binary payload has been observed end to end, so every
     // delivery in this test has resolved: the conservation counters must
     // balance.
-    websocket_test_helpers::assert_message_conservation(&metrics);
+    websocket_test_helpers::assert_message_conservation(&metrics).await;
 }
 
 #[tokio::test]

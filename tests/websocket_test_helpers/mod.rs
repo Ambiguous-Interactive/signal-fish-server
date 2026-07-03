@@ -30,25 +30,46 @@ const SKIPPED_MESSAGE_LIMIT: usize = 8;
 ///
 /// `enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped`
 ///
-/// Call this only at quiescent points — after every send in the test has
-/// completed and been observed by its recipients — because an in-flight
-/// delivery has its attempt counted before its outcome exists.
-pub fn assert_message_conservation(metrics: &ServerMetrics) {
+/// Self-stabilizing: an in-flight delivery has its attempt counted before its
+/// outcome exists, so a snapshot can transiently read `attempts` one (or a
+/// few) ahead of the resolved counters even in a healthy server — e.g. a
+/// background broadcast the test did not explicitly await. Rather than
+/// requiring every caller to reason about total quiescence (the fragile
+/// contract that made this fail on loaded CI runners), the assertion polls
+/// until the law balances, bounded by a generous deadline. A GENUINE
+/// violation — a delivery whose outcome was never recorded, the #131 bug
+/// shape — never balances, so the deadline converts it into the same loud
+/// failure with the final counter values.
+pub async fn assert_message_conservation(metrics: &ServerMetrics) {
     use std::sync::atomic::Ordering;
 
-    let attempts = metrics.websocket_delivery_attempts.load(Ordering::Relaxed);
-    let enqueued = metrics
-        .websocket_deliveries_enqueued
-        .load(Ordering::Relaxed);
-    let channel_closed = metrics
-        .websocket_deliveries_channel_closed
-        .load(Ordering::Relaxed);
-    let dropped = metrics.websocket_messages_dropped.load(Ordering::Relaxed);
+    const QUIESCENCE_DEADLINE: Duration = Duration::from_secs(10);
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-    let resolved = enqueued + channel_closed;
-    assert!(
-        resolved <= attempts && attempts <= resolved + dropped,
-        "delivery conservation violated: expected \
+    let deadline = Instant::now() + QUIESCENCE_DEADLINE;
+    let (mut attempts, mut enqueued, mut channel_closed, mut dropped);
+    loop {
+        attempts = metrics.websocket_delivery_attempts.load(Ordering::Relaxed);
+        enqueued = metrics
+            .websocket_deliveries_enqueued
+            .load(Ordering::Relaxed);
+        channel_closed = metrics
+            .websocket_deliveries_channel_closed
+            .load(Ordering::Relaxed);
+        dropped = metrics.websocket_messages_dropped.load(Ordering::Relaxed);
+
+        let resolved = enqueued + channel_closed;
+        if resolved <= attempts && attempts <= resolved + dropped {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    panic!(
+        "delivery conservation violated (stable past the {QUIESCENCE_DEADLINE:?} quiescence \
+         deadline): expected \
          enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped, got \
          attempts={attempts} enqueued={enqueued} channel_closed={channel_closed} dropped={dropped}"
     );

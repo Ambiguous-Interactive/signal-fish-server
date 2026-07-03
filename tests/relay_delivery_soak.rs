@@ -465,7 +465,7 @@ async fn soak_backpressure_survives_oscillating_drain() {
             ),
         ],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Same shape, but the slow receiver's stall OUTLASTS the grace window: it
@@ -691,5 +691,5 @@ async fn soak_stalled_drain_is_evicted_loudly() {
             ),
         ],
     );
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }

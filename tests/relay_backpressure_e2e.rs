@@ -248,7 +248,7 @@ async fn game_data_burst_is_relayed_completely_and_in_order() {
 
     // Both receivers observed the full burst, so every delivery has resolved:
     // the conservation counters must balance.
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// A recipient that stops draining its socket entirely must be disconnected
@@ -397,7 +397,7 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
 
     // Everything has quiesced (burst delivered, stalled socket closed):
     // attempts must balance against enqueues, disconnect races, and drops.
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// A stalled recipient whose kernel receive window is already full must be
@@ -607,7 +607,7 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
 
     // Everything has quiesced (flood finished, eviction completed, stalled
     // socket torn down): the conservation counters must balance.
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Count this process's open file descriptors via `/proc/self/fd`.
@@ -725,7 +725,7 @@ async fn backpressure_delivers_every_message_in_order_without_disconnecting() {
 
     // The flood completed and the receiver drained every message, so all
     // deliveries have resolved: the conservation counters must balance.
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Coordinator-level check against in-process delivery channels — NOT
@@ -805,7 +805,7 @@ async fn unresponsive_recipient_is_pruned_without_blocking_senders() {
 
     // All six sends have returned (the timeout above proved it), so every
     // delivery has resolved: the conservation counters must balance.
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Empty a receiver of join-time notifications. `Empty` is the expected

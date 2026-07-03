@@ -295,7 +295,7 @@ async fn v4_burst_is_seq_stamped_contiguously_from_one() {
         );
     }
 
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// (b) Mixed room: the v4 recipient's raw JSON frame carries a `seq` key; the
@@ -351,7 +351,7 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
     assert_eq!(v2_data.get("from_player"), v4_data.get("from_player"));
     assert_eq!(v2_data.get("data"), v4_data.get("data"));
 
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// Read raw text frames until the next GameData frame, returning the raw JSON
@@ -447,7 +447,7 @@ async fn interleaved_senders_have_independent_contiguous_seqs() {
     assert_eq!(next_expected_a, PER_SENDER + 1, "all of A's frames arrived");
     assert_eq!(next_expected_b, PER_SENDER + 1, "all of B's frames arrived");
 
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// (d) The sender leaves and rejoins the room: its stamp counter RESTARTS at
@@ -507,7 +507,7 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
         "the per-(sender, room) counter must restart at 1 after leave + rejoin"
     );
 
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }
 
 /// (e) The end-to-end loss-detection story #131's reporter lacked: a slow
@@ -721,5 +721,5 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
         "the gap must correspond to loudly counted drops"
     );
 
-    assert_message_conservation(&metrics);
+    assert_message_conservation(&metrics).await;
 }

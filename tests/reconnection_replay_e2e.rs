@@ -424,7 +424,7 @@ async fn missed_control_events_are_replayed_completely() {
         "nothing was evicted, so the v3 recipient is told the replay is complete"
     );
 
-    assert_message_conservation(&game_server.metrics());
+    assert_message_conservation(&game_server.metrics()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +525,7 @@ async fn overflowed_replay_ring_reports_truncated() {
         "7 buffered control events minus the 3-slot ring = 4 evictions"
     );
 
-    assert_message_conservation(&game_server.metrics());
+    assert_message_conservation(&game_server.metrics()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +589,7 @@ async fn v2_recipient_gets_no_replay_key() {
         "the replayed events themselves are not v3-gated: {raw}"
     );
 
-    assert_message_conservation(&game_server.metrics());
+    assert_message_conservation(&game_server.metrics()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +673,7 @@ async fn game_data_is_never_replayed() {
         "skipping GameData is by design, not truncation"
     );
 
-    assert_message_conservation(&game_server.metrics());
+    assert_message_conservation(&game_server.metrics()).await;
 }
 
 /// Issue #136 (F4 / proposal D): the reconnection token must reach the client
@@ -780,7 +780,7 @@ async fn reconnect_succeeds_with_only_the_wire_token() {
         "every successful reconnect rotates in a fresh token"
     );
 
-    assert_message_conservation(&game_server.metrics());
+    assert_message_conservation(&game_server.metrics()).await;
 }
 
 /// The token field is v3+ only: a pure-v2 joiner's raw `RoomJoined` JSON must
