@@ -75,19 +75,27 @@ pub fn sample_value(text: &str, name: &str) -> u64 {
         if sample_name != name {
             continue;
         }
-        // The exporter renders every value through f64 (`{value}`), so parse
-        // the same way and reject anything that is not a whole number.
+        // Counters/gauges are `u64` rendered as exact integer text
+        // (`render_prometheus_metrics` writes `{value}`), so parse `u64`
+        // DIRECTLY — no float round-trip, exact for any counter value.
+        if let Ok(exact) = raw_value.parse::<u64>() {
+            return exact;
+        }
+        // Fallback for a value rendered with a decimal point (an f64 gauge
+        // like `3.0`). Parsing back through f64 loses precision above 2^53 —
+        // the exact-integer limit of f64 — so that, not `u64::MAX`, is the
+        // honest ceiling: a value past it cannot round-trip and a naive
+        // `as u64` cast would silently saturate. Anything non-finite,
+        // fractional, negative, or past 2^53 is a broken/hostile exporter and
+        // must panic loudly, never coerce.
+        const F64_EXACT_INT_MAX: f64 = (1u64 << 53) as f64;
         let value: f64 = raw_value.parse().unwrap_or_else(|error| {
             panic!("sample {name} has non-numeric value {raw_value:?}: {error}")
         });
-        // Validate the full u64 range BEFORE the cast: Rust's float->int cast
-        // saturates, so without this a malformed/hostile value like `1e100`
-        // (finite, whole) would silently become `u64::MAX` and mask a broken
-        // exporter. These are delivery-contract assertions — garbage must
-        // panic loudly, never coerce.
         assert!(
-            value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= u64::MAX as f64,
-            "sample {name} must be a non-negative integer within u64 range, got {value}"
+            value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= F64_EXACT_INT_MAX,
+            "sample {name} must be a non-negative integer within the f64 exact-integer \
+             range (<= 2^53), got {value}"
         );
         return value as u64;
     }
@@ -177,10 +185,11 @@ signal_fish_websocket_messages_dropped_total 0\n";
     }
 
     #[test]
-    #[should_panic(expected = "must be a non-negative integer within u64 range")]
+    #[should_panic(expected = "must be a non-negative integer within the f64 exact-integer")]
     fn sample_value_panics_on_out_of_range_value() {
-        // Finite and whole, but far past u64::MAX: the saturating float->int
-        // cast would silently coerce it to u64::MAX without the range guard.
+        // Finite and whole, but far past the f64 exact-integer range: it does
+        // not parse as `u64`, and the f64 fallback's saturating cast would
+        // silently coerce it without the range guard.
         sample_value(
             "signal_fish_hostile_total 1e100\n",
             "signal_fish_hostile_total",
