@@ -70,6 +70,16 @@ const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 10_000;
 
 /**
+ * One-shot drain grace applied when the pong deadline first expires. The
+ * deadline check runs in processTimers, BEFORE the chain drains queued
+ * frames, so a `Pong` that already arrived could be declared missing without
+ * ever being handled (deadline and frame ready in the same wake). The
+ * extension guarantees at least one more processing pass. Mirrors the native
+ * client's PONG_DRAIN_GRACE.
+ */
+const PONG_DRAIN_GRACE_MS = 1_000;
+
+/**
  * Local send-buffer ceiling. Browser `WebSocket.send()` never blocks and
  * never fails on backpressure — it buffers unboundedly in `bufferedAmount`
  * while the tab's memory grows and delivery silently stalls. A conformance
@@ -173,6 +183,11 @@ class Orchestrator {
    * answer is outstanding.
    */
   private pongDeadline: number | null = null;
+  /**
+   * Whether the one-shot PONG_DRAIN_GRACE_MS extension was applied to the
+   * current deadline (the second expiry is fatal).
+   */
+  private pongGraceApplied = false;
   private wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: RunConfig) {
@@ -542,15 +557,24 @@ class Orchestrator {
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
     // An unanswered ping is a broken connection or control path — fail loudly
-    // rather than idle into the server's eviction.
+    // rather than idle into the server's eviction. The first expiry only arms
+    // the drain grace (see PONG_DRAIN_GRACE_MS): a `Pong` already queued gets
+    // one guaranteed processing pass before the miss is declared fatal.
     if (this.pongDeadline !== null && now >= this.pongDeadline) {
-      throw FatalError.connection(`server did not answer Ping within ${PONG_TIMEOUT_MS}ms`);
+      if (this.pongGraceApplied) {
+        throw FatalError.connection(
+          `server did not answer Ping within ${PONG_TIMEOUT_MS}ms (+${PONG_DRAIN_GRACE_MS}ms drain grace)`,
+        );
+      }
+      this.pongDeadline = now + PONG_DRAIN_GRACE_MS;
+      this.pongGraceApplied = true;
     }
     if (now >= this.nextPingAt) {
       this.sendFrame(clientFrame('Ping'));
       this.nextPingAt = now + PING_INTERVAL_MS;
       if (this.pongDeadline === null) {
         this.pongDeadline = now + PONG_TIMEOUT_MS;
+        this.pongGraceApplied = false;
       }
     }
 
@@ -729,6 +753,7 @@ class Orchestrator {
       case 'Pong':
         // Keepalive round-trip complete.
         this.pongDeadline = null;
+        this.pongGraceApplied = false;
         break;
       default:
         console.error(`ignoring server message ${frame.type}`);

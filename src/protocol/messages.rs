@@ -203,7 +203,7 @@ pub struct ReconnectedPayload {
     pub ice_servers: Vec<IceServer>,
     /// Events that occurred while disconnected
     pub missed_events: Vec<ServerMessage>,
-    /// Completeness of `missed_events` (v3 only). Populated only for a
+    /// Completeness of `missed_events` (v3+ only). Populated only for a
     /// recipient that negotiated protocol v3+; `None` — and absent from the
     /// wire via `skip_serializing_if`, keeping the v2 JSON and MessagePack
     /// bytes identical — otherwise. See [`ReplayStatus`] for the contract each

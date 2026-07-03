@@ -208,19 +208,22 @@ async fn finalize_closed_connection(
     // client that observes only the stream termination can still attribute
     // it (4001 auth timeout, 4002 slow consumer, 4003 activity timeout,
     // 4004 idle timeout; plain unregistration closes with a normal 1000).
-    if let Some(reason) = reason {
-        let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
-            code: reason.websocket_close_code(),
-            reason: reason.close_frame_reason().into(),
-        }));
-        match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::debug!(%player_id, error = %err, "Failed to write semantic close frame");
-            }
-            Err(_elapsed) => {
-                tracing::debug!(%player_id, "Timed out writing semantic close frame");
-            }
+    // A `None` reason — every close signal clone dropped without an explicit
+    // request, i.e. the connection was simply unregistered everywhere — is
+    // the same normal closure, so the coded frame is TOTAL over server-side
+    // teardowns: no path falls back to a bare, code-less close.
+    let reason = reason.unwrap_or(CloseReason::Unregistered);
+    let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: reason.websocket_close_code(),
+        reason: reason.close_frame_reason().into(),
+    }));
+    match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::debug!(%player_id, error = %err, "Failed to write semantic close frame");
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%player_id, "Timed out writing semantic close frame");
         }
     }
 

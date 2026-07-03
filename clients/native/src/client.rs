@@ -89,6 +89,15 @@ const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// conformance driver is for.
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// One-shot drain grace applied when the pong deadline first expires. The
+/// deadline check runs at the top of the loop, BEFORE the select reads the
+/// socket, so a `Pong` that already arrived could be declared missing
+/// without ever being read (deadline and frame ready in the same wake). The
+/// extension guarantees at least one more read pass — and because the timer
+/// branch is then no longer ready, a pending frame wins that select
+/// deterministically.
+const PONG_DRAIN_GRACE: Duration = Duration::from_secs(1);
+
 /// A failure that terminates the run with a specific exit code.
 #[derive(Debug)]
 struct FatalError {
@@ -186,6 +195,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         linger_until: None,
         next_ping_at: Instant::now() + PING_INTERVAL,
         pong_deadline: None,
+        pong_grace_applied: false,
     };
     orchestrator.maybe_send_ready().await?;
     orchestrator.run_loop().await
@@ -360,6 +370,9 @@ struct Orchestrator<'a> {
     /// Deadline for the `Pong` answering the most recent `Ping`; `None` while
     /// no answer is outstanding.
     pong_deadline: Option<Instant>,
+    /// Whether the one-shot [`PONG_DRAIN_GRACE`] extension was applied to the
+    /// current deadline (the second expiry is fatal).
+    pong_grace_applied: bool,
 }
 
 impl Orchestrator<'_> {
@@ -450,17 +463,25 @@ impl Orchestrator<'_> {
 
         // Mandatory keepalive: send `Ping` on cadence and demand a timely
         // `Pong`. An unanswered ping is a broken connection or control path —
-        // fail loudly rather than idle into the server's eviction.
+        // fail loudly rather than idle into the server's eviction. The first
+        // expiry only arms the drain grace (see PONG_DRAIN_GRACE): a `Pong`
+        // already sitting in the socket buffer gets one guaranteed read pass
+        // before the miss is declared fatal.
         if self.pong_deadline.is_some_and(|at| now >= at) {
-            return Err(FatalError::connection(format!(
-                "server did not answer Ping within {PONG_TIMEOUT:?}"
-            )));
+            if self.pong_grace_applied {
+                return Err(FatalError::connection(format!(
+                    "server did not answer Ping within {PONG_TIMEOUT:?} (+{PONG_DRAIN_GRACE:?} drain grace)"
+                )));
+            }
+            self.pong_deadline = Some(now + PONG_DRAIN_GRACE);
+            self.pong_grace_applied = true;
         }
         if now >= self.next_ping_at {
             self.send_message(&ClientMessage::Ping).await?;
             self.next_ping_at = now + PING_INTERVAL;
             if self.pong_deadline.is_none() {
                 self.pong_deadline = Some(now + PONG_TIMEOUT);
+                self.pong_grace_applied = false;
             }
         }
 
@@ -663,6 +684,7 @@ impl Orchestrator<'_> {
             ServerMessage::Pong => {
                 // Keepalive round-trip complete.
                 self.pong_deadline = None;
+                self.pong_grace_applied = false;
             }
             other => {
                 tracing::debug!(message = ?other, "ignoring server message");
