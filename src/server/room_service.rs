@@ -259,6 +259,12 @@ impl EnhancedGameServer {
                             // its ICE from the late-join SessionPlan below
                             // instead (never both).
                             ice_servers: self.pregather_ice_servers(&room, player_id),
+                            // Minted at join so an unexpected disconnect is
+                            // recoverable with a token the client actually
+                            // holds (v3+ only; None keeps v2 bytes frozen).
+                            reconnection_token: self
+                                .pre_issue_reconnection_token_for(player_id, room.id)
+                                .await,
                         }))),
                     )
                     .await;
@@ -273,15 +279,17 @@ impl EnhancedGameServer {
                     connection_info: None,
                     region_id: self.region_id().to_string(),
                 };
+                // Recorded for reconnection replay BEFORE delivery (buffered
+                // even if the broadcast partially fails, matching "what a
+                // connected player would have been sent").
+                let player_joined = ServerMessage::PlayerJoined {
+                    player: player_info,
+                };
+                self.record_replayable_room_event(&room.id, &player_joined)
+                    .await;
                 let _ = self
                     .message_coordinator
-                    .broadcast_to_room_except(
-                        &room.id,
-                        player_id,
-                        Arc::new(ServerMessage::PlayerJoined {
-                            player: player_info,
-                        }),
-                    )
+                    .broadcast_to_room_except(&room.id, player_id, Arc::new(player_joined))
                     .await;
 
                 // Bring the joiner into an ACTIVE (finalized) v3 session (PLAN
@@ -363,6 +371,14 @@ impl EnhancedGameServer {
             }
         };
 
+        // The player is out of the room: its pre-issued reconnection token
+        // must not stay claimable. On the DISCONNECT path this is a no-op
+        // (register_disconnection_for_reconnect already consumed the entry
+        // before unregistration reaches this method); on a voluntary
+        // LeaveRoom it is the discard that keeps the token map bounded by
+        // currently-joined players.
+        self.discard_pre_issued_reconnection_token(player_id).await;
+
         if !player_removed {
             return;
         }
@@ -387,16 +403,17 @@ impl EnhancedGameServer {
             .send_to_player(player_id, Arc::new(ServerMessage::RoomLeft))
             .await;
 
-        // Then notify other players (excluding the player who left)
+        // Then notify other players (excluding the player who left). Recorded
+        // for reconnection replay BEFORE delivery (buffered even if the
+        // broadcast partially fails).
+        let player_left = ServerMessage::PlayerLeft {
+            player_id: *player_id,
+        };
+        self.record_replayable_room_event(&room_id, &player_left)
+            .await;
         let _ = self
             .message_coordinator
-            .broadcast_to_room_except(
-                &room_id,
-                player_id,
-                Arc::new(ServerMessage::PlayerLeft {
-                    player_id: *player_id,
-                }),
-            )
+            .broadcast_to_room_except(&room_id, player_id, Arc::new(player_left))
             .await;
 
         // v3 mid-session re-planning (after the PlayerLeft broadcast): if the

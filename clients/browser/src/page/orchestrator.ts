@@ -53,6 +53,42 @@ const RELAY_SEND_SETTLE_MS = 250;
 /** Grace period between meeting all success criteria and exiting. */
 const EXIT_LINGER_MS = 250;
 
+/**
+ * Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
+ * `Ping` mandatory for every client (the server evicts idle connections);
+ * this driver models that contract so anyone using it as a template inherits
+ * the keepalive rather than the idle-timeout eviction. Mirrors the native
+ * client's PING_INTERVAL.
+ */
+const PING_INTERVAL_MS = 10_000;
+
+/**
+ * How long a sent `Ping` may go unanswered before the run fails loudly. A
+ * missing `Pong` inside this generous window means the connection (or the
+ * server's control path) is broken. Mirrors the native client's PONG_TIMEOUT.
+ */
+const PONG_TIMEOUT_MS = 10_000;
+
+/**
+ * One-shot drain grace applied when the pong deadline first expires. The
+ * deadline check runs in processTimers, BEFORE the chain drains queued
+ * frames, so a `Pong` that already arrived could be declared missing without
+ * ever being handled (deadline and frame ready in the same wake). The
+ * extension guarantees at least one more processing pass. Mirrors the native
+ * client's PONG_DRAIN_GRACE.
+ */
+const PONG_DRAIN_GRACE_MS = 1_000;
+
+/**
+ * Local send-buffer ceiling. Browser `WebSocket.send()` never blocks and
+ * never fails on backpressure — it buffers unboundedly in `bufferedAmount`
+ * while the tab's memory grows and delivery silently stalls. A conformance
+ * driver must SURFACE local backpressure, not mask it, so crossing this
+ * ceiling is a loud connection failure. (A production client would pace or
+ * drop instead; the recipe lives in the building-a-client guide.)
+ */
+const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
+
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -140,6 +176,18 @@ class Orchestrator {
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
   private lingerUntil: number | null = null;
+  /** Next keepalive `Ping` send (the mandatory client keepalive contract). */
+  private nextPingAt = 0;
+  /**
+   * Deadline for the `Pong` answering the most recent `Ping`; `null` while no
+   * answer is outstanding.
+   */
+  private pongDeadline: number | null = null;
+  /**
+   * Whether the one-shot PONG_DRAIN_GRACE_MS extension was applied to the
+   * current deadline (the second expiry is fatal).
+   */
+  private pongGraceApplied = false;
   private wakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: RunConfig) {
@@ -185,6 +233,7 @@ class Orchestrator {
     // client's process-start semantics.
     this.runDeadline =
       Date.now() + this.config.runForSecs * 1000 - this.config.elapsedBeforeStartMs;
+    this.nextPingAt = Date.now() + PING_INTERVAL_MS;
 
     let ws: WebSocket;
     try {
@@ -288,15 +337,42 @@ class Orchestrator {
       }),
     );
 
-    const response = await this.nextHandshakeFrame();
-    if (response.type === 'RoomJoinFailed') {
-      throw FatalError.protocol(
-        `room join failed: ${String(response.data['reason'])} ` +
-          `(${String(response.data['error_code'])})`,
-      );
-    }
-    if (response.type !== 'RoomJoined') {
-      throw FatalError.protocol(`expected RoomJoined, got ${response.type}`);
+    // Read until `RoomJoined`, tolerating interleaved lobby MEMBERSHIP deltas.
+    //
+    // The server registers a joiner as a room-broadcast recipient before it
+    // finishes assembling and enqueuing that joiner's own `RoomJoined`, so a
+    // second player joining the same room in the same instant can have its
+    // `PlayerJoined` delivered ahead of our `RoomJoined`. That interleaving is
+    // benign: `present` is a set and `RoomJoined.current_players` is the
+    // authoritative baseline, so a delta seen just before it is idempotent.
+    // We fold such deltas in and keep waiting. Any OTHER pre-`RoomJoined`
+    // frame is still a genuine protocol violation and fails loudly. (Mirror
+    // of the native client's join handshake.)
+    const earlyJoined: string[] = [];
+    const earlyLeft: string[] = [];
+    let response = await this.nextHandshakeFrame();
+    while (response.type !== 'RoomJoined') {
+      if (response.type === 'RoomJoinFailed') {
+        throw FatalError.protocol(
+          `room join failed: ${String(response.data['reason'])} ` +
+            `(${String(response.data['error_code'])})`,
+        );
+      }
+      if (response.type === 'PlayerJoined') {
+        const player = response.data['player'] as Record<string, unknown> | undefined;
+        const id = player?.['id'];
+        if (typeof id === 'string') {
+          earlyJoined.push(id);
+        }
+      } else if (response.type === 'PlayerLeft') {
+        const id = response.data['player_id'];
+        if (typeof id === 'string') {
+          earlyLeft.push(id);
+        }
+      } else {
+        throw FatalError.protocol(`expected RoomJoined, got ${response.type}`);
+      }
+      response = await this.nextHandshakeFrame();
     }
     const payload = response.data;
     if (this.config.createRoom) {
@@ -318,6 +394,13 @@ class Orchestrator {
           this.present.add(id);
         }
       }
+    }
+    // Fold in deltas observed ahead of the baseline (set-idempotent).
+    for (const id of earlyJoined) {
+      this.present.add(id);
+    }
+    for (const id of earlyLeft) {
+      this.present.delete(id);
     }
     this.present.add(this.myId);
     for (const id of this.present) {
@@ -477,6 +560,10 @@ class Orchestrator {
     if (this.lingerUntil !== null) {
       wake = Math.min(wake, this.lingerUntil);
     }
+    wake = Math.min(wake, this.nextPingAt);
+    if (this.pongDeadline !== null) {
+      wake = Math.min(wake, this.pongDeadline);
+    }
     return wake;
   }
 
@@ -501,6 +588,34 @@ class Orchestrator {
       return;
     }
     const now = Date.now();
+
+    // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
+    // An unanswered ping is a broken connection or control path — fail loudly
+    // rather than idle into the server's eviction.
+    //
+    // AT MOST ONE ping is outstanding at a time: a new `Ping` is sent only
+    // once the previous one's `Pong` has cleared the deadline. A single
+    // deadline then unambiguously tracks the single in-flight ping — a stale
+    // `Pong` can never clear the deadline of a newer, still-pending ping.
+    //
+    // The first deadline expiry only arms the drain grace
+    // (see PONG_DRAIN_GRACE_MS): a `Pong` already queued gets one guaranteed
+    // processing pass before the miss is declared fatal.
+    if (this.pongDeadline !== null && now >= this.pongDeadline) {
+      if (this.pongGraceApplied) {
+        throw FatalError.connection(
+          `server did not answer Ping within ${PONG_TIMEOUT_MS}ms (+${PONG_DRAIN_GRACE_MS}ms drain grace)`,
+        );
+      }
+      this.pongDeadline = now + PONG_DRAIN_GRACE_MS;
+      this.pongGraceApplied = true;
+    }
+    if (now >= this.nextPingAt && this.pongDeadline === null) {
+      this.sendFrame(clientFrame('Ping'));
+      this.nextPingAt = now + PING_INTERVAL_MS;
+      this.pongDeadline = now + PONG_TIMEOUT_MS;
+      this.pongGraceApplied = false;
+    }
 
     if (!this.relaySent && this.relaySendAt !== null && now >= this.relaySendAt) {
       this.sendRelayPayload();
@@ -543,6 +658,13 @@ class Orchestrator {
   // -------------------------------------------------------------------------
 
   private async handleServerMessage(frame: ServerFrame): Promise<void> {
+    // ANY inbound frame proves the connection and the server are alive, so it
+    // satisfies the keepalive liveness check — not just `Pong`. Cleared BEFORE
+    // dispatch, so the very frame that kicks off a long handler (e.g. WebRTC
+    // pairing) already refreshes liveness; processTimers cannot then declare a
+    // still-pending ping dead just because that handler ran past the window.
+    this.pongDeadline = null;
+    this.pongGraceApplied = false;
     const data = frame.data;
     switch (frame.type) {
       case 'PlayerJoined': {
@@ -640,8 +762,23 @@ class Orchestrator {
         break;
       }
       case 'Error': {
-        // Server-reported errors are surfaced but non-fatal: the relay floor
-        // (and the run window) decide the outcome.
+        if (data['error_code'] === 'SLOW_CONSUMER') {
+          // The server is closing this connection because it could not drain
+          // its outbound queue in time. Surface it distinctly so a run
+          // failure is attributable to consumption speed rather than a
+          // generic server error; the imminent socket close (not this frame)
+          // decides the outcome. Mirrors the native client's dedicated arm.
+          console.error(
+            `server disconnecting us as a slow consumer: ${String(data['message'])}`,
+          );
+          emit({
+            event: 'error',
+            message: `server disconnecting us as a slow consumer: ${String(data['message'])}`,
+          });
+          break;
+        }
+        // Other server-reported errors are surfaced but non-fatal: the relay
+        // floor (and the run window) decide the outcome.
         emit({
           event: 'error',
           message: `server error: ${String(data['message'])} (${String(data['error_code'])})`,
@@ -660,6 +797,9 @@ class Orchestrator {
         break;
       }
       case 'Pong':
+        // Keepalive round-trip complete.
+        this.pongDeadline = null;
+        this.pongGraceApplied = false;
         break;
       default:
         console.error(`ignoring server message ${frame.type}`);
@@ -911,6 +1051,16 @@ class Orchestrator {
   private sendFrame(frame: string): void {
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
       throw FatalError.connection('websocket is not open');
+    }
+    // Browser `send()` never blocks or errors on backpressure — it buffers
+    // unboundedly in `bufferedAmount`. Crossing the ceiling means the
+    // connection has silently stopped draining; surface it loudly (see
+    // SEND_BUFFER_LIMIT_BYTES).
+    if (this.ws.bufferedAmount > SEND_BUFFER_LIMIT_BYTES) {
+      throw FatalError.connection(
+        `local websocket send buffer saturated: bufferedAmount=${this.ws.bufferedAmount} ` +
+          `exceeds ${SEND_BUFFER_LIMIT_BYTES} bytes`,
+      );
     }
     try {
       this.ws.send(frame);

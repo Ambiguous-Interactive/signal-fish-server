@@ -231,16 +231,15 @@ impl EnhancedGameServer {
             config.max_connections_per_ip,
             metrics.clone(),
             message_coordinator.clone(),
+            // Per-connection delivery ledgers exist only when RelayStats
+            // emission is enabled, keeping the delivery hot path at a single
+            // cheap registry miss otherwise.
+            config.websocket_config.delivery_stats_interval_secs > 0,
         );
 
-        let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
-            Arc::new(InMemoryRoomOperationCoordinator::new(
-                message_coordinator.clone(),
-                distributed_lock.clone(),
-                database.clone(),
-            ));
-
-        // Initialize reconnection manager if enabled (in-memory only)
+        // Initialize reconnection manager if enabled (in-memory only). Built
+        // before the room coordinator and spectator service so both can record
+        // their room-uniform broadcasts for reconnection replay.
         let reconnection_manager = if config.enable_reconnection {
             Some(Arc::new(crate::reconnection::ReconnectionManager::new(
                 config.reconnection_window.as_secs(),
@@ -250,6 +249,14 @@ impl EnhancedGameServer {
         } else {
             None
         };
+
+        let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
+            Arc::new(InMemoryRoomOperationCoordinator::new(
+                message_coordinator.clone(),
+                distributed_lock.clone(),
+                database.clone(),
+                reconnection_manager.clone(),
+            ));
 
         // Initialize authentication middleware based on configuration.
         let auth_middleware = if config.auth_enabled {
@@ -275,6 +282,7 @@ impl EnhancedGameServer {
             message_coordinator.clone(),
             room_applications.clone(),
             protocol_config.clone(),
+            reconnection_manager.clone(),
         );
 
         let server = Arc::new(Self {
@@ -416,6 +424,13 @@ impl EnhancedGameServer {
         self.connection_manager.supports_v3(player_id)
     }
 
+    /// Whether the client negotiated protocol v4 or higher (gates the relayed
+    /// `GameData.seq` stamp and `RelayStats` emission; mirrors
+    /// [`client_supports_v3`](Self::client_supports_v3)).
+    pub fn client_supports_v4(&self, player_id: &PlayerId) -> bool {
+        self.connection_manager.supports_v4(player_id)
+    }
+
     /// Whether the client negotiated support for the given transport.
     pub fn client_supports_transport(&self, player_id: &PlayerId, transport: Transport) -> bool {
         self.connection_manager
@@ -529,6 +544,10 @@ impl EnhancedGameServer {
         if let Some(room_id) = room_id_opt {
             self.register_disconnection_for_reconnect(player_id, room_id, was_authority)
                 .await;
+        } else {
+            // No room to reconnect into: any token pre-issued at an earlier
+            // join must not outlive the connection (bounded-map contract).
+            self.discard_pre_issued_reconnection_token(player_id).await;
         }
 
         // Remove from room if joined

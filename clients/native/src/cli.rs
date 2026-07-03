@@ -117,6 +117,46 @@ pub struct Cli {
     /// Comma-separated data-path transports advertised in Authenticate (v3 only).
     #[arg(long, value_delimiter = ',', default_value = "relay,webrtc")]
     pub supported_transports: Vec<TransportArg>,
+
+    /// Tokio runtime flavor driving the whole process. `multi` (the default)
+    /// is the multi-threaded runtime; `current` runs everything on a single
+    /// current-thread runtime — the shape most susceptible to being starved by
+    /// a blocking game loop (see --tick-stall-ms), which the starved-runtime
+    /// conformance matrix pins as an executable boundary.
+    #[arg(long, value_enum, default_value_t = RuntimeFlavor::Multi)]
+    pub runtime: RuntimeFlavor,
+
+    /// FAULT INJECTION: block the orchestrator's executor thread for this many
+    /// milliseconds after each processed input (`std::thread::sleep`, NOT an
+    /// async sleep — the point is to deliberately hog the runtime), simulating
+    /// a game loop that "ticks" its networking occasionally instead of
+    /// continuously driving it. Exists solely for conformance-testing the
+    /// server's slow-consumer contract and the documented "clients driving
+    /// async runtimes must continuously poll/drive their connection"
+    /// requirement (docs/protocol.md, "Delivery reliability and backpressure").
+    /// 0 (the default) disables the stall.
+    #[arg(long, default_value_t = 0)]
+    pub tick_stall_ms: u64,
+}
+
+/// CLI token for the tokio runtime flavor (see [`Cli::runtime`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RuntimeFlavor {
+    /// The default multi-threaded runtime (`tokio::runtime::Runtime::new`).
+    Multi,
+    /// A single current-thread runtime: every task shares one executor
+    /// thread, so a blocking stall (--tick-stall-ms) starves the whole client.
+    Current,
+}
+
+impl RuntimeFlavor {
+    /// Stable lowercase token for event output (matches the CLI token).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Multi => "multi",
+            Self::Current => "current",
+        }
+    }
 }
 
 /// CLI-parseable mirror of [`Topology`] (the protocol enum does not implement
@@ -217,6 +257,9 @@ mod tests {
         assert!(!cli.leave_on_game_start);
         assert_eq!(cli.protocol_version, 3);
         assert!(cli.is_v3());
+        assert_eq!(cli.runtime, RuntimeFlavor::Multi);
+        assert_eq!(cli.runtime.as_str(), "multi");
+        assert_eq!(cli.tick_stall_ms, 0, "fault injection is off by default");
         assert_eq!(
             cli.topologies(),
             vec![Topology::Relay, Topology::Host, Topology::Mesh]
@@ -271,6 +314,23 @@ mod tests {
             "--expect-total-peers overrides the --peers default"
         );
         assert!(cli.leave_on_game_start);
+    }
+
+    #[test]
+    fn starved_runtime_flags_parse() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--runtime",
+            "current",
+            "--tick-stall-ms",
+            "750",
+        ]);
+        assert_eq!(cli.runtime, RuntimeFlavor::Current);
+        assert_eq!(cli.runtime.as_str(), "current");
+        assert_eq!(cli.tick_stall_ms, 750);
     }
 
     #[test]

@@ -2,12 +2,13 @@
 # run-tla-model-check.sh - Model-check the Protocol v3 session-lifecycle TLA+ spec.
 #
 # Downloads a version-pinned, SHA256-verified tla2tools.jar into a cache
-# directory, then runs TLC over the model configurations in formal/tla/
-# (desired=mesh, desired=host, desired=host with WebRTC disabled, and the
-# relay-floor model with both upgrade transports disabled). The default run
-# globs formal/tla/SignalFishSession_*.cfg, so a new configuration file is
-# picked up automatically. Any invariant or property violation exits
-# nonzero; success is quiet (one summary line per configuration).
+# directory, then runs TLC over every model configuration in formal/tla/:
+# the session-lifecycle spec (SignalFishSession_{Mesh,Host,HostDirect,Floor})
+# and the delivery-contract spec (DeliveryContract_Small). Configurations are
+# named <Module>_<Scenario>.cfg and the default run globs them all, so a new
+# spec or scenario is picked up automatically. Any invariant or property
+# violation exits nonzero; success is quiet (one summary line per
+# configuration).
 #
 # TLC deadlock checking stays ENABLED on purpose: the spec's churn-budget
 # terminal states self-loop through an explicit `Done` stutter action, so a
@@ -39,7 +40,13 @@ TLA_TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TLA_DIR="${REPO_ROOT}/formal/tla"
-SPEC_NAME="SignalFishSession"
+# Every checked configuration is <Module>_<Scenario>.cfg; the module name is
+# everything before the LAST underscore (module names here contain none), so
+# new specs (e.g. DeliveryContract_Small.cfg) are picked up automatically.
+module_of() {
+    local base="$1"
+    printf '%s' "${base%_*}"
+}
 
 CACHE_DIR="${SIGNAL_FISH_TLA_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/signal-fish/tla}"
 JAR_PATH="${CACHE_DIR}/tla2tools-${TLA_TOOLS_VERSION}.jar"
@@ -53,8 +60,10 @@ Usage: bash scripts/run-tla-model-check.sh [--config <name>] [--verbose]
 
 Options:
   --config <name>  Check a single configuration. <name> may be the scenario
-                   suffix (Mesh, Host, HostDirect, Floor), the cfg base name
-                   (SignalFishSession_Mesh), or the file name with .cfg.
+                   suffix (Mesh, Host, HostDirect, Floor, Small), the cfg base
+                   name (SignalFishSession_Mesh, DeliveryContract_Small), or
+                   the file name with .cfg. A bare suffix must match exactly
+                   one configuration across all specs.
   --verbose        Stream full TLC output instead of a quiet summary.
   --help           Show this help.
 USAGE
@@ -154,32 +163,47 @@ if [ ! -d "$TLA_DIR" ]; then
     exit 1
 fi
 
+ALL_CONFIGS=()
+for cfg in "${TLA_DIR}"/*_*.cfg; do
+    [ -e "$cfg" ] || continue
+    ALL_CONFIGS+=("$(basename "$cfg")")
+done
+if [ "${#ALL_CONFIGS[@]}" -eq 0 ]; then
+    echo "ERROR: no <Module>_<Scenario>.cfg files found in ${TLA_DIR}" >&2
+    exit 1
+fi
+
 CONFIGS=()
 if [ -n "$SELECTED_CONFIG" ]; then
     base="${SELECTED_CONFIG%.cfg}"
-    case "$base" in
-        "$SPEC_NAME"_*) ;; # already fully qualified
-        *) base="${SPEC_NAME}_${base}" ;;
-    esac
-    if [ ! -f "${TLA_DIR}/${base}.cfg" ]; then
-        echo "ERROR: configuration '${SELECTED_CONFIG}' not found at ${TLA_DIR}/${base}.cfg" >&2
-        echo "Available configurations:" >&2
-        for cfg in "${TLA_DIR}/${SPEC_NAME}"_*.cfg; do
-            [ -e "$cfg" ] || continue
-            echo "  - $(basename "$cfg" .cfg)" >&2
+    if [ -f "${TLA_DIR}/${base}.cfg" ]; then
+        # Fully qualified (Module_Scenario).
+        CONFIGS+=("${base}.cfg")
+    else
+        # Bare scenario suffix: resolve across every spec; must be unambiguous.
+        for cfg in "${ALL_CONFIGS[@]}"; do
+            case "${cfg%.cfg}" in
+                *"_${base}") CONFIGS+=("$cfg") ;;
+            esac
         done
-        exit 2
+        if [ "${#CONFIGS[@]}" -eq 0 ]; then
+            echo "ERROR: configuration '${SELECTED_CONFIG}' not found in ${TLA_DIR}" >&2
+            echo "Available configurations:" >&2
+            for cfg in "${ALL_CONFIGS[@]}"; do
+                echo "  - $(basename "$cfg" .cfg)" >&2
+            done
+            exit 2
+        fi
+        if [ "${#CONFIGS[@]}" -gt 1 ]; then
+            echo "ERROR: scenario suffix '${SELECTED_CONFIG}' is ambiguous:" >&2
+            for cfg in "${CONFIGS[@]}"; do
+                echo "  - $(basename "$cfg" .cfg)" >&2
+            done
+            exit 2
+        fi
     fi
-    CONFIGS+=("${base}.cfg")
 else
-    for cfg in "${TLA_DIR}/${SPEC_NAME}"_*.cfg; do
-        [ -e "$cfg" ] || continue
-        CONFIGS+=("$(basename "$cfg")")
-    done
-    if [ "${#CONFIGS[@]}" -eq 0 ]; then
-        echo "ERROR: no ${SPEC_NAME}_*.cfg files found in ${TLA_DIR}" >&2
-        exit 1
-    fi
+    CONFIGS=("${ALL_CONFIGS[@]}")
 fi
 
 # --- Run TLC ----------------------------------------------------------------
@@ -193,6 +217,7 @@ for cfg in "${CONFIGS[@]}"; do
 
     # -metadir keeps TLC's state files out of the repository; deadlock
     # checking is deliberately left ON (see the header comment).
+    module="$(module_of "$(basename "$cfg" .cfg)")"
     set +e
     (
         cd "$TLA_DIR" && \
@@ -200,7 +225,7 @@ for cfg in "${CONFIGS[@]}"; do
             -workers "$WORKERS" \
             -metadir "$metadir" \
             -config "$cfg" \
-            "${SPEC_NAME}.tla"
+            "${module}.tla"
     ) >"$output_file" 2>&1
     tlc_status=$?
     set -e

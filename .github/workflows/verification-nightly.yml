@@ -1,0 +1,401 @@
+# Nightly Delivery Verification Workflow
+#
+# The NIGHTLY counterpart to the PR-lane relay reliability suites
+# (tests/relay_backpressure_e2e.rs, tests/relay_chaos_e2e.rs): long-running,
+# minutes-scale verification of the issue #131 delivery contract ("zero loss
+# or loud disconnect") that is deliberately kept out of every PR build.
+#
+# Jobs:
+#   - soak: tests/relay_delivery_soak.rs — paced senders vs. oscillating /
+#     stalled receivers over real sockets; terminal delivery-ledger and
+#     conservation assertions.
+#   - concurrency-stress: tests/delivery_concurrency_stress.rs — the
+#     loom-substitute lane racing deliver_or_disconnect against receiver
+#     drops and explicit closes across thousands of scheduler samples.
+#   - load-smoke: the in-process latency-distribution smoke test from
+#     tests/load_tests.rs (the room-creation-throughput and
+#     sustained-connections candidates are excluded as known-broken — see the
+#     load-smoke job comment). NOTE these are throughput/latency smoke checks
+#     only — their clients are mpsc channels that cannot observe delivery
+#     (see the module docs in tests/load_tests.rs); the delivery contract is
+#     verified by the soak/backpressure suites above.
+#   - multiprocess-delivery: tests/multiprocess_delivery_e2e.rs — REAL server
+#     + REAL client processes with OS faults (SIGSTOP/SIGKILL); the two
+#     ignored child-process tests need the pre-built native reference client
+#     (SIGNAL_FISH_CLIENT_BIN), which is why they are nightly-only.
+#   - starved-runtime: clients/native/tests/starved_runtime_e2e.rs — the
+#     --runtime current / --tick-stall-ms conformance matrix pinning the
+#     documented "continuously drive your runtime" requirement.
+#   - scenario-profiles: tests/scenario_realworld_e2e.rs with
+#     --run-ignored all — the PR-lane traffic profiles plus the nightly-only
+#     backgrounded-tab profile (multi-second absorbed pauses + eviction).
+#
+# All targeted tests are `#[ignore]`d in-tree (a scheduling decision, not a
+# flakiness mask) and activated here with `--run-ignored all`. Job timeouts
+# are generous floors over the measured wall times (build + run), per the
+# zero-flakiness policy: a too-tight timeout-minutes cancels a
+# healthy-but-loaded run and is itself a flake source.
+
+name: Verification Nightly
+
+on:
+  schedule:
+    # Daily 03:00 UTC (an hour before fuzz.yml's 04:00 to stagger runner load).
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/coordination/**"
+      - "src/websocket/**"
+      - "src/server/connection_manager.rs"
+      - "tests/relay_delivery_soak.rs"
+      - "tests/delivery_concurrency_stress.rs"
+      - "tests/load_tests.rs"
+      - "tests/multiprocess_delivery_e2e.rs"
+      - "tests/scenario_realworld_e2e.rs"
+      - "tests/websocket_test_helpers/**"
+      - "clients/native/**"
+      - ".github/workflows/verification-nightly.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak:
+    name: Relay Delivery Soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.82.2
+        with:
+          tool: cargo-nextest
+      - name: Run relay delivery soak
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test relay_delivery_soak --run-ignored all \
+            --success-output final 2>&1 | tee soak-output.txt
+      - name: Report soak results to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Relay delivery soak"
+            echo
+            echo '```text'
+            tail -n 60 soak-output.txt 2>/dev/null || echo "no soak output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  concurrency-stress:
+    name: Delivery Concurrency Stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.82.2
+        with:
+          tool: cargo-nextest
+      - name: Run delivery concurrency stress
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test delivery_concurrency_stress --run-ignored all \
+            --success-output final 2>&1 | tee stress-output.txt
+      - name: Report stress results to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Delivery concurrency stress"
+            echo
+            echo '```text'
+            tail -n 40 stress-output.txt 2>/dev/null || echo "no stress output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  load-smoke:
+    name: Load Smoke (in-process throughput)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.82.2
+        with:
+          tool: cargo-nextest
+      # Only the latency-distribution smoke test is activated by name. The
+      # other two candidates (test_load_room_creation_throughput,
+      # test_load_sustained_concurrent_connections) currently fail
+      # deterministically under the shared test-server defaults — they
+      # request 250-500 rooms in one game against max_rooms_per_game=100 and
+      # trip the room-creation rate limits, so their ">=95% success" asserts
+      # can never hold — and are excluded until they are repaired rather than
+      # shipped as a permanently red lane. The remaining #[ignore]d load
+      # tests (stress to failure, memory projection, connection-rate) are
+      # exploratory and stay manual. These tests cannot observe delivery —
+      # see the load_tests.rs module docs — so this job reports numbers and
+      # fails only on genuine test failure.
+      - name: Run load smoke tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test load_tests --run-ignored all --success-output final -- \
+            test_load_message_latency_distribution \
+            2>&1 | tee load-output.txt
+      - name: Report load numbers to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Load smoke numbers (in-process; cannot observe delivery)"
+            echo
+            echo '```text'
+            tail -n 120 load-output.txt 2>/dev/null || echo "no load output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  multiprocess-delivery:
+    name: Multi-Process Delivery Faults
+    runs-on: ubuntu-latest
+    # Generous floor: the native reference client build (full webrtc
+    # dependency graph) dominates a cold run; a too-tight timeout cancels a
+    # healthy-but-loaded build (zero-flakiness policy).
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          workspaces: |
+            .
+            clients/native
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.82.2
+        with:
+          tool: cargo-nextest
+      - name: Build the native reference client
+        shell: bash
+        run: |
+          cargo build --locked --manifest-path clients/native/Cargo.toml \
+            --bin signal-fish-reference-native
+      # --run-ignored all activates the two nightly-only child-process tests
+      # (SIGSTOP eviction, SIGKILL mid-burst) alongside the PR-lane
+      # server-restart test; the pre-built client binary is handed over via
+      # SIGNAL_FISH_CLIENT_BIN so the suite's nested-build fallback never
+      # runs in CI.
+      - name: Run multi-process delivery fault tests
+        shell: bash
+        env:
+          SIGNAL_FISH_CLIENT_BIN: ${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test multiprocess_delivery_e2e --run-ignored all \
+            --success-output final 2>&1 | tee multiprocess-output.txt
+      - name: Report multi-process results to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Multi-process delivery faults"
+            echo
+            echo '```text'
+            tail -n 60 multiprocess-output.txt 2>/dev/null || echo "no multiprocess output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  starved-runtime:
+    name: Starved-Runtime Conformance Matrix
+    runs-on: ubuntu-latest
+    # Generous floor: builds the server binary plus the client crate's full
+    # webrtc dependency graph before the matrix runs.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          workspaces: |
+            .
+            clients/native
+      - name: Build the server binary
+        shell: bash
+        run: |
+          cargo build --locked --bin signal-fish-server
+      # --ignored activates the nightly-only matrix cells; --test-threads=1
+      # keeps the flood-heavy cells from CPU-starving each other (they also
+      # carry #[serial_test::serial] as an in-binary guard).
+      - name: Run the starved-runtime matrix
+        shell: bash
+        env:
+          SIGNAL_FISH_SERVER_BIN: ${{ github.workspace }}/target/debug/signal-fish-server
+        run: |
+          set -o pipefail
+          cargo test --locked --manifest-path clients/native/Cargo.toml \
+            --test starved_runtime_e2e -- --ignored --test-threads=1 \
+            2>&1 | tee starved-runtime-output.txt
+      - name: Report starved-runtime results to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Starved-runtime conformance matrix"
+            echo
+            echo '```text'
+            tail -n 60 starved-runtime-output.txt 2>/dev/null || echo "no starved-runtime output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  scenario-profiles:
+    name: Real-World Scenario Profiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.82.2
+        with:
+          tool: cargo-nextest
+      # --run-ignored all: the PR-lane profiles (already covered by the ci.yml
+      # nextest job) PLUS the nightly-only backgrounded-tab profile.
+      - name: Run real-world scenario profiles
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test scenario_realworld_e2e --run-ignored all \
+            --success-output final 2>&1 | tee scenario-output.txt
+      - name: Report scenario results to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Real-world scenario profiles"
+            echo
+            echo '```text'
+            tail -n 60 scenario-output.txt 2>/dev/null || echo "no scenario output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

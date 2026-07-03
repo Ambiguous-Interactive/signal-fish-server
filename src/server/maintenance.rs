@@ -127,6 +127,14 @@ impl EnhancedGameServer {
 
             for player_id in expired_clients {
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
+                // Pin the ActivityTimeout close code (4003) before the
+                // unregistration's generic reason could win the first-wins
+                // race: the close frame is the one signal a client can still
+                // read when the farewell above was undeliverable.
+                self.connection_manager.request_close_for(
+                    &player_id,
+                    crate::coordination::CloseReason::ActivityTimeout,
+                );
                 self.unregister_client(&player_id).await;
             }
 

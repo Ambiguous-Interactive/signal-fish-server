@@ -75,6 +75,29 @@ const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 /// unreliable-channel sends are not torn down mid-flight for slower siblings.
 const EXIT_LINGER: Duration = Duration::from_millis(250);
 
+/// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
+/// `Ping` mandatory for every client (the server evicts idle connections);
+/// this driver models that contract so anyone using it as a template
+/// inherits the keepalive rather than the idle-timeout eviction. Short
+/// enough that even a default 30-second conformance run exercises several
+/// round-trips.
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a sent `Ping` may go unanswered before the run fails loudly. A
+/// missing `Pong` inside this generous window means the connection (or the
+/// server's control path) is broken — surfacing that is exactly what a
+/// conformance driver is for.
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One-shot drain grace applied when the pong deadline first expires. The
+/// deadline check runs at the top of the loop, BEFORE the select reads the
+/// socket, so a `Pong` that already arrived could be declared missing
+/// without ever being read (deadline and frame ready in the same wake). The
+/// extension guarantees at least one more read pass — and because the timer
+/// branch is then no longer ready, a pending frame wins that select
+/// deterministically.
+const PONG_DRAIN_GRACE: Duration = Duration::from_secs(1);
+
 /// A failure that terminates the run with a specific exit code.
 #[derive(Debug)]
 struct FatalError {
@@ -120,7 +143,10 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     let mut ws = wire::connect(&cli.server_url)
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
-    emit(&Event::Connected);
+    emit(&Event::Connected {
+        runtime: cli.runtime.as_str().to_string(),
+        tick_stall_ms: cli.tick_stall_ms,
+    });
 
     authenticate(&mut ws, cli).await?;
     let (my_id, mut present, lobby_state) = join_room(&mut ws, cli).await?;
@@ -167,6 +193,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pending_signals: BTreeMap::new(),
         run_deadline,
         linger_until: None,
+        next_ping_at: Instant::now() + PING_INTERVAL,
+        pong_deadline: None,
+        pong_grace_applied: false,
     };
     orchestrator.maybe_send_ready().await?;
     orchestrator.run_loop().await
@@ -237,31 +266,63 @@ async fn join_room(
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
 
-    match next_handshake_message(ws).await? {
-        ServerMessage::RoomJoined(payload) => {
-            if cli.create_room {
-                emit(&Event::RoomCreated {
-                    room_code: payload.room_code.clone(),
+    // Read until `RoomJoined`, tolerating interleaved lobby MEMBERSHIP deltas.
+    //
+    // The server registers a joiner as a room-broadcast recipient before it
+    // finishes assembling and enqueuing that joiner's own `RoomJoined`, so a
+    // second player joining the same room in the same instant can have its
+    // `PlayerJoined` delivered ahead of our `RoomJoined`. That interleaving is
+    // benign: `present` is a set, and `RoomJoined.current_players` is the
+    // authoritative baseline, so a delta seen just before it is idempotent
+    // (a `PlayerJoined` for someone already in the baseline is a no-op; a
+    // `PlayerLeft` removes them). We fold such deltas in and keep waiting.
+    //
+    // ANY OTHER message before `RoomJoined` is still a genuine protocol
+    // violation and fails loudly — this only tolerates the one benign,
+    // documented race, it does not blanket-skip unexpected frames.
+    let mut early_joined: Vec<PlayerId> = Vec::new();
+    let mut early_left: Vec<PlayerId> = Vec::new();
+    loop {
+        match next_handshake_message(ws).await? {
+            ServerMessage::RoomJoined(payload) => {
+                if cli.create_room {
+                    emit(&Event::RoomCreated {
+                        room_code: payload.room_code.clone(),
+                    });
+                }
+                emit(&Event::RoomJoined {
+                    room_id: payload.room_id,
+                    player_id: payload.player_id,
+                    lobby_state: payload.lobby_state.clone(),
                 });
+                let mut present: BTreeSet<PlayerId> = payload
+                    .current_players
+                    .iter()
+                    .map(|player| player.id)
+                    .collect();
+                // Apply the deltas observed ahead of the baseline (set
+                // semantics make this order-independent and idempotent).
+                for id in early_joined {
+                    present.insert(id);
+                }
+                for id in early_left {
+                    present.remove(&id);
+                }
+                return Ok((payload.player_id, present, payload.lobby_state));
             }
-            emit(&Event::RoomJoined {
-                room_id: payload.room_id,
-                player_id: payload.player_id,
-                lobby_state: payload.lobby_state.clone(),
-            });
-            let present = payload
-                .current_players
-                .iter()
-                .map(|player| player.id)
-                .collect();
-            Ok((payload.player_id, present, payload.lobby_state))
+            ServerMessage::PlayerJoined { player } => early_joined.push(player.id),
+            ServerMessage::PlayerLeft { player_id } => early_left.push(player_id),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                return Err(FatalError::protocol(format!(
+                    "room join failed: {reason} ({error_code:?})"
+                )))
+            }
+            other => {
+                return Err(FatalError::protocol(format!(
+                    "expected RoomJoined, got {other:?}"
+                )))
+            }
         }
-        ServerMessage::RoomJoinFailed { reason, error_code } => Err(FatalError::protocol(format!(
-            "room join failed: {reason} ({error_code:?})"
-        ))),
-        other => Err(FatalError::protocol(format!(
-            "expected RoomJoined, got {other:?}"
-        ))),
     }
 }
 
@@ -336,6 +397,14 @@ struct Orchestrator<'a> {
     run_deadline: Instant,
     /// Set once all criteria are met; exit 0 when it elapses.
     linger_until: Option<Instant>,
+    /// Next keepalive `Ping` send (the mandatory client keepalive contract).
+    next_ping_at: Instant,
+    /// Deadline for the `Pong` answering the most recent `Ping`; `None` while
+    /// no answer is outstanding.
+    pong_deadline: Option<Instant>,
+    /// Whether the one-shot [`PONG_DRAIN_GRACE`] extension was applied to the
+    /// current deadline (the second expiry is fatal).
+    pong_grace_applied: bool,
 }
 
 impl Orchestrator<'_> {
@@ -352,6 +421,15 @@ impl Orchestrator<'_> {
             };
             match input {
                 LoopInput::Server(Some(Ok(Message::Text(text)))) => {
+                    // ANY inbound frame proves the connection and the server
+                    // are alive, so it satisfies the keepalive liveness check —
+                    // not just `Pong`. This is cleared BEFORE dispatch, so the
+                    // very frame that kicks off a long handler (e.g. WebRTC
+                    // pairing) already refreshes liveness; the loop cannot then
+                    // declare a still-pending ping dead just because that
+                    // handler ran past the window.
+                    self.pong_deadline = None;
+                    self.pong_grace_applied = false;
                     let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
                         FatalError::protocol(format!(
                             "invalid ServerMessage frame: {error}; text={text}"
@@ -379,6 +457,20 @@ impl Orchestrator<'_> {
                 }
                 LoopInput::Tick => {}
             }
+
+            // FAULT INJECTION (--tick-stall-ms): deliberately BLOCK this
+            // executor thread after every processed input — a `std::thread`
+            // sleep, never an async one, because the injected fault is a game
+            // loop that hogs the runtime instead of continuously driving it
+            // (docs/protocol.md, "Delivery reliability and backpressure":
+            // clients must continuously poll/drive their connection). On the
+            // `--runtime current` flavor this starves the entire client,
+            // reproducing the #131 reporter's client-side failure mode; the
+            // starved-runtime conformance matrix uses it to pin the server's
+            // slow-consumer contract as an executable boundary.
+            if self.cli.tick_stall_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.cli.tick_stall_ms));
+            }
         }
     }
 
@@ -399,12 +491,46 @@ impl Orchestrator<'_> {
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
         }
+        wake = wake.min(self.next_ping_at);
+        if let Some(at) = self.pong_deadline {
+            wake = wake.min(at);
+        }
         wake
     }
 
     /// Fire due timers; returns `Some(exit_code)` when the run is over.
     async fn process_timers(&mut self) -> Result<Option<i32>, FatalError> {
         let now = Instant::now();
+
+        // Mandatory keepalive: send `Ping` on cadence and demand a timely
+        // `Pong`. An unanswered ping is a broken connection or control path —
+        // fail loudly rather than idle into the server's eviction.
+        //
+        // AT MOST ONE ping is outstanding at a time: a new `Ping` is sent only
+        // once the previous one's `Pong` has cleared the deadline. A single
+        // deadline then unambiguously tracks the single in-flight ping — a
+        // stale `Pong` can never clear the deadline of a newer, still-pending
+        // ping (the answer arrives while nothing is pending and is a no-op).
+        //
+        // The first deadline expiry only arms the drain grace
+        // (see PONG_DRAIN_GRACE): a `Pong` already sitting in the socket
+        // buffer gets one guaranteed read pass — the deadline check runs
+        // before the `select!` reads the socket — before the miss is fatal.
+        if self.pong_deadline.is_some_and(|at| now >= at) {
+            if self.pong_grace_applied {
+                return Err(FatalError::connection(format!(
+                    "server did not answer Ping within {PONG_TIMEOUT:?} (+{PONG_DRAIN_GRACE:?} drain grace)"
+                )));
+            }
+            self.pong_deadline = Some(now + PONG_DRAIN_GRACE);
+            self.pong_grace_applied = true;
+        }
+        if now >= self.next_ping_at && self.pong_deadline.is_none() {
+            self.send_message(&ClientMessage::Ping).await?;
+            self.next_ping_at = now + PING_INTERVAL;
+            self.pong_deadline = Some(now + PONG_TIMEOUT);
+            self.pong_grace_applied = false;
+        }
 
         if !self.relay_sent && self.relay_send_at.is_some_and(|at| now >= at) {
             self.send_relay_payload().await?;
@@ -529,7 +655,12 @@ impl Orchestrator<'_> {
             ServerMessage::Signal { from, signal } => {
                 self.handle_signal(from, signal).await?;
             }
-            ServerMessage::GameData { from_player, data } => {
+            // `..`: newer protocol revisions may stamp extra relay metadata
+            // (e.g. a per-connection delivery sequence) on GameData; this
+            // driver's contract only concerns the payload and its sender.
+            ServerMessage::GameData {
+                from_player, data, ..
+            } => {
                 if data.get("relay_msg").is_some() {
                     self.relay_received_from.insert(from_player);
                 }
@@ -597,7 +728,11 @@ impl Orchestrator<'_> {
                     self.maybe_send_start_game(all_ready).await?;
                 }
             }
-            ServerMessage::Pong => {}
+            ServerMessage::Pong => {
+                // Keepalive round-trip complete.
+                self.pong_deadline = None;
+                self.pong_grace_applied = false;
+            }
             other => {
                 tracing::debug!(message = ?other, "ignoring server message");
             }

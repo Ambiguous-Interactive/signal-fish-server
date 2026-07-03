@@ -123,6 +123,27 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Connections force-closed because their outbound queue stayed full past websocket.slow_consumer_timeout_ms",
         snapshot.connections.websocket_slow_consumer_disconnects,
     );
+    // Delivery conservation counters: together with the drop counter above,
+    // enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped
+    // at any quiescent point (drops also cover messages abandoned after enqueue).
+    counter(
+        &mut buf,
+        "signal_fish_websocket_delivery_attempts_total",
+        "Delivery attempts routed through the reliable delivery path (one per message per recipient)",
+        snapshot.connections.websocket_delivery_attempts,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_deliveries_enqueued_total",
+        "Delivery attempts enqueued on the recipient's outbound queue (fast path or after backpressure)",
+        snapshot.connections.websocket_deliveries_enqueued,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_deliveries_channel_closed_total",
+        "Delivery attempts that found the recipient's connection already closing (a normal disconnect race, not a delivery fault)",
+        snapshot.connections.websocket_deliveries_channel_closed,
+    );
 
     counter(
         &mut buf,
@@ -322,6 +343,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "signal_fish_reconnection_events_buffered_total",
         "Total lobby events buffered for reconnecting players",
         snapshot.reconnection.events_buffered,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_reconnection_events_evicted_total",
+        "Control events evicted from a replay ring while a reconnection was pending (that player's missed_events arrives truncated)",
+        snapshot.reconnection.events_evicted,
     );
     counter(
         &mut buf,
@@ -672,6 +699,110 @@ mod tests {
             rendered.contains("signal_fish_query_latency_samples_total 0"),
             "expected query latency sample counter"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_render_prometheus_metrics_includes_delivery_conservation_counters() {
+        let metrics = ServerMetrics::new();
+        // Drive each conservation counter to a distinct, non-default value so
+        // the rendered lines are unambiguous, shaped like a real trace: five
+        // attempts resolving as three enqueued, one channel-closed, and one
+        // slow-consumer drop (attempts == enqueued + channel_closed + dropped).
+        for _ in 0..5 {
+            metrics.increment_websocket_delivery_attempts();
+        }
+        for _ in 0..3 {
+            metrics.increment_websocket_deliveries_enqueued();
+        }
+        metrics.increment_websocket_deliveries_channel_closed();
+        metrics.increment_websocket_messages_dropped();
+
+        let snapshot = metrics.snapshot().await;
+        let rendered = render_prometheus_metrics(&snapshot);
+
+        // Exact HELP assertions keep operator semantics from drifting: these
+        // three counters (plus the drop counter) carry the delivery
+        // conservation law, so their meanings must stay precise.
+        let expectations = [
+            (
+                "signal_fish_websocket_delivery_attempts_total",
+                "Delivery attempts routed through the reliable delivery path (one per message per recipient)",
+                5u64,
+            ),
+            (
+                "signal_fish_websocket_deliveries_enqueued_total",
+                "Delivery attempts enqueued on the recipient's outbound queue (fast path or after backpressure)",
+                3,
+            ),
+            (
+                "signal_fish_websocket_deliveries_channel_closed_total",
+                "Delivery attempts that found the recipient's connection already closing (a normal disconnect race, not a delivery fault)",
+                1,
+            ),
+        ];
+
+        for (name, help, value) in expectations {
+            assert!(
+                rendered.contains(&format!("# HELP {name} {help}")),
+                "missing exact HELP line for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {name} counter")),
+                "missing TYPE counter line for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("{name} {value}")),
+                "missing value line `{name} {value}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_render_prometheus_metrics_includes_reconnection_replay_counters() {
+        let metrics = ServerMetrics::new();
+        // Drive the replay-ring counters to distinct, non-default values shaped
+        // like a real trace: five control events buffered while reconnections
+        // were pending, two of which the ring later evicted.
+        for _ in 0..5 {
+            metrics.add_reconnection_events_buffered(1);
+        }
+        metrics.add_reconnection_events_evicted(2);
+
+        let snapshot = metrics.snapshot().await;
+        let rendered = render_prometheus_metrics(&snapshot);
+
+        // Exact HELP assertions keep operator semantics from drifting: the
+        // eviction counter is the capacity alarm for `event_buffer_size`, so
+        // its meaning must stay precise.
+        let expectations = [
+            (
+                "signal_fish_reconnection_events_buffered_total",
+                "Total lobby events buffered for reconnecting players",
+                5u64,
+            ),
+            (
+                "signal_fish_reconnection_events_evicted_total",
+                "Control events evicted from a replay ring while a reconnection was pending (that player's missed_events arrives truncated)",
+                2,
+            ),
+        ];
+
+        for (name, help, value) in expectations {
+            assert!(
+                rendered.contains(&format!("# HELP {name} {help}")),
+                "missing exact HELP line for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {name} counter")),
+                "missing TYPE counter line for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("{name} {value}")),
+                "missing value line `{name} {value}`"
+            );
+        }
     }
 
     #[tokio::test]

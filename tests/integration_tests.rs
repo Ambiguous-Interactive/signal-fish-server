@@ -185,7 +185,9 @@ async fn test_game_data_exchange() {
         Ok(msg) => {
             println!("Player 2 received message: {msg:?}");
             match msg.as_ref() {
-                ServerMessage::GameData { from_player, data } => {
+                ServerMessage::GameData {
+                    from_player, data, ..
+                } => {
                     assert_eq!(*from_player, player1_id);
                     assert_eq!(data, &test_data);
                     println!("Received correct game data message!");

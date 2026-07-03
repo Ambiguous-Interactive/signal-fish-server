@@ -7,9 +7,22 @@
 use std::time::Duration;
 
 use clap::Parser;
-use signal_fish_reference_native::cli::Cli;
+use signal_fish_reference_native::cli::{Cli, RuntimeFlavor};
 use signal_fish_reference_native::client::{self, EXIT_HARD_TIMEOUT};
 use signal_fish_reference_native::events::{emit, Event};
+
+/// Build the tokio runtime per `--runtime`: the default multi-threaded
+/// flavor, or a single current-thread runtime for the starved-runtime
+/// conformance matrix (one executor thread that `--tick-stall-ms` can
+/// deliberately block).
+fn build_runtime(flavor: RuntimeFlavor) -> std::io::Result<tokio::runtime::Runtime> {
+    match flavor {
+        RuntimeFlavor::Multi => tokio::runtime::Runtime::new(),
+        RuntimeFlavor::Current => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+    }
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -22,7 +35,7 @@ fn main() {
         )
         .init();
 
-    let runtime = match tokio::runtime::Runtime::new() {
+    let runtime = match build_runtime(cli.runtime) {
         Ok(runtime) => runtime,
         Err(error) => {
             emit(&Event::Error {

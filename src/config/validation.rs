@@ -119,6 +119,20 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Message size cap validation. A zero cap would reject every inbound
+    // frame AND derive a zero transport-layer cap on the WebSocket upgrade
+    // (`2 * max_message_size`), so no message could ever be admitted. The
+    // signal-cap checks below happen to reject this transitively
+    // (`max_signal_bytes > 0` and `<= max_message_size` force a nonzero
+    // message cap), but the direct check keeps the diagnostic precise and the
+    // invariant independent of that coupling.
+    if config.security.max_message_size == 0 {
+        anyhow::bail!(
+            "security.max_message_size must be greater than 0: a zero cap rejects every \
+             WebSocket message before it can be processed"
+        );
+    }
+
     // Signal payload cap validation. `max_signal_bytes` larger than
     // `max_message_size` is rejected (not just warned about) because it is
     // contradictory dead config: a frame that large is rejected by the
@@ -290,6 +304,27 @@ mod tests {
             err.to_string()
                 .contains("Metrics authentication is enabled but no credentials are configured"),
             "error must explain the missing metrics credentials: {err}"
+        );
+    }
+
+    /// A zero `max_message_size` is contradictory dead config (every frame
+    /// rejected, zero transport cap derived on the upgrade) and must fail
+    /// startup with a diagnostic that names THIS knob — not a downstream
+    /// consequence like the signal-cap comparison.
+    #[test]
+    fn zero_max_message_size_is_rejected_with_a_direct_diagnostic() {
+        let mut config = Config::default();
+        // Quiet the unrelated metrics-credentials check so the failure below
+        // can only come from the knob under test.
+        config.security.require_metrics_auth = false;
+        config.security.max_message_size = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("max_message_size = 0 must be rejected at startup");
+        assert!(
+            err.to_string()
+                .contains("security.max_message_size must be greater than 0"),
+            "error must name security.max_message_size directly: {err}"
         );
     }
 

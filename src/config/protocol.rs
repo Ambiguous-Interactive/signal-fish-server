@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Highest protocol version this server build implements. Single source of truth
-/// for the `max_protocol_version` default and validation ceiling.
-pub const SERVER_MAX_PROTOCOL_VERSION: u16 = 3;
+/// for the `max_protocol_version` default and validation ceiling. v4 adds the
+/// server-stamped `GameData.seq` relay sequence and the opt-in `RelayStats`
+/// frame; deployments can clamp back to 3 via `protocol.max_protocol_version`.
+pub const SERVER_MAX_PROTOCOL_VERSION: u16 = 4;
 /// Lowest protocol version this server build still accepts (the v2 floor).
 pub const SERVER_MIN_PROTOCOL_VERSION: u16 = 2;
 
@@ -38,7 +40,7 @@ pub struct ProtocolConfig {
     /// Lowest protocol version this deployment accepts (the v2 floor; default 2).
     #[serde(default = "default_min_protocol_version")]
     pub min_protocol_version: u16,
-    /// Highest protocol version this deployment will negotiate (default 3).
+    /// Highest protocol version this deployment will negotiate (default 4).
     #[serde(default = "default_max_protocol_version")]
     pub max_protocol_version: u16,
     /// SDK compatibility manifest
@@ -382,7 +384,7 @@ mod protocol_version_tests {
     fn default_protocol_version_bounds() {
         let cfg = ProtocolConfig::default();
         assert_eq!(cfg.min_protocol_version, 2);
-        assert_eq!(cfg.max_protocol_version, 3);
+        assert_eq!(cfg.max_protocol_version, 4);
         assert_eq!(cfg.min_protocol_version, SERVER_MIN_PROTOCOL_VERSION);
         assert_eq!(cfg.max_protocol_version, SERVER_MAX_PROTOCOL_VERSION);
         assert!(cfg.validate().is_ok());
@@ -390,18 +392,46 @@ mod protocol_version_tests {
 
     #[test]
     fn negotiate_clamps_into_range() {
-        let cfg = ProtocolConfig::default(); // [2, 3]
+        let cfg = ProtocolConfig::default(); // [2, 4]
 
-        // v3 client + v3 server => 3
+        // v4 client + v4 server => 4
+        assert_eq!(cfg.negotiate_protocol_version(Some(4)), 4);
+        // v3 client stays v3 (never upgraded)
         assert_eq!(cfg.negotiate_protocol_version(Some(3)), 3);
         // client beyond server max => clamped to max
-        assert_eq!(cfg.negotiate_protocol_version(Some(9)), 3);
+        assert_eq!(cfg.negotiate_protocol_version(Some(9)), 4);
         // v2 client (None) => floor
         assert_eq!(cfg.negotiate_protocol_version(None), 2);
         // client below floor => raised to min
         assert_eq!(cfg.negotiate_protocol_version(Some(1)), 2);
         // exact floor
         assert_eq!(cfg.negotiate_protocol_version(Some(2)), 2);
+    }
+
+    /// Issue #136 (F6): the DEFAULT configuration must accept clients that
+    /// send no platform or an unregistered one (custom engines, the Rust
+    /// reference client). SDK platform/version enforcement is opt-in — a
+    /// deployment that flips `enforce` on regains the strict behavior.
+    #[test]
+    fn default_config_accepts_unregistered_and_missing_platforms() {
+        let cfg = SdkCompatibilityConfig::default();
+        assert!(
+            cfg.evaluate(None, None).is_ok(),
+            "platform: None must pass under the default (non-enforcing) config"
+        );
+        assert!(
+            cfg.evaluate(Some("rust"), Some("0.7.0")).is_ok(),
+            "an unregistered platform must pass under the default config"
+        );
+
+        let strict = SdkCompatibilityConfig {
+            enforce: true,
+            ..SdkCompatibilityConfig::default()
+        };
+        assert!(
+            strict.evaluate(Some("rust"), Some("0.7.0")).is_err(),
+            "opting in to enforcement restores the strict rejection"
+        );
     }
 
     #[test]

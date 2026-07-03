@@ -12,8 +12,17 @@
 //! room-scoped payload is either delivered to every connected peer (with
 //! backpressure applied to the sender when a recipient's queue is full) or the
 //! unresponsive recipient is loudly disconnected as a slow consumer.
+//!
+//! Every test in this binary carries `#[serial_test::serial]`: the wedged-
+//! socket test asserts on the process-wide `/proc/self/fd` table, which is
+//! only deterministic when no sibling test is churning sockets in the same
+//! process (plain `cargo test` runs a binary's tests concurrently in one
+//! process; under nextest each test is its own process and the lock is a
+//! no-op). Serializing also keeps these deliberately flood-heavy tests from
+//! CPU-starving each other on loaded runners.
 
 mod test_helpers;
+mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::ProtocolConfig;
@@ -25,6 +34,7 @@ use std::sync::Arc;
 use test_helpers::{create_test_server, create_test_server_with_config};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::{assert_message_conservation, connect_with_small_recv_buffer};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -175,8 +185,10 @@ fn assert_complete_and_ordered(seqs: &[u64], expected: usize, who: &str) {
 /// order. With the old drop-based bounded queue this fails within the first
 /// few hundred messages; with backpressure it must hold for any burst size.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn game_data_burst_is_relayed_completely_and_in_order() {
     let server = create_test_server().await;
+    let metrics = server.metrics();
     let addr = start_server(server).await;
 
     let (mut sender_sink, mut sender_rx) = connect(addr).await;
@@ -233,12 +245,17 @@ async fn game_data_burst_is_relayed_completely_and_in_order() {
 
     assert_complete_and_ordered(&seqs_a, BURST_MESSAGE_COUNT, "receiver A");
     assert_complete_and_ordered(&seqs_b, BURST_MESSAGE_COUNT, "receiver B");
+
+    // Both receivers observed the full burst, so every delivery has resolved:
+    // the conservation counters must balance.
+    assert_message_conservation(&metrics).await;
 }
 
 /// A recipient that stops draining its socket entirely must be disconnected
 /// as a slow consumer — loudly (metrics, close) — while the rest of the room
 /// keeps flowing and the sender is never wedged behind the dead connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
     // Small queue + short grace window so the stalled recipient is evicted
     // quickly; large payloads so the burst cannot hide in kernel TCP buffers.
@@ -377,12 +394,243 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
         }
         Err(_elapsed) => panic!("stalled client's socket was never closed by the server"),
     }
+
+    // Everything has quiesced (burst delivered, stalled socket closed):
+    // attempts must balance against enqueues, disconnect races, and drops.
+    assert_message_conservation(&metrics).await;
 }
 
-/// Deterministic backpressure check at the coordinator level (no sockets, no
-/// timing): with a tiny recipient queue, a burst must wait for the consumer
-/// (counted as backpressure) and still deliver every message in order.
+/// A stalled recipient whose kernel receive window is already full must be
+/// preempted even while the server's socket write is wedged mid-frame — and
+/// the eviction must actually reclaim the connection's resources.
+///
+/// The stalled client connects with a deliberately tiny `SO_RCVBUF` (clamped
+/// BEFORE the TCP connect) and then stops reading, so the server's send task
+/// wedges inside a socket write after a few kilobytes — precisely the state
+/// the close-preemption `select!` in the send task exists for. Asserted via
+/// metric/gauge polling with generous deadlines (never byte counts — the
+/// kernel doubles `SO_RCVBUF` and buffer sizes vary by platform):
+///
+/// 1. the stall is detected and counted (`slow_consumer_disconnects >= 1`)
+///    while the healthy peer keeps receiving (the room keeps flowing);
+/// 2. the active-connections gauge returns to its pre-stall baseline within
+///    the slow-consumer timeout + the bounded close writes
+///    (`CLOSE_WRITE_TIMEOUT`, 1s each for farewell and close handshake) +
+///    generous scheduling margin;
+/// 3. (Linux only) the process's open-fd count returns to its pre-stall
+///    baseline — the wedged socket's file descriptor is genuinely released,
+///    not leaked to a zombie task;
+/// 4. the stalled client, once it resumes reading, observes termination
+///    (close frame, EOF, or error — any is acceptable) rather than hanging.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn wedged_socket_write_is_preempted_and_fd_released() {
+    /// Sized so a handful of messages saturate the clamped client window and
+    /// the server-side socket buffer (≤64KB effective) while staying well
+    /// under `max_message_size` (64KB default).
+    const WEDGE_PADDING_BYTES: usize = 12 * 1_024;
+    /// Requested client `SO_RCVBUF`; the kernel doubles it, which is why all
+    /// assertions below are metric-driven rather than byte-count-driven.
+    const STALLED_RECV_BUFFER_BYTES: u32 = 4_096;
+    /// Hard cap on the flood so a broken eviction path fails the test loudly
+    /// instead of flooding forever (reached only when eviction never happens).
+    const FLOOD_MESSAGE_CAP: u64 = 50_000;
+    /// Reclaim deadline: slow_consumer_timeout (300ms) + two bounded close
+    /// writes (1s CLOSE_WRITE_TIMEOUT each: farewell frame, close handshake)
+    /// + generous margin for oversubscribed runners. A ceiling, not an
+    /// expected wait — polling returns the instant the state holds.
+    const RECLAIM_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(15);
+
+    let mut server_config = ServerConfig::default();
+    server_config.websocket_config.send_queue_capacity = 8;
+    server_config.websocket_config.slow_consumer_timeout_ms = 300;
+    let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
+    let metrics = server.metrics();
+    let addr = start_server(server).await;
+
+    // Healthy receiver and sender join first: their connections (and fds)
+    // define the pre-stall baseline that eviction must restore.
+    let (mut healthy_sink, mut healthy_rx) = connect(addr).await;
+    let (mut sender_sink, mut sender_rx) = connect(addr).await;
+    join_room(&mut healthy_sink, &mut healthy_rx, "WedgeHealthy").await;
+    join_room(&mut sender_sink, &mut sender_rx, "WedgeSender").await;
+
+    let baseline_active_connections = metrics.active_connections.load(Ordering::Relaxed);
+    #[cfg(target_os = "linux")]
+    let baseline_fd_count = count_open_fds();
+
+    // The stalled client: tiny receive window, joins, then never reads again
+    // until the server has torn it down.
+    let stalled_ws = connect_with_small_recv_buffer(addr, STALLED_RECV_BUFFER_BYTES).await;
+    let (mut stalled_sink, mut stalled_rx) = stalled_ws.split();
+    let stalled_player_id =
+        join_room_returning_id(&mut stalled_sink, &mut stalled_rx, "WedgeStalled").await;
+
+    // Flood GameData until the eviction is visible in metrics (metric-driven
+    // stop; the cap only bites if eviction is broken). Each relayed message
+    // pushes ~12KB toward the stalled client's saturated window.
+    let writer_metrics = Arc::clone(&metrics);
+    let writer = tokio::spawn(async move {
+        let padding = "x".repeat(WEDGE_PADDING_BYTES);
+        let mut sent: u64 = 0;
+        while writer_metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed)
+            == 0
+            && sent < FLOOD_MESSAGE_CAP
+        {
+            let message = ClientMessage::GameData {
+                data: serde_json::json!({ "seq": sent, "padding": padding.as_str() }),
+            };
+            let json = serde_json::to_string(&message).expect("serialize GameData");
+            sender_sink
+                .send(Message::Text(json.into()))
+                .await
+                .expect("send GameData while a peer's socket is wedged");
+            sent += 1;
+        }
+        (sender_sink, sent)
+    });
+
+    // The healthy receiver must keep flowing during the stall and observe the
+    // stalled player's eviction (PlayerLeft via the normal disconnect flow).
+    let healthy_reader = tokio::spawn(async move {
+        let mut game_data_received: u64 = 0;
+        loop {
+            let Some(frame) = healthy_rx.next().await else {
+                panic!(
+                    "healthy receiver closed early (after {game_data_received} GameData messages)"
+                );
+            };
+            let frame = frame.expect("healthy receiver websocket error");
+            let Message::Text(text) = frame else { continue };
+            let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
+            match message {
+                ServerMessage::GameData { .. } => game_data_received += 1,
+                ServerMessage::PlayerLeft { player_id } if player_id == stalled_player_id => {
+                    return (game_data_received, healthy_rx);
+                }
+                ServerMessage::Error {
+                    message,
+                    error_code,
+                } => panic!("healthy receiver got server error: {message} ({error_code:?})"),
+                _ => continue,
+            }
+        }
+    });
+
+    // (1) Eviction detected: both tasks complete under a generous deadline —
+    // the writer stops on the disconnect metric, the healthy reader on the
+    // PlayerLeft broadcast — proving the wedged write never blocked either.
+    let deadline = tokio::time::Duration::from_secs(60);
+    let (writer_result, healthy_result) =
+        tokio::time::timeout(deadline, async { tokio::join!(writer, healthy_reader) })
+            .await
+            .expect("wedged-socket test exceeded its deadline (eviction never happened?)");
+    let (_sender_sink, sent) = writer_result.expect("flood writer task panicked");
+    let (healthy_game_data, _healthy_rx) = healthy_result.expect("healthy reader task panicked");
+    assert!(
+        sent < FLOOD_MESSAGE_CAP,
+        "flood cap reached without a slow-consumer disconnect being recorded"
+    );
+    assert!(
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed)
+            >= 1,
+        "the wedged connection must be evicted as a slow consumer"
+    );
+    assert!(
+        healthy_game_data >= 1,
+        "the healthy receiver must keep receiving while a peer's socket is wedged"
+    );
+
+    // (2) The connection is reclaimed: the active-connections gauge returns to
+    // its pre-stall baseline even though the socket write was wedged mid-frame
+    // (the close request preempts the write inside the send task's select).
+    let reclaim_deadline = tokio::time::Instant::now() + RECLAIM_DEADLINE;
+    loop {
+        let active = metrics.active_connections.load(Ordering::Relaxed);
+        if active <= baseline_active_connections {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < reclaim_deadline,
+            "active connections never returned to the pre-stall baseline: \
+             {active} > {baseline_active_connections}"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+
+    // (4, before 3 so the client-side fd is released too) The stalled client
+    // resumes reading and must observe termination — close frame, EOF, or
+    // error, anything but a hang.
+    let stalled_termination =
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), async move {
+            loop {
+                match stalled_rx.next().await {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => continue,
+                }
+            }
+            stalled_rx
+        })
+        .await;
+    let stalled_rx = match stalled_termination {
+        Ok(stalled_rx) => stalled_rx,
+        Err(_elapsed) => {
+            panic!("stalled client never observed termination after resuming reads")
+        }
+    };
+    drop(stalled_rx);
+    drop(stalled_sink);
+
+    // (3) Linux only: the wedged socket's file descriptor is genuinely
+    // released back to the process. Serialized test execution (see the module
+    // doc) keeps the process-wide fd table deterministic here.
+    #[cfg(target_os = "linux")]
+    {
+        let fd_deadline = tokio::time::Instant::now() + RECLAIM_DEADLINE;
+        loop {
+            let fd_count = count_open_fds();
+            if fd_count <= baseline_fd_count {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < fd_deadline,
+                "open fd count never returned to the pre-stall baseline: \
+                 {fd_count} > {baseline_fd_count}"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    // Everything has quiesced (flood finished, eviction completed, stalled
+    // socket torn down): the conservation counters must balance.
+    assert_message_conservation(&metrics).await;
+}
+
+/// Count this process's open file descriptors via `/proc/self/fd`.
+///
+/// The `read_dir` handle itself briefly adds one entry, but it does so for
+/// the baseline and the polled samples alike, so comparisons stay exact.
+#[cfg(target_os = "linux")]
+fn count_open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("read /proc/self/fd")
+        .count()
+}
+
+/// Coordinator-level check against in-process delivery channels — NOT
+/// real-socket evidence. The "clients" here are bare `register_client` mpsc
+/// handles with no WebSocket, no TCP, and no kernel buffers, so this pins the
+/// coordinator's backpressure accounting deterministically: with a tiny
+/// recipient queue, a burst must wait for the consumer (counted as
+/// backpressure) and still deliver every message in order. The socket-level
+/// version of this contract is covered by the real-socket tests above and by
+/// [`wedged_socket_write_is_preempted_and_fd_released`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn backpressure_delivers_every_message_in_order_without_disconnecting() {
     const MESSAGE_COUNT: usize = 10;
 
@@ -474,12 +722,23 @@ async fn backpressure_delivers_every_message_in_order_without_disconnecting() {
         0,
         "a consumer that drains within the grace window must not be disconnected"
     );
+
+    // The flood completed and the receiver drained every message, so all
+    // deliveries have resolved: the conservation counters must balance.
+    assert_message_conservation(&metrics).await;
 }
 
-/// Deterministic slow-consumer check at the coordinator level: a recipient
-/// that never drains is pruned after the grace window, senders complete
-/// promptly afterwards, and the loss is visible in metrics.
+/// Coordinator-level check against in-process delivery channels — NOT
+/// real-socket evidence. The unresponsive "recipient" is a bare
+/// `register_client` mpsc handle that is never read (no WebSocket, no TCP, no
+/// kernel buffers), pinning the coordinator's pruning deterministically: a
+/// recipient that never drains is pruned after the grace window, senders
+/// complete promptly afterwards, and the loss is visible in metrics. The
+/// socket-level version of this contract — a real wedged socket write being
+/// preempted — is covered by
+/// [`wedged_socket_write_is_preempted_and_fd_released`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn unresponsive_recipient_is_pruned_without_blocking_senders() {
     let mut server_config = ServerConfig::default();
     server_config.websocket_config.slow_consumer_timeout_ms = 100;
@@ -543,6 +802,10 @@ async fn unresponsive_recipient_is_pruned_without_blocking_senders() {
             >= 1,
         "the full queue must have been recorded as backpressure first"
     );
+
+    // All six sends have returned (the timeout above proved it), so every
+    // delivery has resolved: the conservation counters must balance.
+    assert_message_conservation(&metrics).await;
 }
 
 /// Empty a receiver of join-time notifications. `Empty` is the expected

@@ -17,6 +17,21 @@ Functions modeled (faithful to the Rust source — anchors are stable):
    ``all_support`` :175, ``is_valid_pair`` :297)
 - ``elect_host``                        — src/server/session_policy.rs:372
 - ``local_initiates`` (glare rule)      — src/server/signaling.rs:60
+- replay truncation predicate           — src/reconnection.rs
+  (``get_missed_events``'s ``evicted_watermark > last_sequence`` over
+   ``EventBuffer::push``'s max-evicted watermark invariant)
+- ``negotiate_protocol_version``        — src/config/protocol.rs:87
+- per-(sender, room) relay stamping     — the protocol v4 sequencing design
+  (``stamp = counter + 1``; leave/rejoin resets the counter to 0)
+- delivery-contract counter deltas      — src/coordination/mod.rs
+  (``deliver_or_disconnect`` + ``finalize_closed_connection``; the SMT twin
+   of ``formal/tla/DeliveryContract.tla``'s ``Conservation`` invariant)
+
+Every obligation is an ``unsat`` proof except one deliberate EXISTENCE check:
+``naive_gap_predicate_unsound`` (set F) asserts a scenario and expects ``sat``,
+exhibiting the interleaved-rooms witness that makes any sequence-GAP-based
+truncation predicate lie — the SMT twin of ``formal/tla/ReconnectReplay.tla``'s
+``NaiveGapPredicateBug`` counterexample, proving the watermark design necessary.
 
 Run: ``python3 formal/z3/protocol_invariants.py`` (needs the ``z3`` module;
 the dev container installs ``python3-z3``). CI: formal-verification.yml.
@@ -30,6 +45,7 @@ from z3 import (
     And,
     Bool,
     Distinct,
+    Exists,
     ForAll,
     Function,
     If,
@@ -41,6 +57,7 @@ from z3 import (
     Solver,
     Xor,
     BoolSort,
+    sat,
     unsat,
 )
 
@@ -60,6 +77,22 @@ def prove(name: str, solver: Solver) -> None:
         print(f"  FAIL  {name}  ({result})")
         if result.__repr__() == "sat":
             print(f"        counterexample: {solver.model()}")
+
+
+def witness(name: str, solver: Solver) -> None:
+    """An EXISTENCE obligation passes iff the scenario is sat (witness printed).
+
+    The dual of :func:`prove`: used where the property IS the existence of a
+    counterexample to a rejected design (a deliberately-wrong predicate must be
+    demonstrably wrong, so the accepted design is demonstrably necessary).
+    """
+    result = solver.check()
+    if result == sat:
+        print(f"  PASS  {name}")
+        print(f"        witness: {solver.model()}")
+    else:
+        _FAILURES.append(name)
+        print(f"  FAIL  {name}  (expected sat, got {result})")
 
 
 # ---------------------------------------------------------------------------
@@ -291,12 +324,271 @@ def proof_set_d() -> None:
     prove("D2 a seated authority is the unambiguous host (distinct ids)", s)
 
 
+# ---------------------------------------------------------------------------
+# Proof set E — the replay truncation predicate (src/reconnection.rs).
+# `get_missed_events` reports `truncated` iff
+# `evicted_watermark.is_some_and(|w| w > last_sequence)`. The watermark is
+# maintained by `EventBuffer::push` as the MAXIMUM sequence ever evicted
+# (`Option` modeled as has_watermark:Bool x wm:Int; the max-invariant is the
+# TLA+ `WatermarkIsMaxEvicted` ghost coupling in formal/tla/ReconnectReplay.tla).
+# Under that invariant the implementation predicate is proved EQUIVALENT to the
+# spec-level definition "an evicted event with seq > last_sequence exists" —
+# sound (never cries truncation) and complete (never hides one) over unbounded
+# sequence spaces.
+# ---------------------------------------------------------------------------
+def proof_set_e() -> None:
+    print("Proof set E — replay truncation predicate (watermark, reconnection.rs)")
+    evicted = Function("evicted", IntSort(), BoolSort())  # seq -> was evicted
+    has_wm, wm, last = Bool("has_wm"), Int("wm"), Int("last_seq")
+    seq = Int("seq")
+
+    # EventBuffer::push maintains: watermark = max evicted sequence, None iff
+    # nothing was ever evicted; global sequence numbers start at 1.
+    watermark_is_max_evicted = And(
+        Implies(Not(has_wm), ForAll([seq], Not(evicted(seq)))),
+        Implies(
+            has_wm,
+            And(
+                wm >= 1,
+                evicted(wm),
+                ForAll([seq], Implies(evicted(seq), seq <= wm)),
+            ),
+        ),
+    )
+
+    # E1: implementation <=> specification, for every watermark/last_sequence.
+    s = Solver()
+    s.add(watermark_is_max_evicted, last >= 0)
+    implementation = And(has_wm, wm > last)
+    specification = Exists([seq], And(evicted(seq), seq > last))
+    s.add(Not(implementation == specification))
+    prove("E1 watermark truncation predicate is sound AND complete", s)
+
+
+# ---------------------------------------------------------------------------
+# Proof set F — the rejected gap-based truncation predicate is UNSOUND.
+# The one deliberate EXISTENCE obligation (expects sat, prints the witness):
+# with the GLOBAL `next_sequence` counter shared across rooms
+# (src/reconnection.rs), a naive predicate `oldest_retained_seq >
+# last_sequence + 1` reports truncation for a replay from which NOTHING was
+# evicted — another room's interleaved events consumed the intervening global
+# sequence numbers. The SMT twin of formal/tla/ReconnectReplay.tla's
+# `NaiveGapPredicateBug` TLC counterexample; together with E1 this proves the
+# watermark design necessary, not merely sufficient.
+# ---------------------------------------------------------------------------
+def proof_set_f() -> None:
+    print("Proof set F — naive gap predicate unsound (existence witness)")
+    n = 3  # three interleaved global events are enough
+    in_room_a = [Bool(f"seq{i}_in_room_a") for i in range(1, n + 1)]
+    last = Int("last_seq")
+    oldest_retained = Int("oldest_retained")
+
+    s = Solver()
+    s.add(last >= 0, last <= n)
+    # The pending player's room (A) recorded at least one event, and its ring
+    # was never full: NOTHING was evicted, so every room-A event is retained
+    # and the spec-level truncation is FALSE by construction.
+    s.add(Or(*in_room_a))
+    # oldest_retained is the smallest global sequence recorded in room A.
+    s.add(
+        Or(
+            *[
+                And(
+                    in_room_a[i],
+                    oldest_retained == i + 1,
+                    *[Not(in_room_a[j]) for j in range(i)],
+                )
+                for i in range(n)
+            ]
+        )
+    )
+    # The naive predicate cries truncation anyway.
+    s.add(oldest_retained > last + 1)
+    witness("F1 interleaved rooms make the gap predicate cry false truncation", s)
+
+
+# ---------------------------------------------------------------------------
+# Proof set G — protocol version negotiation clamp
+# (src/config/protocol.rs `negotiate_protocol_version`):
+#   client_max.unwrap_or(min_protocol_version)
+#             .min(max_protocol_version)
+#             .max(min_protocol_version)
+# Quantified over every server range validated by `ProtocolConfig::validate`
+# with the v4 ceiling (2 <= min <= max <= 4) and every client request
+# (including the omitted-version v2 default).
+# ---------------------------------------------------------------------------
+def proof_set_g() -> None:
+    print("Proof set G — negotiate_protocol_version clamp")
+    has_client, client = Bool("has_client"), Int("client_req")
+    smin, smax = Int("server_min"), Int("server_max")
+
+    def zmin(a, b):
+        return If(a <= b, a, b)
+
+    def zmax(a, b):
+        return If(a >= b, a, b)
+
+    # Exact mirror of the Rust expression, including the unwrap_or default.
+    negotiated = zmax(zmin(If(has_client, client, smin), smax), smin)
+    valid_range = And(smin >= 2, smax <= 4, smin <= smax)
+    valid_client = client >= 0  # u16 domain
+
+    # G1: the result always lands inside the served range.
+    s = Solver()
+    s.add(valid_range, valid_client)
+    s.add(Not(And(negotiated >= smin, negotiated <= smax)))
+    prove("G1 negotiated version always lands in [min, max]", s)
+
+    # G2: an in-range client request is honored exactly (never up/downgraded).
+    s = Solver()
+    s.add(valid_range, valid_client, has_client, client >= smin, client <= smax)
+    s.add(Not(negotiated == client))
+    prove("G2 an in-range client request is negotiated verbatim", s)
+
+    # G3: an omitted version is a pure-v2 client — negotiated to the floor.
+    s = Solver()
+    s.add(valid_range, Not(has_client))
+    s.add(Not(negotiated == smin))
+    prove("G3 an omitted client version negotiates to the server floor", s)
+
+    # G4: out-of-range requests clamp to the violated bound (never elsewhere).
+    s = Solver()
+    s.add(valid_range, valid_client, has_client)
+    clamped = And(
+        Implies(client > smax, negotiated == smax),
+        Implies(client < smin, negotiated == smin),
+    )
+    s.add(Not(clamped))
+    prove("G4 out-of-range requests clamp to the violated bound", s)
+
+
+# ---------------------------------------------------------------------------
+# Proof set H — v4 per-(sender, room) stamp discipline (the sequencing design
+# model-checked in formal/tla/SequencedRelay.tla): the server stamps
+# `seq = counter + 1` and then stores the stamp back as the counter, so the
+# k-th message of an epoch carries stamp k; a leave/rejoin resets the counter
+# to 0 (a new epoch). Proves per-epoch strict monotonicity AND contiguity —
+# the property that makes a recipient-observed gap evidence of an eviction
+# bracket rather than a stamping artifact.
+# ---------------------------------------------------------------------------
+def proof_set_h() -> None:
+    print("Proof set H — v4 sequence stamping (per-epoch monotone + contiguous)")
+    counter = Int("counter")
+
+    def stamp(c):
+        return c + 1
+
+    # H1: within an epoch, consecutive stamps are strictly increasing and
+    # contiguous (stamp_{n+1} = stamp_n + 1) for every counter state.
+    s = Solver()
+    s.add(counter >= 0)
+    step = And(
+        stamp(counter + 1) == stamp(counter) + 1,
+        stamp(counter + 1) > stamp(counter),
+    )
+    s.add(Not(step))
+    prove("H1 successive stamps are contiguous and strictly increasing", s)
+
+    # H2: every stamp is >= 1 and a reset epoch starts at exactly 1 — no
+    # epoch can emit a stamp that collides with "never received" (0).
+    s = Solver()
+    s.add(counter >= 0)
+    s.add(Not(And(stamp(counter) >= 1, stamp(0) == 1)))
+    prove("H2 stamps start at 1 after every reset and never reach 0", s)
+
+
+# ---------------------------------------------------------------------------
+# Proof set I — conservation closure of the delivery contract
+# (src/coordination/mod.rs `deliver_or_disconnect` +
+# src/websocket/connection.rs `finalize_closed_connection`; the SMT twin of
+# formal/tla/DeliveryContract.tla's `Conservation` invariant). For EVERY
+# transition of the contract, the counter deltas preserve
+#   attempts = queued + written + dropped + channel_closed + in_flight
+# over unbounded counter values (TLC checks it for tiny budgets; this closes
+# the ledger for all of them).
+# ---------------------------------------------------------------------------
+def proof_set_i() -> None:
+    print("Proof set I — delivery-contract conservation closure")
+    attempts, queued, written = Int("attempts"), Int("queued"), Int("written")
+    dropped, ch_closed, in_flight = Int("dropped"), Int("ch_closed"), Int("in_flight")
+
+    def conserved(a, q, w, d, c, f):
+        return a == q + w + d + c + f
+
+    nonneg = And(
+        attempts >= 0, queued >= 0, written >= 0,
+        dropped >= 0, ch_closed >= 0, in_flight >= 0,
+    )
+    pre = conserved(attempts, queued, written, dropped, ch_closed, in_flight)
+
+    def closes(name, guard, a, q, w, d, c, f):
+        s = Solver()
+        s.add(nonneg, pre, guard)
+        s.add(Not(conserved(a, q, w, d, c, f)))
+        prove(name, s)
+
+    # I1 fast enqueue: try_send succeeds (attempt + queued).
+    closes(
+        "I1 fast enqueue preserves conservation",
+        True,
+        attempts + 1, queued + 1, written, dropped, ch_closed, in_flight,
+    )
+    # I2 backpressured attempt parks in send().await (attempt + in-flight).
+    closes(
+        "I2 backpressured park preserves conservation",
+        True,
+        attempts + 1, queued, written, dropped, ch_closed, in_flight + 1,
+    )
+    # I3 the parked send lands once a slot frees.
+    closes(
+        "I3 parked enqueue preserves conservation",
+        in_flight >= 1,
+        attempts, queued + 1, written, dropped, ch_closed, in_flight - 1,
+    )
+    # I4 try_send against a dropped receiver resolves ChannelClosed.
+    closes(
+        "I4 channel-closed attempt preserves conservation",
+        True,
+        attempts + 1, queued, written, dropped, ch_closed + 1, in_flight,
+    )
+    # I5 the receiver drops while a send is parked.
+    closes(
+        "I5 parked channel-closed preserves conservation",
+        in_flight >= 1,
+        attempts, queued, written, dropped, ch_closed + 1, in_flight - 1,
+    )
+    # I6 the grace window expires: the parked message drops with the close.
+    closes(
+        "I6 grace-expiry drop preserves conservation",
+        in_flight >= 1,
+        attempts, queued, written, dropped + 1, ch_closed, in_flight - 1,
+    )
+    # I7 the writer drains one queued message to the socket.
+    closes(
+        "I7 writer drain preserves conservation",
+        queued >= 1,
+        attempts, queued - 1, written + 1, dropped, ch_closed, in_flight,
+    )
+    # I8 close-finish: finalize bulk-drops the ENTIRE remaining queue
+    # (dropped += queued, queued := 0) — for every queue length at once.
+    closes(
+        "I8 close-finish bulk drop preserves conservation",
+        True,
+        attempts, 0, written, dropped + queued, ch_closed, in_flight,
+    )
+
+
 def main() -> int:
-    print("Z3 proofs — Signal Fish protocol v3 pure-logic invariants\n")
+    print("Z3 proofs — Signal Fish protocol pure-logic invariants\n")
     proof_set_a()
     proof_set_b()
     proof_set_c()
     proof_set_d()
+    proof_set_e()
+    proof_set_f()
+    proof_set_g()
+    proof_set_h()
+    proof_set_i()
     print()
     if _FAILURES:
         print(f"RESULT: {len(_FAILURES)} proof(s) FAILED: {', '.join(_FAILURES)}")

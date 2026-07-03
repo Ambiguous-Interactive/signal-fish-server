@@ -144,7 +144,14 @@ async fn finalize_closed_connection(
                 }
             }
         }
-        Some(CloseReason::Unregistered) | None => {
+        Some(
+            CloseReason::Shutdown
+            | CloseReason::AuthTimeout
+            | CloseReason::ActivityTimeout
+            | CloseReason::IdleTimeout
+            | CloseReason::Unregistered,
+        )
+        | None => {
             // Drain whatever is already buffered and flush it, bounded by the
             // close-write budget: an unregistered connection is usually
             // healthy (flush completes in milliseconds), but if its socket is
@@ -192,6 +199,31 @@ async fn finalize_closed_connection(
                     );
                 }
             }
+        }
+    }
+
+    // Semantic close frame (issue #136, F1): the farewell `Error` above is
+    // best-effort and may never survive the congested socket it escapes, but
+    // the close frame's code travels in the closing handshake itself, so a
+    // client that observes only the stream termination can still attribute
+    // it (4001 auth timeout, 4002 slow consumer, 4003 activity timeout,
+    // 4004 idle timeout; plain unregistration closes with a normal 1000).
+    // A `None` reason — every close signal clone dropped without an explicit
+    // request, i.e. the connection was simply unregistered everywhere — is
+    // the same normal closure, so the coded frame is TOTAL over server-side
+    // teardowns: no path falls back to a bare, code-less close.
+    let reason = reason.unwrap_or(CloseReason::Unregistered);
+    let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: reason.websocket_close_code(),
+        reason: reason.close_frame_reason().into(),
+    }));
+    match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::debug!(%player_id, error = %err, "Failed to write semantic close frame");
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%player_id, "Timed out writing semantic close frame");
         }
     }
 
@@ -278,9 +310,11 @@ pub(super) async fn handle_socket(
 
     // One close signal per connection: the delivery layer requests closes
     // through its registered handle (slow consumer) or via unregistration;
-    // both socket tasks listen and tear the connection down.
+    // both socket tasks listen and tear the connection down (as does the
+    // optional RelayStats ticker spawned below).
     let (close_signal, close_listener) = ConnectionCloseSignal::channel();
     let mut send_task_close = close_listener.clone();
+    let stats_task_close = close_listener.clone();
     let mut receive_task_close = close_listener;
 
     // Keep a clone of tx for sending auth responses
@@ -341,6 +375,79 @@ pub(super) async fn handle_socket(
     let auth_timeout = Duration::from_secs(server.config().websocket_config.auth_timeout_secs);
 
     let effective_player_id = Arc::new(RwLock::new(player_id));
+
+    // Periodic per-connection RelayStats emission (protocol v4, opt-in via
+    // `websocket.delivery_stats_interval_secs`; default 0 = disabled, so no
+    // task is spawned at all). The v4 gate is enforced at EMISSION on every
+    // tick — a pre-v4 connection on a stats-enabled deployment never observes
+    // the frame — and re-reads the effective player id so the ticker follows
+    // a reconnection reassignment.
+    let delivery_stats_interval_secs = server
+        .config()
+        .websocket_config
+        .delivery_stats_interval_secs;
+    if delivery_stats_interval_secs > 0 {
+        let server_for_stats = server.clone();
+        let stats_tx = tx_clone.clone();
+        let effective_player_id_for_stats = Arc::clone(&effective_player_id);
+        let mut stats_task_close = stats_task_close;
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(Duration::from_secs(delivery_stats_interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // An interval's first tick resolves immediately; consume it so
+            // frames arrive one full interval after the connection starts.
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    reason = stats_task_close.closed() => {
+                        tracing::debug!(?reason, "Connection closing; ending RelayStats emission");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        let current_player_id = *effective_player_id_for_stats.read().await;
+                        if !server_for_stats.client_supports_v4(&current_player_id) {
+                            continue;
+                        }
+                        let Some(stats) = server_for_stats
+                            .metrics()
+                            .connection_delivery_stats(&current_player_id)
+                        else {
+                            continue;
+                        };
+                        use std::sync::atomic::Ordering;
+                        let message = ServerMessage::RelayStats {
+                            interval_ms: delivery_stats_interval_secs * 1_000,
+                            sent_to_you: stats.sent_to_you.load(Ordering::Relaxed),
+                            dropped_for_you: stats.dropped_for_you.load(Ordering::Relaxed),
+                            backpressure_events: stats
+                                .backpressure_events
+                                .load(Ordering::Relaxed),
+                        };
+                        // Advisory frame on the connection's own queue: the
+                        // counters are cumulative, so a frame skipped under
+                        // load loses nothing — never wait on (or escalate
+                        // over) a full queue, and never count the frame in
+                        // the statistics it reports.
+                        match stats_tx.try_send(Arc::new(message)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::debug!(
+                                    %current_player_id,
+                                    "RelayStats frame skipped: outbound queue full"
+                                );
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        // No ticker: the pre-cloned listener is simply unused (a watch
+        // receiver clone; dropping it here keeps intent explicit).
+        drop(stats_task_close);
+    }
 
     // Spawn task to handle outgoing messages
     let server_clone = server.clone();
@@ -463,34 +570,31 @@ pub(super) async fn handle_socket(
         // while a socket write error abandons whatever is still buffered with
         // the dead connection — count that instead of losing it silently from
         // an observability standpoint.
-        match close_request {
-            Some(reason) => {
-                let current_player_id = *effective_player_id_for_send.read().await;
-                finalize_closed_connection(
-                    &mut sender,
-                    &mut rx,
-                    &mut batcher,
-                    reason,
-                    &current_player_id,
-                    &server_clone,
-                )
-                .await;
-            }
-            None => {
-                let abandoned = rx.len() + batcher.len();
-                if abandoned > 0 {
-                    server_clone
-                        .metrics()
-                        .add_websocket_messages_dropped(abandoned as u64);
-                    let current_player_id = *effective_player_id_for_send.read().await;
-                    tracing::warn!(
-                        player_id = %current_player_id,
-                        abandoned_messages = abandoned,
-                        "Connection ended with a failed socket write; abandoning its buffered messages"
-                    );
-                }
-            }
-        }
+        // The write loop can end on its own (queue senders dropped by
+        // unregistration) in the same instant a close reason was requested;
+        // the unbiased select above may then have taken the loop-ended arm.
+        // Resolve the close reason and ALWAYS finalize through the one path,
+        // so every server-side teardown gets its bounded flush, honest drop
+        // accounting, and a SEMANTIC close frame — never a bare, code-less
+        // close. The reason is: the select's own outcome if a close was
+        // requested; else a reason requested in the same instant the write
+        // loop ended on its own (the first-wins race the peek closes); else
+        // `None` for a plain rx-closed shutdown (all delivery handles dropped
+        // by unregistration), which `finalize_closed_connection` maps to the
+        // normal `Unregistered` closure (WebSocket code 1000).
+        let reason = close_request
+            .flatten()
+            .or_else(|| send_task_close.requested_reason());
+        let current_player_id = *effective_player_id_for_send.read().await;
+        finalize_closed_connection(
+            &mut sender,
+            &mut rx,
+            &mut batcher,
+            reason,
+            &current_player_id,
+            &server_clone,
+        )
+        .await;
 
         // Cleanup when send task ends
         let current_player_id = *effective_player_id_for_send.read().await;
@@ -574,6 +678,10 @@ pub(super) async fn handle_socket(
                                 },
                                 "idle timeout error",
                             );
+                            // Pin the IdleTimeout close code (4004) before the
+                            // teardown's generic unregistration reason could
+                            // win the first-wins race.
+                            close_signal.request_close(CloseReason::IdleTimeout);
                             break;
                         }
                     }
@@ -612,6 +720,10 @@ pub(super) async fn handle_socket(
                             },
                             "authentication timeout",
                         );
+                        // Pin the AuthTimeout close code (4001) before the
+                        // teardown's generic unregistration reason could win
+                        // the first-wins race.
+                        close_signal.request_close(CloseReason::AuthTimeout);
                         break;
                     }
                 }

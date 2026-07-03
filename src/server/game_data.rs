@@ -49,12 +49,14 @@ impl EnhancedGameServer {
     /// Handle JSON game data fan-out with coordination.
     pub async fn handle_game_data(&self, player_id: &PlayerId, data: serde_json::Value) {
         if let Some(room_id) = self.get_client_room(player_id).await {
+            let seq = self.connection_manager.next_game_data_seq(player_id);
             self.broadcast_game_data(
                 player_id,
                 &room_id,
                 ServerMessage::GameData {
                     from_player: *player_id,
                     data,
+                    seq,
                 },
             )
             .await;
@@ -94,6 +96,7 @@ impl EnhancedGameServer {
         }
 
         if let Some(room_id) = self.get_client_room(player_id).await {
+            let seq = self.connection_manager.next_game_data_seq(player_id);
             self.broadcast_game_data(
                 player_id,
                 &room_id,
@@ -101,12 +104,27 @@ impl EnhancedGameServer {
                     from_player: *player_id,
                     encoding,
                     payload,
+                    seq,
                 },
             )
             .await;
         }
     }
 
+    /// Broadcast one relayed game-data message (already stamped with its
+    /// per-(sender, room) `seq` — text and binary share the single counter on
+    /// the sender's `ClientConnection`) to the rest of the room.
+    ///
+    /// The stamp is carried INSIDE the shared `Arc<ServerMessage>`, so this
+    /// layer — and the [`MessageCoordinator`](crate::coordination::MessageCoordinator)
+    /// below it — stays protocol-version-agnostic: per-recipient gating
+    /// (stripping `seq` for pre-v4 recipients) happens at serialization time
+    /// in `websocket::sending`, where every other per-recipient wire decision
+    /// (binary vs JSON-fallback encoding) already lives. Because the stamp is
+    /// an ordinary serde field of `ServerMessage`, it also survives the
+    /// cross-instance bus (`distributed::SequencedMessage` serializes the
+    /// whole message); the in-memory single-instance coordinator is the only
+    /// production backend today, so no remote instance can re-stamp or lose it.
     async fn broadcast_game_data(
         &self,
         player_id: &PlayerId,

@@ -60,6 +60,17 @@ pub(crate) struct ClientConnection {
     /// (v3 only). `None` until the client reports — the relay floor is the implicit
     /// default and never closes regardless of what is (or is not) reported.
     pub transport_status: Option<(Transport, bool)>,
+    /// Last relay sequence number stamped on this client's outbound game data
+    /// (protocol v4): the per-(sender, room) counter behind
+    /// [`ServerMessage::GameData::seq`](crate::protocol::ServerMessage). `0`
+    /// means "nothing stamped yet" (the first stamp is 1). Owned here because
+    /// its lifecycle is exactly the connection's room membership: it RESETS
+    /// wherever that membership does — [`ConnectionManager::assign_client_to_room`],
+    /// [`ConnectionManager::clear_room_assignment`], and the fresh connection
+    /// state built by [`ConnectionManager::reassign_connection`] (restart-on-
+    /// rejoin: recipients treat a sender's rejoin/reconnect as a seq reset) —
+    /// and it is cleaned up with the connection, with no separate map to leak.
+    pub game_data_seq: u64,
 }
 
 impl ClientConnection {
@@ -88,6 +99,11 @@ pub(crate) struct ConnectionManager {
     metrics: Arc<ServerMetrics>,
     message_coordinator: Arc<dyn MessageCoordinator>,
     max_connections_per_ip: usize,
+    /// Whether per-connection delivery statistics (the v4 `RelayStats`
+    /// ledger) are registered with the metrics sink for each connection.
+    /// Mirrors `websocket.delivery_stats_interval_secs > 0` so a disabled
+    /// deployment keeps the per-delivery bookkeeping at a single map miss.
+    track_delivery_stats: bool,
 }
 
 impl ConnectionManager {
@@ -95,6 +111,7 @@ impl ConnectionManager {
         max_connections_per_ip: usize,
         metrics: Arc<ServerMetrics>,
         message_coordinator: Arc<dyn MessageCoordinator>,
+        track_delivery_stats: bool,
     ) -> Self {
         Self {
             clients: DashMap::new(),
@@ -102,6 +119,7 @@ impl ConnectionManager {
             metrics,
             message_coordinator,
             max_connections_per_ip,
+            track_delivery_stats,
         }
     }
 
@@ -138,10 +156,14 @@ impl ConnectionManager {
             app_info: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
+            game_data_seq: 0,
         };
 
         self.clients.insert(player_id, connection);
         self.metrics.increment_connections();
+        if self.track_delivery_stats {
+            self.metrics.register_connection_delivery_stats(player_id);
+        }
 
         if let Err(err) = self
             .message_coordinator
@@ -173,11 +195,15 @@ impl ConnectionManager {
             app_info: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
+            game_data_seq: 0,
         };
 
         self.increment_ip_slot_unbounded(client_addr.ip());
         self.clients.insert(player_id, connection);
         self.metrics.increment_connections();
+        if self.track_delivery_stats {
+            self.metrics.register_connection_delivery_stats(player_id);
+        }
 
         if let Err(err) = self
             .message_coordinator
@@ -191,6 +217,9 @@ impl ConnectionManager {
     pub async fn assign_client_to_room(&self, player_id: &PlayerId, room_id: RoomId) {
         if let Some(mut client) = self.clients.get_mut(player_id) {
             client.room_id = Some(room_id);
+            // Fresh room membership => fresh per-(sender, room) relay stamp
+            // stream (restart-on-rejoin; see the `game_data_seq` field doc).
+            client.game_data_seq = 0;
             let delivery = client.delivery_handle();
             drop(client);
             if let Err(err) = self
@@ -290,6 +319,16 @@ impl ConnectionManager {
             .unwrap_or(false)
     }
 
+    /// Whether the client negotiated protocol v4 or higher (gates the relayed
+    /// `GameData.seq` stamp and `RelayStats` emission; mirrors
+    /// [`Self::supports_v3`]).
+    pub fn supports_v4(&self, player_id: &PlayerId) -> bool {
+        self.clients
+            .get(player_id)
+            .map(|conn| conn.protocol.version >= 4)
+            .unwrap_or(false)
+    }
+
     pub fn supports_transport(&self, player_id: &PlayerId, transport: Transport) -> bool {
         self.clients
             .get(player_id)
@@ -316,7 +355,21 @@ impl ConnectionManager {
     pub fn clear_room_assignment(&self, player_id: &PlayerId) -> Option<ClientDeliveryHandle> {
         self.clients.get_mut(player_id).map(|mut client| {
             client.room_id = None;
+            // Membership ended: the next room (same or different) starts a
+            // fresh stamp stream (see the `game_data_seq` field doc).
+            client.game_data_seq = 0;
             client.delivery_handle()
+        })
+    }
+
+    /// Advance and return the relay sequence stamp for `player_id`'s next
+    /// relayed game-data message (protocol v4; first stamp is 1). `None` when
+    /// the connection no longer exists (a disconnect race — the relay then
+    /// simply stamps nothing).
+    pub fn next_game_data_seq(&self, player_id: &PlayerId) -> Option<u64> {
+        self.clients.get_mut(player_id).map(|mut client| {
+            client.game_data_seq += 1;
+            client.game_data_seq
         })
     }
 
@@ -389,20 +442,45 @@ impl ConnectionManager {
                 // re-establish (and re-report) its P2P path, so the stale status is
                 // cleared rather than carried over.
                 transport_status: None,
+                // Restart-on-rejoin: a reconnecting sender's relay stamp
+                // stream starts over at 1; recipients treat its
+                // `PlayerReconnected` as a seq reset (field doc above).
+                game_data_seq: 0,
             };
 
             // IP slot is already reserved from the old entry -- no need to
             // release and re-reserve for the same IP address.
             self.clients.insert(*reconnect_player_id, new_client);
+            // The RelayStats ledger follows the surviving connection so its
+            // cumulative counters stay meaningful across the reassignment.
+            self.metrics
+                .rekey_connection_delivery_stats(current_player_id, *reconnect_player_id);
             Some(delivery)
         } else {
             None
         }
     }
 
+    /// Request a close for `player_id`'s connection with an explicit reason,
+    /// without unregistering it here (the caller's own teardown follows).
+    /// First requested reason wins, so callers use this to pin a SPECIFIC
+    /// close code — e.g. the activity reaper's `ActivityTimeout` — before the
+    /// generic `Unregistered` of [`Self::remove_client`] would apply.
+    /// Returns whether this call initiated the close.
+    pub fn request_close_for(
+        &self,
+        player_id: &PlayerId,
+        reason: crate::coordination::CloseReason,
+    ) -> bool {
+        self.clients
+            .get(player_id)
+            .is_some_and(|connection| connection.close.request_close(reason))
+    }
+
     pub fn remove_client(&self, player_id: &PlayerId) -> Option<ClientConnection> {
         self.clients.remove(player_id).map(|(_, connection)| {
             self.release_ip_slot(connection.client_addr.ip());
+            self.metrics.unregister_connection_delivery_stats(player_id);
             // Every unregistration positively tears down the socket tasks:
             // without this, a connection unregistered by the activity reaper
             // lingers half-alive (undeliverable but still holding its socket)
@@ -574,7 +652,7 @@ mod tests {
     fn make_manager(max_connections_per_ip: usize) -> ConnectionManager {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-        ConnectionManager::new(max_connections_per_ip, metrics, coordinator)
+        ConnectionManager::new(max_connections_per_ip, metrics, coordinator, false)
     }
 
     fn channel() -> (
@@ -624,6 +702,7 @@ mod tests {
             4,
             metrics.clone(),
             coordinator.clone() as Arc<dyn MessageCoordinator>,
+            false,
         );
 
         let (tx, _rx) = channel();

@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added protocol v4 (strictly additive; clamp `protocol.max_protocol_version` back to `3` to
+  disable): relayed `GameData` / `GameDataBinary` delivered to a v4 recipient carry a
+  server-stamped per-`(sender, room)` `seq` starting at `1` and strictly contiguous per sender,
+  so any recipient can detect any relay gap end-to-end; pre-v4 recipients receive byte-identical
+  frames with no `seq` key. Documented in `docs/protocol.md` ("Protocol v4 additions") and the
+  AsyncAPI spec; pinned by `tests/v4_wire_golden.rs` and `tests/v4_game_data_sequencing_e2e.rs`.
+- Added the v4-only `RelayStats` server message (config-gated by
+  `websocket.delivery_stats_interval_secs`, default `0` = disabled, must be ≤ 3600): periodic
+  per-connection cumulative delivery accounting (`sent_to_you`, `dropped_for_you`,
+  `backpressure_events`) so clients can attribute loss without server log access.
+- Added semantic WebSocket close codes (RFC 6455 private range, stable assignments): `4001
+  auth_timeout`, `4002 slow_consumer`, `4003 activity_timeout`, `4004 idle_timeout` (`4000
+  server_shutdown` reserved; plain unregistration closes with a normal `1000`). The code rides
+  the close frame itself, so a client that never receives the best-effort farewell `Error` can
+  still attribute the disconnect. Documented in `docs/protocol.md` ("Close codes"); pinned by
+  `tests/close_code_semantics_e2e.rs`.
+- Added `RoomJoined.reconnection_token` and `Reconnected.reconnection_token` (v3+ recipients
+  only; absent on the v2 wire): the reconnection token is now minted at room join and rotated on
+  every join/successful reconnect, making reconnection usable by real clients (previously the
+  token was minted only after the socket closed and never reached any wire path). The token's
+  claim window is still armed at disconnect (`server.reconnection_window` from the disconnect),
+  so pre-issuing does not widen it.
+- Added an honest `Reconnected.replay` status (`complete` | `truncated` | `unavailable`, v3+
+  only) and made event replay real: room-uniform control events broadcast while a reconnection
+  is pending are now captured (previously `missed_events` was always empty) and a ring-eviction
+  watermark reports truncation honestly. `GameData` and the per-recipient `GameStarting` are
+  deliberately never replayed. New `signal_fish_reconnection_events_evicted_total` counter.
+- Added transport-layer WebSocket frame/message caps derived as `2 ×
+  security.max_message_size`: grossly oversized frames now terminate the connection before the
+  server buffers them (previously the library defaults allowed ~16 MiB of buffering per frame
+  before the application-level check ran); messages just over the limit keep the polite
+  `MessageTooLarge` error frame. Config validation now rejects `security.max_message_size = 0`
+  with a direct diagnostic.
+- Added delivery-conservation counters (`signal_fish_websocket_delivery_attempts_total`,
+  `..._deliveries_enqueued_total`, `..._deliveries_channel_closed_total`) carrying the invariant
+  `enqueued + channel_closed ≤ attempts ≤ enqueued + channel_closed + dropped`, asserted by
+  every relay-touching e2e test.
+- Added an extensive delivery verification stack: real-socket wedged-write/backpressure tests, a
+  delivery ledger (zero-loss-or-loud-disconnect as a machine-checked predicate), a chaos TCP
+  proxy (pause/throttle/fragment/RST), rate-controlled soaks, a reconnect-churn leak check, a
+  concurrency schedule-explorer, real-world scenario suites, a multi-process suite (SIGSTOP /
+  SIGKILL against real client and server processes), a starved-runtime conformance matrix in the
+  native reference client (`--runtime`, `--tick-stall-ms`), four TLA+ models with seeded-bug
+  non-vacuity counterexamples, five new Z3 proof sets, two stateful fuzz targets, and
+  model-based proptests — plus a `verification-nightly.yml` CI lane.
+- Added the mandatory `Ping` keepalive (with a `Pong` deadline) to both reference clients, a
+  `bufferedAmount` guard and a distinct `SLOW_CONSUMER` arm to the browser reference client.
+
 - Added two WebSocket delivery config fields: `websocket.send_queue_capacity` (default `1024`
   messages; must be ≥ 1) bounds the per-connection outbound message queue — previously
   hard-derived as `batch_size * 4` (40) — and `websocket.slow_consumer_timeout_ms` (default
@@ -459,6 +507,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed an orphaned reconnection replay buffer (found by the new `fuzz_reconnect_tokens` fuzz
+  target): a player re-registering a disconnect from a NEW room replaced its pending record and
+  left the old room's replay ring alive forever — capturing control events and replaying ghosts
+  for a room with nobody pending.
+- Fixed a send-task race (found by the close-code e2e suite) where a connection's write loop
+  ending in the same instant a close reason was requested could lose the reason — and with it
+  the semantic close code — because the unbiased `select!` took the loop-ended arm; terminal
+  paths now re-check the close listener non-blockingly.
 - Fixed [#131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/131): the relay
   silently dropped `GameData` under burst — each connection's outbound queue was a small bounded
   channel (`batch_size * 4` = 40 messages) written with a fire-and-forget `try_send`, so a burst
@@ -658,6 +714,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- SDK platform/version enforcement (`protocol.sdk_compatibility.enforce`) now defaults to
+  `false` (opt-in): with the old default the prepopulated platform list made a default-config
+  server reject every client that did not claim to be a known engine — including
+  `platform: None` and custom/Rust clients. Deployments shipping engine SDKs re-enable it
+  explicitly.
+- `protocol.max_protocol_version` now defaults to `4`.
+- The `PlayerReconnected` notification fan-out is concurrent (bounded by the slowest recipient)
+  instead of serial per recipient.
 - Upgraded the dependency tree to current releases. The only direct major bump is `tower-http`
   0.6 → 0.7 (the CORS/trace middleware the server mounts); `bytes` moved 1.11 → 1.12 and every
   other crate advanced to its latest semver-compatible version via a lockfile refresh. The root and

@@ -465,6 +465,78 @@ fn invalid_utf8_returns_err() {
     }
 }
 
+/// Protocol v4 `GameData.seq` boundary values on BOTH wire encodings: absent,
+/// 0 (never produced by the server, whose first stamp is 1, but must decode),
+/// 1, and u64::MAX all decode, round-trip exactly, and never panic. Also pins
+/// the rejection (not panic) of out-of-domain seq values on the text path.
+#[test]
+fn game_data_seq_boundary_values_decode_on_both_paths() {
+    let uuid = "00000000-0000-0000-0000-000000000001";
+
+    // Absent seq: decodes to None (the entire pre-v4 wire).
+    let bare = format!(r#"{{"type":"GameData","data":{{"from_player":"{uuid}","data":{{}}}}}}"#);
+    match serde_json::from_str::<ServerMessage>(&bare).expect("bare GameData decodes") {
+        ServerMessage::GameData { seq, .. } => assert_eq!(seq, None),
+        other => panic!("expected GameData, got {other:?}"),
+    }
+
+    for boundary in [0u64, 1, u64::MAX] {
+        // Text path.
+        let json = format!(
+            r#"{{"type":"GameData","data":{{"from_player":"{uuid}","data":{{}},"seq":{boundary}}}}}"#
+        );
+        let decoded = serde_json::from_str::<ServerMessage>(&json)
+            .unwrap_or_else(|err| panic!("seq {boundary} must decode from JSON: {err}"));
+        match &decoded {
+            ServerMessage::GameData { seq, .. } => assert_eq!(*seq, Some(boundary)),
+            other => panic!("expected GameData, got {other:?}"),
+        }
+        // Exact JSON round-trip (skip_serializing_if must not eat a Some).
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            json,
+            "seq {boundary} must round-trip byte-identically"
+        );
+
+        // Binary path (enveloped enum via to_vec_named, the production
+        // MessagePack convention).
+        let mp = rmp_serde::to_vec_named(&decoded).expect("msgpack encode");
+        match rmp_serde::from_slice::<ServerMessage>(&mp)
+            .unwrap_or_else(|err| panic!("seq {boundary} must decode from MessagePack: {err}"))
+        {
+            ServerMessage::GameData { seq, .. } => assert_eq!(seq, Some(boundary)),
+            other => panic!("expected GameData, got {other:?}"),
+        }
+
+        // Feed both encodings through every fuzzed decoder for the
+        // never-panic property.
+        assert_decoders_return(json.as_bytes());
+        assert_decoders_return(&mp);
+    }
+
+    // Out-of-domain seq values: rejected with Err (never a panic, never a
+    // silent wrap).
+    for hostile in ["-1", "18446744073709551616", "1.5", "\"1\"", "null"] {
+        let json = format!(
+            r#"{{"type":"GameData","data":{{"from_player":"{uuid}","data":{{}},"seq":{hostile}}}}}"#
+        );
+        // `null` IS in-domain for an Option field; everything else must err.
+        let result = serde_json::from_str::<ServerMessage>(&json);
+        if hostile == "null" {
+            match result.expect("explicit null seq decodes as None") {
+                ServerMessage::GameData { seq, .. } => assert_eq!(seq, None),
+                other => panic!("expected GameData, got {other:?}"),
+            }
+        } else {
+            assert!(
+                result.is_err(),
+                "out-of-domain seq {hostile} must be rejected, got Ok"
+            );
+        }
+        assert_decoders_return(json.as_bytes());
+    }
+}
+
 /// Truncations of VALID MessagePack encodings (the highest-value corruption:
 /// every prefix is reachable from a real frame cut mid-flight).
 #[test]

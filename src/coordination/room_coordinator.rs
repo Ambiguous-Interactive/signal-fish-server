@@ -173,6 +173,12 @@ pub struct InMemoryRoomOperationCoordinator {
     database: Arc<dyn crate::database::GameDatabase>,
     /// Track ready players per room for in-memory coordinator
     ready_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
+    /// Records this coordinator's room-uniform broadcasts (`LobbyStateChanged`
+    /// / uniform `AuthorityChanged`) for reconnection replay; `None` when
+    /// reconnection is disabled. The per-player customized `AuthorityChanged`
+    /// (`you_are_authority` differs by recipient) and the per-recipient
+    /// `GameStarting` are deliberately NOT recorded.
+    reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
 }
 
 impl InMemoryRoomOperationCoordinator {
@@ -181,13 +187,32 @@ impl InMemoryRoomOperationCoordinator {
         coordinator: Arc<dyn MessageCoordinator>,
         distributed_lock: Arc<dyn DistributedLock>,
         database: Arc<dyn crate::database::GameDatabase>,
+        reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
     ) -> Self {
         Self {
             coordinator,
             distributed_lock,
             database,
             ready_players: Arc::new(RwLock::new(HashMap::new())),
+            reconnection_manager,
         }
+    }
+
+    /// Record a room-uniform broadcast for reconnection replay (no-op when
+    /// reconnection is disabled). Called right BEFORE delivery so the event is
+    /// buffered even if the broadcast partially fails, matching "what a
+    /// connected player would have been sent".
+    async fn record_replayable_room_event(
+        &self,
+        room_id: &RoomId,
+        message: &crate::protocol::ServerMessage,
+    ) {
+        let Some(reconnection_manager) = &self.reconnection_manager else {
+            return;
+        };
+        reconnection_manager
+            .record_room_event(room_id, message)
+            .await;
     }
 }
 
@@ -330,6 +355,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 ready_players: Vec::new(),
                 all_ready: false,
             };
+            self.record_replayable_room_event(room_id, &message).await;
             self.coordinator
                 .broadcast_to_room(room_id, Arc::new(message))
                 .await?;
@@ -362,6 +388,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             authority_player: Some(*new_authority),
             you_are_authority: false, // Will be customized per client
         };
+        self.record_replayable_room_event(room_id, &message).await;
         self.coordinator
             .broadcast_to_room(room_id, Arc::new(message))
             .await?;
@@ -626,6 +653,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                     ready_players,
                     all_ready,
                 };
+                self.record_replayable_room_event(room_id, &message).await;
                 self.coordinator
                     .broadcast_to_room(room_id, Arc::new(message))
                     .await
@@ -849,7 +877,8 @@ mod tests {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let lock = Arc::new(InMemoryDistributedLock::new());
-        let coord = InMemoryRoomOperationCoordinator::new(coordinator, lock, database.clone());
+        let coord =
+            InMemoryRoomOperationCoordinator::new(coordinator, lock, database.clone(), None);
 
         let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
         let room = database
@@ -1197,8 +1226,12 @@ mod tests {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let lock = Arc::new(InMemoryDistributedLock::new());
-        let room_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database.clone());
+        let room_coordinator = InMemoryRoomOperationCoordinator::new(
+            coordinator,
+            lock.clone(),
+            database.clone(),
+            None,
+        );
         let player_id = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb);
 
         // The lobby transition now persists and is idempotent, so it needs a real
@@ -1278,7 +1311,7 @@ mod tests {
         coordinator.fail_broadcast_on(1).await;
         let lock = Arc::new(InMemoryDistributedLock::new());
         let room_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database);
+            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database, None);
 
         let result = room_coordinator.transition_room_to_lobby(&room_id).await;
         assert!(
@@ -1298,7 +1331,7 @@ mod tests {
         coordinator.fail_broadcast_on(1).await;
         let lock = Arc::new(InMemoryDistributedLock::new());
         let room_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database);
+            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database, None);
 
         let result = room_coordinator
             .coordinate_authority_transfer(&room_id, &player_id)
@@ -1319,8 +1352,12 @@ mod tests {
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         coordinator.fail_broadcast_on(1).await;
         let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database.clone());
+        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
+            coordinator,
+            lock.clone(),
+            database.clone(),
+            None,
+        );
         let authority = PlayerId::from_u128(0xaaaaaaaa11111111aaaaaaaa11111111);
         let peer = PlayerId::from_u128(0xbbbbbbbb22222222bbbbbbbb22222222);
 
@@ -1366,8 +1403,12 @@ mod tests {
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         coordinator.fail_broadcast_on(3).await;
         let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database.clone());
+        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
+            coordinator,
+            lock.clone(),
+            database.clone(),
+            None,
+        );
         let authority = PlayerId::from_u128(0xcccccccc33333333cccccccc33333333);
         let peer = PlayerId::from_u128(0xdddddddd44444444dddddddd44444444);
 
@@ -1427,7 +1468,7 @@ mod tests {
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let lock = Arc::new(InMemoryDistributedLock::new());
         let ready_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database);
+            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database, None);
         let room_id = RoomId::from_u128(0xcccccccccccccccccccccccccccccccc);
         let player_id = PlayerId::from_u128(0xdddddddddddddddddddddddddddddddd);
 
@@ -1454,6 +1495,7 @@ mod tests {
             coordinator.clone(),
             lock.clone(),
             database.clone(),
+            None,
         ));
         let authority = PlayerId::from_u128(0x99999999999999999999999999999999);
         let peer = PlayerId::from_u128(0x88888888888888888888888888888888);
@@ -1526,8 +1568,12 @@ mod tests {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database.clone());
+        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
+            coordinator,
+            lock.clone(),
+            database.clone(),
+            None,
+        );
         let authority = PlayerId::from_u128(0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee);
         let peer = PlayerId::from_u128(0xffffffffffffffffffffffffffffffff);
 
@@ -1591,6 +1637,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(NoopDistributedLock),
             database.clone(),
+            None,
         );
         let authority = PlayerId::from_u128(0x11111111111111111111111111111111);
         let peer_a = PlayerId::from_u128(0x22222222222222222222222222222222);
@@ -1739,6 +1786,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(NoopDistributedLock),
             database.clone(),
+            None,
         );
         let authority = PlayerId::from_u128(0xa1);
         let peer = PlayerId::from_u128(0xb2);
@@ -1810,6 +1858,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(NoopDistributedLock),
             database.clone(),
+            None,
         );
         let solo = PlayerId::from_u128(0xc3);
 
@@ -1858,6 +1907,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(NoopDistributedLock),
             database.clone(),
+            None,
         );
         let authority = PlayerId::from_u128(0xa1);
         let leaver = PlayerId::from_u128(0xb2);
@@ -1934,6 +1984,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(InMemoryDistributedLock::new()),
             database.clone(),
+            None,
         ));
         let a = PlayerId::from_u128(0xaa);
         let b = PlayerId::from_u128(0xbb);
@@ -1995,6 +2046,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(NoopDistributedLock),
             database.clone(),
+            None,
         );
         let authority = PlayerId::from_u128(0xc1);
         let member = PlayerId::from_u128(0xc2);
@@ -2054,6 +2106,7 @@ mod tests {
             coordinator.clone(),
             Arc::new(NoopDistributedLock),
             database.clone(),
+            None,
         );
         let a = PlayerId::from_u128(0xd1);
         let b = PlayerId::from_u128(0xd2);

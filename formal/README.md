@@ -256,9 +256,23 @@ mid-protocol state with no enabled action).
 
 ## Intentionally not modeled (and why)
 
-- **Rate limits / backpressure** — quantitative throttling, orthogonal to state-machine
-  correctness; delivery in the code is best-effort and the relay floor is the documented
-  fallback for missed messages.
+- **Rate limits / relay backpressure** — quantitative throttling and queue dynamics,
+  orthogonal to the session state machine this spec checks. Note what this does **not**
+  mean: since the slow-consumer hardening (issue #131), per-connection delivery is _not_
+  best-effort — the server never silently drops a relayed message. A full recipient queue
+  backpressures the sender for up to `websocket.slow_consumer_timeout_ms`; a recipient
+  that still cannot absorb the message is loudly disconnected (`CloseReason::SlowConsumer`,
+  surfaced in metrics), abandoning its queue only together with the connection itself.
+  That contract lives in `coordination::deliver_or_disconnect` and is covered by
+  paused-clock unit tests plus the real-socket suite in
+  `tests/relay_backpressure_e2e.rs` — and, at the design level, by the dedicated
+  `tla/DeliveryContract.tla` model (`DeliveryContract_Small.cfg`): a bounded queue, an
+  unfair consumer, and a nondeterministic grace expiry, checked for message
+  conservation, no-silent-loss, first-close-reason-wins, close preemption against a
+  wedged writer, and bounded sender blocking. Its `SilentDropBug` constant reintroduces
+  the pre-#131 drop and makes TLC exhibit the `Conservation` counterexample, so the
+  invariant is demonstrably non-vacuous. What remains unmodeled is only the
+  _quantitative_ side (actual rates, timeout durations, queue sizing).
 - **`Signal` payload relay** — `handle_signal` is transport-only plumbing over opaque
   payloads (deliberately weaker than the session predicate, see
   `src/server/signaling.rs`); its gates are direct conditionals with no state evolution,

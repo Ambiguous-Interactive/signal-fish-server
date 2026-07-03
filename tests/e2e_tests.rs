@@ -538,7 +538,11 @@ async fn test_room_creation_and_joining() {
 
 #[tokio::test]
 async fn test_game_data_broadcasting() {
-    let addr = start_test_server().await;
+    // Keep the server handle's metrics so the relay's delivery-conservation
+    // law can be asserted once the broadcast has been observed.
+    let game_server = create_test_server().await;
+    let metrics = game_server.metrics();
+    let addr = start_server_with_instance(game_server).await;
 
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
     let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
@@ -601,13 +605,20 @@ async fn test_game_data_broadcasting() {
         Ok(None) => panic!("Connection closed while waiting for game data"),
         Err(_) => panic!("Timeout waiting for game data"),
     }
+
+    // The relayed payload has been observed end to end, so every delivery in
+    // this test has resolved: the conservation counters must balance.
+    websocket_test_helpers::assert_message_conservation(&metrics).await;
 }
 
 #[tokio::test]
 async fn test_binary_game_data_broadcasting_uses_bare_message_pack_frame() {
-    let addr =
-        start_test_server_with_config_and_protocol(test_server_config(), test_protocol_config())
-            .await;
+    // Keep the server handle's metrics so the relay's delivery-conservation
+    // law can be asserted once the broadcast has been observed.
+    let game_server =
+        create_test_server_with_config(test_server_config(), test_protocol_config()).await;
+    let metrics = game_server.metrics();
+    let addr = start_server_with_instance(game_server).await;
 
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
     let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
@@ -661,6 +672,11 @@ async fn test_binary_game_data_broadcasting_uses_bare_message_pack_frame() {
             payload,
         }
     );
+
+    // The relayed binary payload has been observed end to end, so every
+    // delivery in this test has resolved: the conservation counters must
+    // balance.
+    websocket_test_helpers::assert_message_conservation(&metrics).await;
 }
 
 #[tokio::test]

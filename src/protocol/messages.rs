@@ -156,6 +156,16 @@ pub struct RoomJoinedPayload {
     /// in the `SessionPlan`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ice_servers: Vec<IceServer>,
+    /// Reconnection token for THIS room, minted at join (v3+ recipients only;
+    /// absent on the v2 wire via `skip_serializing_if`). Present the token in
+    /// a later `Reconnect` after an unexpected disconnect. The token string
+    /// is stable from join through the disconnect, but it only becomes
+    /// claimable for `server.reconnection_window` seconds counted from the
+    /// DISCONNECT — holding it early does not widen the window. Rotated on
+    /// every join and on every successful reconnect (see
+    /// `ReconnectedPayload::reconnection_token`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnection_token: Option<String>,
 }
 
 /// Payload for the Reconnected server message.
@@ -193,6 +203,44 @@ pub struct ReconnectedPayload {
     pub ice_servers: Vec<IceServer>,
     /// Events that occurred while disconnected
     pub missed_events: Vec<ServerMessage>,
+    /// Completeness of `missed_events` (v3+ only). Populated only for a
+    /// recipient that negotiated protocol v3+; `None` — and absent from the
+    /// wire via `skip_serializing_if`, keeping the v2 JSON and MessagePack
+    /// bytes identical — otherwise. See [`ReplayStatus`] for the contract each
+    /// value places on the client (a truncated/unavailable replay requires a
+    /// resync from this payload's snapshot fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayStatus>,
+    /// Fresh (rotated) reconnection token for this room, replacing the one
+    /// just used (v3+ recipients only; absent on the v2 wire via
+    /// `skip_serializing_if`). Store it for the NEXT unexpected disconnect —
+    /// the previous token was consumed by this reconnect and is no longer
+    /// claimable. Same window semantics as
+    /// `RoomJoinedPayload::reconnection_token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnection_token: Option<String>,
+}
+
+/// Completeness of `Reconnected.missed_events` (v3+ recipients only; the field
+/// is absent on the v2 wire).
+///
+/// Only room-uniform control events (`PlayerJoined`, `PlayerLeft`,
+/// `PlayerReconnected`, `NewSpectatorJoined`, `SpectatorDisconnected`,
+/// `LobbyStateChanged`, `AuthorityChanged`) are ever replayed; GameData,
+/// `Signal`, and the per-recipient `GameStarting` never are — reconnectors
+/// resync from the `Reconnected` snapshot and, for started sessions, the
+/// late-join `SessionPlan` flow.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayStatus {
+    /// Every replayable control event since disconnect is in `missed_events`.
+    Complete,
+    /// Events were evicted from the bounded replay ring; `missed_events` is a
+    /// suffix. Resync from the `Reconnected` snapshot fields.
+    Truncated,
+    /// Event replay is not active on this deployment (`event_buffer_size` 0);
+    /// treat reconnection as a full resync from the snapshot.
+    Unavailable,
 }
 
 /// Payload for the SpectatorJoined server message.
@@ -251,6 +299,31 @@ pub enum ServerMessage {
     GameData {
         from_player: PlayerId,
         data: serde_json::Value,
+        /// Server-stamped relay sequence number (v4 only). Per-(sender, room),
+        /// starts at 1, and is strictly contiguous per sender for as long as
+        /// the recipient stays connected. A gap therefore always has an
+        /// EXPLICIT, observable cause — the recipient was told — and never an
+        /// unexplained relay loss:
+        ///
+        /// - a message the server abandoned together with a disconnect the
+        ///   recipient was told about (its own `SLOW_CONSUMER` eviction, or
+        ///   the sender's `PlayerLeft`), or the recipient's own reconnect;
+        /// - a per-recipient undeliverable payload: if a binary
+        ///   [`ServerMessage::GameDataBinary`] cannot be converted for this
+        ///   recipient's negotiated format, it is replaced in-stream by an
+        ///   `Error` with code `UNSUPPORTED_GAME_DATA_FORMAT` (the connection
+        ///   stays open), so this recipient skips that one `seq` while others
+        ///   receive it. The error frame IS the explanation for that gap.
+        ///
+        /// The counter RESTARTS at 1 when the sender leaves/rejoins a room or
+        /// reconnects, so recipients must treat `PlayerLeft`+`PlayerJoined` /
+        /// `PlayerReconnected` for the sender as a seq reset. Stamped at relay
+        /// time in `server::game_data`; stripped per recipient in
+        /// `websocket::sending` — `None` and absent from the wire for pre-v4
+        /// recipients, keeping their bytes byte-identical. Client→server
+        /// `GameData` is unchanged (stamping is purely server-side).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     /// Binary game data payload from another player.
     ///
@@ -263,6 +336,14 @@ pub enum ServerMessage {
         encoding: GameDataEncoding,
         #[serde(with = "bytes_serde")]
         payload: Bytes,
+        /// Server-stamped relay sequence number (v4 only): the same counter,
+        /// semantics, and per-recipient gating as [`ServerMessage::GameData::seq`]
+        /// — text and binary relay share one per-(sender, room) stream. On the
+        /// bare binary wire frame the stamp is carried as the optional `seq`
+        /// map key of `BinaryGameDataFrame` (see `websocket::sending`), present
+        /// only for v4 recipients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     /// Authority status changed
     AuthorityChanged {
@@ -394,6 +475,44 @@ pub enum ServerMessage {
         peer_id: PlayerId,
         transport: Transport,
         connected: bool,
+    },
+    /// Periodic per-connection relay-delivery statistics (v4 only).
+    ///
+    /// Emitted to a connection only when it negotiated protocol v4+ AND the
+    /// deployment enabled `websocket.delivery_stats_interval_secs` (> 0;
+    /// default 0 = disabled — enforcement happens at emission, so a pre-v4
+    /// recipient can never observe this message). Counters are CUMULATIVE
+    /// since the connection registered, so a frame skipped under load loses
+    /// nothing — the next one carries the totals. Pairs with the
+    /// `GameData.seq` gap-detection contract: a recipient that sees a seq gap
+    /// can attribute it via `dropped_for_you` / `backpressure_events` instead
+    /// of guessing.
+    ///
+    /// The frame itself is advisory: it is enqueued best-effort on the
+    /// connection's own queue and never counted in the statistics it reports.
+    ///
+    /// NOTE: appended at the END of the enum (after `PeerTransportStatus`) so
+    /// any future positional/discriminant-sensitive encoding keeps prior
+    /// discriminants stable; the current wire encodings are name-based.
+    RelayStats {
+        /// The configured emission interval in milliseconds
+        /// (`websocket.delivery_stats_interval_secs * 1000`).
+        interval_ms: u64,
+        /// Messages the delivery layer accepted (enqueued) for this
+        /// connection since it registered. Excludes the advisory `RelayStats`
+        /// frames themselves.
+        sent_to_you: u64,
+        /// Messages the server abandoned for this connection since it
+        /// registered (undeliverable-encoding replacements and messages
+        /// dropped with a slow-consumer eviction). Nonzero while connected
+        /// only for undeliverable payloads — every other drop coincides with
+        /// a loud disconnect of this connection.
+        dropped_for_you: u64,
+        /// Deliveries that had to WAIT (true backpressure) on this
+        /// connection's momentarily full outbound queue since it registered.
+        /// A rising value means this connection is not draining fast enough
+        /// and is pacing its room's senders.
+        backpressure_events: u64,
     },
 }
 

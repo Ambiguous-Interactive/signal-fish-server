@@ -1,12 +1,14 @@
 # Formal Verification Workflow
 #
-# Two complementary formal checks of the Protocol v3 session lifecycle:
+# Complementary formal checks of the Protocol v3 session lifecycle and the
+# per-connection delivery contract:
 #
-#   * TLC model-checks the TLA+ specification
-#     (formal/tla/SignalFishSession.tla) across every model configuration
-#     (desired=mesh, desired=host, desired=host with WebRTC disabled, and the
-#     relay-floor model with both upgrade transports disabled) — exploring
-#     reachable states.
+#   * TLC model-checks the TLA+ specifications: the session lifecycle
+#     (formal/tla/SignalFishSession.tla, across desired=mesh, desired=host,
+#     desired=host with WebRTC disabled, and the relay-floor model) and the
+#     #131 delivery contract (formal/tla/DeliveryContract.tla — bounded queue,
+#     unfair consumer, slow-consumer eviction; message conservation and
+#     no-silent-loss) — exploring reachable states.
 #   * Z3 discharges universally quantified SMT proofs of the pure decision
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the
 #     all_support relay-floor invariant, the glare/offerer rule, and host
@@ -38,6 +40,8 @@ on:
       - "src/server/reconnection_service.rs"
       - "src/database/mod.rs"
       - "src/protocol/room_state.rs"
+      - "src/coordination/**"
+      - "src/websocket/**"
       - ".github/workflows/formal-verification.yml"
   pull_request:
     branches: [main]
@@ -51,6 +55,8 @@ on:
       - "src/server/reconnection_service.rs"
       - "src/database/mod.rs"
       - "src/protocol/room_state.rs"
+      - "src/coordination/**"
+      - "src/websocket/**"
       - ".github/workflows/formal-verification.yml"
   workflow_dispatch:
 

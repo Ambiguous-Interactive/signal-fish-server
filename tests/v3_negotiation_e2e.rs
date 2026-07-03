@@ -163,6 +163,120 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
         ServerMessage::ProtocolInfo(info) => {
             assert_eq!(info.protocol_version, Some(3));
             assert_eq!(info.min_protocol_version, Some(2));
+            assert_eq!(
+                info.max_protocol_version,
+                Some(4),
+                "default deployment ceiling is v4"
+            );
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Protocol v4: the [2, 4] clamp matrix end-to-end (matches the config-level
+// matrix in tests/protocol_v3_negotiation.rs::v4_negotiation_clamp_matrix).
+// ---------------------------------------------------------------------------
+
+/// Build an Authenticate message advertising only `protocol_version`.
+fn version_only_auth(protocol_version: Option<u16>) -> ClientMessage {
+    ClientMessage::Authenticate {
+        app_id: APP_ID.to_string(),
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version,
+        supported_transports: None,
+        supported_topologies: None,
+    }
+}
+
+#[tokio::test]
+async fn v4_client_negotiates_v4_on_default_server() {
+    let addr = start_auth_server().await;
+    let mut ws = connect(addr, "/v2/ws").await;
+
+    match authenticate(&mut ws, version_only_auth(Some(4))).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(info.protocol_version, Some(4), "client asks 4 => gets 4");
+            assert_eq!(info.min_protocol_version, Some(2));
+            assert_eq!(info.max_protocol_version, Some(4));
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn future_v5_client_is_clamped_to_v4() {
+    let addr = start_auth_server().await;
+    let mut ws = connect(addr, "/v2/ws").await;
+
+    match authenticate(&mut ws, version_only_auth(Some(5))).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(
+                info.protocol_version,
+                Some(4),
+                "client asks 5 => clamped down to the build ceiling (4)"
+            );
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn v3_client_stays_v3_on_v4_server() {
+    let addr = start_auth_server().await;
+    let mut ws = connect(addr, "/v2/ws").await;
+
+    match authenticate(&mut ws, version_only_auth(Some(3))).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(
+                info.protocol_version,
+                Some(3),
+                "v4 is opt-in: a v3 client is never upgraded"
+            );
+            assert_eq!(info.max_protocol_version, Some(4));
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn v4_client_is_clamped_to_v3_when_deployment_caps_at_v3() {
+    // Deployment clamps `protocol.max_protocol_version` back to 3: a v4
+    // client is negotiated down to 3 and told so via ProtocolInfo.
+    let mut server_config: ServerConfig = test_server_config();
+    server_config.auth_enabled = true;
+
+    let mut protocol_config = test_protocol_config();
+    protocol_config.sdk_compatibility.enforce = false;
+    protocol_config.max_protocol_version = 3;
+
+    let game_server = EnhancedGameServer::new(
+        server_config,
+        protocol_config,
+        signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::config::SessionConfig::default(),
+        signal_fish_server::config::TurnConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::AuthMaintenanceConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        vec![app_entry()],
+    )
+    .await
+    .expect("server builds");
+    let addr = start_server(game_server).await;
+
+    let mut ws = connect(addr, "/v2/ws").await;
+    match authenticate(&mut ws, version_only_auth(Some(4))).await {
+        ServerMessage::ProtocolInfo(info) => {
+            assert_eq!(
+                info.protocol_version,
+                Some(3),
+                "config-clamped server negotiates a v4 client down to 3"
+            );
             assert_eq!(info.max_protocol_version, Some(3));
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),

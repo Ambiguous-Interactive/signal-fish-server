@@ -496,6 +496,7 @@ fn golden_server_room_joined() {
         // v3-only pre-gather field: empty is skipped entirely, so the golden
         // v2 bytes below stay byte-identical.
         ice_servers: Vec::new(),
+        reconnection_token: None,
     }));
     assert_json(
         &msg,
@@ -606,6 +607,9 @@ fn golden_server_game_data() {
     let msg = ServerMessage::GameData {
         from_player: player_a(),
         data: json!({ "move": "up" }),
+        // v4-only relay stamp: `None` is skipped entirely, so the golden v2
+        // bytes below stay byte-identical.
+        seq: None,
     };
     assert_json(
         &msg,
@@ -630,6 +634,9 @@ fn golden_server_game_data_binary_json_fallback() {
     let fallback = ServerMessage::GameData {
         from_player: player_a(),
         data: json!({ "move": "up" }),
+        // v4-only relay stamp: `None` is skipped entirely, so the golden v2
+        // fallback frame stays byte-identical.
+        seq: None,
     };
     assert_json(
         &fallback,
@@ -655,6 +662,9 @@ fn golden_server_game_data_binary_in_memory_repr_not_wire() {
         from_player: player_a(),
         encoding: GameDataEncoding::MessagePack,
         payload: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
+        // v4-only relay stamp: `None` is skipped entirely, so the in-memory
+        // repr snapshot stays byte-identical.
+        seq: None,
     };
     assert_json(
         &msg,
@@ -790,6 +800,10 @@ fn golden_server_reconnected() {
         // v2 bytes below stay byte-identical.
         ice_servers: Vec::new(),
         missed_events: vec![ServerMessage::Pong],
+        // v3-only replay-status field: `None` is skipped entirely, so the
+        // golden v2 bytes below stay byte-identical.
+        replay: None,
+        reconnection_token: None,
     }));
     assert_json(
         &msg,

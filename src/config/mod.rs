@@ -170,7 +170,12 @@ mod tests {
 
     #[test]
     fn test_sdk_compatibility_evaluate() {
-        let config = SdkCompatibilityConfig::default();
+        // Enforcement is opt-in (issue #136, F6: the default must not reject
+        // unregistered platforms); this test exercises the ENFORCING mode.
+        let config = SdkCompatibilityConfig {
+            enforce: true,
+            ..SdkCompatibilityConfig::default()
+        };
 
         // Valid Unity SDK
         let result = config.evaluate(Some("Unity"), Some("1.11.0"));

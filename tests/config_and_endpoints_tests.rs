@@ -173,12 +173,12 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION",
         path: "protocol.max_protocol_version",
-        default: Some("3"),
+        default: Some("4"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE",
         path: "protocol.sdk_compatibility.enforce",
-        default: Some("true"),
+        default: Some("false"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__MINIMUM_VERSIONS",
@@ -505,6 +505,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         path: "websocket.slow_consumer_timeout_ms",
         default: Some("5000"),
     },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS",
+        path: "websocket.delivery_stats_interval_secs",
+        default: Some("0"),
+    },
 ];
 
 const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[
@@ -526,7 +531,7 @@ const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION",
         path: "protocol.max_protocol_version",
-        default: Some("3"),
+        default: Some("4"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__LOGGING__LEVEL",

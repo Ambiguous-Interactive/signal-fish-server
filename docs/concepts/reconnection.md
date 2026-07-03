@@ -49,10 +49,17 @@ reconnect later.
 }
 ```
 
-When a player disconnects, the server generates a reconnection token
-(a server-generated UUID) bound to the player ID and room ID. It is the
-`auth_token` value the client supplies when sending a `Reconnect`
-message. Treat it like a session credential.
+The reconnection token (a server-generated UUID bound to your player ID
+and room ID) arrives ON THE WIRE at join time: v3+ clients read it from
+`RoomJoined.reconnection_token` and store it before anything can go
+wrong. It is the `auth_token` value the client supplies when sending a
+`Reconnect` message — treat it like a session credential. The string is
+stable from join through a later disconnect, but it only becomes
+claimable for `server.reconnection_window` seconds counted from the
+disconnect (holding it early does not widen the window), and it rotates
+on every join and every successful reconnect
+(`Reconnected.reconnection_token` carries the replacement). Discarded on
+a voluntary `LeaveRoom` — leaving cleanly is not a disconnect.
 
 ### Phase 2: Reconnect After a Disconnect
 
@@ -72,8 +79,10 @@ and send a `Reconnect` message with the stored credentials:
 
 If the token is valid and the reconnection window has not expired, the
 server restores you to the room and sends a `Reconnected` message. This
-message contains the current room state **and** an array of all events
-you missed while disconnected:
+message contains the current room state **and** the room-uniform
+**control events** that were broadcast while you were away (see
+[Event Buffer](#event-buffer) for exactly which events are replayed and
+the completeness contract):
 
 ```json
 {
@@ -131,10 +140,30 @@ you missed while disconnected:
           "all_ready": false
         }
       }
-    ]
+    ],
+    "replay": "complete"
   }
 }
 ```
+
+The `replay` field states how complete `missed_events` is. It is sent
+only to clients that negotiated protocol v3 or higher (the v2 wire is
+unchanged — no `replay` key) and takes one of three values:
+
+- `complete` -- Every replayable control event since your disconnect is
+  in `missed_events`.
+- `truncated` -- The bounded replay ring evicted events you needed, so
+  `missed_events` is only a suffix of what happened. Discard any local
+  room-membership bookkeeping and resync from the `Reconnected`
+  snapshot fields (`current_players`, `lobby_state`, `ready_players`,
+  `current_spectators`).
+- `unavailable` -- Event replay is disabled on this deployment
+  (`event_buffer_size` is `0`). Treat every reconnection as a full
+  resync from the snapshot fields, exactly as for `truncated`.
+
+v2 clients should always resync from the snapshot fields; the replayed
+events are a convenience, not a completeness guarantee, without the
+`replay` field.
 
 Other players in the room receive a `PlayerReconnected` notification so
 they know you are back:
@@ -157,7 +186,7 @@ Player disconnects
 Server detects disconnect (register_disconnection)
   - Generates reconnection token (UUID bound to player, room)
   - Records authority status for potential restoration
-  - Starts buffering room events for this player
+  - Starts buffering the room's control events for this player
   - Starts expiration timer (default: 300 seconds)
        |
        |  ... time passes, events happen in the room ...
@@ -174,10 +203,11 @@ Server validates token
        |
        v
 Server restores player
-  - Replays missed events from the buffer
+  - Replays missed control events from the buffer
   - Restores authority role if previously held
   - Notifies other players via PlayerReconnected
   - Sends Reconnected with full room state + missed events
+    (+ the v3-only replay completeness field)
 ```
 
 ## Reconnection Window
@@ -189,13 +219,43 @@ invalid and the player's slot is freed.
 
 ## Event Buffer
 
-While a player is disconnected, the server buffers events that occur in
-their room. The default buffer size is **100 events** per room. The buffer
-uses a ring structure -- if more than 100 events occur,
-the oldest events are evicted. The buffer is cleared when the last
-disconnected player in a room reconnects; if a player's token instead
-expires, the pending record is dropped and the buffer is released when
-the room itself is cleaned up.
+While at least one player of a room is disconnected (awaiting
+reconnection), the server buffers the room's **control events** so they
+can be replayed on reconnect. Only room-uniform events — messages every
+member receives identically — are buffered:
+
+- `PlayerJoined` / `PlayerLeft` / `PlayerReconnected`
+- `NewSpectatorJoined` / `SpectatorDisconnected`
+- `LobbyStateChanged`
+- `AuthorityChanged` (the uniform broadcast form)
+
+Two categories are deliberately **never** replayed:
+
+- **`GameData` / `GameDataBinary` / `Signal`** -- The data path is
+  high-rate; buffering it would immediately purge the control events
+  that matter. Reconnecting clients resync game state at the
+  application level.
+- **`GameStarting`** -- Its `peer_connections` are customized per
+  recipient, so replaying another player's copy would be wrong. A
+  reconnect into a started session receives the room snapshot plus a
+  fresh, tailored `SessionPlan` via the dedicated late-join flow, which
+  fully covers session re-entry.
+
+The buffer is a bounded ring (default **100 events** per room): when it
+overflows, the oldest events are evicted and the server records the
+highest evicted sequence number as an eviction watermark. On reconnect,
+the watermark — not a gap in sequence numbers, which can occur benignly
+because sequence numbers are global across rooms — decides whether your
+replay was truncated, and the `replay` field reports it (see above).
+Each eviction also increments the
+`signal_fish_reconnection_events_evicted_total` metric; a sustained
+non-zero rate means `event_buffer_size` is too small for the room churn
+it serves.
+
+The buffer exists only while someone is pending: it is created when a
+disconnect is registered, and released when the last disconnected
+player of the room reconnects or their reconnection window expires
+(and, as a backstop, when the room itself is cleaned up).
 
 ## When Reconnection Fails
 
@@ -228,8 +288,9 @@ Reconnection is enabled by default. Relevant server settings:
   to disable reconnection entirely.
 - `reconnection_window` -- Seconds before a disconnected player's token
   expires. Default: `300` (5 minutes).
-- `event_buffer_size` -- Maximum number of events buffered per room.
-  Default: `100`.
+- `event_buffer_size` -- Maximum number of control events buffered per
+  room (the replay ring). Default: `100`. Set to `0` to disable event
+  replay entirely; v3 clients are then told `replay: "unavailable"`.
 
 ```json
 {

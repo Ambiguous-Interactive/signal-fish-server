@@ -111,8 +111,14 @@ pub const fn default_enable_message_pack_game_data() -> bool {
     true
 }
 
+/// SDK platform/version enforcement is OPT-IN (issue #136, F6): with the
+/// old `true` default, the prepopulated platform list made a default-config
+/// server reject every client that did not claim to be one of the known
+/// engines — including `platform: None` (the reference clients) and any
+/// custom/Rust client. Deployments that ship engine SDKs enable it
+/// explicitly alongside their own version floors.
 pub const fn default_sdk_enforce() -> bool {
-    true
+    false
 }
 
 pub const fn default_min_protocol_version() -> u16 {
@@ -428,4 +434,16 @@ pub const fn default_send_queue_capacity() -> usize {
 /// connection can stall senders in the same room.
 pub const fn default_slow_consumer_timeout_ms() -> u64 {
     5_000
+}
+
+/// Default per-connection `RelayStats` emission interval in seconds
+/// (`0` disables — the default posture).
+///
+/// The frame is protocol v4-only and purely diagnostic, so it is opt-in:
+/// deployments that want delivery attribution (pairing `GameData.seq` gap
+/// detection with `dropped_for_you` / `backpressure_events`) enable it
+/// explicitly. Validated to at most 3600 (one hour) — a longer period is
+/// indistinguishable from disabled and almost certainly a misconfiguration.
+pub const fn default_delivery_stats_interval_secs() -> u64 {
+    0
 }

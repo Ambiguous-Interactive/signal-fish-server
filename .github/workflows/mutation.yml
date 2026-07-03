@@ -43,6 +43,7 @@ on:
       - "src/protocol/validation.rs"
       - "src/protocol/room_codes.rs"
       - "src/protocol/error_codes.rs"
+      - "src/coordination/mod.rs"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -106,7 +107,7 @@ jobs:
         run: bash scripts/run-mutants.sh --warm
 
   mutants:
-    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/16
+    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/18
     needs: baseline
     runs-on: ubuntu-latest
     # Same fork gate as the baseline job: a fork cannot restore the warm shared
@@ -132,12 +133,12 @@ jobs:
         # This list MUST be the complete contiguous partition 0..N-1 and N MUST
         # match every "/N" denominator in this file (job name + the run step).
         # Enforced by test_mutation_shard_matrix_is_complete_contiguous_partition.
-        # N=16: --in-place runs each shard's mutants SERIALLY, and a mutant costs
-        # ~20-25s (incremental lib rebuild + relink + lib test run). With ~199
-        # mutants that is ~199/16 ≈ 13 mutants/shard ≈ <5 min/shard. The feasibility
+        # N=18: --in-place runs each shard's mutants SERIALLY, and a mutant costs
+        # ~20-25s (incremental lib rebuild + relink + lib test run). With ~212
+        # mutants that is ~212/18 ≈ 12 mutants/shard ≈ <5 min/shard. The feasibility
         # of {mutant-count, N, per-mutant budget, timeout} is asserted by
         # test_mutation_shard_budget_is_feasible_vs_timeout.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
@@ -173,11 +174,11 @@ jobs:
         with:
           tool: cargo-mutants
 
-      - name: Run mutation testing (shard ${{ matrix.shard }}/16)
+      - name: Run mutation testing (shard ${{ matrix.shard }}/18)
         # All flags/env (mold, --in-place, --sharding slice, --profile mutants,
         # --baseline=skip, --timeout, --locked, no --all-features) live in the
         # single source of truth so CI and local devs run the identical thing.
-        run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/16
+        run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/18
 
       - name: Upload mutants report
         if: always()
