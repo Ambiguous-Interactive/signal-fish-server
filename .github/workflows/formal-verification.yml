@@ -77,13 +77,13 @@ jobs:
         uses: actions/checkout@v7.0.0
 
       - name: Install Java runtime
-        uses: actions/setup-java@v5.3.0
+        uses: actions/setup-java@v5.4.0
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Cache TLA+ tools jar
-        uses: actions/cache@v5.0.5
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/signal-fish/tla
           # The script pins the tla2tools version + SHA256, so keying the
@@ -103,7 +103,7 @@ jobs:
         uses: actions/checkout@v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v6.2.0
+        uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.12"
 

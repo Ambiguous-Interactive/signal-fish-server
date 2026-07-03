@@ -170,7 +170,7 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.82.2
+        uses: taiki-e/install-action@v2.82.8
         with:
           tool: cargo-mutants
 
