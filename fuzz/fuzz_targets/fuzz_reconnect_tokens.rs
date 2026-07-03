@@ -295,9 +295,8 @@ async fn run(plan: Plan) {
                 } else {
                     claims[index].spent = true;
                     if released {
-                        if let Some((_, _, active)) = reference
-                            .pending
-                            .get_mut(&claimed.disconnected.player_id)
+                        if let Some((_, _, active)) =
+                            reference.pending.get_mut(&claimed.disconnected.player_id)
                         {
                             *active = false;
                         }

@@ -802,7 +802,13 @@ async fn stall_below_timeout_absorbs_with_zero_loss() {
     // Unpaced burst into the 16-slot queue: the 50ms-per-input consumer
     // repeatedly fills it, but always drains far inside the 5s window.
     let mut next_seq = 0u64;
-    send_ledger_burst(&mut sender_sink, &mut next_seq, BURST_MESSAGES, PADDING_BYTES).await;
+    send_ledger_burst(
+        &mut sender_sink,
+        &mut next_seq,
+        BURST_MESSAGES,
+        PADDING_BYTES,
+    )
+    .await;
 
     // The client exits at its soft window with criteria unmet (no game ever
     // starts here) — exit 1 is the EXPECTED loud outcome, asserted exactly.
@@ -992,7 +998,10 @@ async fn stall_above_timeout_is_evicted_loudly_and_room_flows() {
     // is saturated): confirmed when observed, a printed notice when not —
     // the LOUD guarantees are the metric, the PlayerLeft, and the error/exit
     // above (mirrors relay_backpressure_e2e's farewell handling).
-    if errors.iter().any(|message| message.contains("slow consumer")) {
+    if errors
+        .iter()
+        .any(|message| message.contains("slow consumer"))
+    {
         println!("starved client received the distinct slow-consumer farewell");
     } else {
         eprintln!(
