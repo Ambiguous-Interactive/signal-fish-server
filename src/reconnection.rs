@@ -709,7 +709,7 @@ impl ReconnectionManager {
     ///
     /// The single entry point the server's uniform-broadcast sites call for
     /// every room-wide control message. Cheap when idle: a non-replayable
-    /// message (see [`is_replayable_control_event`]) or a room with no pending
+    /// message (see `is_replayable_control_event`) or a room with no pending
     /// reconnection (no buffer — one read-lock lookup) returns immediately,
     /// so the hot broadcast path never clones or takes the write lock unless
     /// someone is actually waiting to reconnect. Events are recorded even if

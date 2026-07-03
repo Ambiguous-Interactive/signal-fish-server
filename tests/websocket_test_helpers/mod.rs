@@ -61,7 +61,7 @@ pub fn assert_message_conservation(metrics: &ServerMetrics) {
 ///
 /// A client built this way that simply stops reading wedges the server's
 /// socket writes after only a few kilobytes, which is exactly the
-/// slow-consumer state the delivery contract must pre-empt. Regular clients
+/// slow-consumer state the delivery contract must preempt. Regular clients
 /// (default buffers) should use their suite's normal `connect` helper.
 pub async fn connect_with_small_recv_buffer(
     addr: std::net::SocketAddr,

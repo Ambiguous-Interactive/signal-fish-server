@@ -401,7 +401,7 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
 }
 
 /// A stalled recipient whose kernel receive window is already full must be
-/// pre-empted even while the server's socket write is wedged mid-frame — and
+/// preempted even while the server's socket write is wedged mid-frame — and
 /// the eviction must actually reclaim the connection's resources.
 ///
 /// The stalled client connects with a deliberately tiny `SO_RCVBUF` (clamped
@@ -547,7 +547,7 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
 
     // (2) The connection is reclaimed: the active-connections gauge returns to
     // its pre-stall baseline even though the socket write was wedged mid-frame
-    // (the close request pre-empts the write inside the send task's select).
+    // (the close request preempts the write inside the send task's select).
     let reclaim_deadline = tokio::time::Instant::now() + RECLAIM_DEADLINE;
     loop {
         let active = metrics.active_connections.load(Ordering::Relaxed);
@@ -735,7 +735,7 @@ async fn backpressure_delivers_every_message_in_order_without_disconnecting() {
 /// recipient that never drains is pruned after the grace window, senders
 /// complete promptly afterwards, and the loss is visible in metrics. The
 /// socket-level version of this contract — a real wedged socket write being
-/// pre-empted — is covered by
+/// preempted — is covered by
 /// [`wedged_socket_write_is_preempted_and_fd_released`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]

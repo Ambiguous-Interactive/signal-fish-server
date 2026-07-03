@@ -272,7 +272,7 @@ mid-protocol state with no enabled action).
   wedged writer, and bounded sender blocking. Its `SilentDropBug` constant reintroduces
   the pre-#131 drop and makes TLC exhibit the `Conservation` counterexample, so the
   invariant is demonstrably non-vacuous. What remains unmodeled is only the
-  *quantitative* side (actual rates, timeout durations, queue sizing).
+  _quantitative_ side (actual rates, timeout durations, queue sizing).
 - **`Signal` payload relay** — `handle_signal` is transport-only plumbing over opaque
   payloads (deliberately weaker than the session predicate, see
   `src/server/signaling.rs`); its gates are direct conditionals with no state evolution,
