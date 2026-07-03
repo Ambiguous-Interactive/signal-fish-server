@@ -33,5 +33,5 @@ too-many-arguments-threshold = 8
 
 # MSRV - Minimum Supported Rust Version
 # Set to ensure compatibility with CI and production environments
-# Note: The codebase uses features from Rust 1.88+
-msrv = "1.88.0"
+# Note: The codebase uses features from Rust 1.89+
+msrv = "1.89.0"

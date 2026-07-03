@@ -6,7 +6,7 @@ license = "MIT"
 authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
 description = "Native Rust reference client for the Signal Fish protocol v3 (real WebRTC stack)"
 repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
-rust-version = "1.88.0"
+rust-version = "1.89.0"
 publish = false
 
 [dependencies]

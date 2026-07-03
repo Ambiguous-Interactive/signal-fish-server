@@ -119,7 +119,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.89.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -196,7 +196,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.89.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -599,7 +599,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.89.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}

@@ -4,7 +4,7 @@ Guide for building, testing, and contributing to Signal Fish Server.
 
 ## Prerequisites
 
-- Rust 1.88.0 or later (see `rust-version` in `Cargo.toml`)
+- Rust 1.89.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
 ### CI Tooling Parity
@@ -472,7 +472,7 @@ async fn test_websocket_connection() {
 
 ### Minimum Supported Rust Version (MSRV)
 
-The project MSRV is defined in `Cargo.toml` (`rust-version = "1.88.0"`). This is the oldest
+The project MSRV is defined in `Cargo.toml` (`rust-version = "1.89.0"`). This is the oldest
 Rust compiler version guaranteed to build the project.
 
 ### Verifying MSRV Consistency
