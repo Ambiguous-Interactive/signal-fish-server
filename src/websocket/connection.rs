@@ -573,37 +573,28 @@ pub(super) async fn handle_socket(
         // The write loop can end on its own (queue senders dropped by
         // unregistration) in the same instant a close reason was requested;
         // the unbiased select above may then have taken the loop-ended arm.
-        // Re-check the listener non-blockingly so a requested reason — and
-        // its semantic close code — is never lost to that race.
-        let close_request = close_request.or_else(|| send_task_close.requested_reason().map(Some));
-        match close_request {
-            Some(reason) => {
-                let current_player_id = *effective_player_id_for_send.read().await;
-                finalize_closed_connection(
-                    &mut sender,
-                    &mut rx,
-                    &mut batcher,
-                    reason,
-                    &current_player_id,
-                    &server_clone,
-                )
-                .await;
-            }
-            None => {
-                let abandoned = rx.len() + batcher.len();
-                if abandoned > 0 {
-                    server_clone
-                        .metrics()
-                        .add_websocket_messages_dropped(abandoned as u64);
-                    let current_player_id = *effective_player_id_for_send.read().await;
-                    tracing::warn!(
-                        player_id = %current_player_id,
-                        abandoned_messages = abandoned,
-                        "Connection ended with a failed socket write; abandoning its buffered messages"
-                    );
-                }
-            }
-        }
+        // Resolve the close reason and ALWAYS finalize through the one path,
+        // so every server-side teardown gets its bounded flush, honest drop
+        // accounting, and a SEMANTIC close frame — never a bare, code-less
+        // close. The reason is: the select's own outcome if a close was
+        // requested; else a reason requested in the same instant the write
+        // loop ended on its own (the first-wins race the peek closes); else
+        // `None` for a plain rx-closed shutdown (all delivery handles dropped
+        // by unregistration), which `finalize_closed_connection` maps to the
+        // normal `Unregistered` closure (WebSocket code 1000).
+        let reason = close_request
+            .flatten()
+            .or_else(|| send_task_close.requested_reason());
+        let current_player_id = *effective_player_id_for_send.read().await;
+        finalize_closed_connection(
+            &mut sender,
+            &mut rx,
+            &mut batcher,
+            reason,
+            &current_player_id,
+            &server_clone,
+        )
+        .await;
 
         // Cleanup when send task ends
         let current_player_id = *effective_player_id_for_send.read().await;

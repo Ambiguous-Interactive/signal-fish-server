@@ -396,23 +396,39 @@ impl ReconnectionManager {
         };
         let token_string = token.token.clone();
 
-        let last_sequence = *self.next_sequence.read().await;
-
-        let disconnected = DisconnectedPlayer {
-            player_id,
-            room_id,
-            disconnected_at: Utc::now(),
-            token,
-            last_sequence,
-            was_authority,
-            player_info,
-        };
-        let record = ReconnectionRecord {
-            disconnected,
-            claim: None,
-        };
+        let fresh_last_sequence = *self.next_sequence.read().await;
 
         let mut players = self.disconnected_players.write().await;
+
+        // Preserve the ORIGINAL replay snapshot point across a same-room
+        // re-registration. A player registering a second disconnection for the
+        // same room while still pending has NOT reconnected, so it has still
+        // not seen anything after its FIRST disconnect. Advancing
+        // `last_sequence` to the current counter would silently exclude the
+        // control events buffered in `(original, now]` from a later
+        // `get_missed_events`, dropping events the client never saw while
+        // `replay` still reported `complete`. Only a genuinely new pending
+        // record (different player state, or a different room) takes the fresh
+        // snapshot.
+        let last_sequence = match players.get(&player_id) {
+            Some(existing) if existing.disconnected.room_id == room_id => {
+                existing.disconnected.last_sequence
+            }
+            _ => fresh_last_sequence,
+        };
+
+        let record = ReconnectionRecord {
+            disconnected: DisconnectedPlayer {
+                player_id,
+                room_id,
+                disconnected_at: Utc::now(),
+                token,
+                last_sequence,
+                was_authority,
+                player_info,
+            },
+            claim: None,
+        };
         let previous = players.insert(player_id, record);
         // A re-registration from a NEW room replaces the old pending record.
         // If this player was the old room's last pending reconnector, nothing
@@ -1308,6 +1324,51 @@ mod tests {
             .register_disconnection(player, room, false, None)
             .await;
         assert_ne!(armed, wire_token, "a discarded token must never be armed");
+    }
+
+    /// Review-found (Bugbot): a second same-room disconnection while still
+    /// pending must NOT advance `last_sequence` — the player never reconnected,
+    /// so it still has not seen the events buffered since its first
+    /// disconnect. Advancing it would drop those events from a later replay
+    /// while `replay` still reported `complete`.
+    #[tokio::test]
+    async fn same_room_re_registration_preserves_the_original_replay_snapshot() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        // First disconnect: snapshot taken here. Then a control event is
+        // buffered (the player is pending and never sees it).
+        manager
+            .register_disconnection(player, room, false, None)
+            .await;
+        manager.record_room_event(&room, &control_event()).await;
+
+        // Second disconnect for the SAME room while still pending (e.g. a
+        // replaced/racing connection): the snapshot must not jump past the
+        // buffered event.
+        manager
+            .register_disconnection(player, room, false, None)
+            .await;
+        manager.record_room_event(&room, &control_event()).await;
+
+        // Both events must still replay — neither is silently excluded — and
+        // the replay is honestly complete.
+        let missed = manager.get_missed_events(&room, {
+            let players = manager.disconnected_players.read().await;
+            players[&player].disconnected.last_sequence
+        });
+        let missed = missed.await;
+        assert_eq!(
+            missed.events.len(),
+            2,
+            "both buffered control events must survive a same-room re-registration"
+        );
+        assert!(
+            !missed.truncated,
+            "nothing was evicted, so the replay is complete"
+        );
     }
 
     /// Fuzz-found (fuzz_reconnect_tokens): re-registering a player from a NEW

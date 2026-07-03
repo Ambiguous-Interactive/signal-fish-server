@@ -366,9 +366,22 @@ impl EnhancedGameServer {
         // Get missed events (fetched before the claim completes below — the
         // completion may release the room's replay ring when this player is
         // the last one pending).
-        let missed_events = reconnection_manager
+        let mut missed_events = reconnection_manager
             .get_missed_events(room_id, disconnected.last_sequence)
             .await;
+        // Never replay the reconnecting player's OWN membership deltas back to
+        // it: on reconnect it is being RESTORED (its presence is in the
+        // `Reconnected` snapshot and peers get `PlayerReconnected`), so a
+        // buffered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` for THIS
+        // player is a self-referential teardown artifact, not room news it
+        // missed. (This also keeps the replay stable regardless of how many
+        // times the player's disconnect was registered before it reconnected.)
+        missed_events.events.retain(|event| match event {
+            ServerMessage::PlayerLeft { player_id }
+            | ServerMessage::PlayerReconnected { player_id } => player_id != reconnect_player_id,
+            ServerMessage::PlayerJoined { player } => player.id != *reconnect_player_id,
+            _ => true,
+        });
 
         if !room.players.contains_key(reconnect_player_id) {
             let Some(player_info) = disconnected.player_info.clone() else {
