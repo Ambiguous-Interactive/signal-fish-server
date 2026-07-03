@@ -463,10 +463,18 @@ impl Orchestrator<'_> {
 
         // Mandatory keepalive: send `Ping` on cadence and demand a timely
         // `Pong`. An unanswered ping is a broken connection or control path —
-        // fail loudly rather than idle into the server's eviction. The first
-        // expiry only arms the drain grace (see PONG_DRAIN_GRACE): a `Pong`
-        // already sitting in the socket buffer gets one guaranteed read pass
-        // before the miss is declared fatal.
+        // fail loudly rather than idle into the server's eviction.
+        //
+        // AT MOST ONE ping is outstanding at a time: a new `Ping` is sent only
+        // once the previous one's `Pong` has cleared the deadline. A single
+        // deadline then unambiguously tracks the single in-flight ping — a
+        // stale `Pong` can never clear the deadline of a newer, still-pending
+        // ping (the answer arrives while nothing is pending and is a no-op).
+        //
+        // The first deadline expiry only arms the drain grace
+        // (see PONG_DRAIN_GRACE): a `Pong` already sitting in the socket
+        // buffer gets one guaranteed read pass — the deadline check runs
+        // before the `select!` reads the socket — before the miss is fatal.
         if self.pong_deadline.is_some_and(|at| now >= at) {
             if self.pong_grace_applied {
                 return Err(FatalError::connection(format!(
@@ -476,13 +484,11 @@ impl Orchestrator<'_> {
             self.pong_deadline = Some(now + PONG_DRAIN_GRACE);
             self.pong_grace_applied = true;
         }
-        if now >= self.next_ping_at {
+        if now >= self.next_ping_at && self.pong_deadline.is_none() {
             self.send_message(&ClientMessage::Ping).await?;
             self.next_ping_at = now + PING_INTERVAL;
-            if self.pong_deadline.is_none() {
-                self.pong_deadline = Some(now + PONG_TIMEOUT);
-                self.pong_grace_applied = false;
-            }
+            self.pong_deadline = Some(now + PONG_TIMEOUT);
+            self.pong_grace_applied = false;
         }
 
         if !self.relay_sent && self.relay_send_at.is_some_and(|at| now >= at) {

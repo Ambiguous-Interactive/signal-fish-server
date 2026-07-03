@@ -301,12 +301,22 @@ pub enum ServerMessage {
         data: serde_json::Value,
         /// Server-stamped relay sequence number (v4 only). Per-(sender, room),
         /// starts at 1, and is strictly contiguous per sender for as long as
-        /// the recipient stays connected — so a gap can only mean a message
-        /// the server abandoned together with a disconnect the recipient was
-        /// told about (its own `SLOW_CONSUMER` eviction, or the sender's
-        /// `PlayerLeft`), or the recipient's own reconnect. The counter
-        /// RESTARTS at 1 when the sender leaves/rejoins a room or reconnects,
-        /// so recipients must treat `PlayerLeft`+`PlayerJoined` /
+        /// the recipient stays connected. A gap therefore always has an
+        /// EXPLICIT, observable cause — the recipient was told — and never an
+        /// unexplained relay loss:
+        ///
+        /// - a message the server abandoned together with a disconnect the
+        ///   recipient was told about (its own `SLOW_CONSUMER` eviction, or
+        ///   the sender's `PlayerLeft`), or the recipient's own reconnect;
+        /// - a per-recipient undeliverable payload: if a binary
+        ///   [`ServerMessage::GameDataBinary`] cannot be converted for this
+        ///   recipient's negotiated format, it is replaced in-stream by an
+        ///   `Error` with code `UNSUPPORTED_GAME_DATA_FORMAT` (the connection
+        ///   stays open), so this recipient skips that one `seq` while others
+        ///   receive it. The error frame IS the explanation for that gap.
+        ///
+        /// The counter RESTARTS at 1 when the sender leaves/rejoins a room or
+        /// reconnects, so recipients must treat `PlayerLeft`+`PlayerJoined` /
         /// `PlayerReconnected` for the sender as a seq reset. Stamped at relay
         /// time in `server::game_data`; stripped per recipient in
         /// `websocket::sending` — `None` and absent from the wire for pre-v4

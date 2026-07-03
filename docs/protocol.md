@@ -1338,9 +1338,14 @@ Recipient rules:
   can only mean (a) the server abandoned messages together with _your_
   slow-consumer disconnect (you were told: `SLOW_CONSUMER` + close), or
   (b) the sender left and rejoined (you were told: `PlayerLeft` /
-  `PlayerJoined` / `PlayerReconnected`), which resets its counter to `1`.
-- An unexplained gap is a server bug — report it; this is exactly the
-  condition the sequence numbers exist to make observable.
+  `PlayerJoined` / `PlayerReconnected`), which resets its counter to `1`, or
+  (c) a single binary payload that could not be converted for your
+  negotiated format was replaced in-stream by an `Error` with code
+  `UNSUPPORTED_GAME_DATA_FORMAT` (you were told, and the connection stayed
+  open) — you skip that one `seq` while other recipients receive it.
+- An unexplained gap — one with none of the above notifications — is a
+  server bug; report it. That is exactly the condition the sequence numbers
+  exist to make observable.
 
 ### RelayStats
 

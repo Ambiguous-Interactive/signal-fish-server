@@ -557,9 +557,16 @@ class Orchestrator {
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
     // An unanswered ping is a broken connection or control path — fail loudly
-    // rather than idle into the server's eviction. The first expiry only arms
-    // the drain grace (see PONG_DRAIN_GRACE_MS): a `Pong` already queued gets
-    // one guaranteed processing pass before the miss is declared fatal.
+    // rather than idle into the server's eviction.
+    //
+    // AT MOST ONE ping is outstanding at a time: a new `Ping` is sent only
+    // once the previous one's `Pong` has cleared the deadline. A single
+    // deadline then unambiguously tracks the single in-flight ping — a stale
+    // `Pong` can never clear the deadline of a newer, still-pending ping.
+    //
+    // The first deadline expiry only arms the drain grace
+    // (see PONG_DRAIN_GRACE_MS): a `Pong` already queued gets one guaranteed
+    // processing pass before the miss is declared fatal.
     if (this.pongDeadline !== null && now >= this.pongDeadline) {
       if (this.pongGraceApplied) {
         throw FatalError.connection(
@@ -569,13 +576,11 @@ class Orchestrator {
       this.pongDeadline = now + PONG_DRAIN_GRACE_MS;
       this.pongGraceApplied = true;
     }
-    if (now >= this.nextPingAt) {
+    if (now >= this.nextPingAt && this.pongDeadline === null) {
       this.sendFrame(clientFrame('Ping'));
       this.nextPingAt = now + PING_INTERVAL_MS;
-      if (this.pongDeadline === null) {
-        this.pongDeadline = now + PONG_TIMEOUT_MS;
-        this.pongGraceApplied = false;
-      }
+      this.pongDeadline = now + PONG_TIMEOUT_MS;
+      this.pongGraceApplied = false;
     }
 
     if (!this.relaySent && this.relaySendAt !== null && now >= this.relaySendAt) {

@@ -80,9 +80,14 @@ pub fn sample_value(text: &str, name: &str) -> u64 {
         let value: f64 = raw_value.parse().unwrap_or_else(|error| {
             panic!("sample {name} has non-numeric value {raw_value:?}: {error}")
         });
+        // Validate the full u64 range BEFORE the cast: Rust's float->int cast
+        // saturates, so without this a malformed/hostile value like `1e100`
+        // (finite, whole) would silently become `u64::MAX` and mask a broken
+        // exporter. These are delivery-contract assertions — garbage must
+        // panic loudly, never coerce.
         assert!(
-            value >= 0.0 && value.fract() == 0.0,
-            "sample {name} must be a non-negative integer, got {value}"
+            value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= u64::MAX as f64,
+            "sample {name} must be a non-negative integer within u64 range, got {value}"
         );
         return value as u64;
     }
@@ -169,6 +174,17 @@ signal_fish_websocket_messages_dropped_total 0\n";
     #[should_panic(expected = "not found in the scraped exposition")]
     fn sample_value_panics_on_missing_sample() {
         sample_value(EXPOSITION, "signal_fish_nonexistent_total");
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a non-negative integer within u64 range")]
+    fn sample_value_panics_on_out_of_range_value() {
+        // Finite and whole, but far past u64::MAX: the saturating float->int
+        // cast would silently coerce it to u64::MAX without the range guard.
+        sample_value(
+            "signal_fish_hostile_total 1e100\n",
+            "signal_fish_hostile_total",
+        );
     }
 
     #[test]
