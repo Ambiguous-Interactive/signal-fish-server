@@ -35,16 +35,27 @@ pub struct DeliveryCounters {
     pub active_connections: u64,
 }
 
+/// Process-wide scrape client, built once and reused. Delivery suites poll
+/// `/metrics/prom` in tight deadline loops; a fresh `reqwest::Client` per
+/// scrape would rebuild a connection pool + TLS config every iteration. A
+/// `reqwest::Client` is internally reference-counted and cheap to clone, so
+/// one shared instance is the idiomatic, allocation-light choice.
+fn scrape_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("build metrics scrape client")
+    })
+}
+
 /// Fetch the Prometheus exposition from `http://127.0.0.1:{port}/metrics/prom`
 /// and panic on any transport/HTTP failure — a server that stops answering
 /// its metrics endpoint mid-test is itself a bug worth failing loudly on.
 pub async fn fetch_prometheus_text(port: u16) -> String {
     let url = format!("http://127.0.0.1:{port}/metrics/prom");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .expect("build metrics scrape client");
-    let response = client
+    let response = scrape_client()
         .get(&url)
         .send()
         .await
