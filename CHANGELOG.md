@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract behind the BUG-1 fix: a room whose members are active is never reaped
   (`ActiveRoomNeverReaped`) and a room holding an unexpired reconnection record
   is never reaped (`ReconnectWindowRespected`). A `StaleActivityBug` seeded
-  constant reproduces the pre-fix behaviour (both invariants violated) for
+  constant reproduces the pre-fix behavior (both invariants violated) for
   non-vacuity; the checked configs pin it `FALSE` and are green in the
   auto-globbed `scripts/run-tla-model-check.sh` suite.
 
