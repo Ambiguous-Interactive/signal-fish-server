@@ -20688,13 +20688,15 @@ fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message
 
     assert!(
         dep_detect_step_live.contains("HAS_CARGO_CHANGE=\"false\"")
-            && dep_detect_step_live.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
+            && dep_detect_step_live.contains(
+                "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+            )
             && dep_detect_step_live
                 .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
         "dep-detect must skip changelog for dependency-only Cargo changes using file classification, \
          not commit message heuristics.\n\
          Required logic:\n\
-         1. Track whether Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
+         1. Track whether root/native Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
          2. Set skip_changelog=true when HAS_CARGO_CHANGE=true and NON_INTERNAL=false.\n\
          This prevents merge commit messages from accidentally forcing the changelog gate."
     );
