@@ -254,6 +254,47 @@ spurious deadlocks, so the spec adds an explicit `Done` self-loop action once th
 is exhausted; any remaining deadlock TLC reports is then a real modeling bug (a reachable
 mid-protocol state with no enabled action).
 
+## Single-instance theorems (split brain / ARCH-10)
+
+Several of the v4 relay/reconnect invariants are **theorems of a single relay
+instance** — they hold for one process that owns a room, and are _false_ once a
+load balancer lets the same room live on two instances at once. This is not a
+gap in the proofs; it is a deliberately documented boundary of the design. The
+server keeps all room state per-instance and in-memory, and
+join-with-unknown-code **creates** the room (the `Ok(None)` create arm of
+`join_room_with_coordination` → `src/server/room_service.rs:519`), so the same
+room code presented to two instances behind a naive LB yields two independent
+live rooms — each with its own stamp counter, its own replay ring, and its own
+reconnection tokens (ARCH-10 in `PLAN.md`). The honest posture is therefore
+**LB room-affinity** (one home per room; reconnects must land on that home),
+documented as doctrine — not multi-instance sharding.
+
+Two seeded-bug constants make that boundary **executable** — flip either one and
+TLC exhibits the split-brain counterexample:
+
+| Spec (invariant)                                | Seeded constant (checked `FALSE`) | What TRUE models | Result |
+| ----------------------------------------------- | --------------------------------- | ---------------- | ------ |
+| `SequencedRelay.tla` (`GapAccountable`)         | `SplitBrainStampBug`              | a second instance (`SendSplit`) stamps the same sender's stream from an independent `counter2` | a recipient interleaves duplicate/regressing `seq` with no bracket → `GapAccountable` violated in 4 actions |
+| `ReconnectReplay.tla` (`ReplayFaithful` / `StatusHonest`) | `SplitBrainCounterBug`   | the reconnect is served by a second instance that join-created the room fresh (empty ring, zero watermark, its own `next_sequence`) | the empty replay drops a retained needed event → `ReplayFaithful` violated in 3 actions; `complete`-over-eviction → `StatusHonest` violated in 5 |
+
+These join the module's existing non-vacuity constants — `NoResetNotificationBug`
+(`SequencedRelay`), `NaiveGapPredicateBug` (`ReconnectReplay`), and `SilentDropBug`
+(`DeliveryContract`) — each of which likewise makes TLC produce a labeled
+counterexample, so every one of these safety invariants is demonstrably
+non-vacuous. All are pinned `FALSE` in the checked `.cfg`s; each spec's header
+comment carries the minimal trace and the flip-it-locally instructions.
+
+**Which invariants are single-instance theorems.** Any per-`(sender, room)`
+sequencing or per-room replay guarantee — `GapAccountable` (contiguous,
+bracket-accounted `seq`), `ReplayFaithful` / `StatusHonest` (honest reconnect
+replay), and by extension the `DeliveryContract` conservation law — assumes one
+authoritative counter and one queue/ring per room, i.e. a single home. The
+session-lifecycle invariants in `SignalFishSession.tla` are likewise per-room and
+single-instance by the same construction. The multi-instance seams
+(`DedupCache`, the in-memory "distributed lock", `should_process_message`) are
+dead stubs today; the deliberate single-node CP stance and the LB room-affinity
+requirement are the subject of the `F1` doctrine page in `PLAN.md`.
+
 ## Intentionally not modeled (and why)
 
 - **Rate limits / relay backpressure** — quantitative throttling and queue dynamics,
