@@ -1,6 +1,15 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+
+// `tokio::time::Instant` (not `std::time::Instant`) so the activity reaper
+// (`collect_expired_clients`) and the heartbeat-update throttle
+// (`should_update_last_seen`) read the runtime clock. In production this wraps
+// the same monotonic std clock (identical behavior); under
+// `#[tokio::test(start_paused = true)]` it lets tests drive these windows with
+// `tokio::time::advance(..)` deterministically, at zero wall-clock cost. Every
+// `Instant::now()` here runs inside the tokio runtime (all callers are async /
+// `#[tokio::test]`), so the runtime clock is always available.
+use tokio::time::Instant;
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
@@ -721,6 +730,68 @@ mod tests {
             ids.len(),
             16,
             "all 16 same-IP clients admitted at default cap"
+        );
+    }
+
+    /// The heartbeat-update throttle (`should_update_last_seen`) is deterministic
+    /// under the paused-clock runtime: the first observation always updates, then
+    /// updates are suppressed until the threshold has *elapsed* on the runtime
+    /// clock. Driven purely by `tokio::time::advance(..)` — no wall-clock sleep,
+    /// so nothing can flake under load (this is the B4 payoff: the reaper /
+    /// throttle windows read `tokio::time::Instant`).
+    #[tokio::test(start_paused = true)]
+    async fn should_update_last_seen_throttles_until_threshold_elapses() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:7100".parse().unwrap();
+        let (tx, _rx) = channel();
+        let player_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+
+        let threshold = std::time::Duration::from_secs(30);
+
+        // First observation always updates (no prior timestamp recorded).
+        assert!(
+            manager.should_update_last_seen(&player_id, threshold),
+            "first observation must update"
+        );
+        // Immediately after, the throttle suppresses another update.
+        assert!(
+            !manager.should_update_last_seen(&player_id, threshold),
+            "an update within the throttle window must be suppressed"
+        );
+
+        // Just below the threshold: still suppressed (the boundary is `>=`).
+        tokio::time::advance(threshold - std::time::Duration::from_millis(1)).await;
+        assert!(
+            !manager.should_update_last_seen(&player_id, threshold),
+            "an update just under the threshold must stay suppressed"
+        );
+
+        // Crossing the threshold releases exactly one update, then re-throttles
+        // from the new baseline.
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(
+            manager.should_update_last_seen(&player_id, threshold),
+            "an update at/after the threshold must fire"
+        );
+        assert!(
+            !manager.should_update_last_seen(&player_id, threshold),
+            "the update after the release is throttled from the new baseline"
+        );
+    }
+
+    /// A missing player is treated as "allow update" (the DB layer rejects it).
+    /// Clock-independent (the not-found branch never reads the clock), so this
+    /// pins the throttle's else-branch without needing a paused runtime.
+    #[tokio::test]
+    async fn should_update_last_seen_allows_unknown_player() {
+        let manager = make_manager(4);
+        let unknown = Uuid::new_v4();
+        assert!(
+            manager.should_update_last_seen(&unknown, std::time::Duration::from_secs(30)),
+            "unknown player defaults to allowing the update"
         );
     }
 
