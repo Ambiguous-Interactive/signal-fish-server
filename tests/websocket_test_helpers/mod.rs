@@ -3,6 +3,8 @@
 pub mod chaos_proxy;
 pub mod delivery_ledger;
 pub mod prometheus_scrape;
+pub mod room16;
+pub mod server_process;
 
 use std::collections::VecDeque;
 use std::time::Duration;
