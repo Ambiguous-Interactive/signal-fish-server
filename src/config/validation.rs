@@ -204,8 +204,58 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Cross-field: the room-activity refresh piggybacks on the per-player
+    // heartbeat throttle (`maybe_update_last_seen`), so a room with active
+    // members has its `last_activity` refreshed at most once per
+    // `heartbeat_throttle_secs`. If that throttle is >= `inactive_room_timeout`,
+    // steady ping/GameData/Signal traffic can leave `last_activity` stale past
+    // the reaper deadline and GC an occupied room while its members are still
+    // connected (BUG-1 reintroduced by misconfiguration). Require the throttle
+    // to stay strictly below the inactive-room deadline. (`heartbeat_throttle_secs
+    // == 0` disables throttling — every heartbeat refreshes — so it is always
+    // safe and exempt.)
+    if config.server.heartbeat_throttle_secs > 0
+        && config.server.heartbeat_throttle_secs >= config.server.inactive_room_timeout
+    {
+        anyhow::bail!(
+            "server.heartbeat_throttle_secs ({}) must be less than \
+             server.inactive_room_timeout ({}): the room-activity refresh is throttled on \
+             heartbeat_throttle_secs, so a throttle at or above the inactive-room deadline \
+             lets GC reap an occupied room whose members are still active",
+            config.server.heartbeat_throttle_secs,
+            config.server.inactive_room_timeout
+        );
+    }
+
     // WebSocket configuration validation
     config.websocket.validate()?;
+
+    // Cross-field: the slow-consumer grace period must be shorter than the
+    // activity-reaper deadline (BUG-2 / timeout inversion). A message handler
+    // records sender activity at dispatch, then parks on the broadcast
+    // `join_all` while a slow recipient drains — up to `slow_consumer_timeout_ms`.
+    // If that park can outlast `server.ping_timeout`, the reaper evicts the
+    // HEALTHY sender (close 4003) before its own slow recipient is ever
+    // disconnected: a legal config gets a healthy player kicked. Require the
+    // grace period to be strictly less than the ping deadline so the sender's
+    // recorded activity is always still fresh when its park ends. (Guarded on
+    // `ping_timeout > 0`: a zero deadline disables the reaper, so no inversion
+    // exists to prevent.)
+    if config.server.ping_timeout > 0 {
+        let ping_timeout_ms = config.server.ping_timeout.saturating_mul(1000);
+        if config.websocket.slow_consumer_timeout_ms >= ping_timeout_ms {
+            anyhow::bail!(
+                "websocket.slow_consumer_timeout_ms ({}) must be less than \
+                 server.ping_timeout ({} s = {} ms): a slow-consumer park that can \
+                 outlast the ping deadline lets the activity reaper evict the HEALTHY \
+                 sender (close 4003) before its slow recipient is disconnected \
+                 (timeout inversion)",
+                config.websocket.slow_consumer_timeout_ms,
+                config.server.ping_timeout,
+                ping_timeout_ms
+            );
+        }
+    }
 
     // Protocol version-bounds validation
     config.protocol.validate()?;
@@ -421,6 +471,80 @@ mod tests {
             err.to_string().contains("websocket.batch_interval_ms"),
             "error must name the offending field: {err}"
         );
+    }
+
+    /// Timeout inversion (BUG-2): the slow-consumer grace period must be
+    /// strictly less than the activity-reaper deadline. Data-driven over the
+    /// boundary. `ping_timeout` default is 30 s (30000 ms).
+    #[test]
+    fn slow_consumer_timeout_must_be_below_ping_deadline() {
+        // (slow_consumer_timeout_ms, ping_timeout_secs, expect_ok)
+        let cases = [
+            (5_000_u64, 30_u64, true), // default: well below
+            (29_999, 30, true),        // just below the 30000 ms deadline
+            (30_000, 30, false),       // equal: reaper could win → rejected
+            (60_000, 30, false),       // above: the classic inversion → rejected
+            (60_000, 0, true),         // ping_timeout 0 disables the reaper: no inversion
+            (10_000, 5, false),        // 10000 ms >= 5000 ms deadline → rejected
+        ];
+
+        for (slow_ms, ping_s, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.websocket.slow_consumer_timeout_ms = slow_ms;
+            config.server.ping_timeout = ping_s;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "slow_consumer_timeout_ms={slow_ms}, ping_timeout={ping_s}s"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("slow_consumer_timeout_ms") && err.contains("ping_timeout"),
+                    "rejection must name both offending fields: {err}"
+                );
+            }
+        }
+    }
+
+    /// The heartbeat throttle must stay below the inactive-room deadline, or the
+    /// throttled room-activity refresh can let GC reap an occupied room (BUG-1
+    /// via misconfiguration). Data-driven over the boundary.
+    #[test]
+    fn heartbeat_throttle_must_be_below_inactive_room_timeout() {
+        // (heartbeat_throttle_secs, inactive_room_timeout_secs, expect_ok)
+        let cases = [
+            (30_u64, 3600_u64, true), // defaults: well below
+            (3599, 3600, true),       // just below
+            (3600, 3600, false),      // equal: refresh can lag the reaper → rejected
+            (7200, 3600, false),      // above: the misconfig bugbot flagged → rejected
+            (0, 3600, true),          // 0 disables throttling (refresh every heartbeat) → safe
+        ];
+
+        for (throttle, inactive, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.server.heartbeat_throttle_secs = throttle;
+            config.server.inactive_room_timeout = inactive;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "heartbeat_throttle_secs={throttle}, inactive_room_timeout={inactive}"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("heartbeat_throttle_secs")
+                        && err.contains("inactive_room_timeout"),
+                    "rejection must name both offending fields: {err}"
+                );
+            }
+        }
     }
 
     /// With batching DISABLED the flush interval is never constructed, so a zero

@@ -155,7 +155,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN` | `security.metrics_auth_token` | `null` | Bearer token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max WebSocket message size in bytes |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES` | `security.max_signal_bytes` | `16384` | Max serialized size in bytes of a v3 `Signal` payload (must be > 0 and ≤ `max_message_size`) |
-| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `10` | Max concurrent connections from one IP |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `24` | Max concurrent connections from one IP (covers a 16-player NAT/LAN session plus spectators and reconnect churn) |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED` | `security.transport.tls.enabled` | `false` | Enable built-in TLS listener |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH` | `security.transport.tls.certificate_path` | `null` | Path to PEM certificate chain |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH` | `security.transport.tls.private_key_path` | `null` | Path to PEM private key |
@@ -248,7 +248,7 @@ Complete reference of all configuration options with environment variable overri
   "security": {
     "cors_origins": "https://yourgame.com",
     "require_websocket_auth": true,
-    "max_connections_per_ip": 10
+    "max_connections_per_ip": 24
   }
 }
 

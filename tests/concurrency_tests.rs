@@ -522,10 +522,11 @@ async fn test_concurrent_room_cleanup_and_activity() {
     let cleanup_handle = tokio::spawn(async move {
         barrier_clone.wait().await;
 
+        let protected = std::collections::HashSet::new();
         for _ in 0..10 {
             let _ = server_clone
                 .database()
-                .cleanup_empty_rooms(ChronoDuration::zero())
+                .cleanup_empty_rooms(ChronoDuration::zero(), &protected)
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
@@ -614,9 +615,10 @@ async fn test_concurrent_room_cleanup_across_instances() {
         let barrier_clone = barrier.clone();
         tokio::spawn(async move {
             barrier_clone.wait().await;
+            let protected = std::collections::HashSet::new();
             server
                 .database()
-                .cleanup_empty_rooms(ChronoDuration::zero())
+                .cleanup_empty_rooms(ChronoDuration::zero(), &protected)
                 .await
                 .expect("cleanup should succeed")
                 .len()

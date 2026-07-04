@@ -6,14 +6,13 @@ use super::EnhancedGameServer;
 impl EnhancedGameServer {
     /// Handle ping with coordination.
     ///
-    /// Updates the in-memory ping timestamp (always) and the `last_seen` timestamp
-    /// (throttled based on `heartbeat_throttle` configuration to reduce processing overhead).
+    /// Records the in-memory ping timestamp (always) for disconnect detection and
+    /// replies `Pong`. The throttled `last_seen` + room-activity refresh is done
+    /// once per inbound message by the router (`handle_client_message` →
+    /// `maybe_update_last_seen`), so `Ping` needs no separate refresh here.
     pub async fn handle_ping(&self, player_id: &PlayerId) {
         // Always record the ping in memory for disconnect detection
         self.connection_manager.record_ping(player_id);
-
-        // Only update last_seen if enough time has passed since last update (throttled)
-        self.maybe_update_last_seen(player_id).await;
 
         let _ = self
             .message_coordinator
@@ -36,6 +35,31 @@ impl EnhancedGameServer {
             self.metrics.increment_heartbeat_updates();
             if let Err(e) = self.database.update_player_last_seen(player_id).await {
                 tracing::warn!(%player_id, "Failed to update player last_seen: {}", e);
+            }
+            // Keep the player's ROOM alive too. The activity reaper for a room
+            // with players keys off `last_activity`, which is otherwise written
+            // only at creation — so a room whose members are actively pinging,
+            // relaying GameData, or exchanging WebRTC Signals would still be
+            // GC'd `inactive_room_timeout` after creation, mid-game (BUG-1).
+            // This method is the single throttled liveness-refresh, invoked once
+            // per inbound message by `handle_client_message` (text frames) and
+            // `handle_game_data_binary` (binary frames), so it covers every
+            // message type uniformly.
+            //
+            // `update_room_activity` takes the global `rooms` write lock, so this
+            // is deliberately gated behind the per-player heartbeat throttle
+            // (`should_update`, default 30 s cadence): the relay hot path
+            // (potentially every frame) acquires the lock at most once per player
+            // per throttle window, not per message. A room needs only one refresh
+            // per `inactive_room_timeout` (default 1 h) to stay alive, and startup
+            // validation forces `heartbeat_throttle_secs < inactive_room_timeout`,
+            // so the throttled cadence can never starve the reaper. If this ever
+            // shows up in profiling, promote `last_activity` to an atomic so it can
+            // be bumped under the shared read lock.
+            if let Some(room_id) = self.connection_manager.get_client_room(player_id) {
+                if let Err(e) = self.database.update_room_activity(&room_id).await {
+                    tracing::warn!(%player_id, %room_id, "Failed to update room activity: {}", e);
+                }
             }
         } else {
             self.metrics.increment_heartbeat_skipped();

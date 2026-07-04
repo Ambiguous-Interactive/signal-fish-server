@@ -694,6 +694,36 @@ mod tests {
             .expect("registrations resume after slot release");
     }
 
+    /// GAP-3 regression: a 16-player session behind a single NAT must be
+    /// admissible at the DEFAULT per-IP cap. Before A3 the default was 10, so
+    /// the 11th same-IP client was refused. Builds a manager at the real
+    /// `default_max_connections_per_ip()` and registers 16 clients from one IP.
+    #[tokio::test]
+    async fn default_ip_cap_admits_a_sixteen_player_nat() {
+        let cap = crate::config::defaults::default_max_connections_per_ip();
+        assert!(
+            cap >= 16,
+            "default per-IP cap ({cap}) must admit a 16-player NAT session"
+        );
+
+        let manager = make_manager(cap);
+        let mut ids = Vec::new();
+        for i in 0..16u16 {
+            let (tx, _rx) = channel();
+            let addr: SocketAddr = format!("203.0.113.7:{}", 6000 + i).parse().unwrap();
+            let id = manager
+                .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                .await
+                .unwrap_or_else(|e| panic!("client {i} from one IP must be admitted: {e:?}"));
+            ids.push(id);
+        }
+        assert_eq!(
+            ids.len(),
+            16,
+            "all 16 same-IP clients admitted at default cap"
+        );
+    }
+
     #[tokio::test]
     async fn assign_client_to_room_updates_coordinator_membership() {
         let metrics = Arc::new(ServerMetrics::new());

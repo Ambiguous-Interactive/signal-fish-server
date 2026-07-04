@@ -73,8 +73,10 @@ impl EnhancedGameServer {
     ) {
         // Binary frames bypass the message router, so record liveness here
         // (mirrors `handle_client_message`): a client streaming binary game
-        // data must never be reaped as inactive.
+        // data must never be reaped as inactive, and its ROOM must not be GC'd
+        // as inactive either (throttled room + last_seen refresh, BUG-1).
         self.record_client_activity(player_id);
+        self.maybe_update_last_seen(player_id).await;
         if payload.len() > self.config.max_message_size {
             tracing::warn!(
                 %player_id,
@@ -131,8 +133,16 @@ impl EnhancedGameServer {
         room_id: &RoomId,
         message: ServerMessage,
     ) {
-        // Update last_seen with throttling (same mechanism as heartbeat)
-        self.maybe_update_last_seen(player_id).await;
+        // Count every GameData message accepted for relay. This is the sole
+        // increment site for the `game_data_messages` metric (both the JSON and
+        // binary handlers funnel through here); it was exported to Prometheus
+        // but never incremented before (MISC-11), so the counter read a
+        // permanent 0.
+        self.metrics.increment_game_data_messages();
+
+        // (Room + last_seen liveness is refreshed once upstream per inbound
+        // message — by the router for text frames, by `handle_game_data_binary`
+        // for binary frames — so it is intentionally not repeated here.)
 
         if let Err(e) = self
             .message_coordinator

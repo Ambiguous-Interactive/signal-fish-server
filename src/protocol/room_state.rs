@@ -274,8 +274,14 @@ impl Room {
         let now = chrono::Utc::now();
 
         if self.players.is_empty() {
-            // Empty room - check against creation time
-            now.signed_duration_since(self.created_at) > empty_timeout
+            // Empty room - time from the LAST activity (which `remove_player_from_room`
+            // refreshes on the final departure), not `created_at`. A long-lived room
+            // that just emptied must get the full `empty_timeout` window from when it
+            // emptied, otherwise it is deleted immediately off a stale creation time,
+            // collapsing the reconnection window (BUG-1 corollary B). This also keeps
+            // the two cleanup paths (`cleanup_empty_rooms` / `cleanup_expired_rooms`)
+            // consistent, since the former already keys off `last_activity`.
+            now.signed_duration_since(self.last_activity) > empty_timeout
         } else {
             // Room has players - check against last activity
             now.signed_duration_since(self.last_activity) > inactive_timeout
@@ -471,5 +477,77 @@ impl Room {
     #[allow(dead_code)]
     pub fn get_spectators(&self) -> Vec<SpectatorInfo> {
         self.spectators.values().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_room() -> Room {
+        Room::new(
+            "game".to_string(),
+            "CODE01".to_string(),
+            4,
+            true,
+            "relay".to_string(),
+        )
+    }
+
+    /// An empty room's expiry is timed from `last_activity` (refreshed on the
+    /// final departure), NOT `created_at`. A long-lived room that only just
+    /// emptied must NOT be considered expired off its stale creation time — that
+    /// would collapse the reconnection window (BUG-1 corollary B).
+    #[test]
+    fn is_expired_empty_room_keys_off_last_activity_not_created_at() {
+        let empty = chrono::Duration::seconds(300);
+        let inactive = chrono::Duration::seconds(3600);
+
+        // Created long ago but just emptied (fresh last_activity): NOT expired.
+        let mut room = empty_room();
+        room.created_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        room.last_activity = chrono::Utc::now();
+        assert!(
+            !room.is_expired(empty, inactive),
+            "a freshly-emptied room must survive even if created hours ago"
+        );
+
+        // Emptied long ago (stale last_activity): expired.
+        room.last_activity = chrono::Utc::now() - chrono::Duration::hours(1);
+        assert!(
+            room.is_expired(empty, inactive),
+            "a room empty past empty_timeout must be reaped"
+        );
+    }
+
+    /// A room with players is timed from `last_activity`; refreshing it (as the
+    /// join/leave/heartbeat paths now do) keeps an active room alive past
+    /// `inactive_room_timeout` measured from creation (BUG-1 corollary A).
+    #[test]
+    fn is_expired_active_room_keys_off_last_activity() {
+        let empty = chrono::Duration::seconds(300);
+        let inactive = chrono::Duration::seconds(3600);
+
+        let mut room = empty_room();
+        let player_id = Uuid::new_v4();
+        room.players.insert(
+            player_id,
+            PlayerInfo {
+                id: player_id,
+                name: "P".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                region_id: "us-east-1".to_string(),
+            },
+        );
+        // Created 2h ago but activity is fresh: NOT expired.
+        room.created_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        room.last_activity = chrono::Utc::now();
+        assert!(
+            !room.is_expired(empty, inactive),
+            "an active room with fresh activity must not be reaped mid-game"
+        );
     }
 }
