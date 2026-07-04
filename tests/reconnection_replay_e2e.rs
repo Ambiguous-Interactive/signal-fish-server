@@ -529,6 +529,153 @@ async fn overflowed_replay_ring_reports_truncated() {
 }
 
 // ---------------------------------------------------------------------------
+// H7 (P10.C): a truncated replay still hands the reconnector a COMPLETE room
+//    snapshot, so it can resync app state even though the event log was lost.
+//    Pre-registered prediction: "membership + authority recoverable; ready-state
+//    and spectator roster are LIKELY HOLES in ReconnectedPayload." Result:
+//    REFUTED — the snapshot already carries `current_players` (each with
+//    `is_ready`/`is_authority`), an explicit `ready_players` list, and
+//    `current_spectators`. This test pins that: with a ready peer and a live
+//    spectator established BEFORE the disconnect (so they are room state, not
+//    replay-ring events), the reconnector's TRUNCATED snapshot must still show
+//    both. Guards against a future regression that drops those fields.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn truncated_replay_still_carries_full_room_snapshot() {
+    let mut config = test_server_config();
+    config.event_buffer_size = 3;
+    let (addr, game_server) = start_server_with_config(config).await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    // Establish ready-state + a spectator BEFORE B disconnects, so both are
+    // captured in the room snapshot rather than the (truncated) replay ring.
+    // PeerA stays connected throughout, so its ready-state is unambiguous — the
+    // coordinator ready set is not cleared by membership churn
+    // (`room_service.rs`), so the later churn cannot wipe it.
+    send(&mut peer_a, &ClientMessage::PlayerReady).await;
+    next_matching_server_message_within(
+        &mut peer_a,
+        SERVER_MESSAGE_TIMEOUT,
+        "LobbyStateChanged after PeerA readies",
+        |message| matches!(message, ServerMessage::LobbyStateChanged { .. }).then_some(()),
+    )
+    .await;
+
+    let mut spectator = connect(addr).await;
+    authenticate_v3(&mut spectator).await;
+    send(
+        &mut spectator,
+        &ClientMessage::JoinAsSpectator {
+            game_name: "replay-game".to_string(),
+            room_code: joined_a.room_code.clone(),
+            spectator_name: "Spec".to_string(),
+        },
+    )
+    .await;
+    let spectator_id = next_matching_server_message_within(
+        &mut spectator,
+        SERVER_MESSAGE_TIMEOUT,
+        "SpectatorJoined ack",
+        |message| match message {
+            ServerMessage::SpectatorJoined(payload) => Some(payload.spectator_id),
+            ServerMessage::SpectatorJoinFailed { reason, error_code } => {
+                panic!("spectator join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await;
+
+    // B disconnects with a valid token, then the ring overflows (3 cycles = 6+
+    // events into a 3-slot ring) so B's replay is TRUNCATED.
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+    for i in 0..3 {
+        churn_join_leave(
+            addr,
+            &joined_a.room_code,
+            &format!("Churner{i}"),
+            &mut peer_a,
+        )
+        .await;
+    }
+
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        token,
+    )
+    .await;
+
+    // Precondition: the scenario really is the truncated one this test is about.
+    assert_eq!(
+        reconnected.replay,
+        Some(ReplayStatus::Truncated),
+        "the ring overflowed, so the replay must be truncated"
+    );
+
+    // Membership: both live players are in the snapshot (churners left).
+    let member_ids: Vec<PlayerId> = reconnected.current_players.iter().map(|p| p.id).collect();
+    assert!(
+        member_ids.contains(&joined_a.player_id) && member_ids.contains(&joined_b.player_id),
+        "snapshot membership must include both live players, got {member_ids:?}"
+    );
+
+    // Ready-state (the doubted field): PeerA's readiness survives in BOTH the
+    // explicit list and the per-player flag.
+    assert!(
+        reconnected.ready_players.contains(&joined_a.player_id),
+        "ready_players must list the ready peer after a truncated reconnect"
+    );
+    let peer_a_entry = reconnected
+        .current_players
+        .iter()
+        .find(|p| p.id == joined_a.player_id)
+        .expect("PeerA present in snapshot");
+    assert!(
+        peer_a_entry.is_ready,
+        "the snapshot's per-player is_ready must reflect readiness"
+    );
+
+    // Spectator roster (the other doubted field): the live spectator is present.
+    assert!(
+        reconnected
+            .current_spectators
+            .iter()
+            .any(|s| s.id == spectator_id),
+        "current_spectators must carry the live spectator after a truncated reconnect"
+    );
+
+    // The game has not started — a truncated *lobby* reconnect. `PlayerReady`
+    // (with no `StartGame`) puts the room in `Lobby`, so pin that exact state
+    // rather than merely "not Finalized".
+    assert_eq!(
+        reconnected.lobby_state,
+        signal_fish_server::protocol::LobbyState::Lobby,
+        "a readied-but-not-started room must reconnect in the Lobby state"
+    );
+
+    assert_message_conservation(&game_server.metrics()).await;
+}
+
+// ---------------------------------------------------------------------------
 // 3. v2 wire freeze: a v2 recipient's Reconnected frame must not grow a
 //    `replay` key (raw-JSON assertion; the events themselves still replay).
 // ---------------------------------------------------------------------------
