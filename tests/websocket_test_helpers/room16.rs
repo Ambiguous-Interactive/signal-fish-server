@@ -54,8 +54,11 @@ async fn send(ws: &mut WsStream, msg: &ClientMessage) {
         .expect("send client message");
 }
 
-/// Authenticate advertising `protocol_version`, then drain the handshake up to
-/// the `ProtocolInfo` that follows `Authenticated`.
+/// Authenticate advertising `protocol_version`, asserting the full handshake:
+/// `Authenticated` THEN `ProtocolInfo`. Both frames are required — a regression
+/// that dropped or reordered `Authenticated` must fail here rather than pass
+/// silently on the later `ProtocolInfo` (matching the auth helpers in the other
+/// e2e suites).
 pub async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
     send(
         ws,
@@ -69,6 +72,10 @@ pub async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
             supported_topologies: None,
         },
     )
+    .await;
+    next_matching_server_message_within(ws, STEP_DEADLINE, "Authenticated ack", |message| {
+        matches!(message, ServerMessage::Authenticated { .. }).then_some(())
+    })
     .await;
     next_matching_server_message_within(ws, STEP_DEADLINE, "ProtocolInfo after auth", |message| {
         matches!(message, ServerMessage::ProtocolInfo(_)).then_some(())
