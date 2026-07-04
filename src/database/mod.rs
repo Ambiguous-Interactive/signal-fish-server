@@ -2,7 +2,7 @@ use crate::protocol::{ConnectionInfo, PlayerId, PlayerInfo, Room, RoomId, Specta
 use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Summary describing how many rooms were removed by the cleanup routine.
@@ -106,14 +106,25 @@ pub trait GameDatabase: Send + Sync {
     /// Get all players in a room
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>>;
 
-    /// Delete empty rooms and return their IDs for relay cleanup
-    async fn cleanup_empty_rooms(&self, empty_timeout: chrono::Duration) -> Result<Vec<RoomId>>;
+    /// Delete empty rooms and return their IDs for relay cleanup.
+    ///
+    /// Rooms in `protected` are never deleted regardless of age: they hold a
+    /// still-valid reconnection record, so deleting them would strand a live
+    /// reconnection token behind a `RoomNotFound` (BUG-1 corollary B).
+    async fn cleanup_empty_rooms(
+        &self,
+        empty_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
+    ) -> Result<Vec<RoomId>>;
 
-    /// Delete expired rooms based on timeouts and return a summary of what was removed.
+    /// Delete expired rooms based on timeouts and return a summary of what was
+    /// removed. Rooms in `protected` are never deleted (see
+    /// [`Self::cleanup_empty_rooms`]).
     async fn cleanup_expired_rooms(
         &self,
         empty_timeout: chrono::Duration,
         inactive_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
     ) -> Result<RoomCleanupOutcome>;
 
     /// Update room activity timestamp
@@ -420,6 +431,9 @@ impl GameDatabase for InMemoryDatabase {
         if let Some(room) = rooms.get_mut(room_id) {
             if room.players.len() < room.max_players as usize {
                 room.players.insert(player.id, player);
+                // A join is activity: refresh the reaper clock so a room that
+                // fills up long after creation is not GC'd mid-game (BUG-1).
+                room.last_activity = chrono::Utc::now();
                 Ok(true)
             } else {
                 Ok(false) // Room is full
@@ -437,6 +451,13 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             let removed_player = room.players.remove(player_id);
+
+            // A departure is activity, and it starts the empty-room clock:
+            // both cleanup paths time an empty room from `last_activity`, so
+            // refreshing it here gives a room emptied long after creation the
+            // full `empty_room_timeout` window from the LAST departure rather
+            // than deleting it immediately off a stale `created_at` (BUG-1).
+            room.last_activity = chrono::Utc::now();
 
             // Prune the departed player's ready entry so it cannot linger in
             // `RoomJoined` / `Reconnected` payloads: `finalize_room_game`
@@ -613,7 +634,11 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
-    async fn cleanup_empty_rooms(&self, empty_timeout: chrono::Duration) -> Result<Vec<RoomId>> {
+    async fn cleanup_empty_rooms(
+        &self,
+        empty_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
+    ) -> Result<Vec<RoomId>> {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
 
@@ -626,7 +651,10 @@ impl GameDatabase for InMemoryDatabase {
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if room.players.is_empty() && room.last_activity <= cutoff {
+            if room.players.is_empty()
+                && room.last_activity <= cutoff
+                && !protected.contains(room_id)
+            {
                 to_remove.push((*room_id, room.game_name.clone(), room.code.clone()));
             }
         }
@@ -645,13 +673,14 @@ impl GameDatabase for InMemoryDatabase {
         &self,
         empty_timeout: chrono::Duration,
         inactive_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
     ) -> Result<RoomCleanupOutcome> {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if room.is_expired(empty_timeout, inactive_timeout) {
+            if room.is_expired(empty_timeout, inactive_timeout) && !protected.contains(room_id) {
                 let was_empty = room.players.is_empty();
                 to_remove.push((
                     *room_id,
@@ -1069,6 +1098,150 @@ mod tests {
             err_msg.contains("already exists"),
             "error message should contain 'already exists', got: {err_msg}"
         );
+    }
+
+    // --- BUG-1: room lifecycle GC (activity refresh + reconnection-aware GC) ---
+
+    fn member(name: &str) -> PlayerInfo {
+        PlayerInfo {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            is_authority: false,
+            is_ready: false,
+            connected_at: chrono::Utc::now(),
+            connection_info: None,
+            region_id: "us-east-1".to_string(),
+        }
+    }
+
+    /// Backdate a room's timestamps so it looks stale to the GC without waiting
+    /// wall-clock time. Reaches the in-memory map directly (same module).
+    async fn age_room(db: &InMemoryDatabase, room_id: &RoomId, age: chrono::Duration) {
+        let now = chrono::Utc::now();
+        let mut rooms = db.rooms.write().await;
+        let room = rooms.get_mut(room_id).expect("room exists");
+        room.created_at = now - age;
+        room.last_activity = now - age;
+    }
+
+    fn is_fresh(ts: chrono::DateTime<chrono::Utc>) -> bool {
+        chrono::Utc::now().signed_duration_since(ts) < chrono::Duration::minutes(1)
+    }
+
+    /// A join must refresh `last_activity`: without it, a room that fills up
+    /// long after creation keeps a stale timestamp and is reaped mid-game
+    /// (`inactive_room_timeout` measured from creation, BUG-1 corollary A).
+    #[tokio::test]
+    async fn add_player_to_room_refreshes_last_activity() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "activity_game", "ACT001")
+            .await
+            .expect("room creation should succeed");
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+
+        assert!(db
+            .add_player_to_room(&room.id, member("Joiner"))
+            .await
+            .expect("add_player_to_room should not error"));
+
+        let after = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("get_room_by_id should not error")
+            .expect("room exists");
+        assert!(
+            is_fresh(after.last_activity),
+            "joining must refresh last_activity so an active room is not reaped mid-game"
+        );
+    }
+
+    /// A departure must refresh `last_activity`: it is activity AND it starts
+    /// the empty-room clock, so a long-lived room that empties gets the full
+    /// `empty_room_timeout` window from the last departure (BUG-1 corollary B).
+    #[tokio::test]
+    async fn remove_player_from_room_refreshes_last_activity() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "activity_game", "ACT002")
+            .await
+            .expect("room creation should succeed");
+        let creator = *room.players.keys().next().expect("creator present");
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+
+        db.remove_player_from_room(&room.id, &creator)
+            .await
+            .expect("remove_player_from_room should not error");
+
+        let after = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("get_room_by_id should not error")
+            .expect("room exists");
+        assert!(
+            is_fresh(after.last_activity),
+            "a departure must refresh last_activity (starts the empty-room clock)"
+        );
+    }
+
+    /// Both GC sweeps must spare a stale empty room whose id is `protected`
+    /// (it still holds a valid reconnection record), and must delete it when
+    /// unprotected. Data-driven over the two sweeps × {protected, not}.
+    #[tokio::test]
+    async fn cleanup_sweeps_spare_reconnection_protected_rooms() {
+        enum Sweep {
+            Empty,
+            Expired,
+        }
+        let cases = [
+            (Sweep::Empty, true, true),
+            (Sweep::Empty, false, false),
+            (Sweep::Expired, true, true),
+            (Sweep::Expired, false, false),
+        ];
+
+        for (sweep, protect, expect_survives) in cases {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "gc_game", "GC0001")
+                .await
+                .expect("room creation should succeed");
+            let creator = *room.players.keys().next().expect("creator present");
+            db.remove_player_from_room(&room.id, &creator)
+                .await
+                .expect("remove should not error");
+            // Age past both the 300s empty and 3600s inactive timeouts.
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+
+            let mut protected = HashSet::new();
+            if protect {
+                protected.insert(room.id);
+            }
+
+            match sweep {
+                Sweep::Empty => {
+                    db.cleanup_empty_rooms(chrono::Duration::seconds(300), &protected)
+                        .await
+                        .expect("cleanup_empty_rooms should not error");
+                }
+                Sweep::Expired => {
+                    db.cleanup_expired_rooms(
+                        chrono::Duration::seconds(300),
+                        chrono::Duration::seconds(3600),
+                        &protected,
+                    )
+                    .await
+                    .expect("cleanup_expired_rooms should not error");
+                }
+            }
+
+            let survives = db
+                .get_room_by_id(&room.id)
+                .await
+                .expect("get_room_by_id should not error")
+                .is_some();
+            assert_eq!(
+                survives, expect_survives,
+                "protect={protect}: a reconnection-protected room must survive GC"
+            );
+        }
     }
 
     #[tokio::test]

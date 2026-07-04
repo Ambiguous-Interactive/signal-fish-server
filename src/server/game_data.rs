@@ -131,6 +131,13 @@ impl EnhancedGameServer {
         room_id: &RoomId,
         message: ServerMessage,
     ) {
+        // Count every GameData message accepted for relay. This is the sole
+        // increment site for the `game_data_messages` metric (both the JSON and
+        // binary handlers funnel through here); it was exported to Prometheus
+        // but never incremented before (MISC-11), so the counter read a
+        // permanent 0.
+        self.metrics.increment_game_data_messages();
+
         // Update last_seen with throttling (same mechanism as heartbeat)
         self.maybe_update_last_seen(player_id).await;
 

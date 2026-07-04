@@ -163,7 +163,7 @@ impl Default for ServerConfig {
             inactive_room_timeout: Duration::from_secs(3600),
             max_message_size: 65536, // 64KB
             max_signal_bytes: 16384, // 16KB
-            max_connections_per_ip: 10,
+            max_connections_per_ip: 24,
             require_metrics_auth: true,
             metrics_auth_token: None,
             reconnection_window: Duration::from_secs(300), // 5 minutes

@@ -288,7 +288,7 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP",
         path: "security.max_connections_per_ip",
-        default: Some("10"),
+        default: Some("24"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED",

@@ -122,7 +122,7 @@ self-hosted only.
     "cors_origins": "https://yourgame.com",
     "require_websocket_auth": true,
     "max_message_size": 65536,
-    "max_connections_per_ip": 10
+    "max_connections_per_ip": 24
   },
   "websocket": {
     "enable_batching": true,

@@ -207,6 +207,33 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // WebSocket configuration validation
     config.websocket.validate()?;
 
+    // Cross-field: the slow-consumer grace period must be shorter than the
+    // activity-reaper deadline (BUG-2 / timeout inversion). A message handler
+    // records sender activity at dispatch, then parks on the broadcast
+    // `join_all` while a slow recipient drains — up to `slow_consumer_timeout_ms`.
+    // If that park can outlast `server.ping_timeout`, the reaper evicts the
+    // HEALTHY sender (close 4003) before its own slow recipient is ever
+    // disconnected: a legal config gets a healthy player kicked. Require the
+    // grace period to be strictly less than the ping deadline so the sender's
+    // recorded activity is always still fresh when its park ends. (Guarded on
+    // `ping_timeout > 0`: a zero deadline disables the reaper, so no inversion
+    // exists to prevent.)
+    if config.server.ping_timeout > 0 {
+        let ping_timeout_ms = config.server.ping_timeout.saturating_mul(1000);
+        if config.websocket.slow_consumer_timeout_ms >= ping_timeout_ms {
+            anyhow::bail!(
+                "websocket.slow_consumer_timeout_ms ({}) must be less than \
+                 server.ping_timeout ({} s = {} ms): a slow-consumer park that can \
+                 outlast the ping deadline lets the activity reaper evict the HEALTHY \
+                 sender (close 4003) before its slow recipient is disconnected \
+                 (timeout inversion)",
+                config.websocket.slow_consumer_timeout_ms,
+                config.server.ping_timeout,
+                ping_timeout_ms
+            );
+        }
+    }
+
     // Protocol version-bounds validation
     config.protocol.validate()?;
 
@@ -421,6 +448,43 @@ mod tests {
             err.to_string().contains("websocket.batch_interval_ms"),
             "error must name the offending field: {err}"
         );
+    }
+
+    /// Timeout inversion (BUG-2): the slow-consumer grace period must be
+    /// strictly less than the activity-reaper deadline. Data-driven over the
+    /// boundary. `ping_timeout` default is 30 s (30000 ms).
+    #[test]
+    fn slow_consumer_timeout_must_be_below_ping_deadline() {
+        // (slow_consumer_timeout_ms, ping_timeout_secs, expect_ok)
+        let cases = [
+            (5_000_u64, 30_u64, true), // default: well below
+            (29_999, 30, true),        // just below the 30000 ms deadline
+            (30_000, 30, false),       // equal: reaper could win → rejected
+            (60_000, 30, false),       // above: the classic inversion → rejected
+            (60_000, 0, true),         // ping_timeout 0 disables the reaper: no inversion
+            (10_000, 5, false),        // 10000 ms >= 5000 ms deadline → rejected
+        ];
+
+        for (slow_ms, ping_s, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.websocket.slow_consumer_timeout_ms = slow_ms;
+            config.server.ping_timeout = ping_s;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "slow_consumer_timeout_ms={slow_ms}, ping_timeout={ping_s}s"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("slow_consumer_timeout_ms") && err.contains("ping_timeout"),
+                    "rejection must name both offending fields: {err}"
+                );
+            }
+        }
     }
 
     /// With batching DISABLED the flush interval is never constructed, so a zero

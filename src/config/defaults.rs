@@ -230,8 +230,15 @@ pub const fn default_max_signal_bytes() -> usize {
     16384 // 16KB
 }
 
+/// Default cap on concurrent connections from one IP.
+///
+/// 24, not 10: a 16-player session behind one NAT (LAN party, office, venue) is
+/// a first-class use case, and 10 silently refused the 11th same-IP client
+/// (GAP-3). 24 covers 16 players plus spectators and reconnect churn with slack.
+/// (This is the connection limiter only; the number of players in a single room
+/// is bounded separately by that room's `max_players`, default 8.)
 pub const fn default_max_connections_per_ip() -> usize {
-    10
+    24
 }
 
 pub const fn default_client_auth_mode() -> ClientAuthMode {

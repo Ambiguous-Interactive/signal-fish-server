@@ -507,6 +507,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a room-lifecycle GC bug where every room was deleted a fixed interval after **creation**
+  regardless of activity (default `inactive_room_timeout` = 1 h) — `Room.last_activity` was
+  written only at creation and never refreshed (both refresher methods had zero call sites), so a
+  session over an hour old was reaped with players still in it, and a long-lived room that emptied
+  was deleted immediately, collapsing the reconnection window (reconnects failed `RoomNotFound`
+  with still-valid tokens). `last_activity` is now refreshed on join, on leave/disconnect, and on
+  the throttled heartbeat/relay path; the empty-room clock keys off `last_activity` (not
+  `created_at`) so both cleanup paths agree; and room GC never deletes a room that still holds an
+  unexpired reconnection record (`ReconnectionManager::rooms_with_active_reconnections`).
+- Fixed a config timeout-inversion where a legal combination evicted a **healthy** sender: with
+  `websocket.slow_consumer_timeout_ms ≥ server.ping_timeout · 1000`, a sender parked on the
+  broadcast fan-out for a slow recipient could outlast the activity-reaper deadline and be closed
+  `4003` before its slow recipient was ever disconnected. Startup validation now rejects that
+  combination (cross-field check, guarded on `ping_timeout > 0`).
+- Fixed `game_data_messages` (`signal_fish_game_data_messages_total`) reading a permanent `0`: the
+  metric was exported to Prometheus but never incremented. It is now counted once per relayed
+  `GameData` message at the relay funnel.
 - Fixed an orphaned reconnection replay buffer (found by the new `fuzz_reconnect_tokens` fuzz
   target): a player re-registering a disconnect from a NEW room replaced its pending record and
   left the old room's replay ring alive forever — capturing control events and replaying ghosts
@@ -714,6 +731,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Raised `security.max_connections_per_ip` default `10` → `24`. Ten silently refused the 11th
+  concurrent connection from one IP, so a 16-player session behind a single NAT (LAN party,
+  office, venue) could not connect. `24` covers 16 players plus spectators and reconnect churn.
+  (The per-room player count is bounded separately by that room's `max_players`, default `8`.)
 - SDK platform/version enforcement (`protocol.sdk_compatibility.enforce`) now defaults to
   `false` (opt-in): with the old default the prepopulated platform list made a default-config
   server reject every client that did not claim to be a known engine — including

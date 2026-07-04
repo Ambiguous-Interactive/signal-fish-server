@@ -39,7 +39,7 @@ The negotiated version is clamped into the server's configured range:
 `negotiated = clamp(client_max, protocol.min_protocol_version, protocol.max_protocol_version)`. A client that
 advertises a higher version than the deployment speaks is clamped **down** to `protocol.max_protocol_version`; one
 that omits `protocol_version` is negotiated from the endpoint default. Defaults: `protocol.min_protocol_version`
-is `2`, `protocol.max_protocol_version` is `3`.
+is `2`, `protocol.max_protocol_version` is `4`.
 
 ## The two invariants
 

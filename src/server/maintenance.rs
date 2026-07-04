@@ -1,4 +1,5 @@
 use crate::protocol::RoomId;
+use std::collections::HashSet;
 
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
@@ -6,6 +7,16 @@ impl EnhancedGameServer {
     /// Log that a room has been closed during cleanup.
     pub(crate) fn publish_room_closed(&self, room_id: RoomId, reason: &str) {
         tracing::debug!(%room_id, %reason, "Room closed");
+    }
+
+    /// Rooms that room GC must not delete this tick because they still hold a
+    /// valid reconnection record. Empty when reconnection is disabled (no
+    /// manager), so the cleanup paths behave exactly as before in that case.
+    pub(crate) async fn rooms_protected_by_reconnection(&self) -> HashSet<RoomId> {
+        match &self.reconnection_manager {
+            Some(manager) => manager.rooms_with_active_reconnections().await,
+            None => HashSet::new(),
+        }
     }
 
     /// Drop the coordinator's in-memory ready-state entries for rooms that no
@@ -138,8 +149,19 @@ impl EnhancedGameServer {
                 self.unregister_client(&player_id).await;
             }
 
+            // Rooms with an unexpired reconnection record must survive both
+            // sweeps below: they are empty (their members disconnected) but a
+            // still-valid token points at them, and reaping them would fail the
+            // reconnect with `RoomNotFound` (BUG-1 corollary B). Computed once
+            // per tick, before either sweep.
+            let protected = self.rooms_protected_by_reconnection().await;
+
             // Cleanup empty rooms with idempotency
-            match self.database.cleanup_empty_rooms(empty_timeout).await {
+            match self
+                .database
+                .cleanup_empty_rooms(empty_timeout, &protected)
+                .await
+            {
                 Ok(deleted_room_ids) => {
                     let count = deleted_room_ids.len();
                     if count > 0 {
@@ -209,7 +231,7 @@ impl EnhancedGameServer {
 
             match self
                 .database
-                .cleanup_expired_rooms(empty_timeout, inactive_timeout)
+                .cleanup_expired_rooms(empty_timeout, inactive_timeout, &protected)
                 .await
             {
                 Ok(outcome) if !outcome.is_empty() => {

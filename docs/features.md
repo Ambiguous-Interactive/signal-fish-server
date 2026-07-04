@@ -592,7 +592,7 @@ Limit concurrent connections per IP:
 
 {
   "security": {
-    "max_connections_per_ip": 10
+    "max_connections_per_ip": 24
   }
 }
 

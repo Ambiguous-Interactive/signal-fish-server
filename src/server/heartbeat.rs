@@ -37,6 +37,27 @@ impl EnhancedGameServer {
             if let Err(e) = self.database.update_player_last_seen(player_id).await {
                 tracing::warn!(%player_id, "Failed to update player last_seen: {}", e);
             }
+            // Keep the player's ROOM alive too. The activity reaper for a room
+            // with players keys off `last_activity`, which is otherwise written
+            // only at creation — so a room whose members are actively pinging or
+            // relaying would still be GC'd `inactive_room_timeout` after creation,
+            // mid-game (BUG-1). Both `handle_ping` and the game-data relay
+            // (`broadcast_game_data`) reach this path.
+            //
+            // `update_room_activity` takes the global `rooms` write lock, so this
+            // is deliberately gated behind the SAME per-player heartbeat throttle
+            // as the player update above (`should_update`, default 30 s cadence):
+            // the relay hot path (`broadcast_game_data`, potentially every frame)
+            // acquires the lock at most once per player per throttle window, not
+            // per message — a room needs only one refresh per `inactive_room_timeout`
+            // (default 1 h) to stay alive, so a 30 s cadence has enormous margin.
+            // If this ever shows up in profiling, promote `last_activity` to an
+            // atomic so it can be bumped under the shared read lock.
+            if let Some(room_id) = self.connection_manager.get_client_room(player_id) {
+                if let Err(e) = self.database.update_room_activity(&room_id).await {
+                    tracing::warn!(%player_id, %room_id, "Failed to update room activity: {}", e);
+                }
+            }
         } else {
             self.metrics.increment_heartbeat_skipped();
             tracing::trace!(%player_id, "Skipped last_seen update (throttled)");

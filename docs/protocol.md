@@ -662,9 +662,15 @@ Response to client `Ping`.
 ### Reconnected
 
 Reconnection successful. Includes current room state. The `missed_events`
-field is reserved for future use and is always an empty list today — messages
-sent while the player was disconnected are not buffered or replayed (see
-[Reconnection Flow](#reconnection-flow)).
+field carries the replayable **control** events (membership / lobby / authority
+transitions) broadcast to the room while the player was disconnected, oldest
+first, from a bounded per-room replay ring (`server.event_buffer_size`); it is
+NOT empty when such events occurred during the absence. High-rate data-path
+traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
+`replay` field (v3+ recipients only) reports the completeness of that list —
+`complete`, `truncated` (the ring evicted an event the player needed, so
+`missed_events` is only a suffix), or `unavailable` (replay disabled,
+`event_buffer_size = 0`). See [Reconnection Flow](#reconnection-flow).
 
 ```json
 
@@ -691,7 +697,8 @@ sent while the player was disconnected are not buffered or replayed (see
     "ready_players": ["player-id-1"],
     "relay_type": "matchbox",
     "current_spectators": [],
-    "missed_events": []
+    "missed_events": [],
+    "replay": "complete"
   }
 }
 
@@ -909,11 +916,16 @@ and `room_id` (from the original `RoomJoined` response) to reconnect:
 
 On successful reconnection, the server sends a `Reconnected` message with the current room state.
 
-Note: messages sent while a player is disconnected are **not** buffered or
-replayed — the `missed_events` field in the `Reconnected` payload is always
-empty today. Clients must treat reconnection as requiring an
-application-level state resync (for example, have the authority or another
-peer re-send the current game state after `PlayerReconnected`).
+Note: replayable **control** events (membership / lobby / authority
+transitions) broadcast while the player was disconnected ARE buffered in a
+bounded per-room replay ring and returned in the `Reconnected` payload's
+`missed_events` list, with the `replay` field reporting completeness
+(`complete` / `truncated` / `unavailable`). High-rate data-path traffic
+(`GameData` / `Signal`) is **not** replayed, and a `truncated` or
+`unavailable` replay means control history is incomplete — so clients must
+still treat reconnection as requiring an application-level state resync (for
+example, have the authority or another peer re-send the current game state
+after `PlayerReconnected`).
 
 ## Protocol v3 additions
 

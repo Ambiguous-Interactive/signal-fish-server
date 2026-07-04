@@ -8,7 +8,7 @@
 use crate::metrics::ServerMetrics;
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
 use chrono::{DateTime, Duration, Utc};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -861,6 +861,27 @@ impl ReconnectionManager {
             .map(|p| p.disconnected.player_id)
             .collect()
     }
+
+    /// Room IDs that currently hold at least one **unexpired** reconnection
+    /// record. Room garbage collection must not delete these rooms: a room
+    /// whose members disconnected simultaneously is empty, so it would
+    /// otherwise be reaped by the empty-room sweep before its still-valid
+    /// reconnection tokens could be redeemed — the reconnect then fails
+    /// `RoomNotFound` with a token the client was told is good (BUG-1
+    /// corollary B). Expired records are excluded (they are swept by
+    /// [`Self::cleanup_expired`] and no longer protect anything); claimed and
+    /// unclaimed records both protect, since an in-flight claim still needs
+    /// the room to exist.
+    pub async fn rooms_with_active_reconnections(&self) -> HashSet<RoomId> {
+        let window = self.reconnection_window;
+        self.disconnected_players
+            .read()
+            .await
+            .values()
+            .filter(|record| !record.disconnected.is_expired(window))
+            .map(|record| record.disconnected.room_id)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1012,6 +1033,41 @@ mod tests {
 
         // Should no longer have pending reconnection
         assert!(!manager.has_pending_reconnection(&player_id).await);
+    }
+
+    /// `rooms_with_active_reconnections` reports the rooms that room GC must
+    /// spare. A registered (unexpired) disconnection lists its room; an empty
+    /// manager lists nothing; completing the reconnection drops the room. Per-
+    /// record expiry is delegated to `DisconnectedPlayer::is_expired` (covered
+    /// by `reconnection_error_maps_each_variant_to_its_client_code` semantics).
+    #[tokio::test]
+    async fn rooms_with_active_reconnections_tracks_protected_rooms() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+
+        assert!(
+            manager.rooms_with_active_reconnections().await.is_empty(),
+            "a fresh manager protects no rooms"
+        );
+
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        manager
+            .register_disconnection(player_id, room_id, false, None)
+            .await;
+
+        let protected = manager.rooms_with_active_reconnections().await;
+        assert!(
+            protected.contains(&room_id),
+            "a live reconnection record must protect its room from GC"
+        );
+        assert_eq!(protected.len(), 1);
+
+        manager.complete_reconnection(&player_id).await;
+        assert!(
+            manager.rooms_with_active_reconnections().await.is_empty(),
+            "completing the reconnection releases the room"
+        );
     }
 
     #[tokio::test]

@@ -525,7 +525,7 @@ async fn test_concurrent_room_cleanup_and_activity() {
         for _ in 0..10 {
             let _ = server_clone
                 .database()
-                .cleanup_empty_rooms(ChronoDuration::zero())
+                .cleanup_empty_rooms(ChronoDuration::zero(), &std::collections::HashSet::new())
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
@@ -616,7 +616,7 @@ async fn test_concurrent_room_cleanup_across_instances() {
             barrier_clone.wait().await;
             server
                 .database()
-                .cleanup_empty_rooms(ChronoDuration::zero())
+                .cleanup_empty_rooms(ChronoDuration::zero(), &std::collections::HashSet::new())
                 .await
                 .expect("cleanup should succeed")
                 .len()
