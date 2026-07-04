@@ -274,8 +274,8 @@ TLC exhibits the split-brain counterexample:
 
 | Spec (invariant)                                | Seeded constant (checked `FALSE`) | What TRUE models | Result |
 | ----------------------------------------------- | --------------------------------- | ---------------- | ------ |
-| `SequencedRelay.tla` (`GapAccountable`)         | `SplitBrainStampBug`              | a second instance (`SendSplit`) stamps the same sender's stream from an independent `counter2` | a recipient interleaves duplicate/regressing `seq` with no bracket → `GapAccountable` violated in 4 actions |
-| `ReconnectReplay.tla` (`ReplayFaithful` / `StatusHonest`) | `SplitBrainCounterBug`   | the reconnect is served by a second instance that join-created the room fresh (empty ring, zero watermark, its own `next_sequence`) | the empty replay drops a retained needed event → `ReplayFaithful` violated in 3 actions; `complete`-over-eviction → `StatusHonest` violated in 5 |
+| `SequencedRelay.tla` (`GapAccountable`)         | `SplitBrainStampBug`              | a second instance (`SendSplit`) stamps the same sender's stream from an independent `counter2` (a no-affinity LB collapses both onto one recipient queue) | a recipient interleaves duplicate/regressing `seq` with no bracket → `GapAccountable` violated in 4 actions |
+| `ReconnectReplay.tla` (`ReplayFaithful` / `StatusHonest`) | `SplitBrainCounterBug`   | the reconnect is served by a second instance that join-created the room fresh (empty ring, zero watermark, its own `next_sequence`) | the empty replay drops a retained needed event → `ReplayFaithful` violated in 3 actions; `complete`-over-eviction also violates `StatusHonest` at 5 (masked by `ReplayFaithful`@3 unless it is dropped from the checked `INVARIANTS`) |
 
 These join the module's existing non-vacuity constants — `NoResetNotificationBug`
 (`SequencedRelay`), `NaiveGapPredicateBug` (`ReconnectReplay`), and `SilentDropBug`

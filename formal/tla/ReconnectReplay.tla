@@ -87,12 +87,16 @@
 (*   served by instance 2: replaySet = {} yet event 1 (> lastSeq, never    *)
 (*   evicted) was needed — the empty replay silently dropped it.           *)
 (*                                                                         *)
-(* `StatusHonest` is violated too, at the 5-action eviction trace: after   *)
+(* `StatusHonest` is violated too, at a 5-action eviction trace: after     *)
 (* Disconnect -> EventA (seq 1) -> EventA (seq 2) -> EventA (seq 3, evicts  *)
 (* seq 1: watermarkA = 1), the instance-2 Reconnect reports "complete"      *)
 (* over evictedA = {1} with 1 > lastSeq — `complete` while a needed event  *)
-(* was evicted. (Flip only this constant, not NaiveGapPredicateBug, to see  *)
-(* it: the two bugs are independent and both pinned FALSE when checked.)    *)
+(* was evicted. NOTE: with the checked INVARIANTS list, TLC halts at the    *)
+(* shallower `ReplayFaithful`@3 and never reaches this state, so to OBSERVE *)
+(* the StatusHonest counterexample you must temporarily drop `ReplayFaithful*)
+(* ` from the .cfg INVARIANTS as well as flipping the constant. (Flip only  *)
+(* SplitBrainCounterBug, not NaiveGapPredicateBug — the two bugs are        *)
+(* independent and both pinned FALSE when checked.)                        *)
 (*                                                                         *)
 (* This is executable documentation that replay honesty is a single-node   *)
 (* CP guarantee requiring LB room-affinity (reconnects must land on the    *)
@@ -111,8 +115,8 @@ CONSTANTS
     SplitBrainCounterBug \* TRUE serves the reconnect from a SECOND instance
                          \* whose independent next_sequence join-created room A
                          \* fresh (empty ring, zero watermark) — a room-spanning
-                         \* split brain; must violate StatusHonest; FALSE in
-                         \* checked configs
+                         \* split brain; must violate ReplayFaithful (and
+                         \* StatusHonest, deeper); FALSE in checked configs
 
 ASSUME /\ EVENT_BUDGET \in Nat \ {0}
        /\ RING_CAPACITY \in Nat \ {0}
