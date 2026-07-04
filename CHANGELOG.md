@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `RoomLifecycleGC` TLA+ model (`formal/tla/RoomLifecycleGC.tla` +
+  `_Small.cfg` / `_WindowBoundary.cfg`) formalizing the room garbage-collection
+  contract behind the BUG-1 fix: a room whose members are active is never reaped
+  (`ActiveRoomNeverReaped`) and a room holding an unexpired reconnection record
+  is never reaped (`ReconnectWindowRespected`). A `StaleActivityBug` seeded
+  constant reproduces the pre-fix behaviour (both invariants violated) for
+  non-vacuity; the checked configs pin it `FALSE` and are green in the
+  auto-globbed `scripts/run-tla-model-check.sh` suite.
+
 - Added protocol v4 (strictly additive; clamp `protocol.max_protocol_version` back to `3` to
   disable): relayed `GameData` / `GameDataBinary` delivered to a v4 recipient carry a
   server-stamped per-`(sender, room)` `seq` starting at `1` and strictly contiguous per sender,
