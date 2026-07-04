@@ -19,11 +19,12 @@
 //!
 //! # Infrastructure
 //!
-//! The server-spawning harness is adapted from `tests/v3_multiprocess_e2e.rs`
-//! (its module doc explains the temp-config / port-reservation / readiness /
-//! kill-on-drop design; those helpers are file-private there, hence the
-//! copy), extended with per-test `websocket.send_queue_capacity` /
-//! `websocket.slow_consumer_timeout_ms` knobs. Because the server runs in a
+//! The server-spawning harness is the shared
+//! `websocket_test_helpers::server_process` (its module doc explains the
+//! temp-config / port-reservation / readiness / kill-on-drop design); this
+//! suite drives it with a config overlay carrying per-test
+//! `websocket.send_queue_capacity` / `websocket.slow_consumer_timeout_ms`
+//! knobs. Because the server runs in a
 //! separate process, delivery metrics are asserted by scraping its
 //! `/metrics/prom` endpoint (`websocket_test_helpers::prometheus_scrape`;
 //! the temp config disables metrics auth) — the same counters the in-process
@@ -74,6 +75,9 @@ use websocket_test_helpers::delivery_ledger::{extract, LedgerPayload};
 use websocket_test_helpers::prometheus_scrape::{
     assert_scraped_message_conservation, scrape_delivery_counters,
 };
+use websocket_test_helpers::server_process::{
+    spawn_server, spawn_server_on_fixed_port, CONNECT_TIMEOUT,
+};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -85,17 +89,13 @@ const GAME_NAME: &str = "mp-delivery";
 // Saturation-tolerant ceilings (zero-flakiness policy, .llm/context-testing.md):
 // every wait below polls real state and returns the instant it holds; these
 // only bite when something is genuinely broken, so their size never slows a
-// passing run.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+// passing run. (The server-spawn / connect / health ceilings live with the
+// harness in `websocket_test_helpers::server_process`.)
 const EVENT_DEADLINE: Duration = Duration::from_secs(30);
-const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
-const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Whole-phase ceiling for flood + drain sections.
 const PHASE_DEADLINE: Duration = Duration::from_secs(90);
 /// Ceiling for a client process to drain its JSONL stream and exit.
 const CLIENT_EXIT_DEADLINE: Duration = Duration::from_secs(60);
-const SPAWN_ATTEMPTS: usize = 5;
-const FIXED_PORT_SPAWN_ATTEMPTS: usize = 6;
 
 /// Native-client exit code for transport-level failure (socket died); see
 /// `clients/native/src/client.rs` (`EXIT_CONNECTION_ERROR`).
@@ -108,224 +108,20 @@ struct DeliveryKnobs {
     slow_consumer_timeout_ms: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Server process harness (adapted from tests/v3_multiprocess_e2e.rs).
-// ---------------------------------------------------------------------------
-
-/// Guard around the spawned server binary. Dropping it kills the child
-/// (`start_kill` plus `kill_on_drop(true)` at spawn), so a panicking test
-/// never leaks an orphan server process into CI.
-struct ServerProcess {
-    child: Option<tokio::process::Child>,
-    port: u16,
-    stdout_path: PathBuf,
-    stderr_path: PathBuf,
-    /// Owns the temp config, captured output, and child working directory.
-    _workdir: tempfile::TempDir,
-}
-
-impl ServerProcess {
-    /// SIGKILL the child and reap it.
-    async fn kill_and_wait(&mut self) {
-        let mut child = self
-            .child
-            .take()
-            .expect("server process was already killed");
-        child.kill().await.expect("kill the server process");
-    }
-
-    /// The child's captured stdout/stderr, for spawn-failure diagnostics.
-    fn captured_output(&self) -> String {
-        let read = |label: &str, path: &PathBuf| {
-            let content = std::fs::read_to_string(path)
-                .unwrap_or_else(|error| format!("<failed to read {label}: {error}>"));
-            format!("--- server {label} ---\n{content}")
-        };
-        format!(
-            "{}\n{}",
-            read("stdout", &self.stdout_path),
-            read("stderr", &self.stderr_path)
-        )
-    }
-}
-
-impl Drop for ServerProcess {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if let Err(error) = child.start_kill() {
-                eprintln!("failed to kill server process on drop: {error}");
-            }
-        }
-    }
-}
-
-/// Reserve a currently-free port by binding `0.0.0.0:0` (the address the
-/// server binds), reading the assignment, and releasing the listener.
-fn reserve_port() -> u16 {
-    let probe = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind port probe");
-    let port = probe.local_addr().expect("port probe local_addr").port();
-    drop(probe);
-    port
-}
-
-/// Spawn the server binary on a fresh free port, retrying with a NEW port on
-/// failure (absorbs the reserve-release-spawn race).
-async fn spawn_server(knobs: DeliveryKnobs) -> ServerProcess {
-    let mut failures = Vec::new();
-    for attempt in 1..=SPAWN_ATTEMPTS {
-        let port = reserve_port();
-        match try_spawn_server(port, knobs).await {
-            Ok(server) => return server,
-            Err(failure) => failures.push(format!("attempt {attempt} (port {port}): {failure}")),
-        }
-    }
-    panic!(
-        "server binary failed to become healthy after {SPAWN_ATTEMPTS} attempts:\n{}",
-        failures.join("\n")
-    );
-}
-
-/// Spawn the server binary on a FIXED port (restart-on-same-port semantics)
-/// with exponential backoff — after a SIGKILL the kernel can briefly hold the
-/// port (see `spawn_server_on_fixed_port` in tests/v3_multiprocess_e2e.rs).
-async fn spawn_server_on_fixed_port(port: u16, knobs: DeliveryKnobs) -> ServerProcess {
-    let mut failures = Vec::new();
-    let mut backoff = Duration::from_millis(100);
-    for attempt in 1..=FIXED_PORT_SPAWN_ATTEMPTS {
-        match try_spawn_server(port, knobs).await {
-            Ok(server) => return server,
-            Err(failure) => failures.push(format!("attempt {attempt}: {failure}")),
-        }
-        if attempt < FIXED_PORT_SPAWN_ATTEMPTS {
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_millis(1600));
-        }
-    }
-    panic!(
-        "server binary failed to restart on port {port} after {FIXED_PORT_SPAWN_ATTEMPTS} \
-         attempts:\n{}",
-        failures.join("\n")
-    );
-}
-
-/// One spawn attempt: write the temp config (with this suite's delivery
-/// knobs and metrics auth disabled — the tests scrape `/metrics/prom`),
-/// launch the child with a scrubbed environment, and wait for `/v2/health`.
-async fn try_spawn_server(port: u16, knobs: DeliveryKnobs) -> Result<ServerProcess, String> {
-    let workdir = tempfile::tempdir().expect("create temp workdir");
-    let config_path = workdir.path().join("server-config.json");
-    let config = json!({
-        "port": port,
-        "server": {
-            "enable_reconnection": true,
-            "reconnection_window": 300
-        },
-        "security": {
-            "require_websocket_auth": false,
-            "require_metrics_auth": false,
-            "cors_origins": "*"
-        },
-        "protocol": {
-            "sdk_compatibility": { "enforce": false }
-        },
+/// This suite's config overlay, deep-merged over the shared harness's base
+/// config (`websocket_test_helpers::server_process`): the relay default
+/// topology plus this test's websocket delivery knobs. Metrics auth stays
+/// disabled by the base config, so the tests can scrape `/metrics/prom`.
+fn config_overlay(knobs: DeliveryKnobs) -> Value {
+    json!({
         "session": {
             "default_topology": "relay"
         },
         "websocket": {
             "send_queue_capacity": knobs.send_queue_capacity,
             "slow_consumer_timeout_ms": knobs.slow_consumer_timeout_ms
-        },
-        "logging": {
-            "enable_file_logging": false
         }
-    });
-    std::fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&config).expect("serialize server config"),
-    )
-    .expect("write server config");
-
-    let stdout_path = workdir.path().join("server-stdout.log");
-    let stderr_path = workdir.path().join("server-stderr.log");
-    let stdout_file = std::fs::File::create(&stdout_path).expect("create stdout capture");
-    let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr capture");
-
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-server"));
-    command
-        .current_dir(workdir.path())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(stdout_file))
-        .stderr(std::process::Stdio::from(stderr_file))
-        .kill_on_drop(true);
-    // Scrub every inherited SIGNAL_FISH* variable: ambient config JSON, config
-    // paths, or SIGNAL_FISH__* field overrides would silently override the
-    // temp config (env overrides are applied last by the loader).
-    for (key, _) in std::env::vars_os() {
-        if key
-            .to_str()
-            .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
-        {
-            command.env_remove(&key);
-        }
-    }
-    command.env("SIGNAL_FISH_CONFIG_PATH", &config_path);
-    command.env("SIGNAL_FISH__PORT", port.to_string());
-
-    let child = command.spawn().expect("spawn the server binary");
-    let mut server = ServerProcess {
-        child: Some(child),
-        port,
-        stdout_path,
-        stderr_path,
-        _workdir: workdir,
-    };
-
-    match wait_until_healthy(&mut server).await {
-        Ok(()) => Ok(server),
-        Err(reason) => Err(format!(
-            "{reason}; captured child output:\n{}",
-            server.captured_output()
-        )),
-    }
-}
-
-/// Poll `/v2/health` until it answers 200 (or the deadline passes / the child
-/// exits early).
-async fn wait_until_healthy(server: &mut ServerProcess) -> Result<(), String> {
-    let url = format!("http://127.0.0.1:{}/v2/health", server.port);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("build health-poll client");
-    let start = std::time::Instant::now();
-    let deadline = start + HEALTH_DEADLINE;
-
-    loop {
-        let child = server
-            .child
-            .as_mut()
-            .expect("health poll requires a live child");
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(format!("server process exited early with {status}"));
-            }
-            Ok(None) => {}
-            Err(error) => return Err(format!("failed to poll server process: {error}")),
-        }
-
-        match client.get(&url).send().await {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            // Not up yet (connection refused / non-200): keep polling.
-            Ok(_) | Err(_) => {}
-        }
-
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "health endpoint {url} never answered 200 within {HEALTH_DEADLINE:?}"
-            ));
-        }
-        tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -830,7 +626,7 @@ async fn sigstop_client_process_is_evicted_and_room_flows() {
         send_queue_capacity: 64,
         slow_consumer_timeout_ms: 1_000,
     };
-    let server = spawn_server(knobs).await;
+    let server = spawn_server(config_overlay(knobs)).await;
     let port = server.port;
     let room_code = "FRZ001";
     let client_workdir = tempfile::tempdir().expect("create client workdir");
@@ -985,7 +781,7 @@ async fn sigkill_client_mid_burst_conserves() {
         send_queue_capacity: 256,
         slow_consumer_timeout_ms: 3_000,
     };
-    let server = spawn_server(knobs).await;
+    let server = spawn_server(config_overlay(knobs)).await;
     let port = server.port;
     let room_code = "KIL001";
     let client_workdir = tempfile::tempdir().expect("create client workdir");
@@ -1081,7 +877,7 @@ async fn server_sigkill_mid_relay_bounds_loss() {
         send_queue_capacity: 1_024,
         slow_consumer_timeout_ms: 5_000,
     };
-    let mut server = spawn_server(knobs).await;
+    let mut server = spawn_server(config_overlay(knobs)).await;
     let port = server.port;
     let room_code = "SRV001";
 
@@ -1201,7 +997,7 @@ async fn server_sigkill_mid_relay_bounds_loss() {
     drop(server);
 
     // A NEW process on the SAME port serves a completely fresh session.
-    let restarted = spawn_server_on_fixed_port(port, knobs).await;
+    let restarted = spawn_server_on_fixed_port(port, config_overlay(knobs)).await;
     let fresh_room = "SRV002";
     let (mut fresh_sender_sink, mut fresh_sender_rx) = connect_raw(port).await;
     let (mut fresh_receiver_sink, mut fresh_receiver_rx) = connect_raw(port).await;
