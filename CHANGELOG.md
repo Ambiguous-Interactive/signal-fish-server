@@ -744,6 +744,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The activity reaper (`ConnectionManager::collect_expired_clients`) and the heartbeat-update
+  throttle (`ConnectionManager::should_update_last_seen`) now read the Tokio runtime clock
+  (`tokio::time::Instant`) instead of `std::time::Instant`. Production behavior is unchanged —
+  outside a paused runtime `tokio::time::Instant` wraps the same monotonic std clock — but tests
+  can now drive these windows deterministically with `tokio::time::advance()` under
+  `#[tokio::test(start_paused = true)]` at zero wall-clock cost. The `heartbeat.rs` reaper test
+  that previously relied on a real 25 ms sleep is now paused-clock and instant.
 - Raised `security.max_connections_per_ip` default `10` → `24`. Ten silently refused the 11th
   concurrent connection from one IP, so a 16-player session behind a single NAT (LAN party,
   office, venue) could not connect. `24` covers 16 players plus spectators and reconnect churn.

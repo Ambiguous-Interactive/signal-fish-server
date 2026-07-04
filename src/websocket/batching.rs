@@ -157,44 +157,40 @@ mod tests {
         assert!(batcher.is_empty());
     }
 
-    #[test]
-    fn test_message_batcher_flush_on_time() {
-        use std::thread;
-        use std::time::Duration;
-
-        // The batcher's flush timer starts at `new()` and `should_flush()` reads
-        // the wall clock, so a naive "queue then immediately assert !should_flush"
-        // flakes under load: the thread can be descheduled past the interval
-        // between construction and the check. Split the two assertions into
-        // robust legs (zero-flakiness policy, .llm/context-testing.md):
-
-        // "Not enough time" leg — a LARGE (10s) interval so the immediate check
-        // cannot flip even under extreme scheduling delay.
-        let mut fresh = MessageBatcher::new(100, 10_000);
-        fresh.queue(Arc::new(ServerMessage::PlayerLeft {
+    // Deterministic under the paused-clock runtime: the flush timer reads
+    // `tokio::time::Instant`, so `advance(..)` drives the interval exactly — no
+    // `thread::sleep`, so nothing can overshoot or be descheduled. This removes
+    // the FLAKE-002 wall-clock dependence at the root rather than band-aiding it
+    // with large intervals; one batcher exercises both the "not yet" and
+    // "elapsed" edges of the `>=` boundary.
+    #[tokio::test(start_paused = true)]
+    async fn test_message_batcher_flush_on_time() {
+        let mut batcher = MessageBatcher::new(100, 50); // size 100 (unreachable), 50ms interval
+        batcher.queue(Arc::new(ServerMessage::PlayerLeft {
             player_id: uuid::Uuid::new_v4(),
         }));
-        assert_eq!(fresh.len(), 1);
+        assert_eq!(batcher.len(), 1);
         assert!(
-            !fresh.should_flush(),
-            "a fresh batch under a 10s interval must not flush on time"
+            !batcher.should_flush(),
+            "a fresh batch must not flush before its interval elapses"
         );
 
-        // "Enough time" leg — a TINY (5ms) interval and a sleep an order of
-        // magnitude larger, so the time-based flush is deterministic even if the
-        // sleep overruns (sleep only ever overshoots, never undershoots).
-        let mut timed = MessageBatcher::new(100, 5);
-        timed.queue(Arc::new(ServerMessage::PlayerLeft {
-            player_id: uuid::Uuid::new_v4(),
-        }));
-        thread::sleep(Duration::from_millis(50)); // >> 5ms interval
+        // Just under the interval: still not flushing (boundary is `>=`).
+        tokio::time::advance(Duration::from_millis(49)).await;
         assert!(
-            timed.should_flush(),
+            !batcher.should_flush(),
+            "a batch just under its interval must not flush yet"
+        );
+
+        // Crossing the interval: flushes on time.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            batcher.should_flush(),
             "the batch must flush once its interval has elapsed"
         );
-        let messages = timed.flush();
+        let messages = batcher.flush();
         assert_eq!(messages.len(), 1);
-        assert_eq!(timed.len(), 0);
+        assert_eq!(batcher.len(), 0);
     }
 
     #[test]
@@ -238,42 +234,37 @@ mod tests {
         assert_eq!(batcher.len(), 0);
     }
 
-    #[test]
-    fn test_message_batcher_partial_batch() {
-        use std::thread;
-        use std::time::Duration;
-
-        // Same split-leg shape as `test_message_batcher_flush_on_time` to keep the
-        // time-based assertions deterministic under load (zero-flakiness policy).
-
-        // "Not full, not enough time" leg — a LARGE (10s) interval makes the
-        // immediate check robust to any scheduling delay.
-        let mut fresh = MessageBatcher::new(10, 10_000);
+    // Partial-batch (below `batch_size`) time flush, deterministic under the
+    // paused clock — same `>=`-boundary pattern as
+    // `test_message_batcher_flush_on_time` (fresh → just-under → crossing).
+    #[tokio::test(start_paused = true)]
+    async fn test_message_batcher_partial_batch() {
+        let mut batcher = MessageBatcher::new(10, 50); // 3 < size 10, 50ms interval
         for _ in 0..3 {
-            fresh.queue(Arc::new(ServerMessage::PlayerLeft {
+            batcher.queue(Arc::new(ServerMessage::PlayerLeft {
                 player_id: uuid::Uuid::new_v4(),
             }));
         }
-        assert_eq!(fresh.len(), 3);
+        assert_eq!(batcher.len(), 3);
         assert!(
-            !fresh.should_flush(),
-            "a partial batch under a 10s interval must not flush yet"
+            !batcher.should_flush(),
+            "a partial batch must not flush before its interval elapses"
         );
 
-        // "Time elapsed" leg — a TINY (5ms) interval with a generous sleep, so the
-        // partial-batch time flush is deterministic.
-        let mut timed = MessageBatcher::new(10, 5);
-        for _ in 0..3 {
-            timed.queue(Arc::new(ServerMessage::PlayerLeft {
-                player_id: uuid::Uuid::new_v4(),
-            }));
-        }
-        thread::sleep(Duration::from_millis(50)); // >> 5ms interval
+        // Just under the interval: still not flushing (boundary is `>=`).
+        tokio::time::advance(Duration::from_millis(49)).await;
         assert!(
-            timed.should_flush(),
+            !batcher.should_flush(),
+            "a partial batch just under its interval must not flush yet"
+        );
+
+        // Crossing the interval: flushes on time.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            batcher.should_flush(),
             "a partial batch must flush once its interval has elapsed"
         );
-        let messages = timed.flush();
+        let messages = batcher.flush();
         assert_eq!(messages.len(), 3);
     }
 }

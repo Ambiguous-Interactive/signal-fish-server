@@ -81,7 +81,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
     use tokio::sync::mpsc;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{advance, timeout, Duration};
 
     async fn create_test_server() -> Arc<EnhancedGameServer> {
         EnhancedGameServer::new(
@@ -104,7 +104,10 @@ mod tests {
         .expect("failed to construct test server")
     }
 
-    #[tokio::test]
+    // Deterministic under the paused-clock runtime: the activity reaper reads
+    // `tokio::time::Instant`, so `advance(..)` drives `last_ping` staleness with
+    // no wall-clock dependence (no `sleep`, so nothing to overshoot under load).
+    #[tokio::test(start_paused = true)]
     #[cfg_attr(miri, ignore)]
     async fn handle_ping_resets_timeout_and_replies() {
         let server = create_test_server().await;
@@ -122,7 +125,7 @@ mod tests {
             .await
             .expect("client registration");
 
-        sleep(Duration::from_millis(25)).await;
+        advance(Duration::from_millis(25)).await;
         let expired_before = server
             .connection_manager
             .collect_expired_clients(StdDuration::from_millis(5));

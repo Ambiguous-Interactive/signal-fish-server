@@ -182,6 +182,20 @@ Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
 - **Keep the connection alive.** Send `Ping` on an interval or you will be
   dropped with `CONNECTION_IDLE_TIMEOUT`.
 - **Authenticate first.** Any other message before `Authenticate` is an error.
+- **Rejoining by code re-creates a vanished room — carry your original
+  `max_players`.** If a room no longer exists (the server restarted, or every
+  member left and its reconnection window elapsed) and your party rejoins by room
+  code, the _first_ rejoiner **re-creates** the room. Omit `max_players` and it
+  falls back to the server's per-room default (`8`), so a larger party strands
+  its overflow with `ROOM_FULL`. Always re-supply the original `max_players` on a
+  rejoin-by-code so the whole party fits.
+- **`Reconnect` is windowed and single-winner.** The reconnection `auth_token` is
+  only claimable within the reconnection window (default 300 s); after it,
+  `Reconnect` fails with `RECONNECTION_EXPIRED` / `RECONNECTION_TOKEN_INVALID`,
+  so fall back to a fresh `JoinRoom`. Exactly one of two concurrent claims on the
+  same token wins. If a reconnect races the old connection's teardown you may get
+  `PLAYER_ALREADY_CONNECTED` — the token is **not** consumed, so wait briefly and
+  retry. See [Reconnection](../concepts/reconnection.md).
 
 ## Testing checklist
 
