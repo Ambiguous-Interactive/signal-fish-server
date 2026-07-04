@@ -119,7 +119,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.89.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -196,7 +196,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.89.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -298,18 +298,20 @@ jobs:
             NON_INTERNAL="false"
             while IFS= read -r f; do
               # Dependency-only detection: skip paths that are internal to dev/CI (matches
-              # is_internal_path() in scripts/check-doc-consistency.sh) plus Cargo.toml
-              # and CHANGELOG.md which are expected in dependency bumps.
+              # is_internal_path() in scripts/check-doc-consistency.sh), plus known
+              # dependency-maintenance files that can legitimately co-change with
+              # Cargo manifests/lockfiles (MSRV/toolchain/docs parity touchpoints).
               case "$f" in
-                Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE="true" ;;
+                Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs) ;;
-                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md) ;;
+                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/quickstart.md) ;;
                 .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
                 .gitignore|.dockerignore) ;;
                 PLAN.md|AGENTS.md|pre-push.txt) ;;
                 logs_*.zip) ;;
+                Dockerfile|README.md) ;;
                 clippy.toml|deny.toml|tarpaulin.toml|rust-toolchain.toml|mkdocs.yml|requirements-docs.txt) ;;
                 CHANGELOG.md) ;;
                 *) NON_INTERNAL="true"; break ;;
@@ -599,7 +601,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.88.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.89.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}

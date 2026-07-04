@@ -87,10 +87,12 @@ fn test_ci_workflow_has_file_based_actor_agnostic_dep_detect_step() {
     );
     assert!(
         dep_detect_step_live.contains("HAS_CARGO_CHANGE=\"false\"")
-            && dep_detect_step_live.contains("Cargo.toml|Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;")
+            && dep_detect_step_live.contains(
+                "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+            )
             && dep_detect_step_live
                 .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
-        "ci.yml dep-detect step must use file-based dependency-only detection for Cargo manifest/lock changes."
+        "ci.yml dep-detect step must use file-based dependency-only detection for root and clients/native Cargo manifest/lock changes."
     );
 
     assert!(
@@ -174,6 +176,29 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         assert!(
             workflow.contains(file),
             "ci.yml dep-detect case statement must list '{file}' to stay in sync with the script."
+        );
+    }
+}
+
+#[test]
+fn test_ci_dep_detect_allows_dependency_maintenance_touchpoints() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let dep_detect_step = extract_ci_dep_detect_step_block(&workflow);
+    let dep_detect_step_live = strip_comment_lines(&dep_detect_step);
+
+    let dependency_maintenance_paths = [
+        "clients/native/Cargo.toml",
+        "clients/native/Cargo.lock",
+        "docs/quickstart.md",
+        "Dockerfile",
+        "README.md",
+    ];
+
+    for path in dependency_maintenance_paths {
+        assert!(
+            dep_detect_step_live.contains(path),
+            "ci.yml dep-detect must treat '{path}' as a dependency-maintenance touchpoint so dependency-only updates can skip changelog gating."
         );
     }
 }
