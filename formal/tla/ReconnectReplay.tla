@@ -64,19 +64,64 @@
 (*   under a global sequence counter. The checked configuration pins       *)
 (*   `NaiveGapPredicateBug = FALSE`; flip it locally to watch the          *)
 (*   invariant catch the bug.                                              *)
+(*                                                                         *)
+(* SINGLE-INSTANCE THEOREM (ARCH-10). StatusHonest rests on the WHOLE      *)
+(* premise of this module: ONE global `next_sequence` counter and ONE      *)
+(* replay ring per room. Behind a load balancer that lets a room span two  *)
+(* instances (join-with-unknown-code CREATES a fresh room — the `Ok(None)` *)
+(* arm of `join_room_with_coordination`, `src/server/room_service.rs:519`), *)
+(* each instance has its OWN                                                *)
+(* next_sequence counter and its OWN ring, and a reconnection token is     *)
+(* stranded on the instance that minted it. The `SplitBrainCounterBug`     *)
+(* constant models exactly this: when TRUE, the player's token and its     *)
+(* buffered/evicted stream stay on instance 1, but the reconnect is served *)
+(* by instance 2 — which join-created room A fresh under a SECOND           *)
+(* next_sequence counter and therefore has an empty ring and a zero        *)
+(* watermark. Instance 2 can only ever answer "complete" with an empty     *)
+(* replay, which is a LIE the moment instance 1 retained OR evicted an     *)
+(* event the player needed. The split brain breaks BOTH honesty            *)
+(* invariants; TLC reports the shallowest one, `ReplayFaithful`, in a       *)
+(* 3-action trace (verified during development):                           *)
+(*                                                                         *)
+(*   Disconnect (lastSeq = 0) -> EventA (seq 1, retained) -> Reconnect      *)
+(*   served by instance 2: replaySet = {} yet event 1 (> lastSeq, never    *)
+(*   evicted) was needed — the empty replay silently dropped it.           *)
+(*                                                                         *)
+(* `StatusHonest` is violated too, at a 5-action eviction trace: after     *)
+(* Disconnect -> EventA (seq 1) -> EventA (seq 2) -> EventA (seq 3, evicts  *)
+(* seq 1: watermarkA = 1), the instance-2 Reconnect reports "complete"      *)
+(* over evictedA = {1} with 1 > lastSeq — `complete` while a needed event  *)
+(* was evicted. NOTE: with the checked INVARIANTS list, TLC halts at the    *)
+(* shallower `ReplayFaithful`@3 and never reaches this state, so to OBSERVE *)
+(* the StatusHonest counterexample you must temporarily drop `ReplayFaithful*)
+(* ` from the .cfg INVARIANTS as well as flipping the constant. (Flip only  *)
+(* SplitBrainCounterBug, not NaiveGapPredicateBug — the two bugs are        *)
+(* independent and both pinned FALSE when checked.)                        *)
+(*                                                                         *)
+(* This is executable documentation that replay honesty is a single-node   *)
+(* CP guarantee requiring LB room-affinity (reconnects must land on the    *)
+(* instance that owns the room). See D6 in PLAN.md and the                 *)
+(* "single-instance theorems" section of formal/README.md. The checked     *)
+(* configuration pins `SplitBrainCounterBug = FALSE`.                      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     EVENT_BUDGET,        \* total recorded events across both rooms (keep tiny: 5)
     RING_CAPACITY,       \* room A's replay ring slots (keep tiny: 2)
-    NaiveGapPredicateBug \* TRUE decides truncation from the sequence-gap
+    NaiveGapPredicateBug,\* TRUE decides truncation from the sequence-gap
                          \* predicate instead of the eviction watermark (must
                          \* violate StatusHonest; FALSE in checked configs)
+    SplitBrainCounterBug \* TRUE serves the reconnect from a SECOND instance
+                         \* whose independent next_sequence join-created room A
+                         \* fresh (empty ring, zero watermark) — a room-spanning
+                         \* split brain; must violate ReplayFaithful (and
+                         \* StatusHonest, deeper); FALSE in checked configs
 
 ASSUME /\ EVENT_BUDGET \in Nat \ {0}
        /\ RING_CAPACITY \in Nat \ {0}
        /\ NaiveGapPredicateBug \in BOOLEAN
+       /\ SplitBrainCounterBug \in BOOLEAN
 
 VARIABLES
     nextSeq,    \* the ONE global sequence counter shared by both rooms
@@ -154,12 +199,21 @@ EventB ==
 Reconnect ==
     /\ phase = "Pending"
     /\ phase' = "Reconnected"
-    /\ replaySet' = {seq \in Range(ringA) : seq > lastSeq}
-    /\ LET truncated ==
-               IF NaiveGapPredicateBug
-                   THEN ringA # <<>> /\ Head(ringA) > lastSeq + 1
-                   ELSE watermarkA > lastSeq
-       IN status' = IF truncated THEN "truncated" ELSE "complete"
+    /\ IF SplitBrainCounterBug
+           \* Split brain (ARCH-10): the token and this player's buffered /
+           \* evicted stream are stranded on instance 1, but the reconnect is
+           \* served by instance 2, which join-created room A fresh under its
+           \* OWN next_sequence counter. Instance 2's ring is empty and its
+           \* watermark is 0, so it can only answer "complete" with an empty
+           \* replay — regardless of what instance 1 evicted.
+           THEN /\ replaySet' = {}
+                /\ status' = "complete"
+           ELSE /\ replaySet' = {seq \in Range(ringA) : seq > lastSeq}
+                /\ LET truncated ==
+                           IF NaiveGapPredicateBug
+                               THEN ringA # <<>> /\ Head(ringA) > lastSeq + 1
+                               ELSE watermarkA > lastSeq
+                   IN status' = IF truncated THEN "truncated" ELSE "complete"
     /\ UNCHANGED <<nextSeq, ringA, watermarkA, recordedA, evictedA, lastSeq>>
 
 (* Explicit terminal stutter so TLC's deadlock check stays meaningful       *)

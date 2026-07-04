@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-vacuity; the checked configs pin it `FALSE` and are green in the
   auto-globbed `scripts/run-tla-model-check.sh` suite.
 
+- Added split-brain seeded-bug constants to two v4 TLA+ models, making the
+  single-instance boundary of the relay/reconnect contracts (ARCH-10)
+  executable: `SplitBrainStampBug` in `formal/tla/SequencedRelay.tla` (a second
+  instance stamps the same sender's stream from an independent counter →
+  `GapAccountable` violated) and `SplitBrainCounterBug` in
+  `formal/tla/ReconnectReplay.tla` (a reconnect served by a second instance that
+  join-created the room fresh → `ReplayFaithful` / `StatusHonest` violated). Both
+  are pinned `FALSE` in the checked configs (state spaces unchanged, still green
+  in the auto-globbed suite); each spec header carries its minimal
+  counterexample trace. A new "Single-instance theorems (split brain / ARCH-10)"
+  section in `formal/README.md` catalogs which invariants are single-instance
+  theorems and states the LB room-affinity requirement.
+
 - Added protocol v4 (strictly additive; clamp `protocol.max_protocol_version` back to `3` to
   disable): relayed `GameData` / `GameDataBinary` delivered to a v4 recipient carry a
   server-stamped per-`(sender, room)` `seq` starting at `1` and strictly contiguous per sender,

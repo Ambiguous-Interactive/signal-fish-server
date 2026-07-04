@@ -64,6 +64,35 @@
 (* relay loss. The checked configuration pins                              *)
 (* `NoResetNotificationBug = FALSE`; flip it locally to watch the          *)
 (* invariant catch the bug.                                                *)
+(*                                                                         *)
+(* SINGLE-INSTANCE THEOREM (ARCH-10). GapAccountable is a theorem of a     *)
+(* SINGLE relay instance: the whole per-(sender, room) contract rests on   *)
+(* ONE authoritative stamp counter. Behind a load balancer that lets a     *)
+(* room span two instances (join-with-unknown-code CREATES the room — the  *)
+(* `Ok(None)` arm of `join_room_with_coordination`,                        *)
+(* `src/server/room_service.rs:519`), the same sender's stream is stamped  *)
+(* by two INDEPENDENT counters. The model collapses both instances' output *)
+(* onto ONE recipient queue — the worst-case naive LB with NO connection   *)
+(* or room affinity, where a recipient's inbound frames can come from       *)
+(* either instance, so its reads interleave the two counters' stamps and   *)
+(* it sees duplicate / regressing seq with no bracket. (With mere          *)
+(* connection stickiness the divergence instead surfaces across recipients *)
+(* on different instances or across a migration — either way the per-      *)
+(* recipient contiguity contract is a single-instance theorem.) The        *)
+(* `SplitBrainStampBug` constant models exactly this: when TRUE, a second  *)
+(* instance (`SendSplit`, stamping from the independent `counter2`) may    *)
+(* also relay the sender's stream. TLC then reports a `GapAccountable`     *)
+(* violation; the minimal trace (verified during development) is 4 actions:*)
+(*                                                                         *)
+(*   Send (instance 1, seq 1) -> SendSplit (instance 2, seq 1 again) ->    *)
+(*   Deliver r1 (lastObs 1) -> Deliver r1: seq 1 is a REGRESSION with no   *)
+(*   bracket observed — `accountable[r1] = FALSE`.                         *)
+(*                                                                         *)
+(* This is executable documentation that the sequencing contract does NOT  *)
+(* survive multi-instance split-brain: it is a single-node CP guarantee    *)
+(* requiring LB room-affinity (one home per room). See D6 in PLAN.md and   *)
+(* the "single-instance theorems" section of formal/README.md. The checked *)
+(* configuration pins `SplitBrainStampBug = FALSE`.                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -73,8 +102,12 @@ CONSTANTS
     QueueCapacity,         \* bounded per-recipient queue slots (keep tiny: 2)
     CycleBudget,           \* sender leave+rejoin cycles (keep tiny: 1)
     ReconnectBudget,       \* per-recipient eviction+reconnect cycles (keep tiny: 1)
-    NoResetNotificationBug \* TRUE resets the counter without notifying (must
+    NoResetNotificationBug,\* TRUE resets the counter without notifying (must
                            \* violate GapAccountable; FALSE in checked configs)
+    SplitBrainStampBug     \* TRUE lets a second instance stamp the same
+                           \* sender's stream from an independent counter (a
+                           \* split-brain relay under a room-spanning LB); must
+                           \* violate GapAccountable; FALSE in checked configs
 
 ASSUME /\ Recipients # {}
        /\ SendBudget \in Nat \ {0}
@@ -82,10 +115,14 @@ ASSUME /\ Recipients # {}
        /\ CycleBudget \in Nat
        /\ ReconnectBudget \in Nat
        /\ NoResetNotificationBug \in BOOLEAN
+       /\ SplitBrainStampBug \in BOOLEAN
 
 VARIABLES
     senderIn,    \* whether the sender is currently seated in the room
     counter,     \* the per-(sender, room) stamp counter for the current epoch
+    counter2,    \* a SECOND instance's independent stamp counter for the same
+                 \* (sender, room) — only ever advanced under SplitBrainStampBug
+                 \* (models a room-spanning split brain); stays 0 otherwise
     epoch,       \* ghost: epoch id (bumped by every counter reset)
     sends,       \* relayed messages so far (budget)
     cycles,      \* sender leave+rejoin cycles consumed
@@ -97,8 +134,8 @@ VARIABLES
     accountable  \* [Recipients -> BOOLEAN] ghost: latches FALSE on an
                  \* unexplained gap — the checked verdict
 
-vars == <<senderIn, counter, epoch, sends, cycles, conn, queue, reconnects,
-          lastObs, justified, accountable>>
+vars == <<senderIn, counter, counter2, epoch, sends, cycles, conn, queue,
+          reconnects, lastObs, justified, accountable>>
 
 DataMsgs == [kind : {"data"}, seq : 1..SendBudget]
 CtrlMsgs == [kind : {"left", "rejoin"}]
@@ -125,6 +162,7 @@ AllConnectedHaveRoom ==
 Init ==
     /\ senderIn = TRUE
     /\ counter = 0
+    /\ counter2 = 0
     /\ epoch = 1
     /\ sends = 0
     /\ cycles = 0
@@ -148,7 +186,28 @@ Send ==
                     IF conn[r] = "Connected"
                         THEN Append(queue[r], [kind |-> "data", seq |-> counter + 1])
                         ELSE queue[r]]
-    /\ UNCHANGED <<senderIn, epoch, cycles, conn, reconnects, lastObs,
+    /\ UNCHANGED <<senderIn, counter2, epoch, cycles, conn, reconnects, lastObs,
+                   justified, accountable>>
+
+(* A SECOND relay instance stamps the SAME sender's stream from its own      *)
+(* independent counter (`counter2`). Enabled only under SplitBrainStampBug — *)
+(* the room-spanning split brain of ARCH-10, where join-with-unknown-code    *)
+(* creates a second live room on another instance. Both instances draw from  *)
+(* the shared send budget, so the model stays bounded; the two counters are  *)
+(* wholly independent, so a recipient's reads can interleave duplicate or    *)
+(* regressing seq with NO bracket — exactly the unaccountable gap.           *)
+SendSplit ==
+    /\ SplitBrainStampBug
+    /\ senderIn
+    /\ sends < SendBudget
+    /\ AllConnectedHaveRoom
+    /\ counter2' = counter2 + 1
+    /\ sends' = sends + 1
+    /\ queue' = [r \in Recipients |->
+                    IF conn[r] = "Connected"
+                        THEN Append(queue[r], [kind |-> "data", seq |-> counter2 + 1])
+                        ELSE queue[r]]
+    /\ UNCHANGED <<senderIn, counter, epoch, cycles, conn, reconnects, lastObs,
                    justified, accountable>>
 
 (* The sender leaves the room; PlayerLeft is broadcast to the remaining     *)
@@ -162,7 +221,7 @@ SenderLeave ==
     /\ senderIn' = FALSE
     /\ cycles' = cycles + 1
     /\ BroadcastCtrl("left")
-    /\ UNCHANGED <<counter, epoch, sends, conn, reconnects, lastObs,
+    /\ UNCHANGED <<counter, counter2, epoch, sends, conn, reconnects, lastObs,
                    justified, accountable>>
 
 (* The sender rejoins: the per-(sender, room) counter RESETS (the next      *)
@@ -175,7 +234,7 @@ SenderRejoin ==
     /\ counter' = 0
     /\ epoch' = epoch + 1
     /\ BroadcastCtrl("rejoin")
-    /\ UNCHANGED <<sends, cycles, conn, reconnects, lastObs, justified,
+    /\ UNCHANGED <<counter2, sends, cycles, conn, reconnects, lastObs, justified,
                    accountable>>
 
 (* Slow-consumer eviction: a recipient whose queue is full may be           *)
@@ -186,7 +245,7 @@ Evict(r) ==
     /\ Len(queue[r]) = QueueCapacity
     /\ conn' = [conn EXCEPT ![r] = "Dropped"]
     /\ queue' = [queue EXCEPT ![r] = <<>>]
-    /\ UNCHANGED <<senderIn, counter, epoch, sends, cycles, reconnects,
+    /\ UNCHANGED <<senderIn, counter, counter2, epoch, sends, cycles, reconnects,
                    lastObs, justified, accountable>>
 
 (* The evicted recipient reconnects. Its own disconnect + reconnect is a    *)
@@ -199,8 +258,8 @@ Reconnect(r) ==
     /\ conn' = [conn EXCEPT ![r] = "Connected"]
     /\ reconnects' = [reconnects EXCEPT ![r] = @ + 1]
     /\ justified' = [justified EXCEPT ![r] = TRUE]
-    /\ UNCHANGED <<senderIn, counter, epoch, sends, cycles, queue, lastObs,
-                   accountable>>
+    /\ UNCHANGED <<senderIn, counter, counter2, epoch, sends, cycles, queue,
+                   lastObs, accountable>>
 
 (* The recipient's writer drains one message, in order. A data message is   *)
 (* legal iff contiguous (seq = lastObs + 1) or covered by an unconsumed     *)
@@ -218,7 +277,8 @@ Deliver(r) ==
                       /\ justified' = [justified EXCEPT ![r] = FALSE]
                  ELSE /\ justified' = [justified EXCEPT ![r] = TRUE]
                       /\ UNCHANGED <<lastObs, accountable>>
-    /\ UNCHANGED <<senderIn, counter, epoch, sends, cycles, conn, reconnects>>
+    /\ UNCHANGED <<senderIn, counter, counter2, epoch, sends, cycles, conn,
+                   reconnects>>
 
 (* Explicit terminal stutter so TLC's deadlock check stays meaningful       *)
 (* (matches the SignalFishSession convention): all budgets spent, every     *)
@@ -238,6 +298,7 @@ Done ==
 
 Next ==
     \/ Send
+    \/ SendSplit
     \/ SenderLeave
     \/ SenderRejoin
     \/ \E r \in Recipients : Evict(r) \/ Reconnect(r) \/ Deliver(r)
@@ -251,6 +312,7 @@ Spec == Init /\ [][Next]_vars
 TypeOK ==
     /\ senderIn \in BOOLEAN
     /\ counter \in 0..SendBudget
+    /\ counter2 \in 0..SendBudget
     /\ epoch \in 1..(CycleBudget + 1)
     /\ sends \in 0..SendBudget
     /\ cycles \in 0..CycleBudget

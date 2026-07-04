@@ -27,16 +27,6 @@
 
 ---
 
-## CRITICAL: Git Safety Protocol - NEVER COMMIT
-
-**NEVER CREATE GIT COMMITS OR MODIFY GIT CONFIGURATION. ZERO EXCEPTIONS. EVER.**
-
-This is the #1 policy. You prepare the work; the user commits it.
-
-**Full details:** [Git Safety Protocol](context-git-safety.md)
-
----
-
 ## Quick Decision Trees
 
 ### What Am I Changing?
@@ -133,7 +123,6 @@ Detailed guidance was moved out of this core file. Use these companion reference
 - [Documentation and CI Pitfalls](context-docs-and-ci-pitfalls.md)
 - [Architecture and File Reference](context-architecture-and-files.md)
 - [Protocol and Common Scenarios](context-protocol-and-scenarios.md)
-- [Git Safety Protocol](context-git-safety.md)
 
 Also see:
 
