@@ -13,6 +13,14 @@ impl EnhancedGameServer {
         // This matches the socket-level idle timeout, which already counts
         // any inbound frame as activity.
         self.record_client_activity(player_id);
+        // ...and every inbound message refreshes the sender's ROOM clock the
+        // same way (throttled), so a room stays alive as long as any member is
+        // doing ANYTHING — pinging, relaying GameData, OR exchanging WebRTC
+        // `Signal`s (a long handshake with no pings must not let GC reap an
+        // occupied room, BUG-1). This is the single room-liveness refresh site;
+        // it subsumes the former per-handler calls in `handle_ping` /
+        // `broadcast_game_data`. No-ops for a roomless sender (pre-join).
+        self.maybe_update_last_seen(player_id).await;
         match message {
             ClientMessage::Authenticate { app_id, .. } => {
                 tracing::warn!(

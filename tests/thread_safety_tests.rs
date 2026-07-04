@@ -393,10 +393,11 @@ async fn test_cleanup_rooms_atomic_with_creation() {
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
+            let protected = std::collections::HashSet::new();
             db.cleanup_expired_rooms(
                 chrono::Duration::zero(),
                 chrono::Duration::hours(1),
-                &std::collections::HashSet::new(),
+                &protected,
             )
             .await
             .expect("cleanup should not error");

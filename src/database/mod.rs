@@ -452,12 +452,16 @@ impl GameDatabase for InMemoryDatabase {
         if let Some(room) = rooms.get_mut(room_id) {
             let removed_player = room.players.remove(player_id);
 
-            // A departure is activity, and it starts the empty-room clock:
+            // A real departure is activity, and it starts the empty-room clock:
             // both cleanup paths time an empty room from `last_activity`, so
-            // refreshing it here gives a room emptied long after creation the
-            // full `empty_room_timeout` window from the LAST departure rather
-            // than deleting it immediately off a stale `created_at` (BUG-1).
-            room.last_activity = chrono::Utc::now();
+            // refreshing it gives a room emptied long after creation the full
+            // `empty_room_timeout` window from the LAST departure rather than
+            // deleting it immediately off a stale `created_at` (BUG-1). Guarded
+            // on an ACTUAL removal — a no-op remove (player already gone) is not
+            // activity and must not keep an otherwise-stale room alive.
+            if removed_player.is_some() {
+                room.last_activity = chrono::Utc::now();
+            }
 
             // Prune the departed player's ready entry so it cannot linger in
             // `RoomJoined` / `Reconnected` payloads: `finalize_room_game`

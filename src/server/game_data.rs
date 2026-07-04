@@ -73,8 +73,10 @@ impl EnhancedGameServer {
     ) {
         // Binary frames bypass the message router, so record liveness here
         // (mirrors `handle_client_message`): a client streaming binary game
-        // data must never be reaped as inactive.
+        // data must never be reaped as inactive, and its ROOM must not be GC'd
+        // as inactive either (throttled room + last_seen refresh, BUG-1).
         self.record_client_activity(player_id);
+        self.maybe_update_last_seen(player_id).await;
         if payload.len() > self.config.max_message_size {
             tracing::warn!(
                 %player_id,
@@ -138,8 +140,9 @@ impl EnhancedGameServer {
         // permanent 0.
         self.metrics.increment_game_data_messages();
 
-        // Update last_seen with throttling (same mechanism as heartbeat)
-        self.maybe_update_last_seen(player_id).await;
+        // (Room + last_seen liveness is refreshed once upstream per inbound
+        // message — by the router for text frames, by `handle_game_data_binary`
+        // for binary frames — so it is intentionally not repeated here.)
 
         if let Err(e) = self
             .message_coordinator

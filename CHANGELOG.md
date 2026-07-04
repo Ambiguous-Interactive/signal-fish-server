@@ -521,10 +521,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written only at creation and never refreshed (both refresher methods had zero call sites), so a
   session over an hour old was reaped with players still in it, and a long-lived room that emptied
   was deleted immediately, collapsing the reconnection window (reconnects failed `RoomNotFound`
-  with still-valid tokens). `last_activity` is now refreshed on join, on leave/disconnect, and on
-  the throttled heartbeat/relay path; the empty-room clock keys off `last_activity` (not
-  `created_at`) so both cleanup paths agree; and room GC never deletes a room that still holds an
-  unexpired reconnection record (`ReconnectionManager::rooms_with_active_reconnections`).
+  with still-valid tokens). `last_activity` is now refreshed on join, on a real leave/disconnect,
+  and once per inbound message on the throttled liveness path — covering pings, relayed `GameData`
+  (JSON and binary), and WebRTC `Signal` traffic uniformly; the empty-room clock keys off
+  `last_activity` (not `created_at`) so both cleanup paths agree; and room GC never deletes a room
+  that still holds an unexpired reconnection record
+  (`ReconnectionManager::rooms_with_active_reconnections`). Startup validation additionally rejects
+  `server.heartbeat_throttle_secs >= server.inactive_room_timeout`, so the throttled refresh can
+  never lag the reaper and re-open the bug by misconfiguration.
 - Fixed a config timeout-inversion where a legal combination evicted a **healthy** sender: with
   `websocket.slow_consumer_timeout_ms ≥ server.ping_timeout · 1000`, a sender parked on the
   broadcast fan-out for a slow recipient could outlast the activity-reaper deadline and be closed

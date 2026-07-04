@@ -204,6 +204,29 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Cross-field: the room-activity refresh piggybacks on the per-player
+    // heartbeat throttle (`maybe_update_last_seen`), so a room with active
+    // members has its `last_activity` refreshed at most once per
+    // `heartbeat_throttle_secs`. If that throttle is >= `inactive_room_timeout`,
+    // steady ping/GameData/Signal traffic can leave `last_activity` stale past
+    // the reaper deadline and GC an occupied room while its members are still
+    // connected (BUG-1 reintroduced by misconfiguration). Require the throttle
+    // to stay strictly below the inactive-room deadline. (`heartbeat_throttle_secs
+    // == 0` disables throttling — every heartbeat refreshes — so it is always
+    // safe and exempt.)
+    if config.server.heartbeat_throttle_secs > 0
+        && config.server.heartbeat_throttle_secs >= config.server.inactive_room_timeout
+    {
+        anyhow::bail!(
+            "server.heartbeat_throttle_secs ({}) must be less than \
+             server.inactive_room_timeout ({}): the room-activity refresh is throttled on \
+             heartbeat_throttle_secs, so a throttle at or above the inactive-room deadline \
+             lets GC reap an occupied room whose members are still active",
+            config.server.heartbeat_throttle_secs,
+            config.server.inactive_room_timeout
+        );
+    }
+
     // WebSocket configuration validation
     config.websocket.validate()?;
 
@@ -481,6 +504,43 @@ mod tests {
                 let err = result.unwrap_err().to_string();
                 assert!(
                     err.contains("slow_consumer_timeout_ms") && err.contains("ping_timeout"),
+                    "rejection must name both offending fields: {err}"
+                );
+            }
+        }
+    }
+
+    /// The heartbeat throttle must stay below the inactive-room deadline, or the
+    /// throttled room-activity refresh can let GC reap an occupied room (BUG-1
+    /// via misconfiguration). Data-driven over the boundary.
+    #[test]
+    fn heartbeat_throttle_must_be_below_inactive_room_timeout() {
+        // (heartbeat_throttle_secs, inactive_room_timeout_secs, expect_ok)
+        let cases = [
+            (30_u64, 3600_u64, true), // defaults: well below
+            (3599, 3600, true),       // just below
+            (3600, 3600, false),      // equal: refresh can lag the reaper → rejected
+            (7200, 3600, false),      // above: the misconfig bugbot flagged → rejected
+            (0, 3600, true),          // 0 disables throttling (refresh every heartbeat) → safe
+        ];
+
+        for (throttle, inactive, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.server.heartbeat_throttle_secs = throttle;
+            config.server.inactive_room_timeout = inactive;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "heartbeat_throttle_secs={throttle}, inactive_room_timeout={inactive}"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("heartbeat_throttle_secs")
+                        && err.contains("inactive_room_timeout"),
                     "rejection must name both offending fields: {err}"
                 );
             }
