@@ -123,7 +123,6 @@ Detailed guidance was moved out of this core file. Use these companion reference
 - [Documentation and CI Pitfalls](context-docs-and-ci-pitfalls.md)
 - [Architecture and File Reference](context-architecture-and-files.md)
 - [Protocol and Common Scenarios](context-protocol-and-scenarios.md)
-- [Git Safety Protocol](context-git-safety.md)
 
 Also see:
 
