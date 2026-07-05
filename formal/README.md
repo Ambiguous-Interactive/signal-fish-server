@@ -261,6 +261,28 @@ spurious deadlocks, so the spec adds an explicit `Done` self-loop action once th
 is exhausted; any remaining deadlock TLC reports is then a real modeling bug (a reachable
 mid-protocol state with no enabled action).
 
+### Tooling decisions (P10.D8)
+
+- **TLC-first (explicit-state), not Apalache-first.** Every model here is small and
+  finite by construction (tiny budgets/caps), so exhaustive state enumeration is fast and
+  gives concrete, minimal counterexample traces — which is what the seeded-bug non-vacuity
+  discipline needs. Apalache (symbolic, SMT-backed) is kept **dev-side only** (a future
+  `scripts/run-apalache.sh` could discharge, e.g., `SenderPacingReaper`'s inequality
+  symbolically for _all_ constant valuations rather than the pinned ones) and is **not
+  CI-gating** until it catches something TLC missed — adding an SMT dependency to CI earns
+  its keep only then.
+- **Discrete-tick integer time, not dense/real time.** Every timed property in these
+  models is a _relation between timeout constants_ (grace vs ping deadline, age vs sojourn
+  bound), never a dense-time reachability question. An integer `now`/`Tick` (or per-frame
+  `age`) with absolute-deadline guards captures them exactly, keeps the state space finite,
+  and avoids a real-time model checker. See `SenderPacingReaper` and
+  `ControlPriorityDelivery`.
+- **The action↔code correspondence style, not PlusCal.** Each action bundles one external
+  event with all its side effects and maps to one code function (the correspondence tables
+  and mapping comments). PlusCal's generated control-flow variable (`pc`) would break that
+  one-action-per-function readability, so it is deliberately **not** used — the specs are
+  written directly in TLA+.
+
 ## Single-instance theorems (split brain / ARCH-10)
 
 Several of the v4 relay/reconnect invariants are **theorems of a single relay
