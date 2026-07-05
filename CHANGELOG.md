@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the flagship `EndToEndGapAccountability` TLA+ model
+  (`formal/tla/EndToEndGapAccountability.tla` + `_Small.cfg` + `_Sim.cfg`) —
+  P10.D4. It composes three previously separate contracts (`SequencedRelay`
+  per-`(sender, room)` stamping, `ReconnectReplay`'s bounded replay ring +
+  eviction watermark, and `ConnectionTeardown`'s slow-consumer eviction) into
+  one behavior and proves the client-facing promise: driven only by what the
+  server puts on its socket, a client can classify every sequence discontinuity
+  (`ClientCanClassify`), no evicted frame ever resurfaces out of order
+  (`DroppedNeverObserved`), and the reconnection snapshot heals the tail dropped
+  at eviction (`MembershipEventuallyHonest`). It is the executable proof that
+  the protocol-v4 P10.E5 per-sender `(epoch, seq)` watermarks
+  (`Reconnected.sender_watermarks`) are necessary — a reconnecting client
+  cannot otherwise tell its own outage gap from relay loss. Three seeded bugs
+  prove non-vacuity (`SingleFlagBug` and `NoBaselineResetBug` violate
+  `ClientCanClassify`; `NoSnapshotReconcileBug` violates
+  `MembershipEventuallyHonest`), all pinned `FALSE` in the checked configs.
+- Added a bounded-simulation runner mode to `scripts/run-tla-model-check.sh`: a
+  configuration whose basename ends `_Sim` is checked by `tlc -simulate`
+  (`num=20000 -depth 80`) instead of exhaustive enumeration, for a state space
+  deliberately too large to enumerate. It shares the module's invariants and
+  still fails the run on a violation (TLC exits non-zero under `-simulate`);
+  everything else stays exhaustive and CI-gating.
+
 - Added the `DeliveryClasses` TLA+ model (`formal/tla/DeliveryClasses.tla` +
   `_Small.cfg`) — spec-first for the protocol-v4 P10.E2 delivery classes
   (reliable / latest / volatile). It pins the per-class accounting contract:
