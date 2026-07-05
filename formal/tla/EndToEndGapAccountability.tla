@@ -278,8 +278,9 @@ SenderLeave(s) ==
     /\ cycles' = cycles + 1
     /\ queue' = BroadcastCtrl("left", s)
     /\ nextCtrlSeq' = nextCtrlSeq + 1
-    /\ ring' = RecordedRing("left", s).ring
-    /\ watermark' = RecordedRing("left", s).watermark
+    /\ LET recorded == RecordedRing("left", s)
+       IN /\ ring' = recorded.ring
+          /\ watermark' = recorded.watermark
     /\ UNCHANGED <<counter, epoch, sends, conn, sockBuf, reconnects, snapSeq,
                    obsEpoch, obsSeq, justified, clientMembers, accountable>>
 
@@ -293,8 +294,9 @@ SenderRejoin(s) ==
     /\ epoch' = [epoch EXCEPT ![s] = @ + 1]
     /\ queue' = BroadcastCtrl("rejoin", s)
     /\ nextCtrlSeq' = nextCtrlSeq + 1
-    /\ ring' = RecordedRing("rejoin", s).ring
-    /\ watermark' = RecordedRing("rejoin", s).watermark
+    /\ LET recorded == RecordedRing("rejoin", s)
+       IN /\ ring' = recorded.ring
+          /\ watermark' = recorded.watermark
     /\ UNCHANGED <<sends, cycles, conn, sockBuf, reconnects, snapSeq, obsEpoch,
                    obsSeq, justified, clientMembers, accountable>>
 
