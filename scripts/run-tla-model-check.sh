@@ -218,12 +218,34 @@ for cfg in "${CONFIGS[@]}"; do
     # -metadir keeps TLC's state files out of the repository; deadlock
     # checking is deliberately left ON (see the header comment).
     module="$(module_of "$(basename "$cfg" .cfg)")"
+
+    # A *_Sim configuration is checked by bounded random simulation instead of
+    # exhaustive enumeration: its state space is deliberately too large to
+    # enumerate (deeper budgets, wider queues), so it is sampled by random walk.
+    # Exhaustive (*_Small etc.) configurations are the CI-gating proofs; a *_Sim
+    # run is a best-effort deep sampler that shares the same invariants. TLC
+    # still exits non-zero on a violation under -simulate (verified: a seeded
+    # ClientCanClassify bug trips in ~2s), so the exit-code verdict below has
+    # teeth.
+    #
+    # `num` is PER WORKER, so wall-clock ~= the time for one worker to walk
+    # `num` traces of `depth` and is roughly constant across core counts. On a
+    # 12-core box num=20000 walks ~19M states in ~42s (num=200000 was ~7min,
+    # blowing the shared 10-minute CI budget); 20000 keeps the deep sampler
+    # comfortably inside budget on the 2-4 core CI runners while still visiting
+    # orders of magnitude more states than the exhaustive _Small model.
+    mode_args=()
+    case "$(basename "$cfg" .cfg)" in
+        *_Sim) mode_args=(-simulate num=20000 -depth 80) ;;
+    esac
+
     set +e
     (
         cd "$TLA_DIR" && \
         java -XX:+UseParallelGC -cp "$JAR_PATH" tlc2.TLC \
             -workers "$WORKERS" \
             -metadir "$metadir" \
+            "${mode_args[@]}" \
             -config "$cfg" \
             "${module}.tla"
     ) >"$output_file" 2>&1
@@ -234,8 +256,15 @@ for cfg in "${CONFIGS[@]}"; do
         cat "$output_file"
     fi
 
-    summary="$(grep -E "states generated|depth of the complete" "$output_file" | tr '\n' ' ' || true)"
-    if [ "$tlc_status" -eq 0 ] && grep -q "No error has been found" "$output_file"; then
+    summary="$(grep -E "states generated|depth of the complete|states checked|Finished in" "$output_file" | tr '\n' ' ' || true)"
+    # Exhaustive runs print "No error has been found"; simulation runs finish
+    # quietly (no such banner), so for *_Sim a clean exit code is the verdict.
+    if [ "${#mode_args[@]}" -gt 0 ]; then
+        run_ok=$([ "$tlc_status" -eq 0 ] && echo true || echo false)
+    else
+        run_ok=$([ "$tlc_status" -eq 0 ] && grep -q "No error has been found" "$output_file" && echo true || echo false)
+    fi
+    if [ "$run_ok" = true ]; then
         echo "OK   ${cfg}: ${summary}"
     else
         overall_status=1

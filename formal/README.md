@@ -21,7 +21,11 @@ path filters in `.github/workflows/formal-verification.yml`.
 
 Each `.tla` module carries one or more `<Module>_<Scenario>.cfg` configurations;
 the runner auto-globs **every** `formal/tla/*.cfg`, so a new spec or scenario is
-picked up with zero CI plumbing.
+picked up with zero CI plumbing. A configuration whose basename ends `_Sim` is
+checked by **bounded random simulation** (`tlc -simulate`) instead of exhaustive
+enumeration — for a state space deliberately too large to enumerate; it shares
+the module's invariants and a violation still fails the run (TLC exits non-zero
+under `-simulate`). Everything else is exhaustive and CI-gating.
 
 | Path                          | Purpose                                                                            |
 | ----------------------------- | --------------------------------------------------------------------------------- |
@@ -34,6 +38,7 @@ picked up with zero CI plumbing.
 | `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
 | `tla/ControlPriorityDelivery.tla` | Spec-first for v4/P10.E2: control-priority queue split + sojourn eviction (liveness) |
 | `tla/DeliveryClasses.tla`     | Spec-first for v4/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
+| `tla/EndToEndGapAccountability.tla` | Flagship v4/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
@@ -414,6 +419,73 @@ watermark concern, not this module. This module verifies **ledger completeness**
 not scalar arithmetic. It is consistent with (not a formal refinement of) the #131
 `DeliveryContract.tla` — its counted per-class drops replace that model's single
 conservation law.
+
+## End-to-end gap accountability (flagship composition)
+
+`EndToEndGapAccountability.tla` (P10.D4) is the **flagship** module: it composes
+three previously separate contracts — `SequencedRelay.tla` (per-`(sender, room)`
+contiguous stamping + every-gap-bracketed accountability), `ReconnectReplay.tla`
+(the bounded replay ring + eviction watermark), and `ConnectionTeardown` (a
+slow-consumer eviction that abandons a recipient's queued messages) — into one
+behavior and proves the **client-facing** promise: driven only by what the server
+puts on its socket, a client can classify every sequence discontinuity it ever
+observes, and the reconnection snapshot heals the tail the server dropped when it
+evicted the client. This is the executable proof of the P10.E5 client-SDK
+re-baseline obligation.
+
+Topology is deliberately **one recipient observing two senders**. Two senders is
+mandatory: the single-sender `justified` bracket in `SequencedRelay` is a per-
+recipient flag, which is sound with one sender but **unsound at ≥2** — a bracket
+armed for sender A is spent by the next contiguous frame from B, so A's later
+epoch reset reads as an unexplained regression. D4 tracks justification per
+`(recipient, sender)` pair. Beyond the two-sender axis it adds two structures the
+single-contract specs cannot see:
+
+- a per-recipient **socket buffer** between the server's writer and the client's
+  observation (`WriterDrain` moves a frame queue → `sockBuf`; only `ClientObserve`
+  acts on it). An `Evict` wipes **both** the queue and `sockBuf` — the kernel
+  send/receive buffers die with the TCP connection — so a frame the server already
+  handed to the OS can still be lost. `DroppedNeverObserved` proves a wiped frame
+  never resurfaces out of order.
+- the reconnection **snapshot as authoritative heal**: on reconnect the server
+  sends the current member set (`RoomJoined.current_players`) and each live
+  sender's `(epoch, seq)` high-water mark (`Reconnected.sender_watermarks`, the E5
+  field). The client (a) **replaces** membership with the snapshot set (an upsert,
+  not a delta replay) so a dropped `PlayerLeft` cannot strand a phantom member, and
+  (b) **re-baselines** each per-sender `(epoch, seq)` expectation from the
+  watermarks so the next frame is contiguous against a fresh baseline.
+
+Three seeded-bug constants make each guarantee **non-vacuous** — all pinned
+`FALSE` in the checked configs; flip exactly one to watch TLC catch the design
+bug (traces in the module header):
+
+| Seeded constant (checked `FALSE`) | What TRUE models | Result |
+| --------------------------------- | ---------------- | ------ |
+| `SingleFlagBug` | justification collapsed from per-`(recipient, sender)` to one shared flag | a contiguous frame from `s2` spends the bracket `s1` needs for its epoch reset → `ClientCanClassify` **violated** |
+| `NoBaselineResetBug` | reconnect skips the per-sender watermark re-baseline | a post-outage frame is a gap against a stale baseline with no armed bracket → `ClientCanClassify` **violated** (proves E5's watermarks are necessary) |
+| `NoSnapshotReconcileBug` | reconnect applies only the (possibly incomplete) delta replay instead of the authoritative member set | a `PlayerReconnected` truncated from the wiped socket buffer + replay ring leaves the client believing a seated sender left → `MembershipEventuallyHonest` **violated** |
+
+Also checked: `TypeOK`, `RingSnapshotSound` (retained control events strictly
+ascending, everything evicted strictly below everything retained, no cursor or
+watermark ahead of the global counter). `MembershipEventuallyHonest` is encoded
+as a safety obligation on the terminal (stutter) states — the house convention
+for an eventually-property under TLC.
+
+**Single-instance theorem (ARCH-10).** Every invariant rests on ONE authoritative
+relay: one stamp counter per `(sender, room)`, one global control-sequence
+counter, one replay ring, and a reconnect served by the instance that owns the
+room. D4 does not re-derive the split-brain boundary (that is
+`SequencedRelay`'s `SplitBrainStampBug` and `ReconnectReplay`'s
+`SplitBrainCounterBug`, above); it composes the single-instance behaviors to prove
+the end-to-end client contract.
+
+**Configurations.** `_Small` is exhaustive (2 senders, 1 recipient, a 1-slot
+queue, a 1-slot socket buffer, and a 1-slot ring, one leave/rejoin and one
+eviction/reconnect cycle — a complete state graph at depth 16). `_Sim` runs the
+same invariants over
+a **wider** shape (deeper send budget, 2-slot queue/buffer/ring, two cycles) under
+bounded random simulation, sampling interleavings the exhaustive model cannot
+afford. Both are green with all three bugs pinned `FALSE`.
 
 ## Intentionally not modeled (and why)
 
