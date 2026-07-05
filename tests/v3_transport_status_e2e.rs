@@ -721,7 +721,9 @@ async fn reconnect_clears_stored_transport_status() {
         SERVER_MESSAGE_TIMEOUT,
         "PlayerReconnected",
         |message| match message {
-            ServerMessage::PlayerReconnected { player_id, .. } if player_id == reporter_id => Some(()),
+            ServerMessage::PlayerReconnected { player_id, .. } if player_id == reporter_id => {
+                Some(())
+            }
             _ => None,
         },
     )
