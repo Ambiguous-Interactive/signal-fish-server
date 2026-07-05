@@ -347,6 +347,9 @@ impl GameDatabase for InMemoryDatabase {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            // Room-state record, not a wire snapshot: the v4 incarnation epoch
+            // is filled at snapshot-send time, so this stays `None`.
+            epoch: None,
             region_id: region_id.clone(),
         };
 
@@ -1114,6 +1117,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: "us-east-1".to_string(),
         }
     }
@@ -1529,6 +1533,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: "us-east-1".to_string(),
         };
         assert!(db

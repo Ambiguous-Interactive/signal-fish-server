@@ -1349,8 +1349,10 @@ Recipient rules:
 - Per sender, `seq` is strictly contiguous while you stay connected. A gap
   can only mean (a) the server abandoned messages together with _your_
   slow-consumer disconnect (you were told: `SLOW_CONSUMER` + close), or
-  (b) the sender left and rejoined (you were told: `PlayerLeft` /
-  `PlayerJoined` / `PlayerReconnected`), which resets its counter to `1`, or
+  (b) the sender left and rejoined, which resets its counter to `1` — and the
+  `epoch` bumps at the same time (see below), so the reset is self-describing;
+  you are also told out of band (`PlayerLeft` / `PlayerJoined` /
+  `PlayerReconnected`), or
   (c) a single binary payload that could not be converted for your
   negotiated format was replaced in-stream by an `Error` with code
   `UNSUPPORTED_GAME_DATA_FORMAT` (you were told, and the connection stayed
@@ -1358,6 +1360,28 @@ Recipient rules:
 - An unexplained gap — one with none of the above notifications — is a
   server bug; report it. That is exactly the condition the sequence numbers
   exist to make observable.
+
+### Incarnation epoch (`epoch`)
+
+Alongside `seq`, every relayed `GameData` / `GameDataBinary` to a v4 recipient
+also carries an `epoch`: a per-`(sender, room)` counter that increments once
+per **incarnation** of that sender's membership — the first join is `epoch` 1,
+and each join-after-leave or reconnect increments it. `seq` restarts at `1`
+within every epoch, so the pair `(epoch, seq)` is strictly
+**lexicographically increasing** per sender as observed by any single recipient:
+
+- `(1, 1), (1, 2), (1, 3)` — the sender's first incarnation, and then
+- `(2, 1), (2, 2), …` — after the sender left+rejoined or reconnected.
+
+This makes the `seq` reset in rule (b) above **self-describing**: you attribute
+the backwards `seq` jump to the `epoch` bump directly, rather than having to
+correlate a separately-ordered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected`
+control message. Each member's current epoch is also carried on the room
+snapshots — `RoomJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
+`PlayerReconnected.epoch`, and the `Reconnected` member snapshot — so you can
+baseline a sender's stream before its first relayed frame arrives. Like `seq`,
+`epoch` is stripped for pre-v4 recipients (their bytes stay byte-identical), so
+its absence and its presence are both part of the frozen wire contract.
 
 ### RelayStats
 

@@ -1125,7 +1125,7 @@ async fn mesh_n3_reconnect_full_flow() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(dropper_id, room_id, false, Some(dropper_info))
+        .register_disconnection(dropper_id, room_id, false, Some(dropper_info), 0)
         .await;
 
     // Reconnect over a FRESH socket using the real wire flow.
@@ -1197,7 +1197,7 @@ async fn mesh_n3_reconnect_full_flow() {
             SERVER_MESSAGE_TIMEOUT,
             "PlayerReconnected",
             |message| match message {
-                ServerMessage::PlayerReconnected { player_id } => {
+                ServerMessage::PlayerReconnected { player_id, .. } => {
                     assert_eq!(player_id, dropper_id, "{who} saw the wrong reconnector");
                     Some(())
                 }

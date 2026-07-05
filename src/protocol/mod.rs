@@ -77,6 +77,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -87,6 +88,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -101,6 +103,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -125,6 +128,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -152,6 +156,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -223,6 +228,7 @@ mod tests {
                 is_ready: false,
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
+                epoch: None,
                 region_id: types::DEFAULT_REGION_ID.to_string(),
             },
         );
@@ -285,6 +291,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -303,6 +310,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -334,6 +342,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         let player2 = PlayerInfo {
@@ -343,6 +352,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -389,6 +399,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         let player2 = PlayerInfo {
@@ -398,6 +409,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -435,6 +447,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -462,6 +475,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -498,6 +512,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         room.add_player(player1);
@@ -525,6 +540,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         room.add_player(player2);
@@ -568,6 +584,7 @@ mod tests {
                 is_ready: false,
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
+                epoch: None,
                 region_id: types::DEFAULT_REGION_ID.to_string(),
             });
         }
@@ -612,6 +629,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         });
 
@@ -622,6 +640,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         });
 
@@ -660,6 +679,7 @@ mod tests {
                 is_ready: false,
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
+                epoch: None,
                 region_id: types::DEFAULT_REGION_ID.to_string(),
             });
         }

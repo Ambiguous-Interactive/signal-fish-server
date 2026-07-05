@@ -539,6 +539,7 @@ mod tests {
                 is_ready: false,
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
+                epoch: None,
                 region_id: "us-east-1".to_string(),
             },
         );

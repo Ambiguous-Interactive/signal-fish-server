@@ -260,6 +260,14 @@ pub struct PlayerInfo {
     /// Legacy self-declared peer metadata for `GameStarting`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
+    /// Server-tracked incarnation epoch (v4 only): this player's current
+    /// `(player, room)` epoch behind [`ServerMessage::GameData::epoch`], carried
+    /// on room snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a v4
+    /// recipient learns each member's epoch before their first relayed frame.
+    /// `None` — and absent from the wire — for pre-v4 recipients and in every
+    /// non-snapshot use, keeping v2/v3 bytes byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u32>,
     /// Deployment region that currently hosts this player (internal only).
     #[serde(skip_serializing, skip_deserializing, default)]
     pub region_id: String,
@@ -432,6 +440,7 @@ mod tests {
             is_ready: true,
             connected_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             connection_info,
+            epoch: None,
             region_id: "test-region".to_string(),
         }
     }

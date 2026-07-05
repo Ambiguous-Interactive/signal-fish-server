@@ -764,7 +764,7 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(host_id, room_id, false, Some(host_info))
+        .register_disconnection(host_id, room_id, false, Some(host_info), 0)
         .await;
 
     // The ex-host reconnects over a FRESH socket advertising RELAY-ONLY
@@ -851,7 +851,7 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
             SERVER_MESSAGE_TIMEOUT,
             "PlayerReconnected",
             |message| match message {
-                ServerMessage::PlayerReconnected { player_id } => {
+                ServerMessage::PlayerReconnected { player_id, .. } => {
                     assert_eq!(player_id, host_id, "{who} saw the wrong reconnector");
                     Some(())
                 }

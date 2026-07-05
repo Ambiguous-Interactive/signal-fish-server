@@ -16,7 +16,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use signal_fish_server::protocol::ServerMessage;
+use signal_fish_server::protocol::{PlayerInfo, ServerMessage};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -28,6 +28,16 @@ fn player_a() -> Uuid {
 }
 
 const PLAYER_A_STR: &str = "00000000-0000-0000-0000-00000000000a";
+
+/// Deterministic timestamp for `PlayerInfo` snapshot goldens (matches the
+/// `tests/v2_wire_golden.rs` fixture so the two files agree on the wire form).
+fn fixed_time() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
+        .expect("valid RFC3339 fixture")
+        .with_timezone(&chrono::Utc)
+}
+
+const FIXED_TIME_STR: &str = "2024-01-02T03:04:05Z";
 
 // ---------------------------------------------------------------------------
 // Assertion helpers (mirroring tests/v2_wire_golden.rs).
@@ -77,40 +87,43 @@ fn golden_server_game_data_with_seq() {
         from_player: player_a(),
         data: json!({ "move": "up" }),
         seq: Some(42),
+        epoch: Some(3),
     };
     assert_json(
         &msg,
         json!({
             "type": "GameData",
-            "data": { "from_player": PLAYER_A_STR, "data": { "move": "up" }, "seq": 42 }
+            "data": { "from_player": PLAYER_A_STR, "data": { "move": "up" }, "seq": 42, "epoch": 3 }
         }),
         &format!(
-            r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"move":"up"}},"seq":42}}}}"#
+            r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"move":"up"}},"seq":42,"epoch":3}}}}"#
         ),
     );
-    assert_msgpack(&msg, "82a474797065a847616d6544617461a46461746183ab66726f6d5f706c61796572c4100000000000000000000000000000000aa46461746181a46d6f7665a27570a37365712a");
+    assert_msgpack(&msg, "82a474797065a847616d6544617461a46461746184ab66726f6d5f706c61796572c4100000000000000000000000000000000aa46461746181a46d6f7665a27570a37365712aa565706f636803");
 }
 
-/// The seq stamp starts at 1 — freeze the first-stamp form explicitly so the
-/// "starts at 1" contract has a wire-level witness.
+/// The seq stamp starts at 1 within an epoch, and the first incarnation is
+/// epoch 1 — freeze the first-stamp form explicitly so the "starts at 1"
+/// contract has a wire-level witness for BOTH counters.
 #[test]
-fn golden_server_game_data_with_first_seq() {
+fn golden_server_game_data_with_first_seq_and_epoch() {
     let msg = ServerMessage::GameData {
         from_player: player_a(),
         data: json!({ "move": "up" }),
         seq: Some(1),
+        epoch: Some(1),
     };
     assert_json(
         &msg,
         json!({
             "type": "GameData",
-            "data": { "from_player": PLAYER_A_STR, "data": { "move": "up" }, "seq": 1 }
+            "data": { "from_player": PLAYER_A_STR, "data": { "move": "up" }, "seq": 1, "epoch": 1 }
         }),
         &format!(
-            r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"move":"up"}},"seq":1}}}}"#
+            r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"move":"up"}},"seq":1,"epoch":1}}}}"#
         ),
     );
-    assert_msgpack(&msg, "82a474797065a847616d6544617461a46461746183ab66726f6d5f706c61796572c4100000000000000000000000000000000aa46461746181a46d6f7665a27570a373657101");
+    assert_msgpack(&msg, "82a474797065a847616d6544617461a46461746184ab66726f6d5f706c61796572c4100000000000000000000000000000000aa46461746181a46d6f7665a27570a373657101a565706f636801");
 }
 
 /// In-memory representation ONLY — NOT the wire form (mirrors the v2 golden's
@@ -123,6 +136,7 @@ fn golden_server_game_data_binary_with_seq_in_memory_repr_not_wire() {
         encoding: signal_fish_server::protocol::GameDataEncoding::MessagePack,
         payload: bytes::Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
         seq: Some(7),
+        epoch: Some(3),
     };
     assert_json(
         &msg,
@@ -132,11 +146,12 @@ fn golden_server_game_data_binary_with_seq_in_memory_repr_not_wire() {
                 "from_player": PLAYER_A_STR,
                 "encoding": "message_pack",
                 "payload": [1, 2, 3, 4],
-                "seq": 7
+                "seq": 7,
+                "epoch": 3
             }
         }),
         &format!(
-            r#"{{"type":"GameDataBinary","data":{{"from_player":"{PLAYER_A_STR}","encoding":"message_pack","payload":[1,2,3,4],"seq":7}}}}"#
+            r#"{{"type":"GameDataBinary","data":{{"from_player":"{PLAYER_A_STR}","encoding":"message_pack","payload":[1,2,3,4],"seq":7,"epoch":3}}}}"#
         ),
     );
 }
@@ -175,26 +190,109 @@ fn golden_server_relay_stats() {
 // ===========================================================================
 
 #[test]
-fn v4_game_data_seq_round_trips_json_and_msgpack() {
-    for seq in [None, Some(1), Some(u64::MAX)] {
+fn v4_game_data_seq_and_epoch_round_trip_json_and_msgpack() {
+    // seq and epoch are stamped together; also cover each independently absent
+    // (backward-decode compatibility) and their max values.
+    for (seq, epoch) in [
+        (None, None),
+        (Some(1), Some(1)),
+        (Some(u64::MAX), Some(u32::MAX)),
+    ] {
         let msg = ServerMessage::GameData {
             from_player: player_a(),
             data: json!({ "k": "v" }),
             seq,
+            epoch,
         };
 
         let json = serde_json::to_string(&msg).expect("json");
         match serde_json::from_str::<ServerMessage>(&json).expect("json round-trip") {
-            ServerMessage::GameData { seq: rt_seq, .. } => assert_eq!(rt_seq, seq),
+            ServerMessage::GameData {
+                seq: rt_seq,
+                epoch: rt_epoch,
+                ..
+            } => {
+                assert_eq!(rt_seq, seq);
+                assert_eq!(rt_epoch, epoch);
+            }
             other => panic!("expected GameData, got {other:?}"),
         }
 
         let mp = rmp_serde::to_vec_named(&msg).expect("msgpack");
         match rmp_serde::from_slice::<ServerMessage>(&mp).expect("msgpack round-trip") {
-            ServerMessage::GameData { seq: rt_seq, .. } => assert_eq!(rt_seq, seq),
+            ServerMessage::GameData {
+                seq: rt_seq,
+                epoch: rt_epoch,
+                ..
+            } => {
+                assert_eq!(rt_seq, seq);
+                assert_eq!(rt_epoch, epoch);
+            }
             other => panic!("expected GameData, got {other:?}"),
         }
     }
+}
+
+// ===========================================================================
+// Epoch carriage on room snapshots (E1): PlayerReconnected + PlayerInfo.
+// ===========================================================================
+
+/// `PlayerReconnected` gains the reconnector's new incarnation epoch (v4). The
+/// pre-v4 form (`epoch: None`) is frozen byte-identically in
+/// `tests/v2_wire_golden.rs`; this freezes the v4-recipient form.
+#[test]
+fn golden_player_reconnected_with_epoch() {
+    let msg = ServerMessage::PlayerReconnected {
+        player_id: player_a(),
+        epoch: Some(2),
+    };
+    assert_json(
+        &msg,
+        json!({
+            "type": "PlayerReconnected",
+            "data": { "player_id": PLAYER_A_STR, "epoch": 2 }
+        }),
+        &format!(
+            r#"{{"type":"PlayerReconnected","data":{{"player_id":"{PLAYER_A_STR}","epoch":2}}}}"#
+        ),
+    );
+    assert_msgpack(&msg, "82a474797065b1506c617965725265636f6e6e6563746564a46461746182a9706c617965725f6964c4100000000000000000000000000000000aa565706f636802");
+}
+
+/// A `PlayerInfo` inside a `PlayerJoined` snapshot carries the joiner's epoch
+/// (v4). Freeze the exact placement (trailing `epoch` key, after
+/// `connection_info` which is omitted here) so the snapshot wire cannot drift.
+#[test]
+fn golden_player_joined_player_info_with_epoch() {
+    let msg = ServerMessage::PlayerJoined {
+        player: PlayerInfo {
+            id: player_a(),
+            name: "P".to_string(),
+            is_authority: false,
+            is_ready: false,
+            connected_at: fixed_time(),
+            connection_info: None,
+            epoch: Some(4),
+            region_id: String::new(),
+        },
+    };
+    assert_json(
+        &msg,
+        json!({
+            "type": "PlayerJoined",
+            "data": { "player": {
+                "id": PLAYER_A_STR,
+                "name": "P",
+                "is_authority": false,
+                "is_ready": false,
+                "connected_at": FIXED_TIME_STR,
+                "epoch": 4
+            } }
+        }),
+        &format!(
+            r#"{{"type":"PlayerJoined","data":{{"player":{{"id":"{PLAYER_A_STR}","name":"P","is_authority":false,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4}}}}}}"#
+        ),
+    );
 }
 
 #[test]

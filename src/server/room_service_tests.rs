@@ -257,7 +257,7 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
         .expect("reconnection enabled for test server");
 
     let _token = reconnection_manager
-        .register_disconnection(player_id, room_id, false, None)
+        .register_disconnection(player_id, room_id, false, None, 0)
         .await;
     assert!(
         reconnection_manager

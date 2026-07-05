@@ -983,6 +983,7 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
         is_ready: false,
         connected_at: chrono::Utc::now(),
         connection_info: None,
+        epoch: None,
         region_id: "region-a".to_string(),
     }
 }
@@ -2620,7 +2621,7 @@ async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
         .await;
     server
         .database
@@ -2653,7 +2654,7 @@ async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
     }
 
     match recv(&mut existing_rx).await.as_ref() {
-        ServerMessage::PlayerReconnected { player_id } => assert_eq!(*player_id, reconnecting),
+        ServerMessage::PlayerReconnected { player_id, .. } => assert_eq!(*player_id, reconnecting),
         other => panic!("expected PlayerReconnected, got {other:?}"),
     }
 
@@ -2727,7 +2728,7 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
         .await;
     server
         .database
@@ -2816,7 +2817,7 @@ async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
         .await;
     server
         .database
@@ -2890,7 +2891,13 @@ async fn reconnect_from_roomed_temporary_connection_is_rejected_without_ghost_me
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, target_room_id, false, Some(reconnecting_info))
+        .register_disconnection(
+            reconnecting,
+            target_room_id,
+            false,
+            Some(reconnecting_info),
+            0,
+        )
         .await;
     server
         .database
@@ -2969,7 +2976,7 @@ async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner(
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info))
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
         .await;
     server
         .database

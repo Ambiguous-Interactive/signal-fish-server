@@ -229,8 +229,19 @@ impl EnhancedGameServer {
                 // lobby that already has ready members; reflect it on each player's
                 // `is_ready` too.
                 let ready_players = self.room_coordinator.current_ready_players(&room.id).await;
+                // v4 room snapshot: give a v4 joiner each member's current
+                // incarnation epoch so it can baseline the per-sender (epoch,
+                // seq) stream before the first relayed frame. Single recipient
+                // (the joiner), so gate on its version at construction — a pre-v4
+                // joiner keeps every epoch `None` and byte-identical v2/v3 bytes.
+                let recipient_is_v4 = self.connection_manager.supports_v4(player_id);
                 for player in current_players.iter_mut() {
                     player.is_ready = ready_players.contains(&player.id);
+                    player.epoch = if recipient_is_v4 {
+                        self.connection_manager.game_data_epoch(&player.id)
+                    } else {
+                        None
+                    };
                 }
 
                 // Send success response
@@ -269,7 +280,10 @@ impl EnhancedGameServer {
                     )
                     .await;
 
-                // Notify other players
+                // Notify other players. This is a v4 wire snapshot, so it
+                // carries the joiner's current incarnation epoch (Some after the
+                // `assign_client_to_room` above bumped it); pre-v4 recipients
+                // have it stripped per-recipient in `websocket::sending`.
                 let player_info = PlayerInfo {
                     id: *player_id,
                     name: player_name,
@@ -277,6 +291,7 @@ impl EnhancedGameServer {
                     is_ready: false,
                     connected_at: chrono::Utc::now(),
                     connection_info: None,
+                    epoch: self.connection_manager.game_data_epoch(player_id),
                     region_id: self.region_id().to_string(),
                 };
                 // Recorded for reconnection replay BEFORE delivery (buffered
@@ -490,6 +505,10 @@ impl EnhancedGameServer {
                         is_ready: false,
                         connected_at: chrono::Utc::now(),
                         connection_info: None,
+                        // Room-state record (stored in the DB + `room.players`),
+                        // not a wire snapshot: the v4 epoch is filled at
+                        // snapshot-send time, so this stays `None`.
+                        epoch: None,
                         region_id: room.region_id.clone(),
                     };
 

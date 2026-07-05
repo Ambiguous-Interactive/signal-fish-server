@@ -234,10 +234,10 @@ proptest! {
             // rooms' events consume global sequence numbers (the interleaving
             // that makes gap-based truncation predicates lie).
             manager
-                .register_disconnection(Uuid::from_u128(1), room_a, false, None)
+                .register_disconnection(Uuid::from_u128(1), room_a, false, None, 0)
                 .await;
             manager
-                .register_disconnection(Uuid::from_u128(2), room_b, false, None)
+                .register_disconnection(Uuid::from_u128(2), room_b, false, None, 0)
                 .await;
 
             let mut next_global_seq = 0u64;

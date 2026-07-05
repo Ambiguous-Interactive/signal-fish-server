@@ -144,8 +144,17 @@ impl EnhancedGameServer {
             }
         };
 
+        // Capture the connection's current game-data incarnation epoch WHILE it
+        // is still registered (unregister removes it right after this call), so
+        // the reconnect can resume at `last_epoch + 1` and keep the recipient's
+        // (epoch, seq) view strictly increasing (v4). `None` ⇒ no v4 stream ⇒ 0.
+        let last_epoch = self
+            .connection_manager
+            .game_data_epoch(player_id)
+            .unwrap_or(0);
+
         let token = reconnection_manager
-            .register_disconnection(*player_id, room_id, was_authority, player_info)
+            .register_disconnection(*player_id, room_id, was_authority, player_info, last_epoch)
             .await;
 
         tracing::info!(
@@ -378,7 +387,9 @@ impl EnhancedGameServer {
         // times the player's disconnect was registered before it reconnected.)
         missed_events.events.retain(|event| match event {
             ServerMessage::PlayerLeft { player_id }
-            | ServerMessage::PlayerReconnected { player_id } => player_id != reconnect_player_id,
+            | ServerMessage::PlayerReconnected { player_id, .. } => {
+                player_id != reconnect_player_id
+            }
             ServerMessage::PlayerJoined { player } => player.id != *reconnect_player_id,
             _ => true,
         });
@@ -503,6 +514,16 @@ impl EnhancedGameServer {
                 .await;
         };
 
+        // `reassign_connection` rebuilt the connection from the transient
+        // reconnect socket, whose epoch resets to 1. Restore the sender's real
+        // incarnation lineage: resume at `last_epoch + 1` (the pre-disconnect
+        // epoch survived in the reconnection record), so a recipient that stayed
+        // connected sees the per-(sender, room) `(epoch, seq)` stream strictly
+        // INCREASE across the reconnect instead of an ambiguous reset to (1, 1).
+        // (v4; a pre-v4 sender's `last_epoch` is 0 ⇒ epoch 1 here, harmless.)
+        self.connection_manager
+            .set_game_data_epoch(reconnect_player_id, disconnected.last_epoch.wrapping_add(1));
+
         // Complete once the fallible connection reassignment succeeds. The
         // remaining coordinator/message operations are best-effort updates.
         if !claim_guard.complete().await {
@@ -549,8 +570,19 @@ impl EnhancedGameServer {
         // reflect it on each player's `is_ready`.
         let ready_players = self.room_coordinator.current_ready_players(room_id).await;
         let mut current_players: Vec<PlayerInfo> = room.players.values().cloned().collect();
+        // v4 room snapshot: give a v4 reconnector each member's current
+        // incarnation epoch (including its own freshly bumped epoch) so it can
+        // re-baseline every per-sender (epoch, seq) stream. Single recipient, so
+        // gate on its version at construction — a pre-v4 reconnector keeps every
+        // epoch `None` and byte-identical v2/v3 bytes.
+        let recipient_is_v4 = self.connection_manager.supports_v4(reconnect_player_id);
         for player in current_players.iter_mut() {
             player.is_ready = ready_players.contains(&player.id);
+            player.epoch = if recipient_is_v4 {
+                self.connection_manager.game_data_epoch(&player.id)
+            } else {
+                None
+            };
         }
         let is_authority = room.authority_player == Some(*reconnect_player_id);
 
@@ -613,8 +645,14 @@ impl EnhancedGameServer {
         // room's ring persists when other players are still pending): a
         // reconnector must learn this player came back exactly like a
         // connected member would have.
+        // v4 wire snapshot: carry the reconnector's new incarnation epoch (Some
+        // after the `reassign_connection` above bumped it) — the same value now
+        // stamped on its relayed GameData, so recipients re-baseline the
+        // per-sender (epoch, seq) stream immediately. Stripped per-recipient for
+        // pre-v4 members in `websocket::sending`.
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: *reconnect_player_id,
+            epoch: self.connection_manager.game_data_epoch(reconnect_player_id),
         });
         self.record_replayable_room_event(room_id, notification.as_ref())
             .await;

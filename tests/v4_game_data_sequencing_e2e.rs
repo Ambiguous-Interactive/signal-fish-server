@@ -177,10 +177,12 @@ async fn join_room(ws: &mut WsStream, room_code: &str, player_name: &str) -> (Pl
     .await
 }
 
-/// A received relayed frame: `(from_player, server-stamped seq, payload)`.
+/// A received relayed frame: `(from_player, server-stamped seq, incarnation
+/// epoch, payload)`.
 struct ReceivedGameData {
     from_player: PlayerId,
     seq: Option<u64>,
+    epoch: Option<u32>,
     data: serde_json::Value,
 }
 
@@ -206,9 +208,11 @@ async fn collect_game_data(ws: &mut WsStream, expected: usize) -> Vec<ReceivedGa
                 from_player,
                 data,
                 seq,
+                epoch,
             } => received.push(ReceivedGameData {
                 from_player,
                 seq,
+                epoch,
                 data,
             }),
             ServerMessage::Error {
@@ -337,6 +341,13 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
         Some(1),
         "v4 recipient must see the server-stamped seq: {v4_raw}"
     );
+    // The v4 recipient also sees the incarnation epoch (first incarnation ⇒ 1),
+    // stamped together with seq.
+    assert_eq!(
+        v4_data.get("epoch").and_then(serde_json::Value::as_u64),
+        Some(1),
+        "v4 recipient must see the server-stamped epoch: {v4_raw}"
+    );
 
     let v2_value: serde_json::Value = serde_json::from_str(&v2_raw).expect("v2 frame JSON");
     let v2_data = v2_value
@@ -346,6 +357,10 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
     assert!(
         !v2_data.contains_key("seq"),
         "v2 recipient's raw frame must not contain a seq key: {v2_raw}"
+    );
+    assert!(
+        !v2_data.contains_key("epoch"),
+        "v2 recipient's raw frame must not contain an epoch key: {v2_raw}"
     );
     // Everything else is identical between the two recipients' frames.
     assert_eq!(v2_data.get("from_player"), v4_data.get("from_player"));
@@ -478,6 +493,14 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
     }
     let before = collect_game_data(&mut recipient, BEFORE_LEAVE as usize).await;
     assert_contiguous_seqs(&before, 1, BEFORE_LEAVE, "recipient before leave");
+    // First incarnation ⇒ epoch 1 on every pre-leave frame.
+    for frame in &before {
+        assert_eq!(
+            frame.epoch,
+            Some(1),
+            "the first incarnation's frames all carry epoch 1"
+        );
+    }
 
     // Leave, observe the departure, rejoin the same room.
     send(&mut sender, &ClientMessage::LeaveRoom).await;
@@ -505,6 +528,15 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
         after[0].seq,
         Some(1),
         "the per-(sender, room) counter must restart at 1 after leave + rejoin"
+    );
+    // The epoch bumps to 2 on the new incarnation, so the seq restart is
+    // SELF-DESCRIBING: the recipient sees (epoch 1, seq 3) then (epoch 2, seq 1)
+    // and attributes the backwards seq jump to the epoch bump directly — it does
+    // not have to correlate the separately-ordered PlayerLeft/PlayerJoined.
+    assert_eq!(
+        after[0].epoch,
+        Some(2),
+        "a leave + rejoin is a new incarnation, so the epoch advances to 2"
     );
 
     assert_message_conservation(&metrics).await;
@@ -663,7 +695,9 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled in test config")
-        .register_disconnection(victim_id, room_id, false, Some(victim_info))
+        // last_epoch = 1: the victim joined once (its own incarnation epoch),
+        // though this test asserts the SENDER's stream, not the victim's epoch.
+        .register_disconnection(victim_id, room_id, false, Some(victim_info), 1)
         .await;
 
     let mut reconnected = connect(addr).await;
@@ -719,6 +753,233 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     assert!(
         metrics.websocket_messages_dropped.load(Ordering::Relaxed) >= 1,
         "the gap must correspond to loudly counted drops"
+    );
+
+    assert_message_conservation(&metrics).await;
+}
+
+/// Read text frames until the next server message of `type_name`, returning its
+/// parsed JSON `Value` so field presence/absence can be asserted directly (a v4
+/// field omitted for a pre-v4 recipient is ABSENT from the object, so
+/// `value["data"][..].get("epoch")` is `None`, not a JSON null).
+async fn next_message_value_of_type(
+    ws: &mut WsStream,
+    type_name: &str,
+    context: &str,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + SERVER_MESSAGE_TIMEOUT;
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: timed out waiting for a {type_name} frame"))
+            .unwrap_or_else(|| panic!("{context}: websocket stream closed"))
+            .unwrap_or_else(|err| panic!("{context}: websocket error: {err}"));
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("{context}: invalid JSON text frame: {err}; {text:?}"));
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some(found) if found == type_name => return value,
+            Some("Error") => panic!("{context}: unexpected server error frame: {text}"),
+            _ => continue,
+        }
+    }
+}
+
+/// (f) Room snapshots carry the incarnation epoch for v4 recipients and OMIT it
+/// (byte-absent, not null) for pre-v4 recipients — both directions:
+/// `RoomJoined.current_players[].epoch` (seen by the joiner) and
+/// `PlayerJoined.player.epoch` (seen by existing members).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn v4_room_snapshots_carry_epoch_pre_v4_omit_it() {
+    let (addr, server) = start_test_server(test_server_config()).await;
+    let metrics = server.metrics();
+
+    // Anchor A (v4) establishes the room; its first incarnation ⇒ epoch 1.
+    let mut anchor = connect(addr).await;
+    authenticate_v4(&mut anchor).await;
+    join_room(&mut anchor, "SNAPEP", "SnapAnchor").await;
+
+    // A v2 joiner: its RoomJoined snapshot must OMIT epoch on every member.
+    let mut v2_joiner = connect(addr).await;
+    authenticate_v2(&mut v2_joiner).await;
+    send(&mut v2_joiner, &join_message("SNAPEP", "SnapV2")).await;
+    let v2_room = next_message_value_of_type(&mut v2_joiner, "RoomJoined", "v2 RoomJoined").await;
+    let v2_players = v2_room["data"]["current_players"]
+        .as_array()
+        .expect("v2 RoomJoined current_players array");
+    assert!(
+        !v2_players.is_empty(),
+        "the snapshot lists existing members"
+    );
+    for player in v2_players {
+        assert!(
+            player.get("epoch").is_none(),
+            "a v2 joiner's RoomJoined must omit epoch on every member: {v2_room}"
+        );
+    }
+
+    // A (v4) sees the v2 joiner arrive; the joiner's epoch (1) IS present on A's
+    // v4 wire (the server stamps it regardless of the joiner's own version).
+    let a_sees_v2 =
+        next_message_value_of_type(&mut anchor, "PlayerJoined", "A sees the v2 join").await;
+    assert_eq!(
+        a_sees_v2["data"]["player"]["epoch"].as_u64(),
+        Some(1),
+        "a v4 member sees a joiner's epoch on PlayerJoined: {a_sees_v2}"
+    );
+
+    // A v4 joiner: its RoomJoined snapshot CARRIES each member's epoch (all 1).
+    let mut v4_joiner = connect(addr).await;
+    authenticate_v4(&mut v4_joiner).await;
+    send(&mut v4_joiner, &join_message("SNAPEP", "SnapV4")).await;
+    let v4_room = next_message_value_of_type(&mut v4_joiner, "RoomJoined", "v4 RoomJoined").await;
+    let v4_players = v4_room["data"]["current_players"]
+        .as_array()
+        .expect("v4 RoomJoined current_players array");
+    assert!(
+        !v4_players.is_empty(),
+        "the snapshot lists existing members"
+    );
+    for player in v4_players {
+        assert_eq!(
+            player["epoch"].as_u64(),
+            Some(1),
+            "a v4 joiner's RoomJoined carries each member's epoch: {v4_room}"
+        );
+    }
+
+    // The v2 member now sees the v4 joiner arrive; its PlayerJoined omits epoch.
+    let v2_sees_v4 =
+        next_message_value_of_type(&mut v2_joiner, "PlayerJoined", "v2 sees the v4 join").await;
+    assert!(
+        v2_sees_v4["data"]["player"].get("epoch").is_none(),
+        "a v2 member's PlayerJoined must omit epoch: {v2_sees_v4}"
+    );
+
+    assert_message_conservation(&metrics).await;
+}
+
+/// (g) A reconnecting SENDER's incarnation epoch BUMPS and survives across the
+/// reconnect (the pre-disconnect epoch is captured into the reconnection record
+/// and resumed at `+1`): the recipient learns the new epoch via
+/// `PlayerReconnected`, AND the reconnected sender's `GameData` carries the same
+/// bumped epoch with `seq` restarted at 1 — so the `(epoch, seq)` stream
+/// strictly increases for a recipient that never left, making the reset
+/// self-describing without correlating the control message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data() {
+    let (addr, server) = start_test_server(test_server_config()).await;
+    let metrics = server.metrics();
+
+    let mut sender = connect(addr).await;
+    let mut recipient = connect(addr).await;
+    authenticate_v4(&mut sender).await;
+    authenticate_v4(&mut recipient).await;
+
+    // Join the sender directly so we can capture its pre-issued reconnection
+    // token from RoomJoined (v4 clients get one at join).
+    send(&mut sender, &join_message("RCEPCH", "RcSender")).await;
+    let (sender_id, room_id, token) = next_matching_server_message_within(
+        &mut sender,
+        SERVER_MESSAGE_TIMEOUT,
+        "sender RoomJoined",
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some((
+                payload.player_id,
+                payload.room_id,
+                payload.reconnection_token.clone(),
+            )),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("sender room join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let token = token.expect("a v4 join issues a reconnection token");
+    join_room(&mut recipient, "RCEPCH", "RcRecipient").await;
+
+    // First incarnation: epoch 1, seq 1.
+    send(
+        &mut sender,
+        &ClientMessage::GameData {
+            data: serde_json::json!({ "phase": "before" }),
+        },
+    )
+    .await;
+    let before = collect_game_data(&mut recipient, 1).await;
+    assert_eq!(before[0].seq, Some(1));
+    assert_eq!(before[0].epoch, Some(1), "the first incarnation is epoch 1");
+
+    // Disconnect the sender through the real teardown path. Call the
+    // server-side unregister DIRECTLY (socket still open) so it runs exactly
+    // once and deterministically: it captures epoch 1 from the still-live
+    // connection into the reconnection record, reuses the pre-issued token, and
+    // removes the connection before we reconnect (no PlayerAlreadyConnected
+    // race). Dropping the socket first would instead let the close-driven
+    // unregister consume the pre-issued token and this call mint a fresh one,
+    // invalidating the token we captured above.
+    server.disconnect_client(&sender_id).await;
+    drop(sender);
+
+    // Reconnect on a fresh v4 socket under the original id, with the pre-issued
+    // token.
+    let mut reconnected = connect(addr).await;
+    authenticate_v4(&mut reconnected).await;
+    send(
+        &mut reconnected,
+        &ClientMessage::Reconnect {
+            player_id: sender_id,
+            room_id,
+            auth_token: token,
+        },
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut reconnected,
+        SERVER_MESSAGE_TIMEOUT,
+        "reconnect response",
+        |message| match message {
+            ServerMessage::Reconnected(payload) => Some(payload),
+            ServerMessage::ReconnectionFailed { reason, error_code } => {
+                panic!("reconnect failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await;
+
+    // The recipient (never left) learns of the reconnection with the sender's
+    // NEW epoch (2) — the pre-disconnect epoch 1 survived and bumped.
+    let notice = next_message_value_of_type(
+        &mut recipient,
+        "PlayerReconnected",
+        "recipient sees the reconnection",
+    )
+    .await;
+    assert_eq!(
+        notice["data"]["epoch"].as_u64(),
+        Some(2),
+        "PlayerReconnected advertises the reconnector's bumped epoch: {notice}"
+    );
+
+    // The reconnected sender's GameData carries the same new epoch, seq restarted
+    // — (epoch 1, seq 1) then (epoch 2, seq 1): strictly increasing, no ambiguity.
+    send(
+        &mut reconnected,
+        &ClientMessage::GameData {
+            data: serde_json::json!({ "phase": "after" }),
+        },
+    )
+    .await;
+    let after = collect_game_data(&mut recipient, 1).await;
+    assert_eq!(after[0].seq, Some(1), "seq restarts within the new epoch");
+    assert_eq!(
+        after[0].epoch,
+        Some(2),
+        "the reconnected sender stamps its GameData with the bumped epoch"
     );
 
     assert_message_conservation(&metrics).await;

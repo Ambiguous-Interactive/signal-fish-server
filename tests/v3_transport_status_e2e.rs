@@ -682,7 +682,7 @@ async fn reconnect_clears_stored_transport_status() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reporter_id, room_id, false, Some(reporter_info))
+        .register_disconnection(reporter_id, room_id, false, Some(reporter_info), 0)
         .await;
 
     // Reconnect over a FRESH socket using the real wire flow.
@@ -721,7 +721,7 @@ async fn reconnect_clears_stored_transport_status() {
         SERVER_MESSAGE_TIMEOUT,
         "PlayerReconnected",
         |message| match message {
-            ServerMessage::PlayerReconnected { player_id } if player_id == reporter_id => Some(()),
+            ServerMessage::PlayerReconnected { player_id, .. } if player_id == reporter_id => Some(()),
             _ => None,
         },
     )

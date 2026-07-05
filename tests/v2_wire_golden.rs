@@ -65,6 +65,9 @@ fn player_info_a() -> PlayerInfo {
         is_ready: false,
         connected_at: fixed_time(),
         connection_info: None,
+        // v4-only incarnation epoch: `None` is skipped, so the v2 snapshot
+        // goldens below stay byte-identical.
+        epoch: None,
         region_id: String::new(),
     }
 }
@@ -80,6 +83,7 @@ fn player_info_b() -> PlayerInfo {
             host: "10.0.0.5".to_string(),
             port: 7777,
         }),
+        epoch: None,
         region_id: String::new(),
     }
 }
@@ -610,6 +614,7 @@ fn golden_server_game_data() {
         // v4-only relay stamp: `None` is skipped entirely, so the golden v2
         // bytes below stay byte-identical.
         seq: None,
+        epoch: None,
     };
     assert_json(
         &msg,
@@ -637,6 +642,7 @@ fn golden_server_game_data_binary_json_fallback() {
         // v4-only relay stamp: `None` is skipped entirely, so the golden v2
         // fallback frame stays byte-identical.
         seq: None,
+        epoch: None,
     };
     assert_json(
         &fallback,
@@ -665,6 +671,7 @@ fn golden_server_game_data_binary_in_memory_repr_not_wire() {
         // v4-only relay stamp: `None` is skipped entirely, so the in-memory
         // repr snapshot stays byte-identical.
         seq: None,
+        epoch: None,
     };
     assert_json(
         &msg,
@@ -859,6 +866,8 @@ fn golden_server_reconnection_failed() {
 fn golden_server_player_reconnected() {
     let msg = ServerMessage::PlayerReconnected {
         player_id: player_a(),
+        // v4-only epoch: `None` is skipped, so the v2 wire stays byte-identical.
+        epoch: None,
     };
     assert_json(
         &msg,

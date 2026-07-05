@@ -296,7 +296,7 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
     let token = game_server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(peer2_id, room_id, false, Some(peer2_info))
+        .register_disconnection(peer2_id, room_id, false, Some(peer2_info), 0)
         .await;
 
     let mut replacement = connect(addr).await;

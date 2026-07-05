@@ -500,6 +500,15 @@ components:
         is_ready: { type: boolean }
         connected_at: { type: string, format: date-time }
         connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
+        epoch:
+          type: integer
+          minimum: 1
+          description: >-
+            v4 only: this player's current incarnation epoch (see
+            ServerGameData.epoch), carried on room snapshots (RoomJoined,
+            PlayerJoined, Reconnected) so a v4 recipient learns each member's
+            epoch before that member's first relayed frame. Absent for pre-v4
+            recipients (byte-identical wire).
     SpectatorInfo:
       type: object
       required: [id, name, connected_at]
@@ -900,6 +909,19 @@ components:
                 recipients (their bytes are byte-identical to v3 and earlier).
                 Client-to-server GameData carries no seq; stamping is purely
                 server-side.
+            epoch:
+              type: integer
+              minimum: 1
+              description: >-
+                v4 only: server-tracked incarnation epoch, per (sender, room).
+                Increments once per incarnation (the first join is 1; each
+                join-after-leave or reconnect increments it), and seq restarts at
+                1 within each epoch, so (epoch, seq) is strictly lexicographically
+                increasing per sender as observed by any single recipient. This
+                makes the seq restart of case (b) SELF-DESCRIBING. Stamped
+                together with seq; absent for pre-v4 recipients (byte-identical
+                wire). Also carried on room snapshots (see PlayerInfo.epoch,
+                PlayerReconnected.epoch).
       required: [type, data]
     GameDataBinary:
       type: object
@@ -922,6 +944,10 @@ components:
               type: integer
               minimum: 1
               description: 'v4 only: see ServerGameData seq (identical semantics).'
+            epoch:
+              type: integer
+              minimum: 1
+              description: 'v4 only: see ServerGameData epoch (identical semantics).'
       required: [type, data]
     AuthorityChanged:
       type: object
@@ -1118,6 +1144,15 @@ components:
           required: [player_id]
           properties:
             player_id: { $ref: '#/components/schemas/PlayerId' }
+            epoch:
+              type: integer
+              minimum: 1
+              description: >-
+                v4 only: the reconnector's new incarnation epoch (see
+                ServerGameData.epoch) — the same value now stamped on its relayed
+                GameData — so recipients re-baseline the per-sender (epoch, seq)
+                stream immediately. Absent for pre-v4 recipients (byte-identical
+                wire).
       required: [type, data]
     SpectatorJoined:
       type: object
