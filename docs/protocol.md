@@ -1383,6 +1383,15 @@ baseline a sender's stream before its first relayed frame arrives. Like `seq`,
 `epoch` is stripped for pre-v4 recipients (their bytes stay byte-identical), so
 its absence and its presence are both part of the frozen wire contract.
 
+The `epoch` value is only meaningful **relatively**: baseline each sender from
+the `epoch` you first observe for it (on a snapshot or its first frame) and
+compare subsequent values against that — do NOT assume a newly observed sender
+starts at `epoch` 1. The server tracks epoch as a single monotonic counter per
+connection, so a sender that reached your room after being in another room (on
+the same connection) may first appear at `epoch` 2 or higher. The only
+guarantee — and the only one you need — is that, for a given sender in your
+room, `(epoch, seq)` never goes backwards while you stay connected.
+
 ### RelayStats
 
 Periodic per-connection delivery accounting, emitted only to v4 connections

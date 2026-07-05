@@ -542,6 +542,81 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
     assert_message_conservation(&metrics).await;
 }
 
+/// The incarnation epoch is a single monotonic per-connection counter and is
+/// deliberately NOT reset when a sender leaves one room and joins another: a v4
+/// recipient in the NEW room sees the sender's epoch carry forward (2, not a
+/// fresh 1) with `seq` restarted. This is the design that keeps `(epoch, seq)`
+/// strictly increasing per (sender, room) even across a same-room leave+rejoin
+/// (a per-room reset would replay a lower epoch there); clients baseline
+/// relatively, so a first-observed epoch above 1 is expected and harmless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn epoch_carries_across_a_room_switch_not_reset_to_one() {
+    let (addr, server) = start_test_server(test_server_config()).await;
+    let metrics = server.metrics();
+
+    let mut sender = connect(addr).await;
+    authenticate_v4(&mut sender).await;
+
+    // Room A: the sender's first incarnation ⇒ epoch 1.
+    let mut recipient_a = connect(addr).await;
+    authenticate_v4(&mut recipient_a).await;
+    let (sender_id, _) = join_room(&mut sender, "EPRMA0", "Switcher").await;
+    join_room(&mut recipient_a, "EPRMA0", "WatcherA").await;
+    send(
+        &mut sender,
+        &ClientMessage::GameData {
+            data: serde_json::json!({ "room": "a" }),
+        },
+    )
+    .await;
+    let in_a = collect_game_data(&mut recipient_a, 1).await;
+    assert_eq!(
+        in_a[0].epoch,
+        Some(1),
+        "the first room membership is epoch 1"
+    );
+    assert_eq!(in_a[0].seq, Some(1));
+
+    // Leave A (observed), then join a DIFFERENT room B.
+    send(&mut sender, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut recipient_a,
+        SERVER_MESSAGE_TIMEOUT,
+        "sender departure from A",
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id } if player_id == sender_id => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+
+    let mut recipient_b = connect(addr).await;
+    authenticate_v4(&mut recipient_b).await;
+    join_room(&mut sender, "EPRMB0", "Switcher").await;
+    join_room(&mut recipient_b, "EPRMB0", "WatcherB").await;
+    send(
+        &mut sender,
+        &ClientMessage::GameData {
+            data: serde_json::json!({ "room": "b" }),
+        },
+    )
+    .await;
+    let in_b = collect_game_data(&mut recipient_b, 1).await;
+    // Carried forward + incremented (NOT reset to 1); seq restarted within it.
+    assert_eq!(
+        in_b[0].epoch,
+        Some(2),
+        "epoch carries across the room switch (monotonic per connection), not reset to 1"
+    );
+    assert_eq!(
+        in_b[0].seq,
+        Some(1),
+        "seq restarts within the new room incarnation"
+    );
+
+    assert_message_conservation(&metrics).await;
+}
+
 /// (e) The end-to-end loss-detection story #131's reporter lacked: a slow
 /// consumer is evicted mid-burst, reconnects with its reconnection token, and
 /// can OBSERVE the loss as a seq gap between its last-seen stamp and the next

@@ -913,12 +913,16 @@ components:
               type: integer
               minimum: 1
               description: >-
-                v4 only: server-tracked incarnation epoch, per (sender, room).
-                Increments once per incarnation (the first join is 1; each
-                join-after-leave or reconnect increments it), and seq restarts at
-                1 within each epoch, so (epoch, seq) is strictly lexicographically
-                increasing per sender as observed by any single recipient. This
-                makes the seq restart of case (b) SELF-DESCRIBING. Stamped
+                v4 only: server-tracked incarnation epoch. A single monotonic
+                per-connection counter that increments once per incarnation (the
+                first join is 1; each join-after-leave or reconnect increments
+                it; NOT reset when the same connection switches rooms), while seq
+                restarts at 1 within each epoch, so (epoch, seq) is strictly
+                lexicographically increasing per (sender, room) as observed by
+                any single recipient. This makes the seq restart of case (b)
+                SELF-DESCRIBING. The absolute value is not meaningful: baseline
+                each sender from the epoch you first observe for it (a newly
+                observed sender may start above 1) and compare relatively. Stamped
                 together with seq; absent for pre-v4 recipients (byte-identical
                 wire). Also carried on room snapshots (see PlayerInfo.epoch,
                 PlayerReconnected.epoch).
