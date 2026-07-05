@@ -261,7 +261,10 @@ for cfg in "${CONFIGS[@]}"; do
         cat "$output_file"
     fi
 
-    summary="$(grep -E "states generated|depth of the complete|states checked|Finished in" "$output_file" | tr '\n' ' ' || true)"
+    # Case-insensitive so the metrics line stays populated regardless of how a
+    # given TLC version cases these phrases (1.7.4 emits them lower-case; this
+    # is only the cosmetic OK-line summary, never the pass/fail verdict below).
+    summary="$(grep -iE "states generated|depth of the complete|states checked|Finished in" "$output_file" | tr '\n' ' ' || true)"
     # Exhaustive runs print "No error has been found"; simulation runs finish
     # quietly (no such banner), so for *_Sim a clean exit code is the verdict.
     if [ "${#mode_args[@]}" -gt 0 ]; then
