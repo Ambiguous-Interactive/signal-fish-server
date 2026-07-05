@@ -33,6 +33,7 @@ picked up with zero CI plumbing.
 | `tla/RoomLifecycleGC.tla`     | Room GC vs activity refresh + the reconnection-window guard (BUG-1)                |
 | `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
 | `tla/ControlPriorityDelivery.tla` | Spec-first for v4/P10.E2: control-priority queue split + sojourn eviction (liveness) |
+| `tla/DeliveryClasses.tla`     | Spec-first for v4/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
@@ -383,6 +384,36 @@ dropped-with-close), `CtrlDropsAreLoud`, `StalenessBounded` (no head ages past
 the bound while open — safety, given the Tick cap), and `ReasonStable`. The
 liveness rests only on `WF(Tick, SojournEvict, CloseFinish)` — **never** on writer
 fairness, which is exactly what makes the sojourn close load-bearing.
+
+## Delivery classes (reliable / latest / volatile)
+
+`DeliveryClasses.tla` is the second **spec-first** module for P10.E2 (with
+`ControlPriorityDelivery.tla`), pinning the per-class delivery contract before the
+code. A single recipient's data queue carries three classes, modeled by
+`[class, key, id]` frames with globally-unique ids; the writer is UNFAIR.
+
+- **reliable** — backpressures while the queue is full (enablement); conserved,
+  never coalesced.
+- **latest** (keyed) — a same-key send SUPERSEDES the queued predecessor in place
+  (old id → the `superseded` ledger, counted); a new-key send on a full queue
+  drop-oldest-volatile or drops the arrival (`latDropped`) — it **never parks**.
+- **volatile** — enqueue if space, else drop-oldest-volatile (`volDropped`).
+
+| Invariant | Pins | Seeded bug (checked `FALSE`) → result |
+| --- | --- | --- |
+| `ReliableConservation` | reliable is queued ∨ written ∨ dropped-with-close — never coalesced | `CoalesceReliableBug` → a reliable Head evicted into `volDropped` → **violated** |
+| `LatestConservation` / `VolatileConservation` | each class lands only in its legitimate buckets | `MisdropLatestBug` → a latest misdropped into `volDropped` → **violated** |
+| `AccountedSupersession` | every superseded id is in the ledger (coalescing is never silent) — held ALWAYS, since the ledger write is atomic with the coalesce | `SilentSupersedeBug` → supersede without ledgering → **violated** |
+| `LatestValueLastWrite` | ≤1 queued latest per key; the queued rep is the newest vs superseded ∪ written | — |
+| `ReportHonest` | the out-of-band `DeliveryReport` snapshot never overstates the true counts | `ReportOverstateBug` → published count above truth → **violated** |
+
+Also checked: `TypeOK`, `UniqueIds`, `CoalesceNeverTouchesReliable`, `ReasonStable`.
+Deliberately scoped OUT (documented in the header): the per-successor
+`supersedes_from` scalar and client-side range classification — the D4/E5
+watermark concern, not this module. This module verifies **ledger completeness**,
+not scalar arithmetic. It is consistent with (not a formal refinement of) the #131
+`DeliveryContract.tla` — its counted per-class drops replace that model's single
+conservation law.
 
 ## Intentionally not modeled (and why)
 

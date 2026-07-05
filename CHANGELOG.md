@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `DeliveryClasses` TLA+ model (`formal/tla/DeliveryClasses.tla` +
+  `_Small.cfg`) — spec-first for the protocol-v4 P10.E2 delivery classes
+  (reliable / latest / volatile). It pins the per-class accounting contract:
+  `ReliableConservation` (reliable never coalesced), `LatestConservation` /
+  `VolatileConservation` (each class only in its legitimate buckets),
+  `AccountedSupersession` (every coalesced-away id is ledgered — held always,
+  since the ledger write is atomic with the supersession), `LatestValueLastWrite`
+  (≤1 queued latest per key; the queued rep is newest), and `ReportHonest` (the
+  out-of-band `DeliveryReport` never overstates). Four seeded bugs prove
+  non-vacuity — `SilentSupersedeBug`, `CoalesceReliableBug`, `MisdropLatestBug`,
+  `ReportOverstateBug` (each violating its intended invariant) — all pinned
+  `FALSE` in the checked config (green in the auto-globbed suite). `latest` never
+  backpressures (a new-key send on a full queue drop-oldest-volatile or drops the
+  arrival); the per-successor `supersedes_from` scalar is documented as the
+  D4/E5 watermark concern, out of scope here.
+
 - Added the `ControlPriorityDelivery` TLA+ model
   (`formal/tla/ControlPriorityDelivery.tla` + `_Small.cfg`) — spec-first for the
   protocol-v4 P10.E2 delivery revision (merged before the code). It pins the two
