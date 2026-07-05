@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `ControlPriorityDelivery` TLA+ model
+  (`formal/tla/ControlPriorityDelivery.tla` + `_Small.cfg`) — spec-first for the
+  protocol-v4 P10.E2 delivery revision (merged before the code). It pins the two
+  properties the queue split must satisfy, composing with the #131
+  `DeliveryContract` substrate: `ControlAgeBounded` (control rides a separate
+  queue drained strictly before data — never starved behind a data backlog) and
+  the `DeliveryEventuallyResolves` liveness (a frame that sits too long triggers
+  a sojourn close, so `enqueued ~> written ∨ closed` holds even against a peer
+  that pings but never reads — resting only on `WF(Tick, SojournEvict,
+  CloseFinish)`, never on writer fairness). Two seeded bugs prove non-vacuity:
+  `SingleQueueBug` (control misrouted onto the data FIFO) violates
+  `ControlAgeBounded`, and `NoSojournEvictionBug` violates the liveness. Both are
+  pinned `FALSE` in the checked config (green in the auto-globbed suite);
+  `PerClassConservation`, `CtrlDropsAreLoud`, and `StalenessBounded` are also
+  checked.
+
 - Added the `SenderPacingReaper` TLA+ model
   (`formal/tla/SenderPacingReaper.tla` + `_Small.cfg` / `_Boundary.cfg`) — the
   repo's first discrete-time (`now` + `Tick`) spec — formalizing BUG-2, the

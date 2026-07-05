@@ -20,7 +20,7 @@ path filters in `.github/workflows/formal-verification.yml`.
 ## Layout
 
 Each `.tla` module carries one or more `<Module>_<Scenario>.cfg` configurations;
-the runner auto-globs **every** `formal/tla/*.cfg` (12 today), so a new spec or
+the runner auto-globs **every** `formal/tla/*.cfg` (13 today), so a new spec or
 scenario is picked up with zero CI plumbing.
 
 | Path                          | Purpose                                                                            |
@@ -32,6 +32,7 @@ scenario is picked up with zero CI plumbing.
 | `tla/ReconnectReplay.tla`     | v4 reconnect replay: faithful replay, honest status + the split-brain theorem      |
 | `tla/RoomLifecycleGC.tla`     | Room GC vs activity refresh + the reconnection-window guard (BUG-1)                |
 | `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
+| `tla/ControlPriorityDelivery.tla` | Spec-first for v4/P10.E2: control-priority queue split + sojourn eviction (liveness) |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
@@ -340,6 +341,26 @@ contention, so a thin-margin config can still invert if `d` exceeds `PING − SL
 True safety is an operator sizing concern (keep the margin above the worst-case
 pre-park delay; the default 25 s dwarfs it) — the check is the derived guardrail
 against the provable inversion region, not a liveness proof under unbounded load.
+
+## Delivery-revision spec-first (control priority + sojourn)
+
+`ControlPriorityDelivery.tla` is **spec-first** for the protocol-v4 P10.E2
+delivery revision — it is merged BEFORE the code and pins the two properties the
+queue split must satisfy, composing with the #131 `DeliveryContract.tla`
+substrate rather than re-deriving it. Frames are modeled by CLASS (data | ctrl)
+and carry a discrete AGE (the Appendix-O `now`/`Tick` convention, sojourn as an
+absolute-age guard). The writer (the peer draining) is deliberately UNFAIR.
+
+| Property | What it pins | Seeded bug (checked `FALSE`) → result |
+| --- | --- | --- |
+| `ControlAgeBounded` | control frames ride a separate queue drained **strictly before** data — never starved behind a data backlog | `SingleQueueBug` (control misrouted onto the data FIFO) → a data frame is written while a control frame waits behind it → **violated** |
+| `DeliveryEventuallyResolves` (liveness) | a frame that sits too long triggers a **sojourn** close, so `enqueued ~> written ∨ closed` holds even against a peer that pings but never reads | `NoSojournEvictionBug` (no sojourn close) → the frame parks forever behind the unfair writer → **violated** |
+
+Also checked: `PerClassConservation` (each class independently queued ∨ written ∨
+dropped-with-close), `CtrlDropsAreLoud`, `StalenessBounded` (no head ages past
+the bound while open — safety, given the Tick cap), and `ReasonStable`. The
+liveness rests only on `WF(Tick, SojournEvict, CloseFinish)` — **never** on writer
+fairness, which is exactly what makes the sojourn close load-bearing.
 
 ## Intentionally not modeled (and why)
 
