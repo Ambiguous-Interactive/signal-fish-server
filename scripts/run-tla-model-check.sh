@@ -230,10 +230,15 @@ for cfg in "${CONFIGS[@]}"; do
     #
     # `num` is PER WORKER, so wall-clock ~= the time for one worker to walk
     # `num` traces of `depth` and is roughly constant across core counts. On a
-    # 12-core box num=20000 walks ~19M states in ~42s (num=200000 was ~7min,
-    # blowing the shared 10-minute CI budget); 20000 keeps the deep sampler
-    # comfortably inside budget on the 2-4 core CI runners while still visiting
-    # orders of magnitude more states than the exhaustive _Small model.
+    # 12-core box num=20000 reports ~19M state VISITS in ~42s (that count is
+    # `num` x workers x depth and includes the terminal-stutter self-loop once a
+    # walk reaches AllResolved, so it is a sampling-effort figure, not distinct
+    # states; the invariant is already checked when AllResolved is first
+    # reached). num=200000 was ~7min, blowing the shared 10-minute CI budget;
+    # 20000 keeps the deep sampler comfortably inside budget on the 2-4 core CI
+    # runners while still sampling far more interleavings than the exhaustive
+    # _Small model (2602 distinct) can afford. `depth` is a generous ceiling
+    # (well above the reachable diameter) so no legitimate trace is truncated.
     mode_args=()
     case "$(basename "$cfg" .cfg)" in
         *_Sim) mode_args=(-simulate num=20000 -depth 80) ;;
