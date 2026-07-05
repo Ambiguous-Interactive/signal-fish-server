@@ -19,14 +19,22 @@ path filters in `.github/workflows/formal-verification.yml`.
 
 ## Layout
 
-| Path                                  | Purpose                                                              |
-| ------------------------------------- | -------------------------------------------------------------------- |
-| `tla/SignalFishSession.tla`           | The specification: actions, invariants, action properties            |
-| `tla/SignalFishSession_Mesh.cfg`      | Model: `desired = mesh`, both upgrade transports enabled             |
-| `tla/SignalFishSession_Host.cfg`      | Model: `desired = host`, both upgrade transports enabled, a v2 member |
-| `tla/SignalFishSession_HostDirect.cfg` | Model: `desired = host`, WebRTC transport disabled (host+direct rung) |
-| `tla/SignalFishSession_Floor.cfg`     | Model: `desired = mesh`, BOTH upgrade transports disabled (relay-floor denial)  |
-| `z3/protocol_invariants.py`           | Z3 SMT proofs of the pure decision functions (selector, glare, host election)   |
+Each `.tla` module carries one or more `<Module>_<Scenario>.cfg` configurations;
+the runner auto-globs **every** `formal/tla/*.cfg`, so a new spec or scenario is
+picked up with zero CI plumbing.
+
+| Path                          | Purpose                                                                            |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
+| `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
+| `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
+| `tla/SequencedRelay.tla`      | v4 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
+| `tla/ReconnectReplay.tla`     | v4 reconnect replay: faithful replay, honest status + the split-brain theorem      |
+| `tla/RoomLifecycleGC.tla`     | Room GC vs activity refresh + the reconnection-window guard (BUG-1)                |
+| `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
+| `tla/ControlPriorityDelivery.tla` | Spec-first for v4/P10.E2: control-priority queue split + sojourn eviction (liveness) |
+| `tla/DeliveryClasses.tla`     | Spec-first for v4/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
+| `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
 
@@ -42,7 +50,7 @@ This directory holds **two complementary** formal checks:
 ## How to run
 
 ```bash
-# TLA+: all four configurations (downloads + verifies the pinned tla2tools.jar once):
+# TLA+: every configuration in formal/tla/ (downloads + verifies the pinned tla2tools.jar once):
 bash scripts/run-tla-model-check.sh
 
 # One configuration / full TLC output:
@@ -254,6 +262,28 @@ spurious deadlocks, so the spec adds an explicit `Done` self-loop action once th
 is exhausted; any remaining deadlock TLC reports is then a real modeling bug (a reachable
 mid-protocol state with no enabled action).
 
+### Tooling decisions (P10.D8)
+
+- **TLC-first (explicit-state), not Apalache-first.** Every model here is small and
+  finite by construction (tiny budgets/caps), so exhaustive state enumeration is fast and
+  gives concrete, minimal counterexample traces — which is what the seeded-bug non-vacuity
+  discipline needs. Apalache (symbolic, SMT-backed) is kept **dev-side only** (a future
+  `scripts/run-apalache.sh` could discharge, e.g., `SenderPacingReaper`'s inequality
+  symbolically for _all_ constant valuations rather than the pinned ones) and is **not
+  CI-gating** until it catches something TLC missed — adding an SMT dependency to CI earns
+  its keep only then.
+- **Discrete-tick integer time, not dense/real time.** Every timed property in these
+  models is a _relation between timeout constants_ (grace vs ping deadline, age vs sojourn
+  bound), never a dense-time reachability question. An integer `now`/`Tick` (or per-frame
+  `age`) with absolute-deadline guards captures them exactly, keeps the state space finite,
+  and avoids a real-time model checker. See `SenderPacingReaper` and
+  `ControlPriorityDelivery`.
+- **The action↔code correspondence style, not PlusCal.** Each action bundles one external
+  event with all its side effects and maps to one code function (the correspondence tables
+  and mapping comments). PlusCal's generated control-flow variable (`pc`) would break that
+  one-action-per-function readability, so it is deliberately **not** used — the specs are
+  written directly in TLA+.
+
 ## Single-instance theorems (split brain / ARCH-10)
 
 Several of the v4 relay/reconnect invariants are **theorems of a single relay
@@ -294,6 +324,96 @@ single-instance by the same construction. The multi-instance seams
 (`DedupCache`, the in-memory "distributed lock", `should_process_message`) are
 dead stubs today; the deliberate single-node CP stance and the LB room-affinity
 requirement are the subject of the `F1` doctrine page in `PLAN.md`.
+
+## Timing theorem (sender pacing vs the activity reaper)
+
+`SenderPacingReaper.tla` (P10.D3) is the repo's first **discrete-time** model
+(Appendix-O house rule: an integer `now` + a `Tick` action, timers as
+absolute-deadline guards). It pins **BUG-2**, the timeout inversion the P10.A2
+config cross-field check prevents: a message handler records a sender's activity
+at dispatch, then — still on the same task — does a throttled room refresh
+(`maybe_update_last_seen`, a DB write + `rooms` write-lock) and parks on the
+broadcast `join_all` while a slow recipient drains (up to
+`websocket.slow_consumer_timeout_ms`). The receive loop is that same task, so a
+long enough park freezes its recorded activity past `server.ping_timeout` and the
+activity reaper evicts the **healthy** sender (close 4003) before its slow
+recipient is ever disconnected. Time advances only in the two waiting states: while
+parked (capped at the grace deadline) and **once while broadcasting** — the
+pre-park delay `d` (the `maybe_update_last_seen` lock/DB await), so the
+reaper-visible gap peaks at `d + SLOW`. `HealthySenderNeverReaped == ~sndEvicted`
+is the contract, with the stronger `GapWithinPingDeadline` (the reaper never sees a
+healthy gap over the deadline) pinning the boundary it rests on.
+
+| Spec (invariant)                                    | Seeded constant (checked `FALSE`) | What TRUE models | Result |
+| --------------------------------------------------- | --------------------------------- | ---------------- | ------ |
+| `SenderPacingReaper.tla` (`HealthySenderNeverReaped` / `GapWithinPingDeadline`) | `TimeoutInversionBug` | the effective grace period forced to exactly `PING_TIMEOUT` — the `slow = ping` boundary the check rejects (legal per-field, forbidden cross-field; legal system-wide before A2) | via the `d = 1` pre-park path the peak gap reaches `PING + 1 > PING` and the reaper evicts the healthy parked sender → both invariants violated (`GapWithinPingDeadline` trips one step earlier) |
+
+**Derived deliverable (the A2 inequality).** With the pre-park delay `d` (0 or 1
+tick) modeled, TLC derives that `slow >= ping` is unsafe — **exactly** the region
+`validate_config_security` rejects (`slow_consumer_timeout_ms >= ping_timeout *
+1000`): at the boundary (effective grace `= PING`, exhibited via the
+`TimeoutInversionBug` flag since the checked configs pin `SLOW < PING`) the
+`d = 1` path pushes the peak gap to `PING + 1 > PING` and the reaper (strict `>`)
+evicts. Two checked configs are green — `_Small`
+(`SLOW = 2 < PING = 4`) and `_Boundary` (`SLOW = 3 = PING − 1`, the tightest safe:
+peak gap `SLOW + 1 = PING`, never `> PING`). So the strict `<` is the **necessary
+floor** the model derives — it eliminates every `SLOW >= PING` inversion, gross
+(60 s vs 30 s) and boundary alike. It is **not proven sufficient**: the model
+bounds `d` to one tick, but the lock/DB pre-park delay is unbounded under
+contention, so a thin-margin config can still invert if `d` exceeds `PING − SLOW`.
+True safety is an operator sizing concern (keep the margin above the worst-case
+pre-park delay; the default 25 s dwarfs it) — the check is the derived guardrail
+against the provable inversion region, not a liveness proof under unbounded load.
+
+## Delivery-revision spec-first (control priority + sojourn)
+
+`ControlPriorityDelivery.tla` is **spec-first** for the protocol-v4 P10.E2
+delivery revision — it is merged BEFORE the code and pins the two properties the
+queue split must satisfy, composing with the #131 `DeliveryContract.tla`
+substrate rather than re-deriving it. Frames are modeled by CLASS (data | ctrl)
+and carry a discrete AGE (the Appendix-O `now`/`Tick` convention, sojourn as an
+absolute-age guard). The writer (the peer draining) is deliberately UNFAIR.
+
+| Property | What it pins | Seeded bug (checked `FALSE`) → result |
+| --- | --- | --- |
+| `ControlAgeBounded` | control frames ride a separate queue drained **strictly before** data — never starved behind a data backlog | `SingleQueueBug` (control misrouted onto the data FIFO) → a data frame is written while a control frame waits behind it → **violated** |
+| `DeliveryEventuallyResolves` (liveness) | a frame that sits too long triggers a **sojourn** close, so `enqueued ~> written ∨ closed` holds even against a peer that pings but never reads | `NoSojournEvictionBug` (no sojourn close) → the frame parks forever behind the unfair writer → **violated** |
+
+Also checked: `PerClassConservation` (each class independently queued ∨ written ∨
+dropped-with-close), `CtrlDropsAreLoud`, `StalenessBounded` (no head ages past
+the bound while open — safety, given the Tick cap), and `ReasonStable`. The
+liveness rests only on `WF(Tick, SojournEvict, CloseFinish)` — **never** on writer
+fairness, which is exactly what makes the sojourn close load-bearing.
+
+## Delivery classes (reliable / latest / volatile)
+
+`DeliveryClasses.tla` is the second **spec-first** module for P10.E2 (with
+`ControlPriorityDelivery.tla`), pinning the per-class delivery contract before the
+code. A single recipient's data queue carries three classes, modeled by
+`[class, key, id]` frames with globally-unique ids; the writer is UNFAIR.
+
+- **reliable** — backpressures while the queue is full (enablement); conserved,
+  never coalesced.
+- **latest** (keyed) — a same-key send SUPERSEDES the queued predecessor in place
+  (old id → the `superseded` ledger, counted); a new-key send on a full queue
+  drop-oldest-volatile or drops the arrival (`latDropped`) — it **never parks**.
+- **volatile** — enqueue if space, else drop-oldest-volatile (`volDropped`).
+
+| Invariant | Pins | Seeded bug (checked `FALSE`) → result |
+| --- | --- | --- |
+| `ReliableConservation` | reliable is queued ∨ written ∨ dropped-with-close — never coalesced | `CoalesceReliableBug` → a reliable Head evicted into `volDropped` → **violated** |
+| `LatestConservation` / `VolatileConservation` | each class lands only in its legitimate buckets | `MisdropLatestBug` → a latest misdropped into `volDropped` → **violated** |
+| `AccountedSupersession` | every superseded id is in the ledger (coalescing is never silent) — held ALWAYS, since the ledger write is atomic with the coalesce | `SilentSupersedeBug` → supersede without ledgering → **violated** |
+| `LatestValueLastWrite` | ≤1 queued latest per key; the queued rep is the newest vs superseded ∪ written | — |
+| `ReportHonest` | the out-of-band `DeliveryReport` snapshot never overstates the true counts | `ReportOverstateBug` → published count above truth → **violated** |
+
+Also checked: `TypeOK`, `UniqueIds`, `CoalesceNeverTouchesReliable`, `ReasonStable`.
+Deliberately scoped OUT (documented in the header): the per-successor
+`supersedes_from` scalar and client-side range classification — the D4/E5
+watermark concern, not this module. This module verifies **ledger completeness**,
+not scalar arithmetic. It is consistent with (not a formal refinement of) the #131
+`DeliveryContract.tla` — its counted per-class drops replace that model's single
+conservation law.
 
 ## Intentionally not modeled (and why)
 

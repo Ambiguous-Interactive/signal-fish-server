@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `DeliveryClasses` TLA+ model (`formal/tla/DeliveryClasses.tla` +
+  `_Small.cfg`) — spec-first for the protocol-v4 P10.E2 delivery classes
+  (reliable / latest / volatile). It pins the per-class accounting contract:
+  `ReliableConservation` (reliable never coalesced), `LatestConservation` /
+  `VolatileConservation` (each class only in its legitimate buckets),
+  `AccountedSupersession` (every coalesced-away id is ledgered — held always,
+  since the ledger write is atomic with the supersession), `LatestValueLastWrite`
+  (≤1 queued latest per key; the queued rep is newest), and `ReportHonest` (the
+  out-of-band `DeliveryReport` never overstates). Four seeded bugs prove
+  non-vacuity — `SilentSupersedeBug`, `CoalesceReliableBug`, `MisdropLatestBug`,
+  `ReportOverstateBug` (each violating its intended invariant) — all pinned
+  `FALSE` in the checked config (green in the auto-globbed suite). `latest` never
+  backpressures (a new-key send on a full queue drop-oldest-volatile or drops the
+  arrival); the per-successor `supersedes_from` scalar is documented as the
+  D4/E5 watermark concern, out of scope here.
+
+- Added the `ControlPriorityDelivery` TLA+ model
+  (`formal/tla/ControlPriorityDelivery.tla` + `_Small.cfg`) — spec-first for the
+  protocol-v4 P10.E2 delivery revision (merged before the code). It pins the two
+  properties the queue split must satisfy, composing with the #131
+  `DeliveryContract` substrate: `ControlAgeBounded` (control rides a separate
+  queue drained strictly before data — never starved behind a data backlog) and
+  the `DeliveryEventuallyResolves` liveness (a frame that sits too long triggers
+  a sojourn close, so `enqueued ~> written ∨ closed` holds even against a peer
+  that pings but never reads — resting only on `WF(Tick, SojournEvict,
+  CloseFinish)`, never on writer fairness). Two seeded bugs prove non-vacuity:
+  `SingleQueueBug` (control misrouted onto the data FIFO) violates
+  `ControlAgeBounded`, and `NoSojournEvictionBug` violates the liveness. Both are
+  pinned `FALSE` in the checked config (green in the auto-globbed suite);
+  `PerClassConservation`, `CtrlDropsAreLoud`, and `StalenessBounded` are also
+  checked.
+
+- Added the `SenderPacingReaper` TLA+ model
+  (`formal/tla/SenderPacingReaper.tla` + `_Small.cfg` / `_Boundary.cfg`) — the
+  repo's first discrete-time (`now` + `Tick`) spec — formalizing BUG-2, the
+  timeout inversion the config
+  cross-field check prevents: a healthy sender parked on the broadcast
+  `join_all` while a slow recipient drains must never be evicted by the activity
+  reaper (`HealthySenderNeverReaped`). A `TimeoutInversionBug` seeded constant
+  (effective grace = `ping_timeout`, the `slow = ping` boundary) reproduces the
+  healthy-sender eviction for non-vacuity; the checked configs pin it `FALSE`
+  and are green in the auto-globbed `scripts/run-tla-model-check.sh` suite. By
+  modeling the pre-park delay (the `maybe_update_last_seen` DB write + `rooms`
+  lock between the activity record and the park), the model derives that
+  `slow_consumer_timeout_ms >= ping_timeout * 1000` is unsafe (same units — ms;
+  `ping_timeout` is seconds) — exactly the region `validate_config_security`
+  rejects — so the strict `<` is the necessary floor
+  (documented in `formal/README.md` and the check's comment, with the
+  not-proven-sufficient margin caveat). No behavior change to the A2 check.
+
 - Added the `RoomLifecycleGC` TLA+ model (`formal/tla/RoomLifecycleGC.tla` +
   `_Small.cfg` / `_WindowBoundary.cfg`) formalizing the room garbage-collection
   contract behind the BUG-1 fix: a room whose members are active is never reaped

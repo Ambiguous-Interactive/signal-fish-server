@@ -241,6 +241,22 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // recorded activity is always still fresh when its park ends. (Guarded on
     // `ping_timeout > 0`: a zero deadline disables the reaper, so no inversion
     // exists to prevent.)
+    //
+    // `formal/tla/SenderPacingReaper.tla` (P10.D3) derives this strict `<` as
+    // the NECESSARY floor. It models the pre-park delay `d` — the
+    // `maybe_update_last_seen` throttle-boundary DB write + `rooms` write-lock
+    // that runs after the activity record and before the park — and TLC shows
+    // that `slow >= ping` is unsafe (the peak reaper-visible gap `d + slow`
+    // exceeds the deadline), which is EXACTLY the region rejected here. The
+    // `<` is not, however, proven SUFFICIENT: the model bounds `d` to one
+    // tick, but the lock/DB delay is unbounded under contention, so a config
+    // with a thin margin can still invert if `d` exceeds that margin. Full
+    // safety is an operator sizing concern — keep the margin
+    // `ping_timeout * 1000 - slow_consumer_timeout_ms` (both in ms; note
+    // `ping_timeout` is seconds, `slow_consumer_timeout_ms` is milliseconds)
+    // above the worst-case pre-park delay (the default 30000 - 5000 = 25000 ms
+    // dwarfs it). This check is the guardrail against the provable inversion
+    // region, not a liveness proof under unbounded load.
     if config.server.ping_timeout > 0 {
         let ping_timeout_ms = config.server.ping_timeout.saturating_mul(1000);
         if config.websocket.slow_consumer_timeout_ms >= ping_timeout_ms {
@@ -475,7 +491,12 @@ mod tests {
 
     /// Timeout inversion (BUG-2): the slow-consumer grace period must be
     /// strictly less than the activity-reaper deadline. Data-driven over the
-    /// boundary. `ping_timeout` default is 30 s (30000 ms).
+    /// boundary. `ping_timeout` default is 30 s (30000 ms). This asserts the
+    /// check's NECESSARY floor — it rejects `slow >= ping` (the provable
+    /// inversion region derived by `formal/tla/SenderPacingReaper.tla`, P10.D3)
+    /// and accepts `slow < ping`. Passing the floor is not a safety
+    /// certificate: a thin margin can still invert under load, which is an
+    /// operator sizing concern (see `validate_config_security`).
     #[test]
     fn slow_consumer_timeout_must_be_below_ping_deadline() {
         // (slow_consumer_timeout_ms, ping_timeout_secs, expect_ok)
