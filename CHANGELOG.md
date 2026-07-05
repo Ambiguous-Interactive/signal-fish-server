@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `SenderPacingReaper` TLA+ model
+  (`formal/tla/SenderPacingReaper.tla` + `_Small.cfg` / `_Boundary.cfg`) — the
+  repo's first discrete-time (`now` + `Tick`) spec — formalizing BUG-2, the
+  timeout inversion the config
+  cross-field check prevents: a healthy sender parked on the broadcast
+  `join_all` while a slow recipient drains must never be evicted by the activity
+  reaper (`HealthySenderNeverReaped`). A `TimeoutInversionBug` seeded constant
+  (effective grace = `ping_timeout`, the `slow = ping` boundary) reproduces the
+  healthy-sender eviction for non-vacuity; the checked configs pin it `FALSE`
+  and are green in the auto-globbed `scripts/run-tla-model-check.sh` suite. By
+  modeling the pre-park delay (the `maybe_update_last_seen` DB write + `rooms`
+  lock between the activity record and the park), the model derives that
+  `slow_consumer_timeout_ms >= ping_timeout` is unsafe — exactly the region
+  `validate_config_security` rejects — so the strict `<` is the necessary floor
+  (documented in `formal/README.md` and the check's comment, with the
+  not-proven-sufficient margin caveat). No behavior change to the A2 check.
+
 - Added the `RoomLifecycleGC` TLA+ model (`formal/tla/RoomLifecycleGC.tla` +
   `_Small.cfg` / `_WindowBoundary.cfg`) formalizing the room garbage-collection
   contract behind the BUG-1 fix: a room whose members are active is never reaped

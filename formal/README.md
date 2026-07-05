@@ -295,6 +295,46 @@ single-instance by the same construction. The multi-instance seams
 dead stubs today; the deliberate single-node CP stance and the LB room-affinity
 requirement are the subject of the `F1` doctrine page in `PLAN.md`.
 
+## Timing theorem (sender pacing vs the activity reaper)
+
+`SenderPacingReaper.tla` (P10.D3) is the repo's first **discrete-time** model
+(Appendix-O house rule: an integer `now` + a `Tick` action, timers as
+absolute-deadline guards). It pins **BUG-2**, the timeout inversion the P10.A2
+config cross-field check prevents: a message handler records a sender's activity
+at dispatch, then — still on the same task — does a throttled room refresh
+(`maybe_update_last_seen`, a DB write + `rooms` write-lock) and parks on the
+broadcast `join_all` while a slow recipient drains (up to
+`websocket.slow_consumer_timeout_ms`). The receive loop is that same task, so a
+long enough park freezes its recorded activity past `server.ping_timeout` and the
+activity reaper evicts the **healthy** sender (close 4003) before its slow
+recipient is ever disconnected. Time advances only in the two waiting states: while
+parked (capped at the grace deadline) and **once while broadcasting** — the
+pre-park delay `d` (the `maybe_update_last_seen` lock/DB await), so the
+reaper-visible gap peaks at `d + SLOW`. `HealthySenderNeverReaped == ~sndEvicted`
+is the contract, with the stronger `GapWithinPingDeadline` (the reaper never sees a
+healthy gap over the deadline) pinning the boundary it rests on.
+
+| Spec (invariant)                                    | Seeded constant (checked `FALSE`) | What TRUE models | Result |
+| --------------------------------------------------- | --------------------------------- | ---------------- | ------ |
+| `SenderPacingReaper.tla` (`HealthySenderNeverReaped` / `GapWithinPingDeadline`) | `TimeoutInversionBug` | the effective grace period forced to exactly `PING_TIMEOUT` — the `slow = ping` boundary the check rejects (legal per-field, forbidden cross-field; legal system-wide before A2) | via the `d = 1` pre-park path the peak gap reaches `PING + 1 > PING` and the reaper evicts the healthy parked sender → both invariants violated (`GapWithinPingDeadline` trips one step earlier) |
+
+**Derived deliverable (the A2 inequality).** With the pre-park delay `d` (0 or 1
+tick) modeled, TLC derives that `slow >= ping` is unsafe — **exactly** the region
+`validate_config_security` rejects (`slow_consumer_timeout_ms >= ping_timeout *
+1000`): at the boundary (effective grace `= PING`, exhibited via the
+`TimeoutInversionBug` flag since the checked configs pin `SLOW < PING`) the
+`d = 1` path pushes the peak gap to `PING + 1 > PING` and the reaper (strict `>`)
+evicts. Two checked configs are green — `_Small`
+(`SLOW = 2 < PING = 4`) and `_Boundary` (`SLOW = 3 = PING − 1`, the tightest safe:
+peak gap `SLOW + 1 = PING`, never `> PING`). So the strict `<` is the **necessary
+floor** the model derives — it eliminates every `SLOW >= PING` inversion, gross
+(60 s vs 30 s) and boundary alike. It is **not proven sufficient**: the model
+bounds `d` to one tick, but the lock/DB pre-park delay is unbounded under
+contention, so a thin-margin config can still invert if `d` exceeds `PING − SLOW`.
+True safety is an operator sizing concern (keep the margin above the worst-case
+pre-park delay; the default 25 s dwarfs it) — the check is the derived guardrail
+against the provable inversion region, not a liveness proof under unbounded load.
+
 ## Intentionally not modeled (and why)
 
 - **Rate limits / relay backpressure** — quantitative throttling and queue dynamics,
