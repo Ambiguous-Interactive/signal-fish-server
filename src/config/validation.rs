@@ -250,11 +250,13 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // exceeds the deadline), which is EXACTLY the region rejected here. The
     // `<` is not, however, proven SUFFICIENT: the model bounds `d` to one
     // tick, but the lock/DB delay is unbounded under contention, so a config
-    // with a thin margin can still invert if `d` exceeds `ping - slow`. Full
-    // safety is an operator sizing concern — keep `ping_timeout -
-    // slow_consumer_timeout_ms` above the worst-case pre-park delay (the
-    // default 25 s margin dwarfs it). This check is the guardrail against the
-    // provable inversion region, not a liveness proof under unbounded load.
+    // with a thin margin can still invert if `d` exceeds that margin. Full
+    // safety is an operator sizing concern — keep the margin
+    // `ping_timeout * 1000 - slow_consumer_timeout_ms` (both in ms; note
+    // `ping_timeout` is seconds, `slow_consumer_timeout_ms` is milliseconds)
+    // above the worst-case pre-park delay (the default 30000 - 5000 = 25000 ms
+    // dwarfs it). This check is the guardrail against the provable inversion
+    // region, not a liveness proof under unbounded load.
     if config.server.ping_timeout > 0 {
         let ping_timeout_ms = config.server.ping_timeout.saturating_mul(1000);
         if config.websocket.slow_consumer_timeout_ms >= ping_timeout_ms {

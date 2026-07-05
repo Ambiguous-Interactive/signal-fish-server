@@ -20,8 +20,8 @@ path filters in `.github/workflows/formal-verification.yml`.
 ## Layout
 
 Each `.tla` module carries one or more `<Module>_<Scenario>.cfg` configurations;
-the runner auto-globs **every** `formal/tla/*.cfg` (13 today), so a new spec or
-scenario is picked up with zero CI plumbing.
+the runner auto-globs **every** `formal/tla/*.cfg`, so a new spec or scenario is
+picked up with zero CI plumbing.
 
 | Path                          | Purpose                                                                            |
 | ----------------------------- | --------------------------------------------------------------------------------- |
