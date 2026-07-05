@@ -19,14 +19,20 @@ path filters in `.github/workflows/formal-verification.yml`.
 
 ## Layout
 
-| Path                                  | Purpose                                                              |
-| ------------------------------------- | -------------------------------------------------------------------- |
-| `tla/SignalFishSession.tla`           | The specification: actions, invariants, action properties            |
-| `tla/SignalFishSession_Mesh.cfg`      | Model: `desired = mesh`, both upgrade transports enabled             |
-| `tla/SignalFishSession_Host.cfg`      | Model: `desired = host`, both upgrade transports enabled, a v2 member |
-| `tla/SignalFishSession_HostDirect.cfg` | Model: `desired = host`, WebRTC transport disabled (host+direct rung) |
-| `tla/SignalFishSession_Floor.cfg`     | Model: `desired = mesh`, BOTH upgrade transports disabled (relay-floor denial)  |
-| `z3/protocol_invariants.py`           | Z3 SMT proofs of the pure decision functions (selector, glare, host election)   |
+Each `.tla` module carries one or more `<Module>_<Scenario>.cfg` configurations;
+the runner auto-globs **every** `formal/tla/*.cfg` (12 today), so a new spec or
+scenario is picked up with zero CI plumbing.
+
+| Path                          | Purpose                                                                            |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
+| `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
+| `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
+| `tla/SequencedRelay.tla`      | v4 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
+| `tla/ReconnectReplay.tla`     | v4 reconnect replay: faithful replay, honest status + the split-brain theorem      |
+| `tla/RoomLifecycleGC.tla`     | Room GC vs activity refresh + the reconnection-window guard (BUG-1)                |
+| `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
+| `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
 
@@ -42,7 +48,7 @@ This directory holds **two complementary** formal checks:
 ## How to run
 
 ```bash
-# TLA+: all four configurations (downloads + verifies the pinned tla2tools.jar once):
+# TLA+: every configuration in formal/tla/ (downloads + verifies the pinned tla2tools.jar once):
 bash scripts/run-tla-model-check.sh
 
 # One configuration / full TLC output:
