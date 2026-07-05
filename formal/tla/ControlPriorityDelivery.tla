@@ -8,8 +8,8 @@
 (*      SessionPlan, errors) ride a SEPARATE per-connection queue drained   *)
 (*      STRICTLY BEFORE the data queue, so a control frame is never stuck   *)
 (*      behind a data backlog. (`websocket.control_queue_capacity`.)        *)
-(*   2. SOJOURN EVICTION. A frame that sits at the head of a queue longer   *)
-(*      than `websocket.max_sojourn_ms` closes the connection ("Stale"),    *)
+(*   2. SOJOURN EVICTION. A frame whose AGE (time since enqueue) exceeds    *)
+(*      `websocket.max_sojourn_ms` closes the connection ("Stale"),         *)
 (*      which is what makes "enqueued ~> written or closed" TRUE even       *)
 (*      against a peer that pings (so the activity reaper is happy) but      *)
 (*      never READS (so the writer never drains) — the limbo a plain        *)
@@ -211,8 +211,10 @@ SojournEvict ==
     /\ UNCHANGED <<dataQ, ctrlQ, sentD, sentC, writtenD, writtenC,
                    droppedD, droppedC, ctrlDelayedByData>>
 
-(* Any other eviction (activity reaper, idle timeout) requesting the close.    *)
-(* Exercises first-reason-wins against SojournEvict. *)
+(* A distinct non-sojourn close path (activity reaper, idle timeout). First-   *)
+(* reason-wins is preserved by RequestClose (the house pattern), though in this *)
+(* abstraction the two close actions cannot actually contest it — both require  *)
+(* connState = "Open", which is left one-way, so the reason is set exactly once.*)
 LifecycleClose ==
     /\ connState = "Open"
     /\ connState' = "CloseRequested"
