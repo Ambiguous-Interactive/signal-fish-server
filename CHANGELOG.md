@@ -53,8 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and are green in the auto-globbed `scripts/run-tla-model-check.sh` suite. By
   modeling the pre-park delay (the `maybe_update_last_seen` DB write + `rooms`
   lock between the activity record and the park), the model derives that
-  `slow_consumer_timeout_ms >= ping_timeout` is unsafe — exactly the region
-  `validate_config_security` rejects — so the strict `<` is the necessary floor
+  `slow_consumer_timeout_ms >= ping_timeout * 1000` is unsafe (same units — ms;
+  `ping_timeout` is seconds) — exactly the region `validate_config_security`
+  rejects — so the strict `<` is the necessary floor
   (documented in `formal/README.md` and the check's comment, with the
   not-proven-sufficient margin caveat). No behavior change to the A2 check.
 
