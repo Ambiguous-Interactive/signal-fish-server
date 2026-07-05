@@ -394,6 +394,25 @@ impl EnhancedGameServer {
             _ => true,
         });
 
+        // v4 wire gate for REPLAYED snapshots. The replay ring stores
+        // `PlayerJoined` / `PlayerReconnected` in their live-broadcast form —
+        // carrying the v4 incarnation `epoch` — but `missed_events` is embedded
+        // in the `Reconnected` payload and so BYPASSES the per-recipient strip in
+        // `websocket::sending` (which only rewrites the top-level frame). Strip
+        // `epoch` for a pre-v4 reconnector so its `Reconnected` stays
+        // byte-identical to the frozen v2/v3 wire. The reconnecting socket's
+        // negotiated version lives on `current_player_id` here (the reassignment
+        // to `reconnect_player_id` happens below), and the protocol survives it.
+        if self.client_protocol(current_player_id).version < 4 {
+            for event in &mut missed_events.events {
+                match event {
+                    ServerMessage::PlayerJoined { player } => player.epoch = None,
+                    ServerMessage::PlayerReconnected { epoch, .. } => *epoch = None,
+                    _ => {}
+                }
+            }
+        }
+
         if !room.players.contains_key(reconnect_player_id) {
             let Some(player_info) = disconnected.player_info.clone() else {
                 return self
@@ -521,8 +540,10 @@ impl EnhancedGameServer {
         // connected sees the per-(sender, room) `(epoch, seq)` stream strictly
         // INCREASE across the reconnect instead of an ambiguous reset to (1, 1).
         // (v4; a pre-v4 sender's `last_epoch` is 0 ⇒ epoch 1 here, harmless.)
-        self.connection_manager
-            .set_game_data_epoch(reconnect_player_id, disconnected.last_epoch.wrapping_add(1));
+        self.connection_manager.set_game_data_epoch(
+            reconnect_player_id,
+            disconnected.last_epoch.saturating_add(1),
+        );
 
         // Complete once the fallible connection reassignment succeeds. The
         // remaining coordinator/message operations are best-effort updates.

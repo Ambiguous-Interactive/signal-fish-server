@@ -410,6 +410,20 @@ async fn missed_control_events_are_replayed_completely() {
         "first missed event must be the churner's PlayerJoined: {:?}",
         reconnected.missed_events
     );
+    // Regression (missed_events epoch leak): the replay ring stores the
+    // churner's PlayerJoined in its live-broadcast form, which carries the v4
+    // incarnation `epoch`. `missed_events` is embedded in the `Reconnected`
+    // payload and bypasses the per-recipient strip in `websocket::sending`, so a
+    // pre-v4 (v3) reconnector must have that `epoch` stripped server-side —
+    // otherwise its `Reconnected` wire is no longer byte-identical to v2/v3.
+    // Deserialized `None` proves wire-absence (`epoch` is skip-if-none).
+    let ServerMessage::PlayerJoined { player } = &reconnected.missed_events[0] else {
+        unreachable!("asserted PlayerJoined above");
+    };
+    assert_eq!(
+        player.epoch, None,
+        "a v3 reconnector's replayed PlayerJoined must omit the v4 epoch"
+    );
     assert!(
         matches!(
             &reconnected.missed_events[1],
@@ -422,6 +436,62 @@ async fn missed_control_events_are_replayed_completely() {
         reconnected.replay,
         Some(ReplayStatus::Complete),
         "nothing was evicted, so the v3 recipient is told the replay is complete"
+    );
+
+    assert_message_conservation(&game_server.metrics()).await;
+}
+
+/// Non-vacuity for the missed_events epoch strip: a v4 reconnector MUST still
+/// see the churner's incarnation `epoch` replayed. This proves the strip in the
+/// previous test is CONDITIONED on the reconnector being pre-v4, not an
+/// unconditional wipe that would also hide the field from v4 clients that want
+/// it.
+#[tokio::test]
+async fn missed_events_carry_epoch_for_v4_reconnector() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate(&mut peer_a, Some(4)).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate(&mut peer_b, Some(4)).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    // While B is away, a churner joins+leaves; its PlayerJoined is buffered with
+    // the churner's incarnation epoch (first join ⇒ 1).
+    let churner_id = churn_join_leave(addr, &joined_a.room_code, "Churner", &mut peer_a).await;
+
+    let mut replacement = connect(addr).await;
+    authenticate(&mut replacement, Some(4)).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        token,
+    )
+    .await;
+
+    let ServerMessage::PlayerJoined { player } = &reconnected.missed_events[0] else {
+        panic!(
+            "first missed event must be the churner's PlayerJoined: {:?}",
+            reconnected.missed_events
+        );
+    };
+    assert_eq!(player.id, churner_id, "first missed event is the churner");
+    assert_eq!(
+        player.epoch,
+        Some(1),
+        "a v4 reconnector's replayed PlayerJoined carries the churner's epoch"
     );
 
     assert_message_conservation(&game_server.metrics()).await;
