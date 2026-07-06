@@ -995,8 +995,9 @@ The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 field
 ```
 
 These v3-only fields are omitted from the wire for a negotiated v2 connection, so the v2 `ProtocolInfo` shape stays
-byte-identical. `transports` names the server message lanes available to the connection; today it is always
-`["websocket"]` for negotiated v3 and reserves a future advertisement point for another server relay lane.
+byte-identical. `ProtocolInfo.transports` names the server message lanes available to the connection; today it is
+always `["websocket"]` for negotiated v3 and reserves a future advertisement point for another server relay lane. It
+does not participate in the `Authenticate.supported_transports` data-path negotiation above.
 
 **Endpoints.** `/v2/ws` and `/v3/ws` share the same handler. `/v3/ws` only changes the _default_ protocol version
 to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then
