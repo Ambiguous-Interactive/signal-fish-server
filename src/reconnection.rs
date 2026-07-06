@@ -219,6 +219,20 @@ pub struct DisconnectedPlayer {
     pub last_epoch: u32,
 }
 
+/// The subset of a still-pending disconnect record that a same-room
+/// re-registration must PRESERVE — the player has not reconnected, so this
+/// state is unchanged and re-deriving it from a (possibly racing, possibly
+/// `None`) second `register_disconnection` call would clobber the real capture.
+/// See [`ReconnectionManager::register_disconnection`].
+struct PreservedPending {
+    token: String,
+    token_created_at: DateTime<Utc>,
+    last_sequence: u64,
+    last_epoch: u32,
+    was_authority: bool,
+    player_info: Option<PlayerInfo>,
+}
+
 impl DisconnectedPlayer {
     /// Check if reconnection window has expired
     pub fn is_expired(&self, window_seconds: i64) -> bool {
@@ -405,25 +419,20 @@ impl ReconnectionManager {
         // A same-room re-registration — the player registered a SECOND
         // disconnection for the same room while still pending, so it has NOT
         // reconnected — must preserve everything the client already
-        // holds/expects from its first pending record. Snapshot the original
-        // record's preserved fields up front (owned, so the later
-        // `players.insert` is unencumbered). Field order:
-        //   (token string, token mint time, last_sequence, last_epoch,
-        //    was_authority, player_info).
-        // A record from a DIFFERENT room, or a genuinely new one, takes fresh
-        // values instead.
+        // holds/expects from its first pending record. Snapshot those preserved
+        // fields up front (owned, so the later `players.insert` is
+        // unencumbered). A record from a DIFFERENT room, or a genuinely new one,
+        // takes fresh values instead.
         let existing_same_room = players
             .get(&player_id)
             .filter(|existing| existing.disconnected.room_id == room_id)
-            .map(|existing| {
-                (
-                    existing.disconnected.token.token.clone(),
-                    existing.disconnected.token.created_at,
-                    existing.disconnected.last_sequence,
-                    existing.disconnected.last_epoch,
-                    existing.disconnected.was_authority,
-                    existing.disconnected.player_info.clone(),
-                )
+            .map(|existing| PreservedPending {
+                token: existing.disconnected.token.token.clone(),
+                token_created_at: existing.disconnected.token.created_at,
+                last_sequence: existing.disconnected.last_sequence,
+                last_epoch: existing.disconnected.last_epoch,
+                was_authority: existing.disconnected.was_authority,
+                player_info: existing.disconnected.player_info.clone(),
             });
 
         let now = Utc::now();
@@ -435,12 +444,12 @@ impl ReconnectionManager {
         // fallback mint (embedders that never pre-issue). Only (3) is a NEW
         // token, so only it counts toward the issued-token metric.
         let (token, minted_fresh) = match &existing_same_room {
-            Some((existing_token, created_at, ..)) => (
+            Some(existing) => (
                 ReconnectionToken {
-                    token: existing_token.clone(),
+                    token: existing.token.clone(),
                     player_id,
                     room_id,
-                    created_at: *created_at,
+                    created_at: existing.token_created_at,
                     expires_at: now + Duration::seconds(self.reconnection_window),
                 },
                 false,
@@ -472,7 +481,7 @@ impl ReconnectionManager {
         // while `replay` still reported `complete`.
         let last_sequence = existing_same_room
             .as_ref()
-            .map(|(_, _, last_sequence, ..)| *last_sequence)
+            .map(|existing| existing.last_sequence)
             .unwrap_or(fresh_last_sequence);
 
         // Same-room re-registration keeps the ORIGINAL incarnation epoch: the
@@ -481,7 +490,7 @@ impl ReconnectionManager {
         // ensures that can never clobber the real value.
         let last_epoch = existing_same_room
             .as_ref()
-            .map(|(_, _, _, existing_epoch, ..)| (*existing_epoch).max(last_epoch))
+            .map(|existing| existing.last_epoch.max(last_epoch))
             .unwrap_or(last_epoch);
 
         // Likewise keep the ORIGINAL disconnect snapshot — the authority flag
@@ -493,12 +502,10 @@ impl ReconnectionManager {
         // original itself never captured `player_info`).
         let was_authority = existing_same_room
             .as_ref()
-            .map(|(_, _, _, _, was_authority, _)| *was_authority)
+            .map(|existing| existing.was_authority)
             .unwrap_or(was_authority);
         let player_info = match &existing_same_room {
-            Some((_, _, _, _, _, existing_info)) if existing_info.is_some() => {
-                existing_info.clone()
-            }
+            Some(existing) if existing.player_info.is_some() => existing.player_info.clone(),
             _ => player_info,
         };
 
