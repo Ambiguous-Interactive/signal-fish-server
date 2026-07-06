@@ -94,6 +94,15 @@ jobs:
       # the expensive matrix spends minutes rediscovering it on every lane.
       - name: Check compilation
         run: cargo check --locked --all-targets --all-features
+      # The fuzz crate is a SEPARATE workspace (fuzz/, out-of-tree per ADR-0003),
+      # so the check above never sees it — which let an E1 `register_disconnection`
+      # signature change break `fuzz_reconnect_tokens` undetected (fuzz.yml only
+      # runs on narrow paths and builds two other targets). Type-check every fuzz
+      # target here against current library code on every PR. This is a no-codegen
+      # `check` (no libFuzzer/sanitizer), so the pinned stable toolchain suffices;
+      # the nightly build/run stays in fuzz.yml. No --locked (matches fuzz.yml).
+      - name: Check fuzz crate compiles
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins
 
   lint:
     name: Lint (${{ matrix.os }})
