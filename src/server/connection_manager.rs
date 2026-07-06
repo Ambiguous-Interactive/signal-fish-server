@@ -93,11 +93,14 @@ pub(crate) struct ClientConnection {
     /// the same connection switches rooms — a room-B membership entered after a
     /// room-A one carries a higher epoch, not a fresh `1`. This is what upholds
     /// the client-facing contract: `(epoch, seq)` is strictly increasing per
-    /// `(sender, room)` as observed by ANY single recipient. A per-room-reset
-    /// counter would instead REPLAY a lower epoch when a sender leaves and
-    /// rejoins the SAME room (a recipient that stayed would see the epoch go
-    /// backwards), unless the server kept unbounded per-`(player, room)` epoch
-    /// state; a monotonic counter guarantees the invariant for free. The
+    /// `(sender, room)` as observed by ANY single recipient. A counter reset per
+    /// room membership would instead REPEAT an epoch it already used when a
+    /// sender leaves and rejoins the SAME room — a recipient that stayed would
+    /// see `(epoch, seq)` collide (the same `epoch`, with `seq` restarting at
+    /// 1), the very ambiguity `epoch` exists to remove. Keeping a distinct
+    /// per-`(player, room)` epoch across leave/rejoin would instead require
+    /// unbounded server state; a single monotonic counter guarantees the
+    /// strictly-increasing invariant for free. The
     /// absolute value is not meaningful to clients — they baseline each sender
     /// from the epoch on its snapshot / first frame and only compare relatively.
     /// Paired with `game_data_seq` (which restarts at 1 per epoch) it makes a

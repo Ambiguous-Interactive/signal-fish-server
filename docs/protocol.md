@@ -1366,11 +1366,16 @@ Recipient rules:
 ### Incarnation epoch (`epoch`)
 
 Alongside `seq`, every relayed `GameData` / `GameDataBinary` to a v3 recipient
-also carries an `epoch`: a per-`(sender, room)` counter that increments once
-per **incarnation** of that sender's membership — the first join is `epoch` 1,
-and each join-after-leave or reconnect increments it. `seq` restarts at `1`
-within every epoch, so the pair `(epoch, seq)` is strictly
-**lexicographically increasing** per sender as observed by any single recipient:
+also carries an `epoch`: a **monotonic per-sender** counter that increments once
+per **incarnation** of that sender's membership — its first-ever incarnation is
+`epoch` 1, and each join-after-leave or reconnect increments it. The server
+tracks it per sender connection and never resets it on a room switch, so a
+sender's first frame in a given room may begin at `epoch` 2 or higher if that
+sender was previously in another room — do not assume a room's first observed
+epoch is 1. What the contract guarantees is per `(sender, room)`: because `seq`
+restarts at `1` within every epoch, the pair `(epoch, seq)` is strictly
+**lexicographically increasing** per `(sender, room)` as observed by any single
+recipient:
 
 - `(1, 1), (1, 2), (1, 3)` — the sender's first incarnation, and then
 - `(2, 1), (2, 2), …` — after the sender left+rejoined or reconnected.
