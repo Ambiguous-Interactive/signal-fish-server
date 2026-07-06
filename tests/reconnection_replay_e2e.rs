@@ -261,6 +261,11 @@ async fn register_reconnect_token(
     game_server
         .reconnection_manager()
         .expect("reconnection enabled")
+        // `last_epoch = 0`: `disconnect_client` above already removed the
+        // connection, so its incarnation epoch is no longer reachable via
+        // `game_data_epoch` — the documented fallback (resume at epoch 1). This
+        // e2e reconnects over a fresh socket and asserts replay/snapshot
+        // behavior, not cross-disconnect epoch monotonicity.
         .register_disconnection(player_id, room_id, false, Some(player_info), 0)
         .await
 }
