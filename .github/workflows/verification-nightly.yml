@@ -95,7 +95,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.82.8
+        uses: taiki-e/install-action@v2.82.9
         with:
           tool: cargo-nextest
       - name: Run relay delivery soak
@@ -143,7 +143,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.82.8
+        uses: taiki-e/install-action@v2.82.9
         with:
           tool: cargo-nextest
       - name: Run delivery concurrency stress
@@ -191,7 +191,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.82.8
+        uses: taiki-e/install-action@v2.82.9
         with:
           tool: cargo-nextest
       # Only the latency-distribution smoke test is activated by name. The
@@ -258,7 +258,7 @@ jobs:
             .
             clients/native
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.82.8
+        uses: taiki-e/install-action@v2.82.9
         with:
           tool: cargo-nextest
       - name: Build the native reference client
@@ -376,7 +376,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.82.8
+        uses: taiki-e/install-action@v2.82.9
         with:
           tool: cargo-nextest
       # --run-ignored all: the PR-lane profiles (already covered by the ci.yml
