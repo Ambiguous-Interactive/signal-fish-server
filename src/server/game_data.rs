@@ -122,7 +122,7 @@ impl EnhancedGameServer {
     /// The stamp is carried INSIDE the shared `Arc<ServerMessage>`, so this
     /// layer — and the [`MessageCoordinator`](crate::coordination::MessageCoordinator)
     /// below it — stays protocol-version-agnostic: per-recipient gating
-    /// (stripping `seq` for pre-v4 recipients) happens at serialization time
+    /// (stripping `seq` for pre-v3 recipients) happens at serialization time
     /// in `websocket::sending`, where every other per-recipient wire decision
     /// (binary vs JSON-fallback encoding) already lives. Because the stamp is
     /// an ordinary serde field of `ServerMessage`, it also survives the

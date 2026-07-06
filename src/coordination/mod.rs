@@ -223,7 +223,7 @@ pub async fn deliver_or_disconnect(
     // one of enqueued / channel-closed / slow-consumer drop, so the exported
     // counters can prove no delivery outcome went unrecorded.
     metrics.increment_websocket_delivery_attempts();
-    // Per-connection ledger for the v4 RelayStats frame. `None` (registry
+    // Per-connection ledger for the v3 RelayStats frame. `None` (registry
     // empty) unless `websocket.delivery_stats_interval_secs` enabled tracking,
     // so the default deployment pays one cheap map miss here. Relaxed: these
     // are monotonic diagnostics, never synchronization.

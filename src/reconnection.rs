@@ -208,7 +208,7 @@ pub struct DisconnectedPlayer {
     /// Room membership snapshot used to restore the player on reconnect.
     pub player_info: Option<PlayerInfo>,
     /// The disconnecting connection's game-data incarnation epoch (protocol
-    /// v4). Captured here so it SURVIVES the connection removal: on reconnect
+    /// v3). Captured here so it SURVIVES the connection removal: on reconnect
     /// the restored connection resumes at `last_epoch + 1`, keeping the
     /// per-(sender, room) `(epoch, seq)` stream strictly increasing for a
     /// recipient that stayed connected across the sender's absence (a fresh
@@ -371,10 +371,10 @@ impl ReconnectionManager {
     /// Register a player disconnection.
     ///
     /// `last_epoch` is the disconnecting connection's game-data incarnation
-    /// epoch (protocol v4), captured by the caller from the still-live
+    /// epoch (protocol v3), captured by the caller from the still-live
     /// connection so it survives into [`DisconnectedPlayer::last_epoch`] and the
     /// reconnect can resume at `last_epoch + 1` (see that field). Pass `0` when
-    /// there is no v4 stream to preserve.
+    /// there is no v3 stream to preserve.
     pub async fn register_disconnection(
         &self,
         player_id: PlayerId,

@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added the protocol-v4 incarnation `epoch` (P10.E1) beside the relay `seq`.
-  Every relayed `GameData` / `GameDataBinary` to a v4 recipient now carries an
+- Added the protocol-v3 incarnation `epoch` (P10.E1) beside the relay `seq`.
+  Every relayed `GameData` / `GameDataBinary` to a v3 recipient now carries an
   `epoch: u32` — a per-`(sender, room)` counter that increments once per
   incarnation of the sender's membership (first join is 1; each join-after-leave
   or reconnect increments it) while `seq` restarts at 1 within each epoch. The
@@ -21,14 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` control message. Each member's
   current epoch is also carried on the room snapshots
   (`RoomJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
-  `PlayerReconnected.epoch`, and the `Reconnected` member snapshot) so a v4
+  `PlayerReconnected.epoch`, and the `Reconnected` member snapshot) so a v3
   recipient can baseline a sender before its first relayed frame. The epoch is
   captured into the reconnection record at disconnect and resumed at
   `last_epoch + 1` on reconnect, so it stays strictly increasing across a
   sender's absence for a recipient that never left. Like `seq`, `epoch` is
-  stripped for pre-v4 recipients — the v2/v3 wire stays byte-identical (golden
-  snapshots unchanged). Covered by `tests/v4_wire_golden.rs`,
-  `tests/v4_game_data_sequencing_e2e.rs`, and the `src/websocket/sending.rs` unit
+  stripped for pre-v3 recipients — the v2 wire stays byte-identical (golden
+  snapshots unchanged). Covered by `tests/v3_reliability_wire_golden.rs`,
+  `tests/v3_game_data_sequencing_e2e.rs`, and the `src/websocket/sending.rs` unit
   tests; documented in `docs/protocol.md` and
   `spec/signal-fish-protocol.asyncapi.yaml`.
 - Added the flagship `EndToEndGapAccountability` TLA+ model
@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ClientCanClassify`), no evicted frame ever resurfaces out of order
   (`DroppedNeverObserved`), and the reconnection snapshot heals the tail dropped
   at eviction (`MembershipEventuallyHonest`). It is the executable proof that
-  the protocol-v4 P10.E5 per-sender `(epoch, seq)` watermarks
+  the protocol-v3 P10.E5 per-sender `(epoch, seq)` watermarks
   (`Reconnected.sender_watermarks`) are necessary — a reconnecting client
   cannot otherwise tell its own outage gap from relay loss. Three seeded bugs
   prove non-vacuity (`SingleFlagBug` and `NoBaselineResetBug` violate
@@ -55,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everything else stays exhaustive and CI-gating.
 
 - Added the `DeliveryClasses` TLA+ model (`formal/tla/DeliveryClasses.tla` +
-  `_Small.cfg`) — spec-first for the protocol-v4 P10.E2 delivery classes
+  `_Small.cfg`) — spec-first for the protocol-v3 P10.E2 delivery classes
   (reliable / latest / volatile). It pins the per-class accounting contract:
   `ReliableConservation` (reliable never coalesced), `LatestConservation` /
   `VolatileConservation` (each class only in its legitimate buckets),
@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added the `ControlPriorityDelivery` TLA+ model
   (`formal/tla/ControlPriorityDelivery.tla` + `_Small.cfg`) — spec-first for the
-  protocol-v4 P10.E2 delivery revision (merged before the code). It pins the two
+  protocol-v3 P10.E2 delivery revision (merged before the code). It pins the two
   properties the queue split must satisfy, composing with the #131
   `DeliveryContract` substrate: `ControlAgeBounded` (control rides a separate
   queue drained strictly before data — never starved behind a data backlog) and
@@ -113,7 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-vacuity; the checked configs pin it `FALSE` and are green in the
   auto-globbed `scripts/run-tla-model-check.sh` suite.
 
-- Added split-brain seeded-bug constants to two v4 TLA+ models, making the
+- Added split-brain seeded-bug constants to two v3 TLA+ models, making the
   single-instance boundary of the relay/reconnect contracts (ARCH-10)
   executable: `SplitBrainStampBug` in `formal/tla/SequencedRelay.tla` (a second
   instance stamps the same sender's stream from an independent counter →
@@ -126,13 +126,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section in `formal/README.md` catalogs which invariants are single-instance
   theorems and states the LB room-affinity requirement.
 
-- Added protocol v4 (strictly additive; clamp `protocol.max_protocol_version` back to `3` to
-  disable): relayed `GameData` / `GameDataBinary` delivered to a v4 recipient carry a
+- Added protocol v3 (strictly additive; clamp `protocol.max_protocol_version` back to `3` to
+  disable): relayed `GameData` / `GameDataBinary` delivered to a v3 recipient carry a
   server-stamped per-`(sender, room)` `seq` starting at `1` and strictly contiguous per sender,
-  so any recipient can detect any relay gap end-to-end; pre-v4 recipients receive byte-identical
-  frames with no `seq` key. Documented in `docs/protocol.md` ("Protocol v4 additions") and the
-  AsyncAPI spec; pinned by `tests/v4_wire_golden.rs` and `tests/v4_game_data_sequencing_e2e.rs`.
-- Added the v4-only `RelayStats` server message (config-gated by
+  so any recipient can detect any relay gap end-to-end; pre-v3 recipients receive byte-identical
+  frames with no `seq` key. Documented in `docs/protocol.md` ("Protocol v3 delivery reliability") and the
+  AsyncAPI spec; pinned by `tests/v3_reliability_wire_golden.rs` and `tests/v3_game_data_sequencing_e2e.rs`.
+- Added the v3-only `RelayStats` server message (config-gated by
   `websocket.delivery_stats_interval_secs`, default `0` = disabled, must be ≤ 3600): periodic
   per-connection cumulative delivery accounting (`sent_to_you`, `dropped_for_you`,
   `backpressure_events`) so clients can attribute loss without server log access.
@@ -852,6 +852,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Consolidated the pre-release protocol into a single v3.** The
+  delivery-reliability features that were briefly developed behind a separate
+  `protocol_version: 4` (server-stamped `GameData.seq` + incarnation `epoch`, and
+  the opt-in `RelayStats` frame) now negotiate under **v3** — there is no v4. v3
+  is the single unshipped/mutable "current" version (WebRTC signaling AND
+  delivery reliability), additive over the frozen v2 floor.
+  `SERVER_MAX_PROTOCOL_VERSION` and the `protocol.max_protocol_version` default
+  are now **3**; a client that still advertises `4`/`5` is clamped to 3. v2
+  remains byte-frozen (the pre-v3 forms are unchanged). Net effect for consumers:
+  a client obtains the reliability surface by negotiating v3 rather than v4. The
+  `[Unreleased]` entries that referenced "v4" describe these same features as
+  they now ship — under v3.
 - The activity reaper (`ConnectionManager::collect_expired_clients`) and the heartbeat-update
   throttle (`ConnectionManager::should_update_last_seen`) now read the Tokio runtime clock
   (`tokio::time::Instant`) instead of `std::time::Instant`. Production behavior is unchanged —

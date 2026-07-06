@@ -263,7 +263,7 @@ complete reference.
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT`        | `protocol.max_players_limit`       | `100`     | Hard ceiling on players per room                    |
 | `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames                 |
 | `SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION`     | `protocol.min_protocol_version`    | `2`       | Lowest accepted protocol version                    |
-| `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION`     | `protocol.max_protocol_version`    | `4`       | Highest negotiated protocol version                 |
+| `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION`     | `protocol.max_protocol_version`    | `3`       | Highest negotiated protocol version                 |
 | `SIGNAL_FISH__LOGGING__LEVEL`                     | `logging.level`                    | `null`    | Log level override (`trace`, `debug`, `info`, `warn`, `error`) |
 | `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING`       | `logging.enable_file_logging`      | `true`    | Enable rolling file logs                            |
 | `SIGNAL_FISH__LOGGING__FORMAT`                    | `logging.format`                   | `json`    | Log output format (`json` or `text`)                |

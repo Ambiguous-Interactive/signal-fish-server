@@ -1,10 +1,12 @@
-//! GOLDEN v4 WIRE SNAPSHOTS — these lock the protocol v4 additions.
+//! GOLDEN v3 WIRE SNAPSHOTS — these lock the protocol v3 delivery-reliability
+//! additions.
 //!
-//! v4 is additive over v2/v3: the server-stamped `GameData.seq` /
-//! `GameDataBinary.seq` relay sequence and the opt-in `RelayStats` frame. The
-//! pre-v4 forms (`seq: None`, no RelayStats) are frozen byte-for-byte in
-//! `tests/v2_wire_golden.rs`, which MUST keep passing unchanged; this file
-//! freezes the v4-recipient forms with the same assertion strategy:
+//! v3 is additive over the frozen v2 floor: the server-stamped `GameData.seq` /
+//! `GameDataBinary.seq` relay sequence + incarnation `epoch`, and the opt-in
+//! `RelayStats` frame. The pre-v3 (v2) forms (`seq: None`, no RelayStats) are
+//! frozen byte-for-byte in `tests/v2_wire_golden.rs`, which MUST keep passing
+//! unchanged; this file freezes the v3-recipient forms with the same assertion
+//! strategy:
 //!
 //! - JSON: structural equality against a `json!` value AND a raw-string
 //!   assertion to catch field-name / casing / ordering drift.
@@ -49,12 +51,12 @@ fn assert_json<T: Serialize>(value: &T, expected: Value, raw: &str) {
     let actual_value = serde_json::to_value(value).expect("json value");
     assert_eq!(
         actual_value, expected,
-        "JSON structural mismatch (BREAKING v4 wire change?)"
+        "JSON structural mismatch (BREAKING v3 wire change?)"
     );
     let actual_raw = serde_json::to_string(value).expect("json string");
     assert_eq!(
         actual_raw, raw,
-        "JSON raw-string mismatch — field name/casing/ordering drift (BREAKING v4 wire change?)"
+        "JSON raw-string mismatch — field name/casing/ordering drift (BREAKING v3 wire change?)"
     );
 }
 
@@ -73,12 +75,12 @@ fn assert_msgpack<T: Serialize>(value: &T, expected_hex: &str) {
     let actual_hex = hex(&bytes);
     assert_eq!(
         actual_hex, expected_hex,
-        "MessagePack byte mismatch (BREAKING v4 wire change?)\n  actual: {actual_hex}\n  golden: {expected_hex}"
+        "MessagePack byte mismatch (BREAKING v3 wire change?)\n  actual: {actual_hex}\n  golden: {expected_hex}"
     );
 }
 
 // ===========================================================================
-// GameData with the server-stamped seq (v4 recipients).
+// GameData with the server-stamped seq (v3 recipients).
 // ===========================================================================
 
 #[test]
@@ -157,7 +159,7 @@ fn golden_server_game_data_binary_with_seq_in_memory_repr_not_wire() {
 }
 
 // ===========================================================================
-// RelayStats (v4-only, config-gated).
+// RelayStats (v3-only, config-gated).
 // ===========================================================================
 
 #[test]
@@ -185,12 +187,12 @@ fn golden_server_relay_stats() {
 }
 
 // ===========================================================================
-// Round-trips: v4 fields survive both wire encodings, and the unstamped form
+// Round-trips: v3 fields survive both wire encodings, and the unstamped form
 // still decodes with `seq: None` (backward decode compatibility).
 // ===========================================================================
 
 #[test]
-fn v4_game_data_seq_and_epoch_round_trip_json_and_msgpack() {
+fn v3_game_data_seq_and_epoch_round_trip_json_and_msgpack() {
     // seq and epoch are stamped together; also cover each independently absent
     // (backward-decode compatibility) and their max values.
     for (seq, epoch) in [
@@ -237,9 +239,9 @@ fn v4_game_data_seq_and_epoch_round_trip_json_and_msgpack() {
 // Epoch carriage on room snapshots (E1): PlayerReconnected + PlayerInfo.
 // ===========================================================================
 
-/// `PlayerReconnected` gains the reconnector's new incarnation epoch (v4). The
-/// pre-v4 form (`epoch: None`) is frozen byte-identically in
-/// `tests/v2_wire_golden.rs`; this freezes the v4-recipient form.
+/// `PlayerReconnected` gains the reconnector's new incarnation epoch (v3). The
+/// pre-v3 form (`epoch: None`) is frozen byte-identically in
+/// `tests/v2_wire_golden.rs`; this freezes the v3-recipient form.
 #[test]
 fn golden_player_reconnected_with_epoch() {
     let msg = ServerMessage::PlayerReconnected {
@@ -260,7 +262,7 @@ fn golden_player_reconnected_with_epoch() {
 }
 
 /// A `PlayerInfo` inside a `PlayerJoined` snapshot carries the joiner's epoch
-/// (v4). Freeze the exact placement (trailing `epoch` key, after
+/// (v3). Freeze the exact placement (trailing `epoch` key, after
 /// `connection_info` which is omitted here) so the snapshot wire cannot drift.
 #[test]
 fn golden_player_joined_player_info_with_epoch() {
@@ -296,7 +298,7 @@ fn golden_player_joined_player_info_with_epoch() {
 }
 
 #[test]
-fn v4_relay_stats_round_trips_json_and_msgpack() {
+fn v3_relay_stats_round_trips_json_and_msgpack() {
     let msg = ServerMessage::RelayStats {
         interval_ms: 60_000,
         sent_to_you: u64::MAX,

@@ -173,7 +173,7 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION",
         path: "protocol.max_protocol_version",
-        default: Some("4"),
+        default: Some("3"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE",
@@ -531,7 +531,7 @@ const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION",
         path: "protocol.max_protocol_version",
-        default: Some("4"),
+        default: Some("3"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__LOGGING__LEVEL",

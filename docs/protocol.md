@@ -1328,21 +1328,23 @@ C1                        server                          H (host)            C2
 |  (on failure: each client falls back to GameData over the relay floor)      |
 ```
 
-## Protocol v4 additions
+## Protocol v3 delivery reliability
 
-Protocol v4 is a strictly additive negotiation step over v3: every v2/v3
-message and byte stays identical, and a deployment can clamp
-`protocol.max_protocol_version` back to `3` to disable everything below.
-v4 exists so clients can _detect_ relay loss end-to-end instead of trusting
-the delivery contract blindly.
+The v3 additions above cover WebRTC signaling. v3 ALSO adds a delivery
+reliability surface (there is no separate v4: v3 is the single unshipped
+"current" version, so everything additive over the frozen v2 floor negotiates
+under `protocol_version: 3`). A deployment can clamp
+`protocol.max_protocol_version` back to `2` to disable all of it (pure v2).
+This surface exists so clients can _detect_ relay loss end-to-end instead of
+trusting the delivery contract blindly.
 
 ### Sequenced relay (`seq`)
 
 Relayed `GameData` (JSON) and `GameDataBinary` / bare MessagePack frames
-delivered to a v4 recipient carry an additional server-stamped `seq` field:
+delivered to a v3 recipient carry an additional server-stamped `seq` field:
 a per-(sender, room) counter that starts at `1` and increases by exactly one
-for every message the server relays from that sender to the room. Pre-v4
-recipients in the same room receive byte-identical frames with no `seq` key.
+for every message the server relays from that sender to the room. Pre-v3
+(v2) recipients in the same room receive byte-identical frames with no `seq` key.
 
 Recipient rules:
 
@@ -1363,7 +1365,7 @@ Recipient rules:
 
 ### Incarnation epoch (`epoch`)
 
-Alongside `seq`, every relayed `GameData` / `GameDataBinary` to a v4 recipient
+Alongside `seq`, every relayed `GameData` / `GameDataBinary` to a v3 recipient
 also carries an `epoch`: a per-`(sender, room)` counter that increments once
 per **incarnation** of that sender's membership — the first join is `epoch` 1,
 and each join-after-leave or reconnect increments it. `seq` restarts at `1`
@@ -1380,7 +1382,7 @@ control message. Each member's current epoch is also carried on the room
 snapshots — `RoomJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
 `PlayerReconnected.epoch`, and the `Reconnected` member snapshot — so you can
 baseline a sender's stream before its first relayed frame arrives. Like `seq`,
-`epoch` is stripped for pre-v4 recipients (their bytes stay byte-identical), so
+`epoch` is stripped for pre-v3 (v2) recipients (their bytes stay byte-identical), so
 its absence and its presence are both part of the frozen wire contract.
 
 The `epoch` value is only meaningful **relatively**: baseline each sender from
@@ -1394,7 +1396,7 @@ room, `(epoch, seq)` never goes backwards while you stay connected.
 
 ### RelayStats
 
-Periodic per-connection delivery accounting, emitted only to v4 connections
+Periodic per-connection delivery accounting, emitted only to v3 connections
 and only when `websocket.delivery_stats_interval_secs` is nonzero (default
 `0`, disabled):
 

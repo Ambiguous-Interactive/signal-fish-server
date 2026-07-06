@@ -65,7 +65,7 @@ fn player_info_a() -> PlayerInfo {
         is_ready: false,
         connected_at: fixed_time(),
         connection_info: None,
-        // v4-only incarnation epoch: `None` is skipped, so the v2 snapshot
+        // v3-only incarnation epoch: `None` is skipped, so the v2 snapshot
         // goldens below stay byte-identical.
         epoch: None,
         region_id: String::new(),
@@ -611,7 +611,7 @@ fn golden_server_game_data() {
     let msg = ServerMessage::GameData {
         from_player: player_a(),
         data: json!({ "move": "up" }),
-        // v4-only relay stamp: `None` is skipped entirely, so the golden v2
+        // v3-only relay stamp: `None` is skipped entirely, so the golden v2
         // bytes below stay byte-identical.
         seq: None,
         epoch: None,
@@ -639,7 +639,7 @@ fn golden_server_game_data_binary_json_fallback() {
     let fallback = ServerMessage::GameData {
         from_player: player_a(),
         data: json!({ "move": "up" }),
-        // v4-only relay stamp: `None` is skipped entirely, so the golden v2
+        // v3-only relay stamp: `None` is skipped entirely, so the golden v2
         // fallback frame stays byte-identical.
         seq: None,
         epoch: None,
@@ -668,7 +668,7 @@ fn golden_server_game_data_binary_in_memory_repr_not_wire() {
         from_player: player_a(),
         encoding: GameDataEncoding::MessagePack,
         payload: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
-        // v4-only relay stamp: `None` is skipped entirely, so the in-memory
+        // v3-only relay stamp: `None` is skipped entirely, so the in-memory
         // repr snapshot stays byte-identical.
         seq: None,
         epoch: None,
@@ -866,7 +866,7 @@ fn golden_server_reconnection_failed() {
 fn golden_server_player_reconnected() {
     let msg = ServerMessage::PlayerReconnected {
         player_id: player_a(),
-        // v4-only epoch: `None` is skipped, so the v2 wire stays byte-identical.
+        // v3-only epoch: `None` is skipped, so the v2 wire stays byte-identical.
         epoch: None,
     };
     assert_json(

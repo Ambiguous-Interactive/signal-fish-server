@@ -49,12 +49,12 @@ pub struct WebSocketConfig {
     /// notified through the normal disconnect flow.
     #[serde(default = "default_slow_consumer_timeout_ms")]
     pub slow_consumer_timeout_ms: u64,
-    /// How often (seconds) each connection that negotiated protocol v4+ is
+    /// How often (seconds) each connection that negotiated protocol v3+ is
     /// sent a `RelayStats` frame with its cumulative delivery statistics
     /// (`sent_to_you` / `dropped_for_you` / `backpressure_events`); `0`
     /// (the default) disables emission entirely.
     ///
-    /// Pre-v4 recipients never receive the frame regardless of this setting
+    /// Pre-v3 recipients never receive the frame regardless of this setting
     /// (the version gate is enforced at emission). Must be at most `3600`.
     #[serde(default = "default_delivery_stats_interval_secs")]
     pub delivery_stats_interval_secs: u64,

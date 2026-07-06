@@ -147,7 +147,11 @@ impl EnhancedGameServer {
         // Capture the connection's current game-data incarnation epoch WHILE it
         // is still registered (unregister removes it right after this call), so
         // the reconnect can resume at `last_epoch + 1` and keep the recipient's
-        // (epoch, seq) view strictly increasing (v4). `None` ⇒ no v4 stream ⇒ 0.
+        // (epoch, seq) view strictly increasing (v3 reliability surface).
+        // `game_data_epoch` returns `None` only if the connection already
+        // vanished (a disconnect race) — never merely because the client is v2;
+        // that case falls back to `0` here (equivalent to "never stamped", so
+        // the reconnect just resumes at epoch 1).
         let last_epoch = self
             .connection_manager
             .game_data_epoch(player_id)
@@ -394,16 +398,16 @@ impl EnhancedGameServer {
             _ => true,
         });
 
-        // v4 wire gate for REPLAYED snapshots. The replay ring stores
+        // v3 wire gate for REPLAYED snapshots. The replay ring stores
         // `PlayerJoined` / `PlayerReconnected` in their live-broadcast form —
-        // carrying the v4 incarnation `epoch` — but `missed_events` is embedded
+        // carrying the v3 incarnation `epoch` — but `missed_events` is embedded
         // in the `Reconnected` payload and so BYPASSES the per-recipient strip in
         // `websocket::sending` (which only rewrites the top-level frame). Strip
-        // `epoch` for a pre-v4 reconnector so its `Reconnected` stays
-        // byte-identical to the frozen v2/v3 wire. The reconnecting socket's
+        // `epoch` for a pre-v3 (v2) reconnector so its `Reconnected` stays
+        // byte-identical to the frozen v2 wire. The reconnecting socket's
         // negotiated version lives on `current_player_id` here (the reassignment
         // to `reconnect_player_id` happens below), and the protocol survives it.
-        if self.client_protocol(current_player_id).version < 4 {
+        if self.client_protocol(current_player_id).version < 3 {
             for event in &mut missed_events.events {
                 match event {
                     ServerMessage::PlayerJoined { player } => player.epoch = None,
@@ -539,7 +543,7 @@ impl EnhancedGameServer {
         // epoch survived in the reconnection record), so a recipient that stayed
         // connected sees the per-(sender, room) `(epoch, seq)` stream strictly
         // INCREASE across the reconnect instead of an ambiguous reset to (1, 1).
-        // (v4; a pre-v4 sender's `last_epoch` is 0 ⇒ epoch 1 here, harmless.)
+        // (v3; a pre-v3 sender's `last_epoch` is 0 ⇒ epoch 1 here, harmless.)
         self.connection_manager.set_game_data_epoch(
             reconnect_player_id,
             disconnected.last_epoch.saturating_add(1),
@@ -591,15 +595,15 @@ impl EnhancedGameServer {
         // reflect it on each player's `is_ready`.
         let ready_players = self.room_coordinator.current_ready_players(room_id).await;
         let mut current_players: Vec<PlayerInfo> = room.players.values().cloned().collect();
-        // v4 room snapshot: give a v4 reconnector each member's current
+        // v3 room snapshot: give a v3 reconnector each member's current
         // incarnation epoch (including its own freshly bumped epoch) so it can
         // re-baseline every per-sender (epoch, seq) stream. Single recipient, so
-        // gate on its version at construction — a pre-v4 reconnector keeps every
-        // epoch `None` and byte-identical v2/v3 bytes.
-        let recipient_is_v4 = self.connection_manager.supports_v4(reconnect_player_id);
+        // gate on its version at construction — a pre-v3 (v2) reconnector keeps
+        // every epoch `None` and byte-identical v2 bytes.
+        let recipient_is_v3 = self.connection_manager.supports_v3(reconnect_player_id);
         for player in current_players.iter_mut() {
             player.is_ready = ready_players.contains(&player.id);
-            player.epoch = if recipient_is_v4 {
+            player.epoch = if recipient_is_v3 {
                 self.connection_manager.game_data_epoch(&player.id)
             } else {
                 None
@@ -666,11 +670,11 @@ impl EnhancedGameServer {
         // room's ring persists when other players are still pending): a
         // reconnector must learn this player came back exactly like a
         // connected member would have.
-        // v4 wire snapshot: carry the reconnector's new incarnation epoch (Some
+        // v3 wire snapshot: carry the reconnector's new incarnation epoch (Some
         // after the `reassign_connection` above bumped it) — the same value now
         // stamped on its relayed GameData, so recipients re-baseline the
         // per-sender (epoch, seq) stream immediately. Stripped per-recipient for
-        // pre-v4 members in `websocket::sending`.
+        // pre-v3 members in `websocket::sending`.
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: *reconnect_player_id,
             epoch: self.connection_manager.game_data_epoch(reconnect_player_id),

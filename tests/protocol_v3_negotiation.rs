@@ -619,60 +619,60 @@ fn session_plan_default_ice_servers_when_field_absent() {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol v4 negotiation: the [2, 4] clamp matrix at the config level. The
+// Protocol v3 negotiation: the [2, 4] clamp matrix at the config level. The
 // same matrix is exercised end-to-end (through Authenticate/ProtocolInfo) in
 // `tests/v3_negotiation_e2e.rs`.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn v4_negotiation_clamp_matrix() {
+fn v3_negotiation_clamp_matrix() {
     use signal_fish_server::config::{ProtocolConfig, SERVER_MAX_PROTOCOL_VERSION};
 
     assert_eq!(
-        SERVER_MAX_PROTOCOL_VERSION, 4,
-        "this build implements protocol v4 (server-stamped GameData seq + RelayStats)"
+        SERVER_MAX_PROTOCOL_VERSION, 3,
+        "this build implements protocol v3 (the single unshipped current version: \
+         WebRTC signaling + server-stamped GameData seq/epoch + RelayStats)"
     );
 
-    // Default deployment range is [2, 4].
+    // Default deployment range is [2, 3].
     let cfg = ProtocolConfig::default();
-    assert_eq!(cfg.max_protocol_version, 4, "default ceiling is v4");
-    assert!(cfg.validate().is_ok(), "default [2, 4] range validates");
+    assert_eq!(cfg.max_protocol_version, 3, "default ceiling is v3");
+    assert!(cfg.validate().is_ok(), "default [2, 3] range validates");
 
-    // client asks 4 => gets 4.
-    assert_eq!(cfg.negotiate_protocol_version(Some(4)), 4);
-    // client asks 5 (future) => clamped down to 4.
-    assert_eq!(cfg.negotiate_protocol_version(Some(5)), 4);
-    // client asks 3 => stays 3 (v4 is opt-in, never forced).
+    // client asks 3 => gets 3.
     assert_eq!(cfg.negotiate_protocol_version(Some(3)), 3);
-    // client asks 2 / omits => the v2 floor.
+    // client asks 4/5 (future, or a stale v3-era client) => clamped down to 3.
+    assert_eq!(cfg.negotiate_protocol_version(Some(4)), 3);
+    assert_eq!(cfg.negotiate_protocol_version(Some(5)), 3);
+    // client asks 2 / omits => the v2 floor (v3 is opt-in, never forced).
     assert_eq!(cfg.negotiate_protocol_version(Some(2)), 2);
     assert_eq!(cfg.negotiate_protocol_version(None), 2);
 
-    // Deployment clamped back to max 3 by config: a v4 client is negotiated
-    // down to 3 and the narrowed range still validates.
+    // Deployment clamped back to max 2 (pure v2) by config: a v3 client is
+    // negotiated down to 2 and the narrowed range still validates.
     let clamped = ProtocolConfig {
-        max_protocol_version: 3,
+        max_protocol_version: 2,
         ..ProtocolConfig::default()
     };
-    assert!(clamped.validate().is_ok(), "[2, 3] stays a valid range");
-    assert_eq!(clamped.negotiate_protocol_version(Some(4)), 3);
-    assert_eq!(clamped.negotiate_protocol_version(Some(3)), 3);
+    assert!(clamped.validate().is_ok(), "[2, 2] stays a valid range");
+    assert_eq!(clamped.negotiate_protocol_version(Some(3)), 2);
+    assert_eq!(clamped.negotiate_protocol_version(Some(2)), 2);
 
-    // The full [2, 4] range is accepted by config validation; above the
+    // The full [2, 3] range is accepted by config validation; above the
     // build ceiling is rejected.
     let full = ProtocolConfig {
         min_protocol_version: 2,
-        max_protocol_version: 4,
+        max_protocol_version: 3,
         ..ProtocolConfig::default()
     };
     assert!(full.validate().is_ok());
     let beyond = ProtocolConfig {
-        max_protocol_version: 5,
+        max_protocol_version: 4,
         ..ProtocolConfig::default()
     };
     assert!(
         beyond.validate().is_err(),
-        "max above the build ceiling (4) must be rejected"
+        "max above the build ceiling (3) must be rejected"
     );
 }
 

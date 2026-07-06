@@ -45,12 +45,12 @@ pub(super) async fn send_single_message(
             seq,
             epoch,
         } => {
-            // Per-recipient v4 gate: the relay stamp (seq + incarnation epoch)
-            // reaches only recipients that negotiated protocol v4+ — pre-v4
-            // recipients' bytes stay byte-identical to the frozen v2/v3 wire.
-            let v4 = server.client_supports_v4(player_id);
-            let seq = seq.filter(|_| v4);
-            let epoch = epoch.filter(|_| v4);
+            // Per-recipient v3 gate: the relay stamp (seq + incarnation epoch)
+            // reaches only recipients that negotiated protocol v3+ — a pre-v3
+            // (v2) recipient's bytes stay byte-identical to the frozen v2 wire.
+            let v3 = server.client_supports_v3(player_id);
+            let seq = seq.filter(|_| v3);
+            let epoch = epoch.filter(|_| v3);
             if server.prefers_encoding(player_id, *encoding) {
                 match encode_binary_game_data(*from_player, *encoding, payload, seq, epoch) {
                     Ok(frame_bytes) => {
@@ -117,28 +117,29 @@ pub(super) async fn send_single_message(
                 .await?;
             }
         }
-        // A stamped text relay bound for a pre-v4 recipient: serialize the
+        // A stamped text relay bound for a pre-v3 (v2) recipient: serialize the
         // borrowed legacy shadow (seq + epoch stripped) instead of cloning the
-        // payload, keeping pre-v4 bytes identical at ~the same cost as the
-        // pre-v4 serialization itself. v4 recipients (and unstamped messages)
-        // fall through to the shared-Arc path below untouched. (seq and epoch
-        // are always stamped together, so gating on `seq: Some(_)` also catches
-        // the epoch.)
+        // payload, keeping pre-v3 bytes identical at ~the same cost as the
+        // pre-v3 serialization itself. v3 recipients (and unstamped messages)
+        // fall through to the shared-Arc path below untouched. The guard fires
+        // when EITHER stamp is present (they are stamped together today, but
+        // keying on both — not just `seq` — keeps the strip robust if the fields
+        // ever diverge; `seq`/`epoch` are referenced only by the guard).
         ServerMessage::GameData {
             from_player,
             data,
-            seq: Some(_),
-            ..
-        } if !server.client_supports_v4(player_id) => {
+            seq,
+            epoch,
+        } if (seq.is_some() || epoch.is_some()) && !server.client_supports_v3(player_id) => {
             let legacy = LegacyGameDataEnvelope::new(*from_player, data);
             send_serialized_text(sender, &legacy, player_id).await?;
         }
-        // Broadcast room-snapshot frames carry a v4 incarnation `epoch` that
-        // must never reach a pre-v4 recipient (their bytes stay byte-identical
-        // to the frozen v2/v3 wire). Only the rare snapshot broadcasts hit this;
-        // the common relay path above is untouched.
+        // Broadcast room-snapshot frames carry a v3 incarnation `epoch` that
+        // must never reach a pre-v3 (v2) recipient (their bytes stay
+        // byte-identical to the frozen v2 wire). Only the rare snapshot
+        // broadcasts hit this; the common relay path above is untouched.
         ServerMessage::PlayerJoined { player }
-            if player.epoch.is_some() && !server.client_supports_v4(player_id) =>
+            if player.epoch.is_some() && !server.client_supports_v3(player_id) =>
         {
             let mut player = player.clone();
             player.epoch = None;
@@ -147,7 +148,7 @@ pub(super) async fn send_single_message(
         ServerMessage::PlayerReconnected {
             player_id: reconnected,
             epoch: Some(_),
-        } if !server.client_supports_v4(player_id) => {
+        } if !server.client_supports_v3(player_id) => {
             let stripped = ServerMessage::PlayerReconnected {
                 player_id: *reconnected,
                 epoch: None,
@@ -174,7 +175,7 @@ async fn send_binary_fallback(
     let data =
         decode_binary_to_json(encoding, payload).map_err(BinaryFallbackError::Undeliverable)?;
     // `seq`/`epoch` were already gated per recipient by the caller, so the enum
-    // form serializes correctly for v4 (present) and pre-v4 (absent) alike.
+    // form serializes correctly for v3 (present) and pre-v3 (absent) alike.
     let fallback = ServerMessage::GameData {
         from_player,
         data,
@@ -250,7 +251,7 @@ pub(super) async fn send_text_message(
 }
 
 /// Serialize any wire-shaped value to a JSON text frame and send it. Shared by
-/// the `ServerMessage` path and the borrowed pre-v4 GameData shadow
+/// the `ServerMessage` path and the borrowed pre-v3 GameData shadow
 /// ([`LegacyGameDataEnvelope`]); `Err(())` means the connection closed.
 async fn send_serialized_text<T: Serialize>(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -277,9 +278,9 @@ async fn send_serialized_text<T: Serialize>(
     Ok(())
 }
 
-/// Borrowed wire shadow of a `ServerMessage::GameData` frame WITHOUT the v4
+/// Borrowed wire shadow of a `ServerMessage::GameData` frame WITHOUT the v3
 /// `seq` stamp, used to serialize a stamped shared-`Arc` relay message for a
-/// pre-v4 recipient without cloning the payload.
+/// pre-v3 recipient without cloning the payload.
 ///
 /// IMPORTANT: this must serialize byte-identically to
 /// `ServerMessage::GameData { from_player, data, seq: None }` — the adjacently
@@ -324,17 +325,17 @@ struct BinaryGameDataFrame<'a> {
     encoding: GameDataEncoding,
     #[serde(with = "serde_bytes")]
     payload: &'a [u8],
-    /// Server-stamped relay sequence (protocol v4): same counter and
+    /// Server-stamped relay sequence (protocol v3): same counter and
     /// semantics as `ServerMessage::GameData::seq`. Present as a trailing
-    /// `seq` map key only when the recipient negotiated v4 (the caller gates
-    /// it), so pre-v4 recipients' frames stay byte-identical to the frozen
+    /// `seq` map key only when the recipient negotiated v3 (the caller gates
+    /// it), so pre-v3 recipients' frames stay byte-identical to the frozen
     /// vectors below.
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
-    /// Server-tracked incarnation epoch (protocol v4): same counter and
+    /// Server-tracked incarnation epoch (protocol v3): same counter and
     /// semantics as `ServerMessage::GameData::epoch`, riding beside `seq` as a
     /// trailing `epoch` map key. Gated per recipient by the caller (present
-    /// only for v4), so pre-v4 frames stay byte-identical to the frozen vectors.
+    /// only for v3), so pre-v3 frames stay byte-identical to the frozen vectors.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch: Option<u32>,
 }
@@ -345,7 +346,7 @@ struct BinaryGameDataFrame<'a> {
 /// private to the websocket module so the wire frame layout can be tested
 /// without becoming public library API.
 ///
-/// `seq`/`epoch` must already be gated per recipient (v4+ only). Only the
+/// `seq`/`epoch` must already be gated per recipient (v3+ only). Only the
 /// MessagePack frame has an envelope to carry them; the `Json` / `Rkyv`
 /// passthrough paths forward the sender's raw bytes and therefore cannot attach
 /// a stamp — recipients of those encodings rely on the text-relay stamp instead.
@@ -428,8 +429,8 @@ mod tests {
     #[test]
     fn binary_game_data_encoder_emits_bare_message_pack_frame() {
         let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
-        // Pre-v4 form (`seq`/`epoch` both None): bytes are FROZEN — they must
-        // never drift, v4 or not (pre-v4 recipients keep receiving exactly this
+        // Pre-v3 form (`seq`/`epoch` both None): bytes are FROZEN — they must
+        // never drift, v3 or not (pre-v3 recipients keep receiving exactly this
         // frame).
         let wire = encode_binary_game_data(
             player_a(),
@@ -477,8 +478,8 @@ mod tests {
         );
     }
 
-    /// v4 form: the stamp rides as trailing `seq` + `epoch` map keys (production
-    /// always pairs them). Frozen so the v4 binary wire cannot drift either.
+    /// v3 form: the stamp rides as trailing `seq` + `epoch` map keys (production
+    /// always pairs them). Frozen so the v3 binary wire cannot drift either.
     #[test]
     fn binary_game_data_encoder_appends_stamp_for_v4_recipients() {
         let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
@@ -494,11 +495,11 @@ mod tests {
         assert_eq!(
             hex(&wire),
             "85ab66726f6d5f706c61796572c4100000000000000000000000000000000aa8656e636f64696e67ac6d6573736167655f7061636ba77061796c6f6164c40401020304a373657107a565706f636803",
-            "v4 binary wire frame drift (BREAKING v4 wire change?)"
+            "v3 binary wire frame drift (BREAKING v3 wire change?)"
         );
 
         let decoded: DecodedBinaryGameDataFrame =
-            rmp_serde::from_slice(&wire).expect("v4 bare binary frame decodes");
+            rmp_serde::from_slice(&wire).expect("v3 bare binary frame decodes");
         assert_eq!(
             decoded,
             DecodedBinaryGameDataFrame {
@@ -526,7 +527,7 @@ mod tests {
                 "seq": 7,
                 "epoch": 3
             }),
-            "v4 binary frame field-name/casing drift (BREAKING v4 wire change?)"
+            "v3 binary frame field-name/casing drift (BREAKING v3 wire change?)"
         );
     }
 
@@ -550,8 +551,8 @@ mod tests {
         }
     }
 
-    /// The borrowed pre-v4 shadow must serialize byte-identically to the enum
-    /// with `seq: None` — this is what keeps pre-v4 recipients' text frames
+    /// The borrowed pre-v3 shadow must serialize byte-identically to the enum
+    /// with `seq: None` — this is what keeps pre-v3 recipients' text frames
     /// unchanged when the shared broadcast `Arc` carries a stamp.
     #[test]
     fn legacy_game_data_envelope_matches_enum_bytes_without_seq() {
@@ -568,18 +569,18 @@ mod tests {
         let enum_json = serde_json::to_string(&enum_form).expect("enum json");
         assert_eq!(
             legacy_json, enum_json,
-            "pre-v4 shadow must be byte-identical to the unstamped enum form"
+            "pre-v3 shadow must be byte-identical to the unstamped enum form"
         );
         assert_eq!(
             legacy_json,
             format!(
                 r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"move":"up","n":3}}}}}}"#
             ),
-            "pre-v4 GameData text frame drift (BREAKING v2 wire change?)"
+            "pre-v3 GameData text frame drift (BREAKING v2 wire change?)"
         );
 
         // And the stamped enum form differs ONLY by the trailing seq + epoch
-        // keys (production always pairs them for a v4 recipient).
+        // keys (production always pairs them for a v3 recipient).
         let stamped = crate::protocol::ServerMessage::GameData {
             from_player: player_a(),
             data,
@@ -592,7 +593,7 @@ mod tests {
             format!(
                 r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"move":"up","n":3}},"seq":42,"epoch":3}}}}"#
             ),
-            "v4 GameData text frame drift (BREAKING v4 wire change?)"
+            "v3 GameData text frame drift (BREAKING v3 wire change?)"
         );
     }
 }

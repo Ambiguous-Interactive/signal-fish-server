@@ -347,7 +347,7 @@ impl GameDatabase for InMemoryDatabase {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info: None,
-            // Room-state record, not a wire snapshot: the v4 incarnation epoch
+            // Room-state record, not a wire snapshot: the v3 incarnation epoch
             // is filled at snapshot-send time, so this stays `None`.
             epoch: None,
             region_id: region_id.clone(),

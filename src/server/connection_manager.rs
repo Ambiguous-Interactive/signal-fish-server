@@ -70,7 +70,7 @@ pub(crate) struct ClientConnection {
     /// default and never closes regardless of what is (or is not) reported.
     pub transport_status: Option<(Transport, bool)>,
     /// Last relay sequence number stamped on this client's outbound game data
-    /// (protocol v4): the per-(sender, room) counter behind
+    /// (protocol v3): the per-(sender, room) counter behind
     /// [`ServerMessage::GameData::seq`](crate::protocol::ServerMessage). `0`
     /// means "nothing stamped yet" (the first stamp is 1). Owned here because
     /// its lifecycle is exactly the connection's room membership: it RESETS
@@ -81,7 +81,7 @@ pub(crate) struct ClientConnection {
     /// and it is cleaned up with the connection, with no separate map to leak.
     pub game_data_seq: u64,
     /// Incarnation epoch for this client's outbound game-data stream (protocol
-    /// v4), behind [`ServerMessage::GameData::epoch`](crate::protocol::ServerMessage).
+    /// v3), behind [`ServerMessage::GameData::epoch`](crate::protocol::ServerMessage).
     ///
     /// It is a single **monotonic per-connection** counter that increments once
     /// each time a NEW incarnation of a room membership begins —
@@ -142,7 +142,7 @@ pub(crate) struct ConnectionManager {
     metrics: Arc<ServerMetrics>,
     message_coordinator: Arc<dyn MessageCoordinator>,
     max_connections_per_ip: usize,
-    /// Whether per-connection delivery statistics (the v4 `RelayStats`
+    /// Whether per-connection delivery statistics (the v3 `RelayStats`
     /// ledger) are registered with the metrics sink for each connection.
     /// Mirrors `websocket.delivery_stats_interval_secs > 0` so a disabled
     /// deployment keeps the per-delivery bookkeeping at a single map miss.
@@ -361,20 +361,16 @@ impl ConnectionManager {
             .and_then(|conn| conn.transport_status)
     }
 
+    /// Whether the client negotiated protocol v3+ (the single unshipped
+    /// "current" version). v3 is the ONE gate for every additive feature over
+    /// the frozen v2 floor: the WebRTC signaling surface
+    /// (`Signal`/`NewPeer`/`SessionPlan`/`TransportStatus`) AND the delivery
+    /// reliability surface (relayed `GameData.seq` + incarnation `epoch`, and
+    /// `RelayStats` emission). A v2 client gets none of it (byte-identical wire).
     pub fn supports_v3(&self, player_id: &PlayerId) -> bool {
         self.clients
             .get(player_id)
             .map(|conn| conn.protocol.version >= 3)
-            .unwrap_or(false)
-    }
-
-    /// Whether the client negotiated protocol v4 or higher (gates the relayed
-    /// `GameData.seq` stamp and `RelayStats` emission; mirrors
-    /// [`Self::supports_v3`]).
-    pub fn supports_v4(&self, player_id: &PlayerId) -> bool {
-        self.clients
-            .get(player_id)
-            .map(|conn| conn.protocol.version >= 4)
             .unwrap_or(false)
     }
 
@@ -412,7 +408,7 @@ impl ConnectionManager {
     }
 
     /// Advance the relay sequence and return the full relay stamp — the next
-    /// `seq` (protocol v4; first stamp is 1) together with the current
+    /// `seq` (protocol v3; first stamp is 1) together with the current
     /// incarnation `epoch` — for `player_id`'s next relayed game-data message.
     /// Both are read under one `get_mut` so the `(epoch, seq)` pair a recipient
     /// observes is always internally consistent. `None` when the connection no
@@ -428,7 +424,7 @@ impl ConnectionManager {
     }
 
     /// Read the current incarnation [`epoch`](ClientConnection::game_data_epoch)
-    /// for `player_id` without advancing anything. Used when building v4 room
+    /// for `player_id` without advancing anything. Used when building v3 room
     /// snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a recipient
     /// learns each member's epoch before that member's first relayed frame.
     /// `None` when the connection no longer exists.
