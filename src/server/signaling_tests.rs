@@ -2621,7 +2621,19 @@ async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            // Mirror production: capture the connection's real pre-disconnect
+            // incarnation epoch (non-zero once it has joined a room), so the
+            // reconnect resumes at `epoch + 1` instead of colliding at 1.
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
         .await;
     server
         .database
@@ -2728,7 +2740,19 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            // Mirror production: capture the connection's real pre-disconnect
+            // incarnation epoch (non-zero once it has joined a room), so the
+            // reconnect resumes at `epoch + 1` instead of colliding at 1.
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
         .await;
     server
         .database
@@ -2817,7 +2841,19 @@ async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            // Mirror production: capture the connection's real pre-disconnect
+            // incarnation epoch (non-zero once it has joined a room), so the
+            // reconnect resumes at `epoch + 1` instead of colliding at 1.
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
         .await;
     server
         .database
@@ -2896,7 +2932,12 @@ async fn reconnect_from_roomed_temporary_connection_is_rejected_without_ghost_me
             target_room_id,
             false,
             Some(reconnecting_info),
-            0,
+            // Mirror production: pass the real pre-disconnect incarnation epoch
+            // (non-zero after the room assignment above), not 0.
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
         )
         .await;
     server
@@ -2976,7 +3017,19 @@ async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner(
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            // Mirror production: capture the connection's real pre-disconnect
+            // incarnation epoch (non-zero once it has joined a room), so the
+            // reconnect resumes at `epoch + 1` instead of colliding at 1.
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
         .await;
     server
         .database

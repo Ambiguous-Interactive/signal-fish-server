@@ -373,10 +373,15 @@ impl ReconnectionManager {
     /// Register a player disconnection.
     ///
     /// `last_epoch` is the disconnecting connection's game-data incarnation
-    /// epoch (protocol v3), captured by the caller from the still-live
-    /// connection so it survives into [`DisconnectedPlayer::last_epoch`] and the
-    /// reconnect can resume at `last_epoch + 1` (see that field). Pass `0` when
-    /// there is no v3 stream to preserve.
+    /// epoch, captured by the caller from the still-live connection (via
+    /// `ConnectionManager::game_data_epoch`) so it survives into
+    /// [`DisconnectedPlayer::last_epoch`] and the reconnect can resume at
+    /// `last_epoch + 1` (see that field). The epoch is tracked for every sender
+    /// regardless of negotiated version — it bumps on each room join — so
+    /// whenever the still-live connection's epoch is reachable, pass it. `0`
+    /// (resume at epoch 1) is the fallback for when there is no incarnation to
+    /// preserve: the connection never joined a room, or it was already removed
+    /// (`game_data_epoch` returns `None`) before this call.
     pub async fn register_disconnection(
         &self,
         player_id: PlayerId,
