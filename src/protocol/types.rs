@@ -261,9 +261,10 @@ pub struct PlayerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
     /// Server-tracked incarnation epoch (v3 only): this player's current
-    /// `(player, room)` epoch behind
-    /// [`ServerMessage::GameData::epoch`](crate::protocol::ServerMessage),
-    /// carried on room snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a v3
+    /// incarnation epoch behind
+    /// [`ServerMessage::GameData::epoch`](crate::protocol::ServerMessage) — a
+    /// monotonic per-sender counter (not reset on a room switch), carried on
+    /// room snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a v3
     /// recipient learns each member's epoch before their first relayed frame.
     /// `None` — and absent from the wire — for pre-v3 recipients and in every
     /// non-snapshot use, keeping v2 bytes byte-identical.

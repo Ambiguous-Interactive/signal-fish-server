@@ -11,11 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added the protocol-v3 incarnation `epoch` (P10.E1) beside the relay `seq`.
   Every relayed `GameData` / `GameDataBinary` to a v3 recipient now carries an
-  `epoch: u32` — a per-`(sender, room)` counter that increments once per
-  incarnation of the sender's membership (first join is 1; each join-after-leave
-  or reconnect increments it) while `seq` restarts at 1 within each epoch. The
-  pair `(epoch, seq)` is therefore strictly lexicographically increasing per
-  sender as observed by any single recipient, making a `seq` reset
+  `epoch: u32` — a monotonic per-sender counter (tracked per connection, not
+  reset on a room switch) that increments once per incarnation of the sender's
+  membership (its first-ever incarnation is 1; each join-after-leave or reconnect
+  increments it) while `seq` restarts at 1 within each epoch. The pair
+  `(epoch, seq)` is therefore strictly lexicographically increasing per
+  `(sender, room)` as observed by any single recipient, making a `seq` reset
   **self-describing** (GAP-8): a recipient attributes the backwards `seq` jump to
   the epoch bump directly instead of correlating a separately-ordered
   `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` control message. Each member's
