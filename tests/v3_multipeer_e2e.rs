@@ -1319,6 +1319,31 @@ async fn expect_peer_transport_status(
     .await;
 }
 
+/// Assert no `PeerTransportStatus` arrives while draining known join-phase
+/// backlog. The duplicate-status contract is about no fan-out, not global
+/// silence from previously queued `PlayerJoined` / `LobbyStateChanged` events.
+async fn expect_no_peer_transport_status(ws: &mut WsStream, context: &str) {
+    assert!(
+        maybe_next_matching_server_message_within(
+            ws,
+            SILENCE_WINDOW,
+            context,
+            |message| match message {
+                ServerMessage::PeerTransportStatus { .. } => Some(()),
+                ServerMessage::PlayerJoined { .. } | ServerMessage::LobbyStateChanged { .. } => {
+                    None
+                }
+                other => panic!(
+                    "{context}: unexpected ServerMessage while checking no PeerTransportStatus: {other:?}"
+                ),
+            },
+        )
+        .await
+        .is_none(),
+        "{context}: duplicate TransportStatus must not fan out PeerTransportStatus"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mesh_n3_transport_status_fan_out_and_dedup() {
     // One v3 member of an N=3 room reports TransportStatus { webrtc, true }:
@@ -1349,26 +1374,15 @@ async fn mesh_n3_transport_status_fan_out_and_dedup() {
     expect_peer_transport_status(&mut peer_b, "peer_b", id_a, Transport::WebRtc, true).await;
     expect_peer_transport_status(&mut peer_c, "peer_c", id_a, Transport::WebRtc, true).await;
 
-    // The reporter is excluded from its own fan-out (its join-phase backlog is
-    // drained here too, so the strict silence below is sound for it as well).
-    assert!(
-        maybe_next_matching_server_message_within(
-            &mut peer_a,
-            SILENCE_WINDOW,
-            "reporter echo check",
-            |message| matches!(message, ServerMessage::PeerTransportStatus { .. }).then_some(()),
-        )
-        .await
-        .is_none(),
-        "the reporter must never receive its own PeerTransportStatus"
-    );
+    // The reporter is excluded from its own fan-out.
+    expect_no_peer_transport_status(&mut peer_a, "reporter echo check").await;
 
-    // A byte-identical duplicate is dropped at the dedup gate: strict silence
-    // for every member (backlogs were fully consumed above).
+    // A byte-identical duplicate is dropped at the dedup gate: no
+    // PeerTransportStatus fans out to any member.
     report_transport_status(&mut peer_a, Transport::WebRtc, true).await;
-    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after duplicate").await;
-    expect_no_server_message_within(&mut peer_c, SILENCE_WINDOW, "peer_c after duplicate").await;
-    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "reporter after duplicate").await;
+    expect_no_peer_transport_status(&mut peer_b, "peer_b after duplicate").await;
+    expect_no_peer_transport_status(&mut peer_c, "peer_c after duplicate").await;
+    expect_no_peer_transport_status(&mut peer_a, "reporter after duplicate").await;
 
     // The next REAL transition fans out again (the dedup gate is per-state,
     // not once-per-connection).
