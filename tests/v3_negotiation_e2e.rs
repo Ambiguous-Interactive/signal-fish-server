@@ -209,7 +209,7 @@ async fn v3_client_negotiates_v3_on_default_server() {
 #[tokio::test]
 async fn future_v4_client_is_clamped_to_v3() {
     // A stale v3-era (or future) client that still advertises 4/5 negotiates
-    // down to the build ceiling (3) — v3 no longer exists as a distinct version.
+    // down to the build ceiling (3) — v4+ is not a negotiated version.
     let addr = start_auth_server().await;
     let mut ws = connect(addr, "/v2/ws").await;
 

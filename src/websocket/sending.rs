@@ -481,7 +481,7 @@ mod tests {
     /// v3 form: the stamp rides as trailing `seq` + `epoch` map keys (production
     /// always pairs them). Frozen so the v3 binary wire cannot drift either.
     #[test]
-    fn binary_game_data_encoder_appends_stamp_for_v4_recipients() {
+    fn binary_game_data_encoder_appends_stamp_for_v3_recipients() {
         let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
         let wire = encode_binary_game_data(
             player_a(),

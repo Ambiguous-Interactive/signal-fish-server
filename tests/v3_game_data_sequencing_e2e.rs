@@ -317,7 +317,7 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
     authenticate_v3(&mut v3_recipient).await;
     authenticate_v2(&mut v2_recipient).await;
     join_room(&mut sender, "SEQMIX", "MixSender").await;
-    join_room(&mut v3_recipient, "SEQMIX", "MixV4").await;
+    join_room(&mut v3_recipient, "SEQMIX", "MixV3").await;
     join_room(&mut v2_recipient, "SEQMIX", "MixV2").await;
 
     send(
@@ -867,7 +867,7 @@ async fn next_message_value_of_type(
 /// `RoomJoined.current_players[].epoch` (seen by the joiner) and
 /// `PlayerJoined.player.epoch` (seen by existing members).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn v3_room_snapshots_carry_epoch_pre_v4_omit_it() {
+async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
     let (addr, server) = start_test_server(test_server_config()).await;
     let metrics = server.metrics();
 
@@ -908,7 +908,7 @@ async fn v3_room_snapshots_carry_epoch_pre_v4_omit_it() {
     // A v3 joiner: its RoomJoined snapshot CARRIES each member's epoch (all 1).
     let mut v3_joiner = connect(addr).await;
     authenticate_v3(&mut v3_joiner).await;
-    send(&mut v3_joiner, &join_message("SNAPEP", "SnapV4")).await;
+    send(&mut v3_joiner, &join_message("SNAPEP", "SnapV3")).await;
     let v3_room = next_message_value_of_type(&mut v3_joiner, "RoomJoined", "v3 RoomJoined").await;
     let v3_players = v3_room["data"]["current_players"]
         .as_array()
@@ -926,11 +926,11 @@ async fn v3_room_snapshots_carry_epoch_pre_v4_omit_it() {
     }
 
     // The v2 member now sees the v3 joiner arrive; its PlayerJoined omits epoch.
-    let v2_sees_v4 =
+    let v2_sees_v3 =
         next_message_value_of_type(&mut v2_joiner, "PlayerJoined", "v2 sees the v3 join").await;
     assert!(
-        v2_sees_v4["data"]["player"].get("epoch").is_none(),
-        "a v2 member's PlayerJoined must omit epoch: {v2_sees_v4}"
+        v2_sees_v3["data"]["player"].get("epoch").is_none(),
+        "a v2 member's PlayerJoined must omit epoch: {v2_sees_v3}"
     );
 
     assert_message_conservation(&metrics).await;

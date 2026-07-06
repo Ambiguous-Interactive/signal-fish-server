@@ -619,7 +619,7 @@ fn session_plan_default_ice_servers_when_field_absent() {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol v3 negotiation: the [2, 4] clamp matrix at the config level. The
+// Protocol v3 negotiation: the [2, 3] clamp matrix at the config level. The
 // same matrix is exercised end-to-end (through Authenticate/ProtocolInfo) in
 // `tests/v3_negotiation_e2e.rs`.
 // ---------------------------------------------------------------------------
