@@ -129,7 +129,8 @@ If you want peer-to-peer (WebRTC mesh or host topology), opt in during
 
 Omitting `supported_transports` / `supported_topologies` keeps you relay-only
 even on the `/v3/ws` endpoint. The server echoes the negotiated
-`protocol_version` and accepted range in `ProtocolInfo`.
+`protocol_version`, accepted range, and current server message `transports`
+(`["websocket"]` today) in `ProtocolInfo`.
 
 When a v3 room negotiates a non-relay plan, in addition to `GameStarting` you
 receive a per-recipient **`SessionPlan`** describing the chosen `topology`

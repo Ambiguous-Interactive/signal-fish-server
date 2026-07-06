@@ -354,6 +354,9 @@ pub struct RateLimitInfo {
     pub per_day: u32,
 }
 
+/// ProtocolInfo transport token for the current WebSocket message lane.
+pub const PROTOCOL_INFO_TRANSPORT_WEBSOCKET: &str = "websocket";
+
 /// Describes negotiated protocol capabilities for a specific SDK.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolInfoPayload {
@@ -385,6 +388,12 @@ pub struct ProtocolInfoPayload {
     /// Highest protocol version this deployment speaks (v3+ only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_protocol_version: Option<u16>,
+    /// Server message transports available to this connection (v3+ only).
+    ///
+    /// `None` for negotiated v2 connections so the v2 wire contract stays
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transports: Option<Vec<String>>,
 }
 
 /// Describes the characters your deployment allows inside `player_name`.

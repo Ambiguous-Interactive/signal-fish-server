@@ -750,8 +750,8 @@ components:
       type: object
       description: >-
         Payload is a flattened ProtocolInfoPayload (newtype variant). v3 fields
-        protocol_version / min_protocol_version / max_protocol_version are absent
-        on negotiated v2 connections.
+        protocol_version / min_protocol_version / max_protocol_version /
+        transports are absent on negotiated v2 connections.
       properties:
         type: { const: ProtocolInfo }
         data:
@@ -772,6 +772,12 @@ components:
             protocol_version: { type: integer }
             min_protocol_version: { type: integer }
             max_protocol_version: { type: integer }
+            transports:
+              type: array
+              description: Server message transports available to this connection.
+              items:
+                type: string
+                enum: [websocket]
       required: [type, data]
     AuthenticationError:
       type: object

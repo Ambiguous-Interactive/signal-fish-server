@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the v3-only `ProtocolInfo.transports` capability array (P10.E8). A
+  negotiated-v3 handshake now advertises the current server message lane as
+  `["websocket"]`, reserving the protocol seam for a future relay transport
+  without another negotiation redesign. Negotiated-v2 `ProtocolInfo` frames still
+  omit the field, so the frozen v2 JSON and MessagePack wire snapshots stay
+  byte-identical. The contract is documented in `docs/protocol.md`,
+  `docs/concepts/protocol-versions.md`, the Rust client guide, the AsyncAPI
+  schema, and the v3 canonical samples.
 - Added the protocol-v3 incarnation `epoch` (P10.E1) beside the relay `seq`.
   Every relayed `GameData` / `GameDataBinary` to a v3 recipient now carries an
   `epoch: u32` — a monotonic per-sender counter (tracked per connection, not

@@ -9,7 +9,9 @@ mod websocket_test_helpers;
 
 use futures_util::SinkExt;
 use signal_fish_server::config::AppAuthEntry;
-use signal_fish_server::protocol::{ClientMessage, ServerMessage, Topology, Transport};
+use signal_fish_server::protocol::{
+    ClientMessage, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::Arc;
@@ -168,6 +170,10 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
                 Some(3),
                 "default deployment ceiling is v3"
             );
+            assert_eq!(
+                info.transports,
+                Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
+            );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -201,6 +207,10 @@ async fn v3_client_negotiates_v3_on_default_server() {
             assert_eq!(info.protocol_version, Some(3), "client asks 3 => gets 3");
             assert_eq!(info.min_protocol_version, Some(2));
             assert_eq!(info.max_protocol_version, Some(3));
+            assert_eq!(
+                info.transports,
+                Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
+            );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -220,6 +230,10 @@ async fn future_v4_client_is_clamped_to_v3() {
                     info.protocol_version,
                     Some(3),
                     "client asks {asked:?} => clamped down to the build ceiling (3)"
+                );
+                assert_eq!(
+                    info.transports,
+                    Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
                 );
             }
             other => panic!("expected ProtocolInfo, got {other:?}"),
@@ -245,6 +259,7 @@ async fn v2_client_stays_v2_on_default_server() {
             );
             assert_eq!(info.min_protocol_version, None);
             assert_eq!(info.max_protocol_version, None);
+            assert_eq!(info.transports, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -289,6 +304,7 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
                 "config-clamped server negotiates a v3 client down to 2 (frozen v2 ProtocolInfo)"
             );
             assert_eq!(info.max_protocol_version, None);
+            assert_eq!(info.transports, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -314,11 +330,13 @@ async fn v2_client_omitting_fields_is_recorded_as_v2() {
             assert_eq!(info.protocol_version, None);
             assert_eq!(info.min_protocol_version, None);
             assert_eq!(info.max_protocol_version, None);
+            assert_eq!(info.transports, None);
             let value = serde_json::to_value(&info).expect("serializes");
             assert!(
                 value.get("protocol_version").is_none()
                     && value.get("min_protocol_version").is_none()
-                    && value.get("max_protocol_version").is_none(),
+                    && value.get("max_protocol_version").is_none()
+                    && value.get("transports").is_none(),
                 "negotiated v2 ProtocolInfo must not serialize v3-only keys: {value}"
             );
         }
@@ -348,6 +366,10 @@ async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
                 info.protocol_version,
                 Some(3),
                 "/v3/ws path should default the omitted version to 3"
+            );
+            assert_eq!(
+                info.transports,
+                Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
             );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
@@ -379,6 +401,7 @@ async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
             );
             assert_eq!(info.min_protocol_version, None);
             assert_eq!(info.max_protocol_version, None);
+            assert_eq!(info.transports, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -402,6 +425,7 @@ async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
     match authenticate(&mut ws, auth).await {
         ServerMessage::ProtocolInfo(info) => {
             assert_eq!(info.protocol_version, None);
+            assert_eq!(info.transports, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -429,6 +453,10 @@ async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
                 Some(3),
                 "auth-disabled /v3/ws Authenticate must still apply the path default"
             );
+            assert_eq!(
+                info.transports,
+                Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
+            );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
@@ -454,6 +482,7 @@ async fn auth_disabled_v3_ws_respects_explicit_v2_without_version_fields() {
             assert_eq!(info.protocol_version, None);
             assert_eq!(info.min_protocol_version, None);
             assert_eq!(info.max_protocol_version, None);
+            assert_eq!(info.transports, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }

@@ -99,7 +99,8 @@ Connect to `/v3/ws` and add three optional fields to your first `Authenticate` m
 
 Advertise only what you can actually run. Always include `relay` so you remain a valid floor member. The
 negotiated result comes back in the extended `ProtocolInfo` (`protocol_version`, `min_protocol_version`,
-`max_protocol_version`).
+`max_protocol_version`, `transports`). For negotiated v3, `transports` currently advertises `["websocket"]`; it is
+omitted with the other v3-only fields on negotiated v2 connections.
 
 ### 2. Handle the five new server messages
 

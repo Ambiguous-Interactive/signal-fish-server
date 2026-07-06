@@ -445,6 +445,7 @@ fn golden_server_protocol_info() {
         protocol_version: None,
         min_protocol_version: None,
         max_protocol_version: None,
+        transports: None,
     });
     assert_json(
         &msg,

@@ -20,6 +20,7 @@ pub use types::{
     SessionPeer, SessionPlanPayload, SpectatorInfo, SpectatorStateChangeReason, Topology,
     Transport, DEFAULT_MAX_GAME_NAME_LENGTH, DEFAULT_MAX_PLAYERS_LIMIT,
     DEFAULT_MAX_PLAYER_NAME_LENGTH, DEFAULT_REGION_ID, DEFAULT_ROOM_CODE_LENGTH,
+    PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 
 // From messages
