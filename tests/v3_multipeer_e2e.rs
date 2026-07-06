@@ -1115,13 +1115,16 @@ async fn mesh_n3_reconnect_full_flow() {
     expect_player_left(&mut peer_a, dropper_id, "peer_a").await;
     expect_player_left(&mut peer_b, dropper_id, "peer_b").await;
 
-    // Mint a reconnection token through the server handle. The wire flow never
-    // delivers the token to the client (it is generated at
-    // disconnect-registration time, `src/server/reconnection_service.rs`), so
-    // this is the sanctioned in-process pattern from `v3_signaling_e2e.rs`.
-    // Registering AFTER PlayerLeft was observed guarantees the disconnect
-    // path's own auto-registration already ran, so this record (and token)
-    // deterministically replaces it.
+    // Mint a reconnection token through the server handle. `expect_player_left`
+    // above means the socket-drop path already auto-registered the disconnect
+    // with the dropper's pre-issued (join-time) token; this same-room
+    // re-registration PRESERVES that token (see
+    // `ReconnectionManager::register_disconnection`) rather than replacing it,
+    // so `token` is exactly what the dropper received in `RoomJoined` and would
+    // reconnect with — faithful to a real client. (The client-held-token
+    // invariant itself is locked at the unit level:
+    // `same_room_reregistration_keeps_pre_issued_token_claimable`.) This is the
+    // sanctioned in-process pattern from `v3_signaling_e2e.rs`.
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")

@@ -404,12 +404,14 @@ impl ReconnectionManager {
 
         // A same-room re-registration — the player registered a SECOND
         // disconnection for the same room while still pending, so it has NOT
-        // reconnected — must preserve what the client already holds/expects from
-        // its first pending record. Snapshot those values up front (owned, so
-        // the later `players.insert` is unencumbered): the client-held token
-        // string and its mint time, the original replay snapshot point, and the
-        // original incarnation epoch. A record from a DIFFERENT room, or a
-        // genuinely new one, takes fresh values instead.
+        // reconnected — must preserve everything the client already
+        // holds/expects from its first pending record. Snapshot the original
+        // record's preserved fields up front (owned, so the later
+        // `players.insert` is unencumbered). Field order:
+        //   (token string, token mint time, last_sequence, last_epoch,
+        //    was_authority, player_info).
+        // A record from a DIFFERENT room, or a genuinely new one, takes fresh
+        // values instead.
         let existing_same_room = players
             .get(&player_id)
             .filter(|existing| existing.disconnected.room_id == room_id)
@@ -419,6 +421,8 @@ impl ReconnectionManager {
                     existing.disconnected.token.created_at,
                     existing.disconnected.last_sequence,
                     existing.disconnected.last_epoch,
+                    existing.disconnected.was_authority,
+                    existing.disconnected.player_info.clone(),
                 )
             });
 
@@ -431,7 +435,7 @@ impl ReconnectionManager {
         // fallback mint (embedders that never pre-issue). Only (3) is a NEW
         // token, so only it counts toward the issued-token metric.
         let (token, minted_fresh) = match &existing_same_room {
-            Some((existing_token, created_at, _, _)) => (
+            Some((existing_token, created_at, ..)) => (
                 ReconnectionToken {
                     token: existing_token.clone(),
                     player_id,
@@ -468,7 +472,7 @@ impl ReconnectionManager {
         // while `replay` still reported `complete`.
         let last_sequence = existing_same_room
             .as_ref()
-            .map(|(_, _, last_sequence, _)| *last_sequence)
+            .map(|(_, _, last_sequence, ..)| *last_sequence)
             .unwrap_or(fresh_last_sequence);
 
         // Same-room re-registration keeps the ORIGINAL incarnation epoch: the
@@ -477,8 +481,26 @@ impl ReconnectionManager {
         // ensures that can never clobber the real value.
         let last_epoch = existing_same_room
             .as_ref()
-            .map(|(_, _, _, existing_epoch)| (*existing_epoch).max(last_epoch))
+            .map(|(_, _, _, existing_epoch, ..)| (*existing_epoch).max(last_epoch))
             .unwrap_or(last_epoch);
+
+        // Likewise keep the ORIGINAL disconnect snapshot — the authority flag
+        // and room-membership `player_info` captured at the FIRST disconnect. A
+        // racing second registration carrying `player_info: None` (or a stale
+        // `was_authority`) must NOT clobber them: `reconnection_service` REJECTS
+        // a reconnect whose stored `player_info` is `None`. Fall back to the new
+        // call's values only when there is no original to preserve (or the
+        // original itself never captured `player_info`).
+        let was_authority = existing_same_room
+            .as_ref()
+            .map(|(_, _, _, _, was_authority, _)| *was_authority)
+            .unwrap_or(was_authority);
+        let player_info = match &existing_same_room {
+            Some((_, _, _, _, _, existing_info)) if existing_info.is_some() => {
+                existing_info.clone()
+            }
+            _ => player_info,
+        };
 
         let record = ReconnectionRecord {
             disconnected: DisconnectedPlayer {
@@ -1457,6 +1479,56 @@ mod tests {
         assert!(
             claim.is_ok(),
             "the join-time token must stay claimable after re-registration: {claim:?}"
+        );
+    }
+
+    /// Regression: a same-room re-registration must NOT clobber the disconnect
+    /// snapshot captured at the FIRST disconnect. A racing second call with
+    /// `player_info: None` (and a stale `was_authority`) would otherwise erase
+    /// the membership snapshot — and `reconnection_service` rejects a reconnect
+    /// whose stored `player_info` is `None`.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_disconnect_snapshot() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+        let info = PlayerInfo {
+            id: player,
+            name: "Player".to_string(),
+            is_authority: true,
+            is_ready: false,
+            connected_at: Utc::now(),
+            connection_info: None,
+            epoch: None,
+            region_id: "test".to_string(),
+        };
+
+        let token = manager.pre_issue_token(player, room).await;
+        // First disconnect captures the real snapshot: authority + membership.
+        manager
+            .register_disconnection(player, room, true, Some(info), 5)
+            .await;
+        // A racing second registration carries None + a stale authority flag.
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player, &room, &token)
+            .await
+            .expect("claim succeeds with the preserved token");
+        assert!(
+            claim.disconnected.player_info.is_some(),
+            "the first disconnect's player_info snapshot must survive re-registration"
+        );
+        assert!(
+            claim.disconnected.was_authority,
+            "the first disconnect's was_authority must survive re-registration"
+        );
+        assert_eq!(
+            claim.disconnected.last_epoch, 5,
+            "last_epoch preserved (max) across re-registration"
         );
     }
 
