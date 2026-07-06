@@ -213,7 +213,9 @@ pub struct DisconnectedPlayer {
     /// per-(sender, room) `(epoch, seq)` stream strictly increasing for a
     /// recipient that stayed connected across the sender's absence (a fresh
     /// reconnect socket would otherwise reset the epoch to 1, colliding with
-    /// the first incarnation). `0` when the sender never relayed under v3.
+    /// the first incarnation). The epoch is tracked for every sender regardless
+    /// of protocol version (it bumps on each room join), so this is `0` only
+    /// when the sender disconnected before ever joining a room.
     pub last_epoch: u32,
 }
 

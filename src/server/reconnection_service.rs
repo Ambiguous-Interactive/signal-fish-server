@@ -543,7 +543,11 @@ impl EnhancedGameServer {
         // epoch survived in the reconnection record), so a recipient that stayed
         // connected sees the per-(sender, room) `(epoch, seq)` stream strictly
         // INCREASE across the reconnect instead of an ambiguous reset to (1, 1).
-        // (v3; a pre-v3 sender's `last_epoch` is 0 ⇒ epoch 1 here, harmless.)
+        // (Epoch is tracked server-side for EVERY sender — it bumps on each join
+        // regardless of the sender's own protocol version — so `last_epoch` is
+        // the sender's true pre-disconnect value, not necessarily 0 for a v2
+        // sender. It is still stripped per-recipient, so a v2 recipient never
+        // sees it while a v3 recipient gets a correct monotonic stamp.)
         self.connection_manager.set_game_data_epoch(
             reconnect_player_id,
             disconnected.last_epoch.saturating_add(1),
