@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Per-connection delivery bookkeeping backing the protocol v4 `RelayStats`
+/// Per-connection delivery bookkeeping backing the protocol v3 `RelayStats`
 /// frame (`ServerMessage::RelayStats`).
 ///
 /// Counters are cumulative for the lifetime of one logical connection
@@ -637,7 +637,7 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    // Per-connection delivery statistics (protocol v4 RelayStats)
+    // Per-connection delivery statistics (protocol v3 RelayStats)
 
     /// Start tracking per-connection delivery statistics for `player_id`,
     /// returning the (fresh) ledger. Called at connection registration only

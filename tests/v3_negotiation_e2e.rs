@@ -165,8 +165,8 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
             assert_eq!(info.min_protocol_version, Some(2));
             assert_eq!(
                 info.max_protocol_version,
-                Some(4),
-                "default deployment ceiling is v4"
+                Some(3),
+                "default deployment ceiling is v3"
             );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
@@ -174,8 +174,8 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol v4: the [2, 4] clamp matrix end-to-end (matches the config-level
-// matrix in tests/protocol_v3_negotiation.rs::v4_negotiation_clamp_matrix).
+// Protocol v3: the [2, 3] clamp matrix end-to-end (matches the config-level
+// matrix in tests/protocol_v3_negotiation.rs::v3_negotiation_clamp_matrix).
 // ---------------------------------------------------------------------------
 
 /// Build an Authenticate message advertising only `protocol_version`.
@@ -192,65 +192,74 @@ fn version_only_auth(protocol_version: Option<u16>) -> ClientMessage {
 }
 
 #[tokio::test]
-async fn v4_client_negotiates_v4_on_default_server() {
-    let addr = start_auth_server().await;
-    let mut ws = connect(addr, "/v2/ws").await;
-
-    match authenticate(&mut ws, version_only_auth(Some(4))).await {
-        ServerMessage::ProtocolInfo(info) => {
-            assert_eq!(info.protocol_version, Some(4), "client asks 4 => gets 4");
-            assert_eq!(info.min_protocol_version, Some(2));
-            assert_eq!(info.max_protocol_version, Some(4));
-        }
-        other => panic!("expected ProtocolInfo, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn future_v5_client_is_clamped_to_v4() {
-    let addr = start_auth_server().await;
-    let mut ws = connect(addr, "/v2/ws").await;
-
-    match authenticate(&mut ws, version_only_auth(Some(5))).await {
-        ServerMessage::ProtocolInfo(info) => {
-            assert_eq!(
-                info.protocol_version,
-                Some(4),
-                "client asks 5 => clamped down to the build ceiling (4)"
-            );
-        }
-        other => panic!("expected ProtocolInfo, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn v3_client_stays_v3_on_v4_server() {
+async fn v3_client_negotiates_v3_on_default_server() {
     let addr = start_auth_server().await;
     let mut ws = connect(addr, "/v2/ws").await;
 
     match authenticate(&mut ws, version_only_auth(Some(3))).await {
         ServerMessage::ProtocolInfo(info) => {
-            assert_eq!(
-                info.protocol_version,
-                Some(3),
-                "v4 is opt-in: a v3 client is never upgraded"
-            );
-            assert_eq!(info.max_protocol_version, Some(4));
+            assert_eq!(info.protocol_version, Some(3), "client asks 3 => gets 3");
+            assert_eq!(info.min_protocol_version, Some(2));
+            assert_eq!(info.max_protocol_version, Some(3));
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn v4_client_is_clamped_to_v3_when_deployment_caps_at_v3() {
-    // Deployment clamps `protocol.max_protocol_version` back to 3: a v4
-    // client is negotiated down to 3 and told so via ProtocolInfo.
+async fn future_v4_client_is_clamped_to_v3() {
+    // A stale v3-era (or future) client that still advertises 4/5 negotiates
+    // down to the build ceiling (3) — v4+ is not a negotiated version.
+    let addr = start_auth_server().await;
+    let mut ws = connect(addr, "/v2/ws").await;
+
+    for asked in [Some(4), Some(5)] {
+        match authenticate(&mut ws, version_only_auth(asked)).await {
+            ServerMessage::ProtocolInfo(info) => {
+                assert_eq!(
+                    info.protocol_version,
+                    Some(3),
+                    "client asks {asked:?} => clamped down to the build ceiling (3)"
+                );
+            }
+            other => panic!("expected ProtocolInfo, got {other:?}"),
+        }
+        ws = connect(addr, "/v2/ws").await;
+    }
+}
+
+#[tokio::test]
+async fn v2_client_stays_v2_on_default_server() {
+    let addr = start_auth_server().await;
+    let mut ws = connect(addr, "/v2/ws").await;
+
+    match authenticate(&mut ws, version_only_auth(Some(2))).await {
+        ServerMessage::ProtocolInfo(info) => {
+            // A v2-negotiated client gets the FROZEN v2 ProtocolInfo: the v3
+            // version-negotiation fields are additive (gated on negotiated >= 3)
+            // and so are all absent. `None` here is exactly "not upgraded" —
+            // a v3 client would instead see `protocol_version = Some(3)`.
+            assert_eq!(
+                info.protocol_version, None,
+                "v3 is opt-in: a v2 client is never upgraded (no version echo)"
+            );
+            assert_eq!(info.min_protocol_version, None);
+            assert_eq!(info.max_protocol_version, None);
+        }
+        other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
+    // Deployment clamps `protocol.max_protocol_version` back to 2 (pure v2): a
+    // v3 client is negotiated down to 2 and told so via ProtocolInfo.
     let mut server_config: ServerConfig = test_server_config();
     server_config.auth_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
-    protocol_config.max_protocol_version = 3;
+    protocol_config.max_protocol_version = 2;
 
     let game_server = EnhancedGameServer::new(
         server_config,
@@ -270,14 +279,16 @@ async fn v4_client_is_clamped_to_v3_when_deployment_caps_at_v3() {
     let addr = start_server(game_server).await;
 
     let mut ws = connect(addr, "/v2/ws").await;
-    match authenticate(&mut ws, version_only_auth(Some(4))).await {
+    match authenticate(&mut ws, version_only_auth(Some(3))).await {
         ServerMessage::ProtocolInfo(info) => {
+            // Clamped down to 2 (< 3), so the client is served the frozen v2
+            // ProtocolInfo with no version fields — observably distinct from an
+            // un-clamped v3 client, which would see `protocol_version = Some(3)`.
             assert_eq!(
-                info.protocol_version,
-                Some(3),
-                "config-clamped server negotiates a v4 client down to 3"
+                info.protocol_version, None,
+                "config-clamped server negotiates a v3 client down to 2 (frozen v2 ProtocolInfo)"
             );
-            assert_eq!(info.max_protocol_version, Some(3));
+            assert_eq!(info.max_protocol_version, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }

@@ -108,8 +108,8 @@ fn host_session_config() -> SessionConfig {
 
 /// Boot the production router (`/v2` nest + `/v3/ws` alias) around a server
 /// built with the given `SessionConfig`, returning the bound address and the
-/// server handle (the reconnect test needs the handle to mint a token, exactly
-/// like `tests/v3_multipeer_e2e.rs` — the token never crosses the wire).
+/// server handle (the reconnect test mints the token in-process via the handle
+/// rather than receiving it over the wire, like `tests/v3_multipeer_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
 ) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
@@ -759,12 +759,12 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
     )
     .await;
 
-    // Mint a reconnection token for the ex-host (token never crosses the wire;
-    // the in-process pattern from `v3_multipeer_e2e.rs`).
+    // Mint a reconnection token for the ex-host — obtained in-process here
+    // rather than over the wire (the pattern from `v3_multipeer_e2e.rs`).
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(host_id, room_id, false, Some(host_info))
+        .register_disconnection(host_id, room_id, false, Some(host_info), 0)
         .await;
 
     // The ex-host reconnects over a FRESH socket advertising RELAY-ONLY
@@ -851,7 +851,7 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
             SERVER_MESSAGE_TIMEOUT,
             "PlayerReconnected",
             |message| match message {
-                ServerMessage::PlayerReconnected { player_id } => {
+                ServerMessage::PlayerReconnected { player_id, .. } => {
                     assert_eq!(player_id, host_id, "{who} saw the wrong reconnector");
                     Some(())
                 }

@@ -419,16 +419,12 @@ impl EnhancedGameServer {
         self.connection_manager.transport_status(player_id)
     }
 
-    /// Whether the client negotiated protocol v3 or higher (gates all v3 emission).
+    /// Whether the client negotiated protocol v3+ (the single unshipped
+    /// "current" version). Gates ALL additive emission over the frozen v2 floor:
+    /// the WebRTC signaling surface AND the delivery reliability surface
+    /// (`GameData.seq`/`epoch` stamps + `RelayStats`).
     pub fn client_supports_v3(&self, player_id: &PlayerId) -> bool {
         self.connection_manager.supports_v3(player_id)
-    }
-
-    /// Whether the client negotiated protocol v4 or higher (gates the relayed
-    /// `GameData.seq` stamp and `RelayStats` emission; mirrors
-    /// [`client_supports_v3`](Self::client_supports_v3)).
-    pub fn client_supports_v4(&self, player_id: &PlayerId) -> bool {
-        self.connection_manager.supports_v4(player_id)
     }
 
     /// Whether the client negotiated support for the given transport.

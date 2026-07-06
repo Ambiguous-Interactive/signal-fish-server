@@ -261,7 +261,12 @@ async fn register_reconnect_token(
     game_server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(player_id, room_id, false, Some(player_info))
+        // `last_epoch = 0`: `disconnect_client` above already removed the
+        // connection, so its incarnation epoch is no longer reachable via
+        // `game_data_epoch` — the documented fallback (resume at epoch 1). This
+        // e2e reconnects over a fresh socket and asserts replay/snapshot
+        // behavior, not cross-disconnect epoch monotonicity.
+        .register_disconnection(player_id, room_id, false, Some(player_info), 0)
         .await
 }
 
@@ -410,6 +415,19 @@ async fn missed_control_events_are_replayed_completely() {
         "first missed event must be the churner's PlayerJoined: {:?}",
         reconnected.missed_events
     );
+    // The replay ring stores the churner's PlayerJoined in its live-broadcast
+    // form, carrying the v3 incarnation `epoch`. This reconnector negotiated v3,
+    // so that epoch is PRESERVED in the replay (a v3 client wants it). The pre-v3
+    // (v2) strip — which keeps a v2 reconnector's `Reconnected` byte-identical to
+    // the frozen v2 wire — is exercised by the companion test below.
+    let ServerMessage::PlayerJoined { player } = &reconnected.missed_events[0] else {
+        unreachable!("asserted PlayerJoined above");
+    };
+    assert_eq!(
+        player.epoch,
+        Some(1),
+        "a v3 reconnector's replayed PlayerJoined carries the churner's epoch (first join ⇒ 1)"
+    );
     assert!(
         matches!(
             &reconnected.missed_events[1],
@@ -422,6 +440,69 @@ async fn missed_control_events_are_replayed_completely() {
         reconnected.replay,
         Some(ReplayStatus::Complete),
         "nothing was evicted, so the v3 recipient is told the replay is complete"
+    );
+
+    assert_message_conservation(&game_server.metrics()).await;
+}
+
+/// Regression (missed_events epoch leak) + non-vacuity for the previous test:
+/// the replay ring stores the churner's PlayerJoined in its live-broadcast form,
+/// carrying the v3 incarnation `epoch`. `missed_events` is embedded in the
+/// `Reconnected` payload and bypasses the per-recipient strip in
+/// `websocket::sending`, so a PRE-v3 (v2) reconnector must have that `epoch`
+/// stripped server-side — otherwise its `Reconnected` wire is no longer
+/// byte-identical to the frozen v2 wire. (A v2 socket reaches this path by
+/// reconnecting with a token minted for its earlier v3 incarnation.) Deserialized
+/// `None` proves wire-absence; that the v3 reconnector above KEEPS the same
+/// epoch proves the strip is CONDITIONED on the reconnector being pre-v3, not an
+/// unconditional wipe.
+#[tokio::test]
+async fn missed_events_strip_epoch_for_pre_v3_reconnector() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate(&mut peer_a, Some(3)).await;
+    let joined_a = join_room(&mut peer_a, "replay-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate(&mut peer_b, Some(3)).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "replay-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    // While B is away, a churner joins+leaves; its PlayerJoined is buffered with
+    // the churner's incarnation epoch (first join ⇒ 1).
+    let churner_id = churn_join_leave(addr, &joined_a.room_code, "Churner", &mut peer_a).await;
+
+    // Reconnect on a PRE-v3 (v2) socket: the replayed epoch must be stripped so
+    // the v2 wire stays byte-identical.
+    let mut replacement = connect(addr).await;
+    authenticate(&mut replacement, Some(2)).await;
+    let reconnected = reconnect(
+        &mut replacement,
+        joined_b.player_id,
+        joined_b.room_id,
+        token,
+    )
+    .await;
+
+    let ServerMessage::PlayerJoined { player } = &reconnected.missed_events[0] else {
+        panic!(
+            "first missed event must be the churner's PlayerJoined: {:?}",
+            reconnected.missed_events
+        );
+    };
+    assert_eq!(player.id, churner_id, "first missed event is the churner");
+    assert_eq!(
+        player.epoch, None,
+        "a pre-v3 (v2) reconnector's replayed PlayerJoined must omit the v3 epoch"
     );
 
     assert_message_conservation(&game_server.metrics()).await;

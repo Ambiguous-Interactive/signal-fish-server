@@ -865,7 +865,7 @@ async fn register_reconnect_token(
     game_server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(player_id, room_id, false, Some(player_info))
+        .register_disconnection(player_id, room_id, false, Some(player_info), 0)
         .await
 }
 

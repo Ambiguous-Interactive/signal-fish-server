@@ -299,7 +299,7 @@ pub enum ServerMessage {
     GameData {
         from_player: PlayerId,
         data: serde_json::Value,
-        /// Server-stamped relay sequence number (v4 only). Per-(sender, room),
+        /// Server-stamped relay sequence number (v3 only). Per-(sender, room),
         /// starts at 1, and is strictly contiguous per sender for as long as
         /// the recipient stays connected. A gap therefore always has an
         /// EXPLICIT, observable cause — the recipient was told — and never an
@@ -319,11 +319,25 @@ pub enum ServerMessage {
         /// reconnects, so recipients must treat `PlayerLeft`+`PlayerJoined` /
         /// `PlayerReconnected` for the sender as a seq reset. Stamped at relay
         /// time in `server::game_data`; stripped per recipient in
-        /// `websocket::sending` — `None` and absent from the wire for pre-v4
+        /// `websocket::sending` — `None` and absent from the wire for pre-v3
         /// recipients, keeping their bytes byte-identical. Client→server
         /// `GameData` is unchanged (stamping is purely server-side).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
+        /// Server-tracked incarnation epoch (v3 only), stamped beside `seq`. It
+        /// increments once per `(sender, room)` incarnation — a join-after-leave
+        /// or a reconnect — and `seq` restarts at 1 within each epoch, so
+        /// `(epoch, seq)` is strictly lexicographically increasing per sender as
+        /// observed by any single recipient. This makes the `seq` restart
+        /// SELF-DESCRIBING: a recipient attributes a backwards `seq` jump to the
+        /// epoch bump directly, rather than inferring it from a separately
+        /// ordered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` (which a
+        /// future control-plane/data split may reorder relative to data). Gated
+        /// exactly like `seq`: stamped from the sender's counter, present only
+        /// for v3 recipients, absent (bytes byte-identical to pre-v3) below.
+        /// Precedent: Aeron image sessionId, Kafka producer epoch (KIP-98).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
     },
     /// Binary game data payload from another player.
     ///
@@ -336,14 +350,23 @@ pub enum ServerMessage {
         encoding: GameDataEncoding,
         #[serde(with = "bytes_serde")]
         payload: Bytes,
-        /// Server-stamped relay sequence number (v4 only): the same counter,
+        /// Server-stamped relay sequence number (v3 only): the same counter,
         /// semantics, and per-recipient gating as [`ServerMessage::GameData::seq`]
         /// — text and binary relay share one per-(sender, room) stream. On the
         /// bare binary wire frame the stamp is carried as the optional `seq`
         /// map key of `BinaryGameDataFrame` (see `websocket::sending`), present
-        /// only for v4 recipients.
+        /// only for v3 recipients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
+        /// Server-tracked incarnation epoch (v3 only): the same per-(sender,
+        /// room) counter, semantics, and per-recipient gating as
+        /// [`ServerMessage::GameData::epoch`] — text and binary relay share the
+        /// one epoch on the sender's `ClientConnection`. On the bare binary wire
+        /// frame it rides beside `seq` as an optional `epoch` map key of
+        /// `BinaryGameDataFrame` (see `websocket::sending`), present only for v3
+        /// recipients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
     },
     /// Authority status changed
     AuthorityChanged {
@@ -411,8 +434,19 @@ pub enum ServerMessage {
         reason: String,
         error_code: ErrorCode,
     },
-    /// Another player reconnected to the room
-    PlayerReconnected { player_id: PlayerId },
+    /// Another player reconnected to the room.
+    ///
+    /// `epoch` (v3 only) is the reconnector's new incarnation epoch — the same
+    /// value now stamped on that player's relayed [`ServerMessage::GameData`] —
+    /// so a recipient can re-baseline the per-sender `(epoch, seq)` stream
+    /// immediately, before the first post-reconnect frame arrives. Stripped for
+    /// pre-v3 recipients, keeping their bytes byte-identical to the frozen
+    /// v2 wire.
+    PlayerReconnected {
+        player_id: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
+    },
     /// Successfully joined a room as spectator (boxed to reduce enum size)
     SpectatorJoined(Box<SpectatorJoinedPayload>),
     /// Failed to join as spectator
@@ -476,11 +510,11 @@ pub enum ServerMessage {
         transport: Transport,
         connected: bool,
     },
-    /// Periodic per-connection relay-delivery statistics (v4 only).
+    /// Periodic per-connection relay-delivery statistics (v3 only).
     ///
-    /// Emitted to a connection only when it negotiated protocol v4+ AND the
+    /// Emitted to a connection only when it negotiated protocol v3+ AND the
     /// deployment enabled `websocket.delivery_stats_interval_secs` (> 0;
-    /// default 0 = disabled — enforcement happens at emission, so a pre-v4
+    /// default 0 = disabled — enforcement happens at emission, so a pre-v3
     /// recipient can never observe this message). Counters are CUMULATIVE
     /// since the connection registered, so a frame skipped under load loses
     /// nothing — the next one carries the totals. Pairs with the

@@ -1,15 +1,15 @@
-//! End-to-end protocol v4 `RelayStats` emission tests through the real
+//! End-to-end protocol v3 `RelayStats` emission tests through the real
 //! WebSocket stack.
 //!
 //! The contract under test (config-gated, default OFF):
 //!
 //! - with `websocket.delivery_stats_interval_secs > 0`, a connection that
-//!   negotiated v4 receives periodic `RelayStats` frames with plausible
+//!   negotiated v3 receives periodic `RelayStats` frames with plausible
 //!   cumulative fields;
-//! - a v3 connection on the SAME deployment never receives one (the v4 gate
-//!   is enforced at emission);
+//! - a pre-v3 (v2) connection on the SAME deployment never receives one (the
+//!   v3 gate is enforced at emission);
 //! - with the default config (interval 0), nobody receives one — not even a
-//!   v4 connection.
+//!   v3 connection.
 
 mod test_helpers;
 mod websocket_test_helpers;
@@ -33,7 +33,7 @@ const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::fro
 /// interval, so an erroneous emission would land well inside it.
 const ABSENCE_WINDOW: tokio::time::Duration = tokio::time::Duration::from_millis(2_500);
 
-fn v4_protocol_config() -> ProtocolConfig {
+fn v3_protocol_config() -> ProtocolConfig {
     let mut protocol_config = ProtocolConfig::default();
     protocol_config.sdk_compatibility.enforce = false;
     protocol_config
@@ -44,7 +44,7 @@ async fn start_test_server(
 ) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
     let mut server_config = test_server_config();
     server_config.websocket_config.delivery_stats_interval_secs = delivery_stats_interval_secs;
-    let server = create_test_server_with_config(server_config, v4_protocol_config()).await;
+    let server = create_test_server_with_config(server_config, v3_protocol_config()).await;
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -76,7 +76,7 @@ async fn connect(addr: std::net::SocketAddr) -> WsStream {
 /// ProtocolInfo handshake.
 async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
     let auth = ClientMessage::Authenticate {
-        app_id: "v4-relay-stats-test".to_string(),
+        app_id: "v3-relay-stats-test".to_string(),
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -106,10 +106,10 @@ async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
 }
 
 #[tokio::test]
-async fn v4_client_receives_periodic_relay_stats_when_enabled() {
+async fn v3_client_receives_periodic_relay_stats_when_enabled() {
     let (addr, _server) = start_test_server(1).await;
     let mut ws = connect(addr).await;
-    authenticate(&mut ws, 4).await;
+    authenticate(&mut ws, 3).await;
 
     // Two consecutive frames prove periodic emission (not a one-shot), and
     // the cumulative counters must be plausible and monotonic.
@@ -161,15 +161,15 @@ async fn v4_client_receives_periodic_relay_stats_when_enabled() {
 }
 
 #[tokio::test]
-async fn v3_client_never_receives_relay_stats_even_when_enabled() {
+async fn v2_client_never_receives_relay_stats_even_when_enabled() {
     let (addr, _server) = start_test_server(1).await;
     let mut ws = connect(addr).await;
-    authenticate(&mut ws, 3).await;
+    authenticate(&mut ws, 2).await;
 
     let stray = maybe_next_matching_server_message_within(
         &mut ws,
         ABSENCE_WINDOW,
-        "RelayStats absence for a v3 connection",
+        "RelayStats absence for a v2 connection",
         |message| match message {
             ServerMessage::RelayStats { .. } => Some(()),
             _ => None,
@@ -178,7 +178,8 @@ async fn v3_client_never_receives_relay_stats_even_when_enabled() {
     .await;
     assert!(
         stray.is_none(),
-        "RelayStats is v4-only and must never be emitted to a v3 connection"
+        "RelayStats is part of the v3 reliability surface and must never be \
+         emitted to a pre-v3 (v2) connection"
     );
 }
 
@@ -187,7 +188,7 @@ async fn nobody_receives_relay_stats_with_default_config() {
     // Default config: delivery_stats_interval_secs = 0 (disabled).
     let (addr, _server) = start_test_server(0).await;
     let mut ws = connect(addr).await;
-    authenticate(&mut ws, 4).await;
+    authenticate(&mut ws, 3).await;
 
     let stray = maybe_next_matching_server_message_within(
         &mut ws,

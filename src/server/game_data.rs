@@ -49,14 +49,15 @@ impl EnhancedGameServer {
     /// Handle JSON game data fan-out with coordination.
     pub async fn handle_game_data(&self, player_id: &PlayerId, data: serde_json::Value) {
         if let Some(room_id) = self.get_client_room(player_id).await {
-            let seq = self.connection_manager.next_game_data_seq(player_id);
+            let stamp = self.connection_manager.next_relay_stamp(player_id);
             self.broadcast_game_data(
                 player_id,
                 &room_id,
                 ServerMessage::GameData {
                     from_player: *player_id,
                     data,
-                    seq,
+                    seq: stamp.map(|s| s.seq),
+                    epoch: stamp.map(|s| s.epoch),
                 },
             )
             .await;
@@ -98,7 +99,7 @@ impl EnhancedGameServer {
         }
 
         if let Some(room_id) = self.get_client_room(player_id).await {
-            let seq = self.connection_manager.next_game_data_seq(player_id);
+            let stamp = self.connection_manager.next_relay_stamp(player_id);
             self.broadcast_game_data(
                 player_id,
                 &room_id,
@@ -106,7 +107,8 @@ impl EnhancedGameServer {
                     from_player: *player_id,
                     encoding,
                     payload,
-                    seq,
+                    seq: stamp.map(|s| s.seq),
+                    epoch: stamp.map(|s| s.epoch),
                 },
             )
             .await;
@@ -120,7 +122,7 @@ impl EnhancedGameServer {
     /// The stamp is carried INSIDE the shared `Arc<ServerMessage>`, so this
     /// layer — and the [`MessageCoordinator`](crate::coordination::MessageCoordinator)
     /// below it — stays protocol-version-agnostic: per-recipient gating
-    /// (stripping `seq` for pre-v4 recipients) happens at serialization time
+    /// (stripping `seq` for pre-v3 recipients) happens at serialization time
     /// in `websocket::sending`, where every other per-recipient wire decision
     /// (binary vs JSON-fallback encoding) already lives. Because the stamp is
     /// an ordinary serde field of `ServerMessage`, it also survives the

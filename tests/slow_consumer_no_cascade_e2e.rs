@@ -10,7 +10,7 @@
 //! receiver keeps flowing (`relay_backpressure_e2e::
 //! slow_consumer_is_disconnected_loudly_and_room_keeps_flowing`,
 //! `wedged_socket_write_is_preempted_and_fd_released`;
-//! `v4_game_data_sequencing_e2e::evicted_recipient_observes_seq_gap_after_reconnect`).
+//! `v3_game_data_sequencing_e2e::evicted_recipient_observes_seq_gap_after_reconnect`).
 //! But "cascade" is inherently a MULTI-peer phenomenon, and every one of those
 //! tests uses a single healthy witness and asserts only
 //! `slow_consumer_disconnects >= 1` — none pins that the eviction did not

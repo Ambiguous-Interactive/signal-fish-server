@@ -498,6 +498,52 @@ mod tests {
         );
     }
 
+    /// The `SpectatorJoined` snapshot is a third `Vec<PlayerInfo>` carrier
+    /// (beside `RoomJoined`/`Reconnected`) and is NOT run through the
+    /// per-recipient v3 stripping in `websocket::sending`. It stays v2-safe
+    /// only because it is cloned from `room.players`, whose room-state
+    /// `PlayerInfo.epoch` is always `None` (the incarnation epoch is stamped at
+    /// GameData-send time, never stored). Lock that invariant so a future change
+    /// that populates room-state epoch cannot silently leak it onto a v2
+    /// spectator's wire.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn spectator_snapshot_never_carries_incarnation_epoch() {
+        let (service, room, _creator_id, coordinator, _database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Snapshot Watcher".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+
+        let payload = coordinator
+            .messages_for(&spectator_id)
+            .await
+            .into_iter()
+            .find_map(|message| match message {
+                ServerMessage::SpectatorJoined(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("spectator receives a SpectatorJoined snapshot");
+
+        assert!(
+            !payload.current_players.is_empty(),
+            "the snapshot lists the room's existing members"
+        );
+        for player in &payload.current_players {
+            assert!(
+                player.epoch.is_none(),
+                "a spectator snapshot must never carry the incarnation epoch: {player:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn leave_detaches_spectator_and_sends_disconnect_notifications() {

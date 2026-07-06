@@ -1167,6 +1167,7 @@ mod tests {
             is_ready: false,
             connected_at: chrono::Utc::now(),
             connection_info,
+            epoch: None,
             region_id: "test-region".to_string(),
         }
     }

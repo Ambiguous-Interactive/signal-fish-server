@@ -207,6 +207,30 @@ pub struct DisconnectedPlayer {
     pub was_authority: bool,
     /// Room membership snapshot used to restore the player on reconnect.
     pub player_info: Option<PlayerInfo>,
+    /// The disconnecting connection's game-data incarnation epoch (protocol
+    /// v3). Captured here so it SURVIVES the connection removal: on reconnect
+    /// the restored connection resumes at `last_epoch + 1`, keeping the
+    /// per-(sender, room) `(epoch, seq)` stream strictly increasing for a
+    /// recipient that stayed connected across the sender's absence (a fresh
+    /// reconnect socket would otherwise reset the epoch to 1, colliding with
+    /// the first incarnation). The epoch is tracked for every sender regardless
+    /// of protocol version (it bumps on each room join), so this is `0` only
+    /// when the sender disconnected before ever joining a room.
+    pub last_epoch: u32,
+}
+
+/// The subset of a still-pending disconnect record that a same-room
+/// re-registration must PRESERVE — the player has not reconnected, so this
+/// state is unchanged and re-deriving it from a (possibly racing, possibly
+/// `None`) second `register_disconnection` call would clobber the real capture.
+/// See [`ReconnectionManager::register_disconnection`].
+struct PreservedPending {
+    token: String,
+    token_created_at: DateTime<Utc>,
+    last_sequence: u64,
+    last_epoch: u32,
+    was_authority: bool,
+    player_info: Option<PlayerInfo>,
 }
 
 impl DisconnectedPlayer {
@@ -360,13 +384,25 @@ impl ReconnectionManager {
         self.pre_issued.write().await.remove(player_id);
     }
 
-    /// Register a player disconnection
+    /// Register a player disconnection.
+    ///
+    /// `last_epoch` is the disconnecting connection's game-data incarnation
+    /// epoch, captured by the caller from the still-live connection (via
+    /// `ConnectionManager::game_data_epoch`) so it survives into
+    /// [`DisconnectedPlayer::last_epoch`] and the reconnect can resume at
+    /// `last_epoch + 1` (see that field). The epoch is tracked for every sender
+    /// regardless of negotiated version — it bumps on each room join — so
+    /// whenever the still-live connection's epoch is reachable, pass it. `0`
+    /// (resume at epoch 1) is the fallback for when there is no incarnation to
+    /// preserve: the connection never joined a room, or it was already removed
+    /// (`game_data_epoch` returns `None`) before this call.
     pub async fn register_disconnection(
         &self,
         player_id: PlayerId,
         room_id: RoomId,
         was_authority: bool,
         player_info: Option<PlayerInfo>,
+        last_epoch: u32,
     ) -> String {
         // Reuse the token STRING pre-issued at join (the client already holds
         // it — issue #136, F4), re-stamping its expiry so the reconnect gate
@@ -375,10 +411,51 @@ impl ReconnectionManager {
         // pre-issue keep the old disconnect-time semantics; such a token is
         // unclaimable by an honest client, exactly as before).
         let pre_issued = self.pre_issued.write().await.remove(&player_id);
-        let (token, minted_fresh) = match pre_issued {
-            Some(pre_issued) if pre_issued.room_id == room_id => {
-                let now = Utc::now();
-                (
+
+        let fresh_last_sequence = *self.next_sequence.read().await;
+
+        let mut players = self.disconnected_players.write().await;
+
+        // A same-room re-registration — the player registered a SECOND
+        // disconnection for the same room while still pending, so it has NOT
+        // reconnected — must preserve everything the client already
+        // holds/expects from its first pending record. Snapshot those preserved
+        // fields up front (owned, so the later `players.insert` is
+        // unencumbered). A record from a DIFFERENT room, or a genuinely new one,
+        // takes fresh values instead.
+        let existing_same_room = players
+            .get(&player_id)
+            .filter(|existing| existing.disconnected.room_id == room_id)
+            .map(|existing| PreservedPending {
+                token: existing.disconnected.token.token.clone(),
+                token_created_at: existing.disconnected.token.created_at,
+                last_sequence: existing.disconnected.last_sequence,
+                last_epoch: existing.disconnected.last_epoch,
+                was_authority: existing.disconnected.was_authority,
+                player_info: existing.disconnected.player_info.clone(),
+            });
+
+        let now = Utc::now();
+        // Token, in preference order: (1) the token from an existing same-room
+        // pending record — the FIRST registration already consumed the
+        // pre-issued entry, so minting fresh here would overwrite the record
+        // with a token the client never received (issue #136, F4: the client
+        // holds the join-time token); (2) the pre-issued join token; (3) a fresh
+        // fallback mint (embedders that never pre-issue). Only (3) is a NEW
+        // token, so only it counts toward the issued-token metric.
+        let (token, minted_fresh) = match &existing_same_room {
+            Some(existing) => (
+                ReconnectionToken {
+                    token: existing.token.clone(),
+                    player_id,
+                    room_id,
+                    created_at: existing.token_created_at,
+                    expires_at: now + Duration::seconds(self.reconnection_window),
+                },
+                false,
+            ),
+            None => match pre_issued {
+                Some(pre_issued) if pre_issued.room_id == room_id => (
                     ReconnectionToken {
                         token: pre_issued.token,
                         player_id,
@@ -387,34 +464,49 @@ impl ReconnectionManager {
                         expires_at: now + Duration::seconds(self.reconnection_window),
                     },
                     false,
-                )
-            }
-            _ => (
-                ReconnectionToken::new(player_id, room_id, self.reconnection_window),
-                true,
-            ),
+                ),
+                _ => (
+                    ReconnectionToken::new(player_id, room_id, self.reconnection_window),
+                    true,
+                ),
+            },
         };
         let token_string = token.token.clone();
 
-        let fresh_last_sequence = *self.next_sequence.read().await;
-
-        let mut players = self.disconnected_players.write().await;
-
         // Preserve the ORIGINAL replay snapshot point across a same-room
-        // re-registration. A player registering a second disconnection for the
-        // same room while still pending has NOT reconnected, so it has still
-        // not seen anything after its FIRST disconnect. Advancing
-        // `last_sequence` to the current counter would silently exclude the
-        // control events buffered in `(original, now]` from a later
-        // `get_missed_events`, dropping events the client never saw while
-        // `replay` still reported `complete`. Only a genuinely new pending
-        // record (different player state, or a different room) takes the fresh
-        // snapshot.
-        let last_sequence = match players.get(&player_id) {
-            Some(existing) if existing.disconnected.room_id == room_id => {
-                existing.disconnected.last_sequence
-            }
-            _ => fresh_last_sequence,
+        // re-registration: the player has not seen anything after its FIRST
+        // disconnect, so advancing `last_sequence` to the current counter would
+        // silently exclude the control events buffered in `(original, now]` from
+        // a later `get_missed_events`, dropping events the client never saw
+        // while `replay` still reported `complete`.
+        let last_sequence = existing_same_room
+            .as_ref()
+            .map(|existing| existing.last_sequence)
+            .unwrap_or(fresh_last_sequence);
+
+        // Same-room re-registration keeps the ORIGINAL incarnation epoch: the
+        // player has not reconnected, so its epoch has not advanced, and a
+        // second capture reads `0` from the already-removed connection — `.max`
+        // ensures that can never clobber the real value.
+        let last_epoch = existing_same_room
+            .as_ref()
+            .map(|existing| existing.last_epoch.max(last_epoch))
+            .unwrap_or(last_epoch);
+
+        // Likewise keep the ORIGINAL disconnect snapshot — the authority flag
+        // and room-membership `player_info` captured at the FIRST disconnect. A
+        // racing second registration carrying `player_info: None` (or a stale
+        // `was_authority`) must NOT clobber them: `reconnection_service` REJECTS
+        // a reconnect whose stored `player_info` is `None`. Fall back to the new
+        // call's values only when there is no original to preserve (or the
+        // original itself never captured `player_info`).
+        let was_authority = existing_same_room
+            .as_ref()
+            .map(|existing| existing.was_authority)
+            .unwrap_or(was_authority);
+        let player_info = match &existing_same_room {
+            Some(existing) if existing.player_info.is_some() => existing.player_info.clone(),
+            _ => player_info,
         };
 
         let record = ReconnectionRecord {
@@ -426,6 +518,7 @@ impl ReconnectionManager {
                 last_sequence,
                 was_authority,
                 player_info,
+                last_epoch,
             },
             claim: None,
         };
@@ -1019,7 +1112,7 @@ mod tests {
 
         // Register disconnection
         let token = manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
 
         // Validate reconnection
@@ -1053,7 +1146,7 @@ mod tests {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
         manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
 
         let protected = manager.rooms_with_active_reconnections().await;
@@ -1077,7 +1170,7 @@ mod tests {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
         let token = manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
         let current_a = Uuid::new_v4();
         let current_b = Uuid::new_v4();
@@ -1131,7 +1224,7 @@ mod tests {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
         let token = manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
 
         let first_claim = manager
@@ -1159,7 +1252,7 @@ mod tests {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
         let _token = manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
         {
             let mut players = manager.disconnected_players.write().await;
@@ -1213,7 +1306,7 @@ mod tests {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
         manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
 
         // 5 events into a 3-slot ring: 2 evictions.
@@ -1245,10 +1338,10 @@ mod tests {
         let room_a = Uuid::new_v4();
         let room_b = Uuid::new_v4();
         manager
-            .register_disconnection(Uuid::new_v4(), room_a, false, None)
+            .register_disconnection(Uuid::new_v4(), room_a, false, None, 0)
             .await;
         manager
-            .register_disconnection(Uuid::new_v4(), room_b, false, None)
+            .register_disconnection(Uuid::new_v4(), room_b, false, None, 0)
             .await;
 
         // Interleave: room B consumes global sequence numbers between room
@@ -1290,7 +1383,7 @@ mod tests {
 
         // Pending: the gate is open.
         manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
         manager.record_room_event(&room_id, &control_event()).await;
         assert_eq!(manager.get_missed_events(&room_id, 0).await.events.len(), 1);
@@ -1330,7 +1423,7 @@ mod tests {
         );
 
         let armed_token = manager
-            .register_disconnection(player, room, false, None)
+            .register_disconnection(player, room, false, None, 0)
             .await;
         assert_eq!(
             armed_token, wire_token,
@@ -1343,11 +1436,107 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        // Consumed: a second disconnect (no new join in between) mints fresh.
-        let fresh = manager
-            .register_disconnection(player, room, false, None)
+        // A SECOND same-room disconnect while STILL PENDING (no reconnect in
+        // between) must PRESERVE the client-held token: the first registration
+        // already consumed the pre-issued entry, so re-minting here would
+        // overwrite the record with a token the client never received (delivered
+        // at join) and silently break its reconnect. No new mint is counted.
+        let re_armed = manager
+            .register_disconnection(player, room, false, None, 0)
             .await;
-        assert_ne!(fresh, wire_token, "a consumed token is never re-armed");
+        assert_eq!(
+            re_armed, wire_token,
+            "a still-pending same-room re-registration keeps the client's token"
+        );
+        assert_eq!(
+            metrics
+                .reconnection_tokens_issued
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "preserving the token must not count a new mint"
+        );
+    }
+
+    /// Regression: a same-room re-registration while still pending must keep the
+    /// client's pre-issued token CLAIMABLE. Before the fix, the second
+    /// registration found the pre-issued entry already consumed, minted a fresh
+    /// token, and overwrote the record — so a client reconnecting with the token
+    /// it received at join (the only token it ever held) was rejected.
+    #[tokio::test]
+    async fn same_room_reregistration_keeps_pre_issued_token_claimable() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        let wire_token = manager.pre_issue_token(player, room).await;
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        // A benign second registration for the same still-pending room (e.g. a
+        // concurrent teardown path re-invoking the disconnect handler).
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        // The client only ever held `wire_token`; it must still reconnect.
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player, &room, &wire_token)
+            .await;
+        assert!(
+            claim.is_ok(),
+            "the join-time token must stay claimable after re-registration: {claim:?}"
+        );
+    }
+
+    /// Regression: a same-room re-registration must NOT clobber the disconnect
+    /// snapshot captured at the FIRST disconnect. A racing second call with
+    /// `player_info: None` (and a stale `was_authority`) would otherwise erase
+    /// the membership snapshot — and `reconnection_service` rejects a reconnect
+    /// whose stored `player_info` is `None`.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_disconnect_snapshot() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+        let info = PlayerInfo {
+            id: player,
+            name: "Player".to_string(),
+            is_authority: true,
+            is_ready: false,
+            connected_at: Utc::now(),
+            connection_info: None,
+            epoch: None,
+            region_id: "test".to_string(),
+        };
+
+        let token = manager.pre_issue_token(player, room).await;
+        // First disconnect captures the real snapshot: authority + membership.
+        manager
+            .register_disconnection(player, room, true, Some(info), 5)
+            .await;
+        // A racing second registration carries None + a stale authority flag.
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player, &room, &token)
+            .await
+            .expect("claim succeeds with the preserved token");
+        assert!(
+            claim.disconnected.player_info.is_some(),
+            "the first disconnect's player_info snapshot must survive re-registration"
+        );
+        assert!(
+            claim.disconnected.was_authority,
+            "the first disconnect's was_authority must survive re-registration"
+        );
+        assert_eq!(
+            claim.disconnected.last_epoch, 5,
+            "last_epoch preserved (max) across re-registration"
+        );
     }
 
     /// A pre-issued token bound to a DIFFERENT room is not reused (the player
@@ -1360,7 +1549,7 @@ mod tests {
 
         let stale = manager.pre_issue_token(player, Uuid::new_v4()).await;
         let armed = manager
-            .register_disconnection(player, Uuid::new_v4(), false, None)
+            .register_disconnection(player, Uuid::new_v4(), false, None, 0)
             .await;
         assert_ne!(armed, stale, "a wrong-room pre-issue must not be armed");
     }
@@ -1377,7 +1566,7 @@ mod tests {
         let wire_token = manager.pre_issue_token(player, room).await;
         manager.discard_pre_issued(&player).await;
         let armed = manager
-            .register_disconnection(player, room, false, None)
+            .register_disconnection(player, room, false, None, 0)
             .await;
         assert_ne!(armed, wire_token, "a discarded token must never be armed");
     }
@@ -1397,7 +1586,7 @@ mod tests {
         // First disconnect: snapshot taken here. Then a control event is
         // buffered (the player is pending and never sees it).
         manager
-            .register_disconnection(player, room, false, None)
+            .register_disconnection(player, room, false, None, 0)
             .await;
         manager.record_room_event(&room, &control_event()).await;
 
@@ -1405,7 +1594,7 @@ mod tests {
         // replaced/racing connection): the snapshot must not jump past the
         // buffered event.
         manager
-            .register_disconnection(player, room, false, None)
+            .register_disconnection(player, room, false, None, 0)
             .await;
         manager.record_room_event(&room, &control_event()).await;
 
@@ -1443,14 +1632,14 @@ mod tests {
 
         // P pends in room A; the gate opens and captures events there.
         manager
-            .register_disconnection(player, room_a, false, None)
+            .register_disconnection(player, room_a, false, None, 0)
             .await;
         manager.record_room_event(&room_a, &control_event()).await;
 
         // P disconnects again from room B: the re-registration REPLACES its
         // record. Nobody pends in room A anymore, so its buffer must go.
         manager
-            .register_disconnection(player, room_b, false, None)
+            .register_disconnection(player, room_b, false, None, 0)
             .await;
         assert!(
             !manager.event_buffers.read().await.contains_key(&room_a),
@@ -1466,14 +1655,14 @@ mod tests {
         // But while ANOTHER player still pends in the old room, a sibling's
         // re-registration must leave that room's buffer untouched.
         manager
-            .register_disconnection(other_player, room_a, false, None)
+            .register_disconnection(other_player, room_a, false, None, 0)
             .await;
         manager.record_room_event(&room_a, &control_event()).await;
         manager
-            .register_disconnection(player, room_a, false, None)
+            .register_disconnection(player, room_a, false, None, 0)
             .await;
         manager
-            .register_disconnection(player, room_b, false, None)
+            .register_disconnection(player, room_b, false, None, 0)
             .await;
         assert!(
             manager.event_buffers.read().await.contains_key(&room_a),
@@ -1489,7 +1678,7 @@ mod tests {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
         manager
-            .register_disconnection(player_id, room_id, false, None)
+            .register_disconnection(player_id, room_id, false, None, 0)
             .await;
         assert!(
             manager.event_buffers.read().await.contains_key(&room_id),
@@ -1529,7 +1718,7 @@ mod tests {
         let room_id = Uuid::new_v4();
         let player_id = Uuid::new_v4();
         manager
-            .register_disconnection(Uuid::new_v4(), room_id, false, None)
+            .register_disconnection(Uuid::new_v4(), room_id, false, None, 0)
             .await;
 
         let player_info = PlayerInfo {
@@ -1539,6 +1728,7 @@ mod tests {
             is_ready: false,
             connected_at: Utc::now(),
             connection_info: None,
+            epoch: None,
             region_id: "test".to_string(),
         };
         let spectator = SpectatorInfo {
@@ -1553,7 +1743,10 @@ mod tests {
                 player: player_info,
             },
             ServerMessage::PlayerLeft { player_id },
-            ServerMessage::PlayerReconnected { player_id },
+            ServerMessage::PlayerReconnected {
+                player_id,
+                epoch: None,
+            },
             ServerMessage::NewSpectatorJoined {
                 spectator: spectator.clone(),
                 current_spectators: vec![spectator.clone()],
@@ -1589,6 +1782,7 @@ mod tests {
                 from_player: player_id,
                 data: serde_json::json!({ "tick": 1 }),
                 seq: None,
+                epoch: None,
             },
             ServerMessage::GameStarting {
                 peer_connections: Vec::new(),

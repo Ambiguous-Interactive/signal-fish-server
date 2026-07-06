@@ -70,7 +70,7 @@ pub(crate) struct ClientConnection {
     /// default and never closes regardless of what is (or is not) reported.
     pub transport_status: Option<(Transport, bool)>,
     /// Last relay sequence number stamped on this client's outbound game data
-    /// (protocol v4): the per-(sender, room) counter behind
+    /// (protocol v3): the per-(sender, room) counter behind
     /// [`ServerMessage::GameData::seq`](crate::protocol::ServerMessage). `0`
     /// means "nothing stamped yet" (the first stamp is 1). Owned here because
     /// its lifecycle is exactly the connection's room membership: it RESETS
@@ -80,6 +80,43 @@ pub(crate) struct ClientConnection {
     /// rejoin: recipients treat a sender's rejoin/reconnect as a seq reset) —
     /// and it is cleaned up with the connection, with no separate map to leak.
     pub game_data_seq: u64,
+    /// Incarnation epoch for this client's outbound game-data stream (protocol
+    /// v3), behind [`ServerMessage::GameData::epoch`](crate::protocol::ServerMessage).
+    ///
+    /// It is a single **monotonic per-connection** counter that increments once
+    /// each time a NEW incarnation of a room membership begins —
+    /// [`ConnectionManager::assign_client_to_room`] (join / seat-fill join) and
+    /// [`ConnectionManager::reassign_connection`] (reconnect) — so `0` means
+    /// "never joined a room" and the first incarnation is epoch `1`. Leaving a
+    /// room ([`ConnectionManager::clear_room_assignment`]) resets `seq` but does
+    /// NOT bump the epoch: the NEXT join does. It is deliberately NOT reset when
+    /// the same connection switches rooms — a room-B membership entered after a
+    /// room-A one carries a higher epoch, not a fresh `1`. This is what upholds
+    /// the client-facing contract: `(epoch, seq)` is strictly increasing per
+    /// `(sender, room)` as observed by ANY single recipient. A counter reset per
+    /// room membership would instead REPEAT an epoch it already used when a
+    /// sender leaves and rejoins the SAME room — a recipient that stayed would
+    /// see `(epoch, seq)` collide (the same `epoch`, with `seq` restarting at
+    /// 1), the very ambiguity `epoch` exists to remove. Keeping a distinct
+    /// per-`(player, room)` epoch across leave/rejoin would instead require
+    /// unbounded server state; a single monotonic counter guarantees the
+    /// strictly-increasing invariant for free. The
+    /// absolute value is not meaningful to clients — they baseline each sender
+    /// from the epoch on its snapshot / first frame and only compare relatively.
+    /// Paired with `game_data_seq` (which restarts at 1 per epoch) it makes a
+    /// `seq` restart self-describing.
+    pub game_data_epoch: u32,
+}
+
+/// One relay stamp read atomically from a sender's `ClientConnection`: the
+/// per-`(sender, room)` [`game_data_seq`](ClientConnection::game_data_seq) and
+/// its [`game_data_epoch`](ClientConnection::game_data_epoch). Read together
+/// under one map lock so a recipient always observes a consistent `(epoch,
+/// seq)` pair even if the sender is reassigned concurrently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayStamp {
+    pub seq: u64,
+    pub epoch: u32,
 }
 
 impl ClientConnection {
@@ -108,7 +145,7 @@ pub(crate) struct ConnectionManager {
     metrics: Arc<ServerMetrics>,
     message_coordinator: Arc<dyn MessageCoordinator>,
     max_connections_per_ip: usize,
-    /// Whether per-connection delivery statistics (the v4 `RelayStats`
+    /// Whether per-connection delivery statistics (the v3 `RelayStats`
     /// ledger) are registered with the metrics sink for each connection.
     /// Mirrors `websocket.delivery_stats_interval_secs > 0` so a disabled
     /// deployment keeps the per-delivery bookkeeping at a single map miss.
@@ -166,6 +203,7 @@ impl ConnectionManager {
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
             game_data_seq: 0,
+            game_data_epoch: 0,
         };
 
         self.clients.insert(player_id, connection);
@@ -205,6 +243,7 @@ impl ConnectionManager {
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
             game_data_seq: 0,
+            game_data_epoch: 0,
         };
 
         self.increment_ip_slot_unbounded(client_addr.ip());
@@ -229,6 +268,15 @@ impl ConnectionManager {
             // Fresh room membership => fresh per-(sender, room) relay stamp
             // stream (restart-on-rejoin; see the `game_data_seq` field doc).
             client.game_data_seq = 0;
+            // A new incarnation of the membership begins here (first join or a
+            // join-after-leave), so its epoch advances; recipients pair it with
+            // the reset `seq` to attribute the restart (see `game_data_epoch`).
+            // `saturating_add` is deliberate: the u32 epoch space (~4.3B
+            // incarnations on a single connection lineage) is unreachable in
+            // practice, and saturating is the only overflow behavior that never
+            // regresses to a LOWER value — unlike `wrapping_add`, which would
+            // reset to 0 and break the strictly-increasing `(epoch, seq)` view.
+            client.game_data_epoch = client.game_data_epoch.saturating_add(1);
             let delivery = client.delivery_handle();
             drop(client);
             if let Err(err) = self
@@ -321,20 +369,16 @@ impl ConnectionManager {
             .and_then(|conn| conn.transport_status)
     }
 
+    /// Whether the client negotiated protocol v3+ (the single unshipped
+    /// "current" version). v3 is the ONE gate for every additive feature over
+    /// the frozen v2 floor: the WebRTC signaling surface
+    /// (`Signal`/`NewPeer`/`SessionPlan`/`TransportStatus`) AND the delivery
+    /// reliability surface (relayed `GameData.seq` + incarnation `epoch`, and
+    /// `RelayStats` emission). A v2 client gets none of it (byte-identical wire).
     pub fn supports_v3(&self, player_id: &PlayerId) -> bool {
         self.clients
             .get(player_id)
             .map(|conn| conn.protocol.version >= 3)
-            .unwrap_or(false)
-    }
-
-    /// Whether the client negotiated protocol v4 or higher (gates the relayed
-    /// `GameData.seq` stamp and `RelayStats` emission; mirrors
-    /// [`Self::supports_v3`]).
-    pub fn supports_v4(&self, player_id: &PlayerId) -> bool {
-        self.clients
-            .get(player_id)
-            .map(|conn| conn.protocol.version >= 4)
             .unwrap_or(false)
     }
 
@@ -371,15 +415,44 @@ impl ConnectionManager {
         })
     }
 
-    /// Advance and return the relay sequence stamp for `player_id`'s next
-    /// relayed game-data message (protocol v4; first stamp is 1). `None` when
-    /// the connection no longer exists (a disconnect race — the relay then
-    /// simply stamps nothing).
-    pub fn next_game_data_seq(&self, player_id: &PlayerId) -> Option<u64> {
+    /// Advance the relay sequence and return the full relay stamp — the next
+    /// `seq` (protocol v3; first stamp is 1) together with the current
+    /// incarnation `epoch` — for `player_id`'s next relayed game-data message.
+    /// Both are read under one `get_mut` so the `(epoch, seq)` pair a recipient
+    /// observes is always internally consistent. `None` when the connection no
+    /// longer exists (a disconnect race — the relay then simply stamps nothing).
+    pub fn next_relay_stamp(&self, player_id: &PlayerId) -> Option<RelayStamp> {
         self.clients.get_mut(player_id).map(|mut client| {
             client.game_data_seq += 1;
-            client.game_data_seq
+            RelayStamp {
+                seq: client.game_data_seq,
+                epoch: client.game_data_epoch,
+            }
         })
+    }
+
+    /// Read the current incarnation [`epoch`](ClientConnection::game_data_epoch)
+    /// for `player_id` without advancing anything. Used when building v3 room
+    /// snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a recipient
+    /// learns each member's epoch before that member's first relayed frame.
+    /// `None` when the connection no longer exists.
+    pub fn game_data_epoch(&self, player_id: &PlayerId) -> Option<u32> {
+        self.clients
+            .get(player_id)
+            .map(|client| client.game_data_epoch)
+    }
+
+    /// Override the incarnation [`epoch`](ClientConnection::game_data_epoch) for
+    /// a reconnected connection. [`Self::reassign_connection`] derives the epoch
+    /// from the transient reconnect socket (which never joined a room, so it
+    /// would reset to 1); the reconnect path calls this with `last_epoch + 1`
+    /// from the surviving [`DisconnectedPlayer`](crate::reconnection::DisconnectedPlayer)
+    /// record so the sender's `(epoch, seq)` stream stays strictly increasing
+    /// for a recipient that never left. No-op if the connection is gone.
+    pub fn set_game_data_epoch(&self, player_id: &PlayerId, epoch: u32) {
+        if let Some(mut client) = self.clients.get_mut(player_id) {
+            client.game_data_epoch = epoch;
+        }
     }
 
     pub fn record_ping(&self, player_id: &PlayerId) {
@@ -455,6 +528,15 @@ impl ConnectionManager {
                 // stream starts over at 1; recipients treat its
                 // `PlayerReconnected` as a seq reset (field doc above).
                 game_data_seq: 0,
+                // PROVISIONAL epoch. `old_connection` is the transient reconnect
+                // socket (never joined a room ⇒ epoch 0), so this alone would
+                // reset the incarnation to 1 and collide with the sender's first
+                // incarnation. The reconnect path in `reconnection_service`
+                // OVERRIDES this via `set_game_data_epoch` with the surviving
+                // record's `last_epoch + 1` (see `DisconnectedPlayer::last_epoch`);
+                // the `+1` here is only a non-zero fallback for a standalone
+                // reassign that never calls the override.
+                game_data_epoch: old_connection.game_data_epoch.saturating_add(1),
             };
 
             // IP slot is already reserved from the old entry -- no need to

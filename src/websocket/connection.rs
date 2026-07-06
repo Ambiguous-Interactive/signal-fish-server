@@ -376,10 +376,10 @@ pub(super) async fn handle_socket(
 
     let effective_player_id = Arc::new(RwLock::new(player_id));
 
-    // Periodic per-connection RelayStats emission (protocol v4, opt-in via
+    // Periodic per-connection RelayStats emission (protocol v3, opt-in via
     // `websocket.delivery_stats_interval_secs`; default 0 = disabled, so no
-    // task is spawned at all). The v4 gate is enforced at EMISSION on every
-    // tick — a pre-v4 connection on a stats-enabled deployment never observes
+    // task is spawned at all). The v3 gate is enforced at EMISSION on every
+    // tick — a pre-v3 connection on a stats-enabled deployment never observes
     // the frame — and re-reads the effective player id so the ticker follows
     // a reconnection reassignment.
     let delivery_stats_interval_secs = server
@@ -406,7 +406,7 @@ pub(super) async fn handle_socket(
                     }
                     _ = ticker.tick() => {
                         let current_player_id = *effective_player_id_for_stats.read().await;
-                        if !server_for_stats.client_supports_v4(&current_player_id) {
+                        if !server_for_stats.client_supports_v3(&current_player_id) {
                             continue;
                         }
                         let Some(stats) = server_for_stats

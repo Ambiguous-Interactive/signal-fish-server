@@ -136,8 +136,8 @@ fn assert_static_then_default_stun_ice(ice_servers: &[IceServer]) {
 
 /// Boot the production router (`/v2` nest + `/v3/ws` alias) around a server
 /// built with the given `SessionConfig`, returning the bound address and the
-/// server handle (the reconnect test needs the handle to mint a token, exactly
-/// like `tests/v3_signaling_e2e.rs` — the token never crosses the wire).
+/// server handle (the reconnect test mints the token in-process via the handle
+/// rather than receiving it over the wire, like `tests/v3_signaling_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
 ) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
@@ -1115,17 +1115,20 @@ async fn mesh_n3_reconnect_full_flow() {
     expect_player_left(&mut peer_a, dropper_id, "peer_a").await;
     expect_player_left(&mut peer_b, dropper_id, "peer_b").await;
 
-    // Mint a reconnection token through the server handle. The wire flow never
-    // delivers the token to the client (it is generated at
-    // disconnect-registration time, `src/server/reconnection_service.rs`), so
-    // this is the sanctioned in-process pattern from `v3_signaling_e2e.rs`.
-    // Registering AFTER PlayerLeft was observed guarantees the disconnect
-    // path's own auto-registration already ran, so this record (and token)
-    // deterministically replaces it.
+    // Mint a reconnection token through the server handle. `expect_player_left`
+    // above means the socket-drop path already auto-registered the disconnect
+    // with the dropper's pre-issued (join-time) token; this same-room
+    // re-registration PRESERVES that token (see
+    // `ReconnectionManager::register_disconnection`) rather than replacing it,
+    // so `token` is exactly what the dropper received in `RoomJoined` and would
+    // reconnect with — faithful to a real client. (The client-held-token
+    // invariant itself is locked at the unit level:
+    // `same_room_reregistration_keeps_pre_issued_token_claimable`.) This is the
+    // sanctioned in-process pattern from `v3_signaling_e2e.rs`.
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(dropper_id, room_id, false, Some(dropper_info))
+        .register_disconnection(dropper_id, room_id, false, Some(dropper_info), 0)
         .await;
 
     // Reconnect over a FRESH socket using the real wire flow.
@@ -1197,7 +1200,7 @@ async fn mesh_n3_reconnect_full_flow() {
             SERVER_MESSAGE_TIMEOUT,
             "PlayerReconnected",
             |message| match message {
-                ServerMessage::PlayerReconnected { player_id } => {
+                ServerMessage::PlayerReconnected { player_id, .. } => {
                     assert_eq!(player_id, dropper_id, "{who} saw the wrong reconnector");
                     Some(())
                 }

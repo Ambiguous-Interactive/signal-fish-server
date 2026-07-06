@@ -45,14 +45,16 @@
 #   TransportStatus, PeerTransportStatus. v3 messages are tagged `x-protocol: v3`
 #   below. A relay-only room never emits SessionPlan, so a v2 client never sees
 #   v3 messages.
-# * v4 is an OPTIONAL relay-observability upgrade: the server stamps relayed
-#   GameData / GameDataBinary with a per-(sender, room) `seq` (v4 recipients
-#   only — pre-v4 recipients' bytes are unchanged) so any server-side loss is
-#   detectable end-to-end as a gap, and can emit the opt-in periodic RelayStats
-#   frame for attribution. The delivery contract itself (deliver-or-disconnect,
-#   SLOW_CONSUMER) is version-independent; see the ServerGameData and
-#   RelayStats schema descriptions for the normative wording. The server's
-#   default negotiation ceiling is 4 (`protocol.max_protocol_version`).
+# * v3 ALSO adds a relay-observability surface (there is no separate v4 — v3 is
+#   the single unshipped "current" version): the server stamps relayed
+#   GameData / GameDataBinary with a per-(sender, room) `seq` + incarnation
+#   `epoch` (v3 recipients only — pre-v3 (v2) recipients' bytes are unchanged)
+#   so any server-side loss is detectable end-to-end as a gap, and can emit the
+#   opt-in periodic RelayStats frame for attribution. The delivery contract
+#   itself (deliver-or-disconnect, SLOW_CONSUMER) is version-independent; see
+#   the ServerGameData and RelayStats schema descriptions for the normative
+#   wording. The server's default negotiation ceiling is 3
+#   (`protocol.max_protocol_version`).
 # See docs/concepts/protocol-versions.md and docs/guides/building-a-client.md.
 
 asyncapi: 3.0.0
@@ -63,7 +65,7 @@ info:
   description: |
     JSON-over-WebSocket signaling protocol for peer-to-peer game networking.
     v2 relay floor + optional v3 capability negotiation / WebRTC signaling +
-    optional v4 relay sequencing (GameData.seq) and delivery statistics
+    optional v3 relay sequencing (GameData.seq) and delivery statistics
     (RelayStats).
   license:
     name: MIT
@@ -364,8 +366,8 @@ components:
     RelayStats:
       title: RelayStats
       summary: >-
-        v4: periodic per-connection relay-delivery statistics (opt-in via
-        websocket.delivery_stats_interval_secs; never sent to pre-v4 clients).
+        v3: periodic per-connection relay-delivery statistics (opt-in via
+        websocket.delivery_stats_interval_secs; never sent to pre-v3 clients).
       payload: { $ref: '#/components/schemas/RelayStats' }
 
   schemas:
@@ -500,6 +502,15 @@ components:
         is_ready: { type: boolean }
         connected_at: { type: string, format: date-time }
         connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
+        epoch:
+          type: integer
+          minimum: 1
+          description: >-
+            v3 only: this player's current incarnation epoch (see
+            ServerGameData.epoch), carried on room snapshots (RoomJoined,
+            PlayerJoined, Reconnected) so a v3 recipient learns each member's
+            epoch before that member's first relayed frame. Absent for pre-v3
+            recipients (byte-identical wire).
     SpectatorInfo:
       type: object
       required: [id, name, connected_at]
@@ -889,22 +900,39 @@ components:
               type: integer
               minimum: 1
               description: >-
-                v4 only: server-stamped relay sequence number, per (sender,
+                v3 only: server-stamped relay sequence number, per (sender,
                 room). Starts at 1 and is strictly contiguous per sender while
                 the recipient stays connected, so a gap can only mean (a) the
                 recipient's own SLOW_CONSUMER eviction (messages abandoned with
                 the disconnect it was told about), (b) the sender leaving and
                 rejoining (correlate with PlayerLeft + PlayerJoined) or
                 reconnecting (PlayerReconnected) — both RESTART the counter at
-                1 — or (c) the recipient's own reconnect. Absent for pre-v4
+                1 — or (c) the recipient's own reconnect. Absent for pre-v3
                 recipients (their bytes are byte-identical to v3 and earlier).
                 Client-to-server GameData carries no seq; stamping is purely
                 server-side.
+            epoch:
+              type: integer
+              minimum: 1
+              description: >-
+                v3 only: server-tracked incarnation epoch. A single monotonic
+                per-connection counter that increments once per incarnation (the
+                first join is 1; each join-after-leave or reconnect increments
+                it; NOT reset when the same connection switches rooms), while seq
+                restarts at 1 within each epoch, so (epoch, seq) is strictly
+                lexicographically increasing per (sender, room) as observed by
+                any single recipient. This makes the seq restart of case (b)
+                SELF-DESCRIBING. The absolute value is not meaningful: baseline
+                each sender from the epoch you first observe for it (a newly
+                observed sender may start above 1) and compare relatively. Stamped
+                together with seq; absent for pre-v3 recipients (byte-identical
+                wire). Also carried on room snapshots (see PlayerInfo.epoch,
+                PlayerReconnected.epoch).
       required: [type, data]
     GameDataBinary:
       type: object
       description: >-
-        Same delivery contract and v4 seq semantics as GameData (text and
+        Same delivery contract and v3 seq semantics as GameData (text and
         binary relay share one per-(sender, room) counter). On the bare binary
         MessagePack frame actually sent to negotiated-MessagePack clients, the
         stamp is the optional trailing `seq` map key; the json/rkyv binary
@@ -921,7 +949,11 @@ components:
             seq:
               type: integer
               minimum: 1
-              description: 'v4 only: see ServerGameData seq (identical semantics).'
+              description: 'v3 only: see ServerGameData seq (identical semantics).'
+            epoch:
+              type: integer
+              minimum: 1
+              description: 'v3 only: see ServerGameData epoch (identical semantics).'
       required: [type, data]
     AuthorityChanged:
       type: object
@@ -1118,6 +1150,15 @@ components:
           required: [player_id]
           properties:
             player_id: { $ref: '#/components/schemas/PlayerId' }
+            epoch:
+              type: integer
+              minimum: 1
+              description: >-
+                v3 only: the reconnector's new incarnation epoch (see
+                ServerGameData.epoch) — the same value now stamped on its relayed
+                GameData — so recipients re-baseline the per-sender (epoch, seq)
+                stream immediately. Absent for pre-v3 recipients (byte-identical
+                wire).
       required: [type, data]
     SpectatorJoined:
       type: object
@@ -1228,9 +1269,9 @@ components:
     RelayStats:
       type: object
       description: >-
-        v4 only, config-gated (websocket.delivery_stats_interval_secs > 0;
+        v3 only, config-gated (websocket.delivery_stats_interval_secs > 0;
         default 0 = disabled) and never emitted to a connection that
-        negotiated below v4 (enforced at emission). Counters are CUMULATIVE
+        negotiated below v3 (enforced at emission). Counters are CUMULATIVE
         since the connection registered and survive a reconnection's
         player-id reassignment, so a frame skipped while the connection's
         queue is full (the frame is advisory and never waits) loses nothing.

@@ -293,10 +293,16 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
     game_server.disconnect_client(&peer2_id).await;
     let _ = old_peer2.close(None).await;
 
+    // `disconnect_client` already auto-registered the disconnect with peer2's
+    // pre-issued (join-time) token. This re-registration of the same
+    // still-pending room only surfaces that token to the test: it is idempotent
+    // on the token (a same-room re-registration preserves the client-held one),
+    // so `token` is exactly what peer2 received in `RoomJoined` and would
+    // reconnect with — the reconnect below stays faithful to a real client.
     let token = game_server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(peer2_id, room_id, false, Some(peer2_info))
+        .register_disconnection(peer2_id, room_id, false, Some(peer2_info), 0)
         .await;
 
     let mut replacement = connect(addr).await;

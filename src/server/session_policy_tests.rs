@@ -1286,6 +1286,7 @@ fn player_info(id: PlayerId, name: &str, is_authority: bool) -> PlayerInfo {
         is_ready: true,
         connected_at: base_time(),
         connection_info: None,
+        epoch: None,
         region_id: "region-a".to_string(),
     }
 }

@@ -446,7 +446,7 @@ pub const fn default_slow_consumer_timeout_ms() -> u64 {
 /// Default per-connection `RelayStats` emission interval in seconds
 /// (`0` disables — the default posture).
 ///
-/// The frame is protocol v4-only and purely diagnostic, so it is opt-in:
+/// The frame is protocol v3-only and purely diagnostic, so it is opt-in:
 /// deployments that want delivery attribution (pairing `GameData.seq` gap
 /// detection with `dropped_for_you` / `backpressure_events`) enable it
 /// explicitly. Validated to at most 3600 (one hour) — a longer period is
