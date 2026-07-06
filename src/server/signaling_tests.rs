@@ -2651,6 +2651,17 @@ async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
         .await;
     assert!(reconnected, "valid reconnect should report success");
 
+    // The incarnation epoch resumes at `last_epoch + 1` (the pre-disconnect
+    // value 1 captured for `register_disconnection` above), so a recipient that
+    // stayed connected sees the reconnector's `(epoch, seq)` stream keep
+    // increasing across the reconnect instead of colliding at the first
+    // incarnation's `(1, …)`.
+    assert_eq!(
+        server.connection_manager.game_data_epoch(&reconnecting),
+        Some(2),
+        "reconnect must resume the incarnation epoch at last_epoch + 1"
+    );
+
     match recv(&mut current_rx).await.as_ref() {
         ServerMessage::Reconnected(payload) => {
             assert_eq!(payload.player_id, reconnecting);
