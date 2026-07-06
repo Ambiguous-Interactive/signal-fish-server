@@ -126,8 +126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section in `formal/README.md` catalogs which invariants are single-instance
   theorems and states the LB room-affinity requirement.
 
-- Added protocol v3 (strictly additive; clamp `protocol.max_protocol_version` back to `3` to
-  disable): relayed `GameData` / `GameDataBinary` delivered to a v3 recipient carry a
+- Added protocol v3 (strictly additive; clamp `protocol.max_protocol_version` back to `2` —
+  pure v2 — to disable, since v3 is now the current version): relayed `GameData` /
+  `GameDataBinary` delivered to a v3 recipient carry a
   server-stamped per-`(sender, room)` `seq` starting at `1` and strictly contiguous per sender,
   so any recipient can detect any relay gap end-to-end; pre-v3 recipients receive byte-identical
   frames with no `seq` key. Documented in `docs/protocol.md` ("Protocol v3 delivery reliability") and the

@@ -6,8 +6,8 @@
 //! - with `websocket.delivery_stats_interval_secs > 0`, a connection that
 //!   negotiated v3 receives periodic `RelayStats` frames with plausible
 //!   cumulative fields;
-//! - a v3 connection on the SAME deployment never receives one (the v3 gate
-//!   is enforced at emission);
+//! - a pre-v3 (v2) connection on the SAME deployment never receives one (the
+//!   v3 gate is enforced at emission);
 //! - with the default config (interval 0), nobody receives one — not even a
 //!   v3 connection.
 

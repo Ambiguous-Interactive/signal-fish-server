@@ -295,6 +295,10 @@ fn golden_player_joined_player_info_with_epoch() {
             r#"{{"type":"PlayerJoined","data":{{"player":{{"id":"{PLAYER_A_STR}","name":"P","is_authority":false,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4}}}}}}"#
         ),
     );
+    // Freeze the MessagePack encoding too (matching the other goldens here and
+    // in `v2_wire_golden.rs`), so the production binary snapshot wire cannot
+    // drift the trailing `epoch` key silently.
+    assert_msgpack(&msg, "82a474797065ac506c617965724a6f696e6564a46461746181a6706c6179657286a26964c4100000000000000000000000000000000aa46e616d65a150ac69735f617574686f72697479c2a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804");
 }
 
 #[test]
