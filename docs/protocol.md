@@ -973,8 +973,9 @@ The server clamps the negotiated version into its configured range:
 `min(client_max, max_protocol_version)` raised to at least `min_protocol_version`. A client that advertises a higher
 version than the deployment speaks is clamped **down** to `max_protocol_version`; one that omits the field is
 negotiated from the endpoint default (`/v2/ws` defaults to v2; `/v3/ws` defaults to v3). If the negotiated
-version is below 3, the connection is **relay-only** regardless of the advertised transports/topologies. If the
-negotiated version is 3 but transports/topologies are absent, the connection is v3 relay-only. Defaults:
+version is below 3, the connection is **relay-only** regardless of the advertised `supported_transports` /
+`supported_topologies`. If the negotiated version is 3 but `supported_transports` / `supported_topologies` are
+absent, the connection is v3 relay-only. Defaults:
 `min_protocol_version = 2`, `max_protocol_version = 3`.
 
 The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 fields plus v3-only additions):
