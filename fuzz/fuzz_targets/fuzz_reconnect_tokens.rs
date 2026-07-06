@@ -160,7 +160,10 @@ async fn run(plan: Plan) {
                 let player = player_id(player);
                 let room = room_id(room);
                 let token = manager
-                    .register_disconnection(player, room, was_authority, None)
+                    // `last_epoch = 0`: this fuzzer exercises token accept/reject
+                    // paths, not the v3 incarnation-epoch stream, so "no prior v3
+                    // stream to preserve" is the correct provisional value.
+                    .register_disconnection(player, room, was_authority, None, 0)
                     .await;
                 // Re-registration replaces the record (and any active claim).
                 reference.pending.insert(player, (room, token, false));

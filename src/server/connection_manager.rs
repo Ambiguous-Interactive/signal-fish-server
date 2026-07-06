@@ -268,6 +268,11 @@ impl ConnectionManager {
             // A new incarnation of the membership begins here (first join or a
             // join-after-leave), so its epoch advances; recipients pair it with
             // the reset `seq` to attribute the restart (see `game_data_epoch`).
+            // `saturating_add` is deliberate: the u32 epoch space (~4.3B
+            // incarnations on a single connection lineage) is unreachable in
+            // practice, and saturating is the only overflow behavior that never
+            // regresses to a LOWER value — unlike `wrapping_add`, which would
+            // reset to 0 and break the strictly-increasing `(epoch, seq)` view.
             client.game_data_epoch = client.game_data_epoch.saturating_add(1);
             let delivery = client.delivery_handle();
             drop(client);

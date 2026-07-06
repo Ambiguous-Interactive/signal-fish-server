@@ -682,7 +682,11 @@ async fn reconnect_clears_stored_transport_status() {
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
-        .register_disconnection(reporter_id, room_id, false, Some(reporter_info), 0)
+        // The reporter negotiated v3 and joined once, so its true pre-disconnect
+        // incarnation epoch is 1 (not 0 — that would model a sender with no v3
+        // stream and make the reconnect resume at epoch 1, colliding with the
+        // first incarnation).
+        .register_disconnection(reporter_id, room_id, false, Some(reporter_info), 1)
         .await;
 
     // Reconnect over a FRESH socket using the real wire flow.
