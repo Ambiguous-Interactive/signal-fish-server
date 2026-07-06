@@ -85,8 +85,8 @@ fn mesh_session_config() -> SessionConfig {
 
 /// Boot the production router (`/v2` nest + `/v3/ws` alias) around a server
 /// built with the given `SessionConfig`, returning the bound address and the
-/// server handle (the reconnect test needs the handle to mint a token, exactly
-/// like `tests/v3_multipeer_e2e.rs` — the token never crosses the wire).
+/// server handle (the reconnect test mints the token in-process via the handle
+/// rather than receiving it over the wire, like `tests/v3_multipeer_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
 ) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
@@ -677,8 +677,9 @@ async fn reconnect_clears_stored_transport_status() {
     )
     .await;
 
-    // Mint a reconnection token through the server handle (never crosses the
-    // wire; same sanctioned in-process pattern as `v3_multipeer_e2e.rs`).
+    // Mint a reconnection token through the server handle — obtained in-process
+    // here rather than over the wire (same sanctioned pattern as
+    // `v3_multipeer_e2e.rs`).
     let token = server
         .reconnection_manager()
         .expect("reconnection enabled")
