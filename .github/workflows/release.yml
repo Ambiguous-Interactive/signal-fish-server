@@ -504,6 +504,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update
           # matrix.linker_pkg may name multiple packages (cross GCC + cross
           # libc dev); GitHub interpolates it to a literal list before the shell

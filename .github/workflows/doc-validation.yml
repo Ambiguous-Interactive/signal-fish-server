@@ -73,7 +73,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
       - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
 
       - name: Extract and validate inline shell scripts
         run: |
@@ -519,7 +522,9 @@ jobs:
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           # Install shellcheck for comprehensive shell script validation
-          sudo apt-get update && sudo apt-get install -y shellcheck
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"

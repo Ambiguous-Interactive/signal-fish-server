@@ -92,7 +92,10 @@ jobs:
       - name: Install mold + clang linker
         # Mirrors Dockerfile / .devcontainer (mold + clang). scripts/run-mutants.sh
         # sets CARGO_TARGET_<triple>_LINKER=clang + RUSTFLAGS="-C link-arg=-fuse-ld=mold".
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold clang
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (warm + save the shared mutants cache)
         uses: Swatinem/rust-cache@v2.9.1
@@ -159,7 +162,10 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Install mold + clang linker
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold clang
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (restore the warm shared cache)
         uses: Swatinem/rust-cache@v2.9.1
