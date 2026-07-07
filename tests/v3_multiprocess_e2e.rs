@@ -49,7 +49,9 @@
 mod v3_conformance_helpers;
 mod websocket_test_helpers;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use serde_json::json;
@@ -78,6 +80,7 @@ const APP_ID: &str = "multiprocess-conformance-app";
 /// with the harness in `websocket_test_helpers::server_process`.)
 const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
 fn now_unix_ms() -> u64 {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -206,6 +209,7 @@ async fn expect_socket_closed_within(ws: &mut WsStream, timeout: Duration, conte
     }
 }
 
+#[cfg(unix)]
 async fn expect_close_frame_within(
     ws: &mut WsStream,
     timeout: Duration,

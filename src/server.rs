@@ -119,6 +119,8 @@ pub struct EnhancedGameServer {
 pub enum RegisterClientError {
     #[error("Too many connections from your IP ({current}/{limit})")]
     IpLimitExceeded { current: usize, limit: usize },
+    #[error("Server is draining for shutdown")]
+    ServerDraining,
 }
 
 #[derive(Debug, Error)]
@@ -370,9 +372,18 @@ impl EnhancedGameServer {
         close: ConnectionCloseSignal,
         client_addr: SocketAddr,
     ) -> Result<PlayerId, RegisterClientError> {
-        self.connection_manager
+        if self.is_draining() {
+            return Err(RegisterClientError::ServerDraining);
+        }
+        let player_id = self
+            .connection_manager
             .register_client(sender, close, client_addr, self.instance_id)
-            .await
+            .await?;
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(&player_id, CloseReason::Shutdown);
+        }
+        Ok(player_id)
     }
 
     /// Record inbound activity for a client so the activity reaper
@@ -563,23 +574,41 @@ impl EnhancedGameServer {
             self.discard_pre_issued_reconnection_token(player_id).await;
         }
 
-        // Remove from room if joined
-        if let Some(room_id) = room_id_opt {
-            tracing::info!(%player_id, %room_id, draining, "Removing player from room during unregister");
-            self.leave_room(player_id).await;
-            // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
-            // Tests should properly handle the asynchronous nature of message delivery
-        }
+        if draining {
+            // Stop routing before quiet room cleanup so shutdown teardown cannot
+            // enqueue normal room-leave traffic ahead of the semantic close.
+            if let Err(e) = self
+                .message_coordinator
+                .unregister_local_client(player_id)
+                .await
+            {
+                tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+            }
 
-        // Unregister from the message coordinator BEFORE tearing the socket
-        // down: once routing stops, no new message can be enqueued into a
-        // connection whose send task is already flushing its final drain.
-        if let Err(e) = self
-            .message_coordinator
-            .unregister_local_client(player_id)
-            .await
-        {
-            tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+            if let Some(room_id) = room_id_opt {
+                tracing::info!(%player_id, %room_id, draining, "Removing player from room during unregister");
+                self.remove_player_for_shutdown_drain(player_id, &room_id)
+                    .await;
+            }
+        } else {
+            // Remove from room if joined
+            if let Some(room_id) = room_id_opt {
+                tracing::info!(%player_id, %room_id, draining, "Removing player from room during unregister");
+                self.leave_room(player_id).await;
+                // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
+                // Tests should properly handle the asynchronous nature of message delivery
+            }
+
+            // Unregister from the message coordinator BEFORE tearing the socket
+            // down: once routing stops, no new message can be enqueued into a
+            // connection whose send task is already flushing its final drain.
+            if let Err(e) = self
+                .message_coordinator
+                .unregister_local_client(player_id)
+                .await
+            {
+                tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+            }
         }
 
         // Remove client connection (also requests the socket tasks to close)

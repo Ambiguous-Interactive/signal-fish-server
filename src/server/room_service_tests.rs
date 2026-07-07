@@ -4,7 +4,7 @@ use crate::config::{
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
 use crate::database::DatabaseConfig;
-use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
+use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, ServerMessage};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -98,6 +98,89 @@ async fn leave_room_sends_confirmation_and_clears_membership() {
         matches!(*confirmation, ServerMessage::RoomLeft),
         "expected RoomLeft confirmation"
     );
+
+    assert!(
+        server.get_client_room(&player_id).await.is_none(),
+        "room assignment should be cleared"
+    );
+
+    let room_after = server
+        .database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room still exists");
+    assert!(
+        !room_after.players.contains_key(&player_id),
+        "player should be removed from room state"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_unregister_removes_membership_without_roomleft_noise() {
+    let server = create_test_server().await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
+    let (survivor_id, mut survivor_receiver) =
+        register_client(&server, "127.0.0.1:48012".parse().unwrap()).await;
+
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("DRAIN1".to_string()),
+            4,
+            true,
+            player_id,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+
+    server
+        .connection_manager
+        .assign_client_to_room(&player_id, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor_id,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor_id, room.id)
+        .await;
+
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    server.unregister_client(&player_id).await;
+
+    match receiver.try_recv() {
+        Ok(message) => panic!("shutdown unregister must not enqueue room traffic: {message:?}"),
+        Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+    }
+    match survivor_receiver.try_recv() {
+        Ok(message) => panic!("shutdown unregister must not broadcast room traffic: {message:?}"),
+        Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+    }
 
     assert!(
         server.get_client_room(&player_id).await.is_none(),
@@ -246,6 +329,35 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
             "drain rejection should happen before room-cap lock acquisition"
         );
     }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_server_rejects_late_client_registration() {
+    let server = create_test_server().await;
+    let drain = server.begin_shutdown_drain();
+    assert!(
+        drain.started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    let (sender, _receiver) = mpsc::channel(1);
+    let result = server
+        .register_client_with_close(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48013".parse().unwrap(),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(RegisterClientError::ServerDraining)),
+        "late WebSocket registration after drain must be rejected before entering the connection manager"
+    );
+    assert!(
+        server.connection_manager.client_ids().is_empty(),
+        "drain-rejected registration must not leave a client in the connection manager"
+    );
 }
 
 #[tokio::test]

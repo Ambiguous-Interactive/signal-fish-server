@@ -311,6 +311,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch::Sender<bool>) {
     shutdown_signal().await;
 
+    let drain_started_at = tokio::time::Instant::now();
     let drain = server.begin_shutdown_drain();
     tracing::info!(
         deadline_ms = drain.deadline_ms,
@@ -322,8 +323,10 @@ async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch:
 
     let _ = shutdown_tx.send(true);
 
-    if drain.grace > std::time::Duration::ZERO {
-        tokio::time::sleep(drain.grace).await;
+    if let Some(remaining_grace) = drain.grace.checked_sub(drain_started_at.elapsed()) {
+        if remaining_grace > std::time::Duration::ZERO {
+            tokio::time::sleep(remaining_grace).await;
+        }
     }
 
     let close_requests = server.close_connections_for_shutdown();

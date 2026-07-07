@@ -347,6 +347,30 @@ pub(super) async fn handle_socket(
             let _ = sender.close().await;
             return;
         }
+        Err(RegisterClientError::ServerDraining) => {
+            let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: CloseReason::Shutdown.websocket_close_code(),
+                reason: CloseReason::Shutdown.close_frame_reason().into(),
+            }));
+            match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        error = %err,
+                        "Failed to send drain close frame for late WebSocket registration"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        "Timed out sending drain close frame for late WebSocket registration"
+                    );
+                }
+            }
+            let _ = sender.close().await;
+            return;
+        }
     };
     // Track authentication state.
     let mut authenticated = !server.config().auth_enabled; // Auto-authenticated if auth disabled

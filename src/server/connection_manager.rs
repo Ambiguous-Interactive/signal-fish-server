@@ -830,6 +830,9 @@ mod tests {
                 assert_eq!(current, 1);
                 assert_eq!(limit, 1);
             }
+            RegisterClientError::ServerDraining => {
+                panic!("connection manager does not own shutdown drain admission")
+            }
         }
 
         manager.remove_client(&first_id);

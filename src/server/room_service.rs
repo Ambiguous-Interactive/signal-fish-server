@@ -2,7 +2,7 @@ use super::{EnhancedGameServer, MaxRoomsPerGameExceededError};
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
-    ErrorCode, PlayerId, PlayerInfo, RelayTransport, Room, RoomJoinedPayload, ServerMessage,
+    ErrorCode, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload, ServerMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -481,6 +481,50 @@ impl EnhancedGameServer {
             room_code = latest_room_code.as_deref().unwrap_or("unknown"),
             instance_id = %self.instance_id,
             "Player left room with distributed coordination"
+        );
+    }
+
+    /// Remove shutdown-drained membership without emitting normal leave traffic.
+    ///
+    /// During process shutdown every connected client is already getting the
+    /// v3 `GoingAway` advisory and semantic 4000 close frame. Enqueuing normal
+    /// `RoomLeft` / `PlayerLeft` traffic in between makes the shutdown contract
+    /// noisy and can delay the close frame behind irrelevant room updates.
+    pub(super) async fn remove_player_for_shutdown_drain(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) {
+        let player_removed = match self
+            .database
+            .remove_player_from_room(room_id, player_id)
+            .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                tracing::error!(%player_id, %room_id, error = %err, "Failed to remove draining player from room");
+                false
+            }
+        };
+
+        if player_removed {
+            self.metrics.increment_players_left();
+        }
+
+        if self
+            .connection_manager
+            .clear_room_assignment(player_id)
+            .is_none()
+        {
+            tracing::warn!(%player_id, %room_id, "Could not clear draining player's room assignment");
+        }
+
+        tracing::info!(
+            %player_id,
+            %room_id,
+            instance_id = %self.instance_id,
+            "Player removed from room during shutdown drain"
         );
     }
 

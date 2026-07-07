@@ -85,10 +85,10 @@ impl EnhancedGameServer {
     /// The close frame is the authoritative signal. `GoingAway` is advisory, so
     /// this never waits behind a full queue during shutdown.
     pub async fn announce_shutdown_drain(&self, drain: ShutdownDrain) -> usize {
-        let message = ServerMessage::GoingAway {
+        let message = Arc::new(ServerMessage::GoingAway {
             deadline_ms: drain.deadline_ms,
             retry_after_secs: drain.retry_after_secs,
-        };
+        });
         let mut enqueued = 0usize;
         for player_id in self.connection_manager.client_ids() {
             if !self.client_supports_v3(&player_id) {
@@ -96,7 +96,7 @@ impl EnhancedGameServer {
             }
             match self
                 .message_coordinator
-                .try_send_to_player(&player_id, std::sync::Arc::new(message.clone()))
+                .try_send_to_player(&player_id, Arc::clone(&message))
                 .await
             {
                 Ok(true) => enqueued += 1,
