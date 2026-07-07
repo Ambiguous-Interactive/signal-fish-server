@@ -15,10 +15,10 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 use tokio::time::Duration;
 use uuid::Uuid;
 
@@ -109,6 +109,10 @@ pub struct EnhancedGameServer {
     /// Nonzero once graceful shutdown drain has started; stores the advertised
     /// Unix epoch millisecond close deadline.
     shutdown_drain_deadline_ms: AtomicU64,
+    /// Active real WebSocket handlers. During shutdown these stay registered
+    /// until both socket halves have completed their bounded close path.
+    active_socket_tasks: AtomicUsize,
+    active_socket_tasks_notify: Notify,
 }
 
 #[derive(Debug, Error)]
@@ -314,6 +318,8 @@ impl EnhancedGameServer {
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
             shutdown_drain_deadline_ms: AtomicU64::new(0),
+            active_socket_tasks: AtomicUsize::new(0),
+            active_socket_tasks_notify: Notify::new(),
         });
 
         Ok(server)

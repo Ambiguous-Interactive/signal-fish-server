@@ -298,6 +298,7 @@ pub(super) async fn handle_socket(
     token_binding: Option<TokenBindingHandshake>,
     default_protocol_version: u16,
 ) {
+    let _socket_task_guard = server.track_socket_task();
     let (mut sender, mut receiver) = socket.split();
     // Validated >= 1 at startup; clamp anyway because `mpsc::channel` panics on 0.
     let queue_capacity = server.config().websocket_config.send_queue_capacity.max(1);
@@ -347,7 +348,6 @@ pub(super) async fn handle_socket(
             return;
         }
     };
-
     // Track authentication state.
     let mut authenticated = !server.config().auth_enabled; // Auto-authenticated if auth disabled
     let mut authenticate_processed = false;
@@ -454,7 +454,7 @@ pub(super) async fn handle_socket(
     // Spawn task to handle outgoing messages
     let server_clone = server.clone();
     let effective_player_id_for_send = Arc::clone(&effective_player_id);
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         let config = server_clone.config();
         let batching_enabled = config.websocket_config.enable_batching;
         let batch_size = config.websocket_config.batch_size;
@@ -609,7 +609,7 @@ pub(super) async fn handle_socket(
     let effective_player_id_for_receive = Arc::clone(&effective_player_id);
     let auth_timeout_secs = server.config().websocket_config.auth_timeout_secs;
     let close_signal_for_receive = close_signal.clone();
-    let receive_task = tokio::spawn(async move {
+    let mut receive_task = tokio::spawn(async move {
         let mut active_player_id = player_id;
         let token_binding = token_binding_for_receive;
         let close_signal = close_signal_for_receive;
@@ -1176,21 +1176,49 @@ pub(super) async fn handle_socket(
         server_clone.unregister_client(&active_player_id).await;
     });
 
-    // Wait for either task to complete
-    tokio::select! {
-        _ = send_task => {
-            let current_player_id = *effective_player_id.read().await;
-            tracing::info!(%current_player_id, "Send task completed");
-        }
-        _ = receive_task => {
-            let current_player_id = *effective_player_id.read().await;
-            tracing::info!(%current_player_id, "Receive task completed");
-        }
+    enum CompletedSocketTask {
+        Send,
+        Receive,
     }
 
-    // Ensure cleanup
+    let completed_socket_task = tokio::select! {
+        result = &mut send_task => {
+            let current_player_id = *effective_player_id.read().await;
+            match result {
+                Ok(()) => tracing::info!(%current_player_id, "Send task completed"),
+                Err(err) => tracing::warn!(%current_player_id, error = %err, "Send task failed"),
+            }
+            CompletedSocketTask::Send
+        }
+        result = &mut receive_task => {
+            let current_player_id = *effective_player_id.read().await;
+            match result {
+                Ok(()) => tracing::info!(%current_player_id, "Receive task completed"),
+                Err(err) => tracing::warn!(%current_player_id, error = %err, "Receive task failed"),
+            }
+            CompletedSocketTask::Receive
+        }
+    };
+
+    // Ensure cleanup and keep this handler alive until the remaining socket
+    // half observes the close request and finishes its bounded teardown. The
+    // shutdown drain waits on this handler lifetime so code 4000 has a chance
+    // to hit the wire before process exit.
     let current_player_id = *effective_player_id.read().await;
     server.unregister_client(&current_player_id).await;
+
+    match completed_socket_task {
+        CompletedSocketTask::Send => {
+            if let Err(err) = receive_task.await {
+                tracing::warn!(%current_player_id, error = %err, "Receive task failed");
+            }
+        }
+        CompletedSocketTask::Receive => {
+            if let Err(err) = send_task.await {
+                tracing::warn!(%current_player_id, error = %err, "Send task failed");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

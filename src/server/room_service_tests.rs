@@ -183,7 +183,7 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
         "test must transition the server into draining"
     );
 
-    for (room_code, port) in [(None, 48009), (Some("MISSNG"), 48010)] {
+    for (room_code, port) in [(None, 48009), (Some("ABSENT"), 48010)] {
         let (player_id, mut receiver) =
             register_client(&server, format!("127.0.0.1:{port}").parse().unwrap()).await;
 

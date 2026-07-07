@@ -1,10 +1,29 @@
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::coordination::CloseReason;
 use crate::protocol::ServerMessage;
 
 use super::EnhancedGameServer;
+
+/// Drops when a real WebSocket handler has fully returned.
+pub(crate) struct SocketTaskGuard {
+    server: Arc<EnhancedGameServer>,
+}
+
+impl Drop for SocketTaskGuard {
+    fn drop(&mut self) {
+        if self
+            .server
+            .active_socket_tasks
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
+            self.server.active_socket_tasks_notify.notify_waiters();
+        }
+    }
+}
 
 /// Result of starting or observing the current shutdown drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +39,14 @@ pub struct ShutdownDrain {
 }
 
 impl EnhancedGameServer {
+    /// Track a real WebSocket handler for bounded shutdown waiting.
+    pub(crate) fn track_socket_task(self: &Arc<Self>) -> SocketTaskGuard {
+        self.active_socket_tasks.fetch_add(1, Ordering::AcqRel);
+        SocketTaskGuard {
+            server: Arc::clone(self),
+        }
+    }
+
     /// Whether this server is already draining for shutdown.
     pub fn is_draining(&self) -> bool {
         self.shutdown_drain_deadline_ms.load(Ordering::Acquire) != 0
@@ -105,27 +132,35 @@ impl EnhancedGameServer {
         requested
     }
 
-    /// Wait for close-requested sockets to unregister before the process exits.
+    /// Wait for close-requested socket handlers to finish before process exit.
     ///
-    /// The close frames are written by per-connection socket tasks after
+    /// The close frames are written by per-connection send tasks after
     /// [`Self::close_connections_for_shutdown`] requests `CloseReason::Shutdown`.
-    /// Give those tasks a bounded window to flush their semantic close frames;
-    /// return the number of connections that still had not unregistered.
+    /// Unregistration can happen before that bounded flush finishes, so this
+    /// waits on the parent WebSocket handler lifetime instead of connection-map
+    /// membership. It returns the number of handlers still active at timeout.
     pub async fn wait_for_shutdown_connections(&self, max_wait: Duration) -> usize {
         let deadline = tokio::time::Instant::now() + max_wait;
         loop {
-            let remaining = self.connection_manager.client_count();
-            if remaining == 0 {
+            let notified = self.active_socket_tasks_notify.notified();
+            tokio::pin!(notified);
+
+            let active_tasks = self.active_socket_tasks.load(Ordering::Acquire);
+            if active_tasks == 0 {
                 return 0;
             }
 
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return remaining;
+                return active_tasks;
             }
 
-            let sleep_for = (deadline - now).min(Duration::from_millis(10));
-            tokio::time::sleep(sleep_for).await;
+            tokio::select! {
+                () = &mut notified => {}
+                () = tokio::time::sleep_until(deadline) => {
+                    return self.active_socket_tasks.load(Ordering::Acquire);
+                }
+            }
         }
     }
 }
