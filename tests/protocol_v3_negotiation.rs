@@ -8,7 +8,7 @@
 use serde_json::json;
 use signal_fish_server::protocol::{
     ClientMessage, GameDataEncoding, IceServer, PlayerId, ProtocolInfoPayload, ServerMessage,
-    SessionPeer, SessionPlanPayload, Topology, Transport,
+    SessionPeer, SessionPlanPayload, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 
 // ---------------------------------------------------------------------------
@@ -191,16 +191,18 @@ fn protocol_info_version_fields_skipped_when_none() {
         protocol_version: None,
         min_protocol_version: None,
         max_protocol_version: None,
+        transports: None,
     };
     let value = serde_json::to_value(&payload).unwrap();
     let obj = value.as_object().unwrap();
     assert!(!obj.contains_key("protocol_version"));
     assert!(!obj.contains_key("min_protocol_version"));
     assert!(!obj.contains_key("max_protocol_version"));
+    assert!(!obj.contains_key("transports"));
 }
 
 #[test]
-fn protocol_info_version_fields_present_when_some() {
+fn protocol_info_v3_fields_present_when_some() {
     let payload = ProtocolInfoPayload {
         platform: None,
         sdk_version: None,
@@ -213,11 +215,13 @@ fn protocol_info_version_fields_present_when_some() {
         protocol_version: Some(3),
         min_protocol_version: Some(2),
         max_protocol_version: Some(3),
+        transports: Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()]),
     };
     let value = serde_json::to_value(&payload).unwrap();
     assert_eq!(value["protocol_version"], json!(3));
     assert_eq!(value["min_protocol_version"], json!(2));
     assert_eq!(value["max_protocol_version"], json!(3));
+    assert_eq!(value["transports"], json!(["websocket"]));
 }
 
 // ---------------------------------------------------------------------------

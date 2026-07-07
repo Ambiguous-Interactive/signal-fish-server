@@ -5,6 +5,7 @@ use crate::coordination::{
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, PlayerId, PlayerNameRulesPayload,
     ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
+    PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
@@ -971,14 +972,18 @@ pub(super) async fn handle_socket(
                                         response_protocol_version,
                                         response_min_protocol_version,
                                         response_max_protocol_version,
+                                        response_transports,
                                     ) = if negotiated_version >= 3 {
                                         (
                                             Some(negotiated_version),
                                             Some(min_protocol_version),
                                             Some(max_protocol_version),
+                                            Some(vec![
+                                                PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()
+                                            ]),
                                         )
                                     } else {
-                                        (None, None, None)
+                                        (None, None, None, None)
                                     };
                                     let protocol_info =
                                         ServerMessage::ProtocolInfo(ProtocolInfoPayload {
@@ -995,6 +1000,7 @@ pub(super) async fn handle_socket(
                                             protocol_version: response_protocol_version,
                                             min_protocol_version: response_min_protocol_version,
                                             max_protocol_version: response_max_protocol_version,
+                                            transports: response_transports,
                                         });
 
                                     enqueue_connection_message(

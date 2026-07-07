@@ -46,7 +46,8 @@ The server replies with `Authenticated` (identical shape to the v2 scenario) fol
     "game_data_formats": ["json", "message_pack"],
     "protocol_version": 3,
     "min_protocol_version": 2,
-    "max_protocol_version": 3
+    "max_protocol_version": 3,
+    "transports": ["websocket"]
   }
 }
 ```

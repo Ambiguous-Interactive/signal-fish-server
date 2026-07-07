@@ -973,11 +973,12 @@ The server clamps the negotiated version into its configured range:
 `min(client_max, max_protocol_version)` raised to at least `min_protocol_version`. A client that advertises a higher
 version than the deployment speaks is clamped **down** to `max_protocol_version`; one that omits the field is
 negotiated from the endpoint default (`/v2/ws` defaults to v2; `/v3/ws` defaults to v3). If the negotiated
-version is below 3, the connection is **relay-only** regardless of the advertised transports/topologies. If the
-negotiated version is 3 but transports/topologies are absent, the connection is v3 relay-only. Defaults:
+version is below 3, the connection is **relay-only** regardless of the advertised `supported_transports` /
+`supported_topologies`. If the negotiated version is 3 but `supported_transports` / `supported_topologies` are
+absent, the connection is v3 relay-only. Defaults:
 `min_protocol_version = 2`, `max_protocol_version = 3`.
 
-The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 fields plus three new ones):
+The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 fields plus v3-only additions):
 
 ```json
 {
@@ -987,13 +988,16 @@ The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 field
     "game_data_formats": ["json", "message_pack"],
     "protocol_version": 3,
     "min_protocol_version": 2,
-    "max_protocol_version": 3
+    "max_protocol_version": 3,
+    "transports": ["websocket"]
   }
 }
 ```
 
-The three new fields are omitted from the wire for a negotiated v2 connection, so the v2 `ProtocolInfo` shape stays
-byte-identical.
+These v3-only fields are omitted from the wire for a negotiated v2 connection, so the v2 `ProtocolInfo` shape stays
+byte-identical. `ProtocolInfo.transports` names the server message lanes available to the connection; today it is
+always `["websocket"]` for negotiated v3 and reserves a future advertisement point for another server relay lane. It
+does not participate in the `Authenticate.supported_transports` data-path negotiation above.
 
 **Endpoints.** `/v2/ws` and `/v3/ws` share the same handler. `/v3/ws` only changes the _default_ protocol version
 to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then

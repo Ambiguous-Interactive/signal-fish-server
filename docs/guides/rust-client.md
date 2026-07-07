@@ -217,7 +217,7 @@ pub struct PlayerNameRulesPayload {
 /// Capability/version info sent in the `ProtocolInfo` frame that immediately
 /// follows `Authenticated`. The `protocol_version` fields are `None` (and
 /// omitted on the wire) on a negotiated v2 connection so the v2 frame stays
-/// byte-identical; they carry values only on v3.
+/// byte-identical; v3-only fields carry values only on v3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolInfoPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,6 +242,8 @@ pub struct ProtocolInfoPayload {
     pub min_protocol_version: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transports: Option<Vec<String>>,
 }
 
 /// Messages sent from the server to the client.
@@ -1361,6 +1363,8 @@ pub struct ProtocolInfoPayload {
     pub min_protocol_version: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transports: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1860,9 +1864,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 On a successful authentication the server sends `Authenticated` and then,
 immediately after, a `ProtocolInfo` frame on every authenticated connection
-(both v2 and v3; only the `protocol_version` fields differ -- they are omitted
-on v2). Read and handle (or intentionally skip) the `ProtocolInfo` frame rather
-than treating it as unexpected.
+(both v2 and v3; v3-only fields such as `protocol_version` and `transports` are
+omitted on v2). Read and handle (or intentionally skip) the `ProtocolInfo` frame
+rather than treating it as unexpected.
 
 The `app_id` is a public identifier, not a secret. It is safe to embed in
 game builds. The server matches it against the `authorized_apps` list in the
