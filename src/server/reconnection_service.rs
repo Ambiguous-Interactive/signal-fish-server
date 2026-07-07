@@ -234,6 +234,44 @@ impl EnhancedGameServer {
         false
     }
 
+    async fn reject_after_reassigned_reconnect_failure(
+        &self,
+        current_player_id: &PlayerId,
+        reconnect_player_id: &PlayerId,
+        claim_guard: ReconnectionClaimGuard,
+        restored_membership: bool,
+        restored_authority: bool,
+        rollback_context: &'static str,
+    ) -> bool {
+        self.discard_pre_issued_reconnection_token(reconnect_player_id)
+            .await;
+        let _ = self
+            .message_coordinator
+            .unregister_local_client(reconnect_player_id)
+            .await;
+        if self
+            .connection_manager
+            .restore_reassigned_connection(current_player_id, reconnect_player_id)
+            .is_none()
+        {
+            tracing::warn!(
+                %current_player_id,
+                %reconnect_player_id,
+                %rollback_context,
+                "Failed to restore temporary connection identity after reconnect failure"
+            );
+        }
+        self.reject_claimed_reconnect(
+            current_player_id,
+            claim_guard,
+            restored_membership,
+            restored_authority,
+            "Reconnected baseline could not be delivered",
+            ErrorCode::ReconnectionFailed,
+        )
+        .await
+    }
+
     /// Handle player reconnection
     pub async fn handle_reconnect(
         &self,
@@ -554,21 +592,6 @@ impl EnhancedGameServer {
             disconnected.last_epoch.saturating_add(1),
         );
 
-        // Complete once the fallible connection reassignment succeeds. The
-        // remaining coordinator/message operations are best-effort updates.
-        if !claim_guard.complete().await {
-            tracing::warn!(
-                %reconnect_player_id,
-                %room_id,
-                "Reconnection succeeded but pending claim was already released"
-            );
-        }
-
-        let _ = self
-            .message_coordinator
-            .unregister_local_client(current_player_id)
-            .await;
-
         // Update database last_seen
         if let Err(e) = self
             .database
@@ -709,7 +732,16 @@ impl EnhancedGameServer {
                     ?outcome,
                     "Reconnection restored state but could not queue the Reconnected baseline"
                 );
-                return true;
+                return self
+                    .reject_after_reassigned_reconnect_failure(
+                        current_player_id,
+                        reconnect_player_id,
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "baseline_delivery",
+                    )
+                    .await;
             }
             Err(err) => {
                 tracing::warn!(
@@ -718,8 +750,33 @@ impl EnhancedGameServer {
                     error = %err,
                     "Failed to atomically register reassigned connection with coordinator"
                 );
-                return true;
+                return self
+                    .reject_after_reassigned_reconnect_failure(
+                        current_player_id,
+                        reconnect_player_id,
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "coordinator_registration",
+                    )
+                    .await;
             }
+        }
+
+        let _ = self
+            .message_coordinator
+            .unregister_local_client(current_player_id)
+            .await;
+
+        // Complete only after `Reconnected` is queued and the restored player is
+        // visible to room routing. A failure before this point releases the claim
+        // for retry, so the token is never consumed without a delivered baseline.
+        if !claim_guard.complete().await {
+            tracing::warn!(
+                %reconnect_player_id,
+                %room_id,
+                "Reconnection succeeded but pending claim was already released"
+            );
         }
 
         // Notify other players. Recorded for replay BEFORE delivery (the

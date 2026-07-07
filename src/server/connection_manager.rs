@@ -563,6 +563,46 @@ impl ConnectionManager {
         }
     }
 
+    /// Undo a reconnect identity swap after the post-reassign restore path fails.
+    ///
+    /// `reassign_connection` must run before the reconnect baseline is built so
+    /// the payload can read the restored player's negotiated protocol and fresh
+    /// epoch. If that baseline cannot be enqueued, the WebSocket task keeps using
+    /// `current_player_id` because `handle_reconnect` returns `false`; restore the
+    /// connection map to match that task before it handles more teardown or input.
+    pub fn restore_reassigned_connection(
+        &self,
+        current_player_id: &PlayerId,
+        reconnect_player_id: &PlayerId,
+    ) -> Option<ClientDeliveryHandle> {
+        if self.clients.contains_key(current_player_id) {
+            return None;
+        }
+
+        let (_, reassigned_connection) = self.clients.remove(reconnect_player_id)?;
+
+        let delivery = reassigned_connection.delivery_handle();
+        let restored_client = ClientConnection {
+            room_id: None,
+            last_ping: Instant::now(),
+            last_heartbeat_update: None,
+            sender: delivery.sender.clone(),
+            close: delivery.close.clone(),
+            client_addr: reassigned_connection.client_addr,
+            game_data_format: reassigned_connection.game_data_format,
+            app_info: reassigned_connection.app_info,
+            protocol: reassigned_connection.protocol,
+            transport_status: None,
+            game_data_seq: 0,
+            game_data_epoch: 0,
+        };
+
+        self.clients.insert(*current_player_id, restored_client);
+        self.metrics
+            .rekey_connection_delivery_stats(reconnect_player_id, *current_player_id);
+        Some(delivery)
+    }
+
     /// Request a close for `player_id`'s connection with an explicit reason,
     /// without unregistering it here (the caller's own teardown follows).
     /// First requested reason wins, so callers use this to pin a SPECIFIC

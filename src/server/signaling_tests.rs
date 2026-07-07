@@ -9,7 +9,7 @@
 
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    SessionConfig, TransportSecurityConfig, TurnConfig,
+    SessionConfig, TransportSecurityConfig, TurnConfig, WebSocketConfig,
 };
 use crate::database::{DatabaseConfig, InMemoryDatabase};
 use crate::protocol::{
@@ -46,6 +46,24 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
     create_test_server_with_signals(600).await
 }
 
+async fn create_test_server_with_config(config: ServerConfig) -> Arc<EnhancedGameServer> {
+    EnhancedGameServer::new(
+        config,
+        ProtocolConfig::default(),
+        RelayTypeConfig::default(),
+        SessionConfig::default(),
+        TurnConfig::default(),
+        DatabaseConfig::InMemory,
+        MetricsConfig::default(),
+        AuthMaintenanceConfig::default(),
+        CoordinationConfig::default(),
+        TransportSecurityConfig::default(),
+        Vec::new(),
+    )
+    .await
+    .expect("failed to construct test server")
+}
+
 async fn create_test_server_with_signals(max_signals: u32) -> Arc<EnhancedGameServer> {
     create_test_server_with_signal_limits(max_signals, 60).await
 }
@@ -73,21 +91,7 @@ async fn create_test_server_with_signal_policy(
         },
         ..ServerConfig::default()
     };
-    EnhancedGameServer::new(
-        config,
-        ProtocolConfig::default(),
-        RelayTypeConfig::default(),
-        SessionConfig::default(),
-        TurnConfig::default(),
-        DatabaseConfig::InMemory,
-        MetricsConfig::default(),
-        AuthMaintenanceConfig::default(),
-        CoordinationConfig::default(),
-        TransportSecurityConfig::default(),
-        Vec::new(),
-    )
-    .await
-    .expect("failed to construct test server")
+    create_test_server_with_config(config).await
 }
 
 /// Build a server whose session policy is the given `SessionConfig`, so the
@@ -291,7 +295,14 @@ async fn finalize_db_room(server: &EnhancedGameServer, room_id: &uuid::Uuid, pla
 async fn register_client(
     server: &EnhancedGameServer,
 ) -> (PlayerId, mpsc::Receiver<Arc<ServerMessage>>) {
-    let (sender, receiver) = mpsc::channel(16);
+    register_client_with_queue_capacity(server, 16).await
+}
+
+async fn register_client_with_queue_capacity(
+    server: &EnhancedGameServer,
+    capacity: usize,
+) -> (PlayerId, mpsc::Receiver<Arc<ServerMessage>>) {
+    let (sender, receiver) = mpsc::channel(capacity);
     let player_id = server
         .connection_manager
         .register_client(
@@ -2907,6 +2918,124 @@ async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
         .handle_reconnect(&replacement, &reconnecting, &room_id, &token)
         .await;
     assert!(second_attempt, "same token should retry successfully");
+    match recv(&mut replacement_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+        }
+        other => panic!("expected Reconnected after retry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_retry() {
+    let server = create_test_server_with_config(ServerConfig {
+        websocket_config: WebSocketConfig {
+            slow_consumer_timeout_ms: 1,
+            ..WebSocketConfig::default()
+        },
+        ..ServerConfig::default()
+    })
+    .await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client_with_queue_capacity(&server, 1).await;
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    assert!(
+        server
+            .message_coordinator
+            .try_send_to_player(&current, Arc::new(ServerMessage::Pong))
+            .await
+            .expect("prefill current queue"),
+        "test setup must fill the one-slot reconnect response queue"
+    );
+
+    let first_attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        !first_attempt,
+        "reconnect must fail when the Reconnected baseline is not queued"
+    );
+    assert!(
+        server.connection_manager.has_client(&current),
+        "failed baseline delivery must restore the temporary connection id"
+    );
+    assert!(
+        !server.connection_manager.has_client(&reconnecting),
+        "failed baseline delivery must not leave the restored id registered"
+    );
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("baseline delivery failure must release claim for retry");
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    assert!(
+        !members.iter().any(|player| player.id == reconnecting),
+        "failed baseline delivery must roll back restored room membership"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Pong => {}
+        other => panic!("expected the prefilled Pong, got {other:?}"),
+    }
+
+    let (replacement, mut replacement_rx) = register_client(&server).await;
+    server.set_client_protocol(&replacement, v3_webrtc());
+    let second_attempt = server
+        .handle_reconnect(&replacement, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        second_attempt,
+        "same token should retry successfully after baseline delivery failure"
+    );
     match recv(&mut replacement_rx).await.as_ref() {
         ServerMessage::Reconnected(payload) => {
             assert_eq!(payload.player_id, reconnecting);
