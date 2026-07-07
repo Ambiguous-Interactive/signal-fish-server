@@ -1184,6 +1184,7 @@ fn golden_enum_error_code_all_variants() {
         (ErrorCode::GameStartForbidden, r#""GAME_START_FORBIDDEN""#),
         (ErrorCode::SlowConsumer, r#""SLOW_CONSUMER""#),
         (ErrorCode::ActivityTimeout, r#""ACTIVITY_TIMEOUT""#),
+        (ErrorCode::ServerDraining, r#""SERVER_DRAINING""#),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1242,12 +1243,13 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::GameStartNotReady
         | ErrorCode::GameStartForbidden
         | ErrorCode::SlowConsumer
-        | ErrorCode::ActivityTimeout => (),
+        | ErrorCode::ActivityTimeout
+        | ErrorCode::ServerDraining => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        50,
+        51,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

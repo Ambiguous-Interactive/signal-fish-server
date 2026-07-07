@@ -33,6 +33,10 @@ pub(super) enum JoinRoomError {
     /// (→ `MAX_ROOMS_PER_GAME_EXCEEDED`).
     #[error(transparent)]
     MaxRoomsPerGameExceeded(#[from] MaxRoomsPerGameExceededError),
+    /// The server is draining for shutdown and must not create new rooms
+    /// (→ `SERVER_DRAINING`).
+    #[error("Server is draining for shutdown")]
+    ServerDraining,
     /// Any other failure — storage, lock, name validation, broadcast — an
     /// infrastructure fault that must NOT masquerade as a specific business
     /// rejection (→ `ROOM_CREATION_FAILED`).
@@ -47,6 +51,7 @@ impl JoinRoomError {
         match self {
             Self::RoomFull => ErrorCode::RoomFull,
             Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
+            Self::ServerDraining => ErrorCode::ServerDraining,
             Self::Internal(_) => ErrorCode::RoomCreationFailed,
         }
     }
@@ -80,8 +85,16 @@ impl EnhancedGameServer {
         );
         let _span_guard = room_join_span.enter();
 
-        // Rate limiting check
         let is_room_creation = room_code.is_none();
+        if self
+            .join_would_create_room_while_draining(&game_name, room_code.as_deref())
+            .await
+        {
+            self.reject_join_for_shutdown_drain(player_id).await;
+            return;
+        }
+
+        // Rate limiting check
         let rate_limit_result = if is_room_creation {
             self.rate_limiter.check_room_creation(player_id).await
         } else {
@@ -536,6 +549,10 @@ impl EnhancedGameServer {
                 }
             }
             Ok(None) => {
+                if self.is_draining() {
+                    return Err(JoinRoomError::ServerDraining);
+                }
+
                 // Enforce per-game room cap before creating a new room
                 let cap_lock_key = format!("game_room_cap:{game_name}");
                 match self
@@ -626,5 +643,42 @@ impl EnhancedGameServer {
 
         let _ = self.distributed_lock.release(&lock_handle).await;
         result
+    }
+
+    async fn join_would_create_room_while_draining(
+        &self,
+        game_name: &str,
+        room_code: Option<&str>,
+    ) -> bool {
+        if !self.is_draining() {
+            return false;
+        }
+
+        let Some(room_code) = room_code else {
+            return true;
+        };
+
+        if validation::validate_room_code_with_config(room_code, &self.protocol_config).is_err() {
+            return false;
+        }
+
+        let room_code = room_code.to_uppercase();
+        matches!(
+            self.database.get_room(game_name, &room_code).await,
+            Ok(None)
+        )
+    }
+
+    async fn reject_join_for_shutdown_drain(&self, player_id: &PlayerId) {
+        let _ = self
+            .message_coordinator
+            .send_to_player(
+                player_id,
+                Arc::new(ServerMessage::RoomJoinFailed {
+                    reason: "Server is draining for shutdown".to_string(),
+                    error_code: Some(crate::protocol::ErrorCode::ServerDraining),
+                }),
+            )
+            .await;
     }
 }

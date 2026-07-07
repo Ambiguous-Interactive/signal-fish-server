@@ -2,11 +2,11 @@
 //! additions.
 //!
 //! v3 is additive over the frozen v2 floor: the server-stamped `GameData.seq` /
-//! `GameDataBinary.seq` relay sequence + incarnation `epoch`, and the opt-in
-//! `RelayStats` frame. The pre-v3 (v2) forms (`seq: None`, no RelayStats) are
-//! frozen byte-for-byte in `tests/v2_wire_golden.rs`, which MUST keep passing
-//! unchanged; this file freezes the v3-recipient forms with the same assertion
-//! strategy:
+//! `GameDataBinary.seq` relay sequence + incarnation `epoch`, the opt-in
+//! `RelayStats` frame, and the shutdown-drain `GoingAway` advisory. The pre-v3
+//! (v2) forms (`seq: None`, no RelayStats/GoingAway) are frozen byte-for-byte in
+//! `tests/v2_wire_golden.rs`, which MUST keep passing unchanged; this file
+//! freezes the v3-recipient forms with the same assertion strategy:
 //!
 //! - JSON: structural equality against a `json!` value AND a raw-string
 //!   assertion to catch field-name / casing / ordering drift.
@@ -209,6 +209,26 @@ fn golden_server_relay_stats() {
         r#"{"type":"RelayStats","data":{"interval_ms":1000,"sent_to_you":128,"dropped_for_you":2,"backpressure_events":5}}"#,
     );
     assert_msgpack(&msg, "82a474797065aa52656c61795374617473a46461746184ab696e74657276616c5f6d73cd03e8ab73656e745f746f5f796f75cc80af64726f707065645f666f725f796f7502b36261636b70726573737572655f6576656e747305");
+}
+
+#[test]
+fn golden_server_going_away() {
+    let msg = ServerMessage::GoingAway {
+        deadline_ms: 1_700_000_000_000,
+        retry_after_secs: Some(30),
+    };
+    assert_json(
+        &msg,
+        json!({
+            "type": "GoingAway",
+            "data": {
+                "deadline_ms": 1700000000000_u64,
+                "retry_after_secs": 30
+            }
+        }),
+        r#"{"type":"GoingAway","data":{"deadline_ms":1700000000000,"retry_after_secs":30}}"#,
+    );
+    assert_msgpack(&msg, "82a474797065a9476f696e6741776179a46461746182ab646561646c696e655f6d73cf0000018bcfe56800b072657472795f61667465725f736563731e");
 }
 
 // ===========================================================================
@@ -435,5 +455,36 @@ fn v3_relay_stats_round_trips_json_and_msgpack() {
     match rmp_serde::from_slice::<ServerMessage>(&mp).expect("msgpack round-trip") {
         ServerMessage::RelayStats { sent_to_you, .. } => assert_eq!(sent_to_you, u64::MAX),
         other => panic!("expected RelayStats, got {other:?}"),
+    }
+}
+
+#[test]
+fn v3_going_away_round_trips_json_and_msgpack() {
+    for retry_after_secs in [Some(1), None] {
+        let msg = ServerMessage::GoingAway {
+            deadline_ms: 1_700_000_000_001,
+            retry_after_secs,
+        };
+
+        let json = serde_json::to_string(&msg).expect("json");
+        match serde_json::from_str::<ServerMessage>(&json).expect("json round-trip") {
+            ServerMessage::GoingAway {
+                deadline_ms,
+                retry_after_secs: actual_retry_after_secs,
+            } => {
+                assert_eq!(deadline_ms, 1_700_000_000_001);
+                assert_eq!(actual_retry_after_secs, retry_after_secs);
+            }
+            other => panic!("expected GoingAway, got {other:?}"),
+        }
+
+        let mp = rmp_serde::to_vec_named(&msg).expect("msgpack");
+        match rmp_serde::from_slice::<ServerMessage>(&mp).expect("msgpack round-trip") {
+            ServerMessage::GoingAway {
+                retry_after_secs: actual_retry_after_secs,
+                ..
+            } => assert_eq!(actual_retry_after_secs, retry_after_secs),
+            other => panic!("expected GoingAway, got {other:?}"),
+        }
     }
 }

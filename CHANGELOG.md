@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added graceful shutdown drain (P10.E3). `SIGTERM`/Ctrl-C now stop new WebSocket
+  upgrades, reject room-creating joins with `SERVER_DRAINING`, send v3 clients a
+  best-effort `GoingAway { deadline_ms, retry_after_secs }` advisory, then close
+  remaining sockets with `4000 server_shutdown` after `server.drain_grace_secs`
+  (default 30; `0` closes immediately). Shutdown-drain closes do not arm
+  reconnection tokens because the single instance is exiting; clients should
+  create or join a fresh room on another healthy instance.
 - Added v3-only `Reconnected.sender_watermarks` (P10.E5). A v3 reconnect now
   carries every current room member's authoritative `(epoch, seq)` relay tail,
   allowing clients to re-baseline after missed `GameData` that is deliberately

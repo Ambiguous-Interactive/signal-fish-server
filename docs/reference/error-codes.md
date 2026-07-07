@@ -173,6 +173,7 @@ that may resolve on retry.
 | `INTERNAL_ERROR` | An internal server error occurred. Try again or contact support. |
 | `STORAGE_ERROR` | A storage error occurred while processing the request. |
 | `SERVICE_UNAVAILABLE` | The service is temporarily unavailable. Try again in a few moments. |
+| `SERVER_DRAINING` | The server is draining for shutdown. New room creation is rejected; existing sockets will close with `4000 server_shutdown` at the drain deadline. |
 
 ---
 
@@ -204,6 +205,9 @@ fn handle_server_error(error: &ServerError) {
         }
         "RECONNECTION_EXPIRED" => {
             println!("Reconnection window expired. Joining as a new player.");
+        }
+        "SERVER_DRAINING" => {
+            println!("Server is draining. Retry on another healthy instance.");
         }
         "ROOM_NOT_FOUND" => {
             println!("Room not found. It may have been closed.");
@@ -246,6 +250,14 @@ with your per-minute, per-hour, and per-day limits.
 The reconnection window has closed since the client disconnected. The
 stored `auth_token` is no longer valid. The client must rejoin the room
 as a new player by sending a fresh `JoinRoom` message.
+
+### Server draining (`SERVER_DRAINING`)
+
+The process is shutting down gracefully. New room creation is refused during the
+drain, and connected sockets close with WebSocket code `4000` and reason
+`server_shutdown` at the drain deadline. Protocol v3 clients may first receive
+`GoingAway`; v2 clients see only the close frame. Retry on another healthy
+instance and create or join a fresh room.
 
 ### Invalid input (`INVALID_INPUT`)
 

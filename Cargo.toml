@@ -31,6 +31,7 @@ tls = ["axum-server", "rustls", "rustls-pki-types"]
 tokio = { version = "1.52", features = [
     "rt-multi-thread",
     "macros",
+    "signal",
     "sync",
     "time",
 ] }

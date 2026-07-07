@@ -71,6 +71,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("60"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SERVER__DRAIN_GRACE_SECS",
+        path: "server.drain_grace_secs",
+        default: Some("30"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME",
         path: "server.max_rooms_per_game",
         default: Some("1000"),
@@ -783,6 +788,7 @@ fn test_config_default_values() {
     assert_eq!(config.server.default_max_players, 8);
     assert_eq!(config.server.ping_timeout, 30);
     assert_eq!(config.server.room_cleanup_interval, 60);
+    assert_eq!(config.server.drain_grace_secs, 30);
     assert_eq!(config.server.max_rooms_per_game, 1000);
     assert_eq!(config.server.empty_room_timeout, 300);
     assert_eq!(config.server.inactive_room_timeout, 3600);

@@ -39,6 +39,10 @@ pub const fn default_room_cleanup_interval() -> u64 {
     60
 }
 
+pub const fn default_drain_grace_secs() -> u64 {
+    30
+}
+
 pub const fn default_max_rooms_per_game() -> usize {
     1000
 }

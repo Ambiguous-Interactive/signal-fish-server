@@ -14,7 +14,12 @@ use signal_fish_server::security::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket;
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::watch;
+
+// Mirrors the websocket close-frame flush timeout; shutdown should wait long
+// enough for semantic 4000 close frames, but not extend the drain indefinitely.
+const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
@@ -113,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
         default_max_players: cfg.server.default_max_players,
         ping_timeout: tokio::time::Duration::from_secs(cfg.server.ping_timeout),
         room_cleanup_interval: tokio::time::Duration::from_secs(cfg.server.room_cleanup_interval),
+        drain_grace: tokio::time::Duration::from_secs(cfg.server.drain_grace_secs),
         max_rooms_per_game: cfg.server.max_rooms_per_game,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: cfg.rate_limit.max_room_creations,
@@ -157,11 +163,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Start cleanup task
     let cleanup_server = game_server.clone();
-    tokio::spawn(async move {
-        cleanup_server.cleanup_task().await;
+    let cleanup_shutdown_rx = shutdown_rx.clone();
+    let cleanup_task = tokio::spawn(async move {
+        cleanup_server
+            .cleanup_task_until(wait_for_shutdown(cleanup_shutdown_rx))
+            .await;
     });
+
+    let shutdown_server = game_server.clone();
+    let shutdown_task = tokio::spawn(run_shutdown_drain(shutdown_server, shutdown_tx.clone()));
 
     // Create enhanced protocol router with CORS configuration
     let enhanced_router =
@@ -257,9 +271,21 @@ async fn main() -> anyhow::Result<()> {
             "Server started over HTTPS with TLS enabled - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
         );
 
-        axum_server::bind_rustls(addr, tls_config)
+        let tls_handle = axum_server::Handle::new();
+        let tls_shutdown_handle = tls_handle.clone();
+        let tls_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown(tls_shutdown_rx).await;
+            tls_shutdown_handle.graceful_shutdown(None);
+        });
+
+        let serve_result = axum_server::bind_rustls(addr, tls_config)
+            .handle(tls_handle)
             .serve(make_service)
-            .await?;
+            .await;
+
+        finish_background_shutdown(shutdown_tx, shutdown_rx, shutdown_task, cleanup_task).await;
+        serve_result?;
 
         return Ok(());
     }
@@ -272,9 +298,106 @@ async fn main() -> anyhow::Result<()> {
         "Server started over HTTP - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
     );
 
-    axum::serve(listener, make_service).await?;
+    let serve_result = axum::serve(listener, make_service)
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+        .await;
+
+    finish_background_shutdown(shutdown_tx, shutdown_rx, shutdown_task, cleanup_task).await;
+    serve_result?;
 
     Ok(())
+}
+
+async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch::Sender<bool>) {
+    shutdown_signal().await;
+
+    let drain = server.begin_shutdown_drain();
+    tracing::info!(
+        deadline_ms = drain.deadline_ms,
+        grace_ms = drain.grace.as_millis() as u64,
+        "Server shutdown drain started"
+    );
+    let going_away_sent = server.announce_shutdown_drain(drain).await;
+    tracing::info!(going_away_sent, "Shutdown GoingAway advisories enqueued");
+
+    let _ = shutdown_tx.send(true);
+
+    if drain.grace > std::time::Duration::ZERO {
+        tokio::time::sleep(drain.grace).await;
+    }
+
+    let close_requests = server.close_connections_for_shutdown();
+    tracing::info!(close_requests, "Shutdown close requests issued");
+
+    let remaining_connections = server
+        .wait_for_shutdown_connections(SHUTDOWN_CONNECTION_SETTLE_TIMEOUT)
+        .await;
+    if remaining_connections > 0 {
+        tracing::warn!(
+            remaining_connections,
+            settle_ms = SHUTDOWN_CONNECTION_SETTLE_TIMEOUT.as_millis() as u64,
+            "Shutdown drain ended with connections still registered"
+        );
+    }
+}
+
+async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
+    loop {
+        if *shutdown_rx.borrow() {
+            return;
+        }
+        if shutdown_rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn finish_background_shutdown(
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
+    shutdown_task: tokio::task::JoinHandle<()>,
+    cleanup_task: tokio::task::JoinHandle<()>,
+) {
+    let shutdown_started = *shutdown_rx.borrow();
+    let _ = shutdown_tx.send(true);
+    if shutdown_started {
+        let _ = shutdown_task.await;
+    } else {
+        shutdown_task.abort();
+    }
+    let _ = cleanup_task.await;
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %err, "Failed to install Ctrl+C shutdown handler");
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "Failed to install SIGTERM shutdown handler");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            () = ctrl_c => {}
+            () = terminate => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+    }
 }
 
 async fn capture_client_fingerprint(mut req: Request, next: Next) -> Result<Response, Infallible> {

@@ -838,6 +838,7 @@ async fn test_custom_rate_limiting() {
         default_max_players: 8,
         ping_timeout: Duration::from_secs(30),
         room_cleanup_interval: Duration::from_secs(60),
+        drain_grace: Duration::from_secs(30),
         max_rooms_per_game: 1000,
         rate_limit_config: RateLimitConfig {
             max_room_creations: 1,               // Very restrictive for testing

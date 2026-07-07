@@ -30,9 +30,7 @@ use std::sync::Arc;
 /// the disconnect (issue #136, F1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
-    /// The server is shutting down. Defined for the close-code contract;
-    /// no in-process trigger exists today (the binary installs no graceful
-    /// shutdown handler), but embedders and future shutdown paths must use
+    /// The server is shutting down. The binary's graceful shutdown drain uses
     /// this reason rather than overloading `Unregistered`.
     Shutdown,
     /// The connection never completed authentication within

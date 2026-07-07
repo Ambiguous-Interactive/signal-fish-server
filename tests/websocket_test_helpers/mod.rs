@@ -359,5 +359,6 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::Error { .. } => "Error",
         ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
         ServerMessage::RelayStats { .. } => "RelayStats",
+        ServerMessage::GoingAway { .. } => "GoingAway",
     }
 }

@@ -174,6 +174,135 @@ async fn max_room_cap_denial_releases_join_coordination_locks() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
+    let server = create_test_server().await;
+
+    let drain = server.begin_shutdown_drain();
+    assert!(
+        drain.started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    for (room_code, port) in [(None, 48009), (Some("MISSNG"), 48010)] {
+        let (player_id, mut receiver) =
+            register_client(&server, format!("127.0.0.1:{port}").parse().unwrap()).await;
+
+        server
+            .handle_join_room(
+                &player_id,
+                "test-game".to_string(),
+                room_code.map(str::to_string),
+                "player".to_string(),
+                Some(4),
+                Some(true),
+                None,
+            )
+            .await;
+
+        let response = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("channel still open")
+            .expect("join failure message present");
+        match response.as_ref() {
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                assert_eq!(
+                    *error_code,
+                    Some(ErrorCode::ServerDraining),
+                    "room creation during drain should be reported as SERVER_DRAINING"
+                );
+                assert!(
+                    reason.contains("draining"),
+                    "rejection reason should mention draining: {reason}"
+                );
+            }
+            other => panic!("expected RoomJoinFailed, got {other:?}"),
+        }
+
+        if let Some(code) = room_code {
+            assert!(
+                server
+                    .database
+                    .get_room("test-game", code)
+                    .await
+                    .expect("room lookup succeeds")
+                    .is_none(),
+                "provided room code must not be created during drain"
+            );
+            assert!(
+                !server
+                    .distributed_lock
+                    .is_locked(&format!("room_join:test-game:{code}"))
+                    .await
+                    .expect("room join lock check succeeds"),
+                "early drain rejection should happen before room-join lock acquisition"
+            );
+        }
+        assert!(
+            !server
+                .distributed_lock
+                .is_locked("game_room_cap:test-game")
+                .await
+                .expect("room cap lock check succeeds"),
+            "drain rejection should happen before room-cap lock acquisition"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_server_allows_existing_room_join() {
+    let server = create_test_server().await;
+    let (creator, _creator_rx) = register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
+    server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("EXIST1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+
+    let drain = server.begin_shutdown_drain();
+    assert!(
+        drain.started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:48012".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &joiner,
+            "test-game".to_string(),
+            Some("EXIST1".to_string()),
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("channel still open")
+        .expect("join response present");
+    match response.as_ref() {
+        ServerMessage::RoomJoined(payload) => {
+            assert_eq!(payload.room_code, "EXIST1");
+            assert_eq!(payload.player_id, joiner);
+        }
+        other => panic!("expected RoomJoined, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
     // Regression guard for error-code classification (the same class fixed in
     // `ready_state.rs`/`PlayerReadyError`): a join rejected because the room is

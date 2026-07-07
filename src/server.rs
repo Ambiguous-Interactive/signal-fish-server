@@ -15,6 +15,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
@@ -47,6 +48,7 @@ mod room_service_tests;
 mod session_policy;
 #[cfg(test)]
 mod session_policy_tests;
+mod shutdown;
 mod signaling;
 #[cfg(test)]
 mod signaling_tests;
@@ -104,6 +106,9 @@ pub struct EnhancedGameServer {
     transport_security: crate::config::TransportSecurityConfig,
     /// Cached metrics used by the admin dashboard
     dashboard_metrics_cache: Arc<DashboardMetricsCache>,
+    /// Nonzero once graceful shutdown drain has started; stores the advertised
+    /// Unix epoch millisecond close deadline.
+    shutdown_drain_deadline_ms: AtomicU64,
 }
 
 #[derive(Debug, Error)]
@@ -125,6 +130,7 @@ pub struct ServerConfig {
     pub default_max_players: u8,
     pub ping_timeout: Duration,
     pub room_cleanup_interval: Duration,
+    pub drain_grace: Duration,
     pub max_rooms_per_game: usize,
     pub rate_limit_config: RateLimitConfig,
     pub empty_room_timeout: Duration,
@@ -157,6 +163,7 @@ impl Default for ServerConfig {
             default_max_players: 8,
             ping_timeout: Duration::from_secs(30),
             room_cleanup_interval: Duration::from_secs(60),
+            drain_grace: Duration::from_secs(30),
             max_rooms_per_game: 1000,
             rate_limit_config: RateLimitConfig::default(),
             empty_room_timeout: Duration::from_secs(300),
@@ -306,6 +313,7 @@ impl EnhancedGameServer {
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
+            shutdown_drain_deadline_ms: AtomicU64::new(0),
         });
 
         Ok(server)
@@ -516,6 +524,7 @@ impl EnhancedGameServer {
     /// Unregister a client connection
     pub async fn unregister_client(&self, player_id: &PlayerId) {
         // Check if player is in a room and register for reconnection
+        let draining = self.is_draining();
         let (room_id_opt, was_authority) = {
             let room_id = self.get_client_room(player_id).await;
             let was_authority = if let Some(ref room_id) = room_id {
@@ -537,7 +546,9 @@ impl EnhancedGameServer {
             .await;
 
         // Register disconnection for potential reconnection (before removing from room)
-        if let Some(room_id) = room_id_opt {
+        if draining {
+            self.discard_pre_issued_reconnection_token(player_id).await;
+        } else if let Some(room_id) = room_id_opt {
             self.register_disconnection_for_reconnect(player_id, room_id, was_authority)
                 .await;
         } else {
@@ -548,7 +559,7 @@ impl EnhancedGameServer {
 
         // Remove from room if joined
         if let Some(room_id) = room_id_opt {
-            tracing::info!(%player_id, %room_id, "Removing player from room during unregister");
+            tracing::info!(%player_id, %room_id, draining, "Removing player from room during unregister");
             self.leave_room(player_id).await;
             // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
             // Tests should properly handle the asynchronous nature of message delivery

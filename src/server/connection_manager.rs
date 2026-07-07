@@ -511,6 +511,15 @@ impl ConnectionManager {
         self.clients.contains_key(player_id)
     }
 
+    /// Snapshot currently registered client ids.
+    pub fn client_ids(&self) -> Vec<PlayerId> {
+        self.clients.iter().map(|entry| *entry.key()).collect()
+    }
+
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
     pub fn reassign_connection(
         &self,
         current_player_id: &PlayerId,

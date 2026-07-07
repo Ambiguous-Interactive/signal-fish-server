@@ -566,6 +566,26 @@ pub enum ServerMessage {
         /// and is pacing its room's senders.
         backpressure_events: u64,
     },
+    /// Server shutdown advisory (v3 only).
+    ///
+    /// Emitted best-effort when the process starts a graceful drain. Clients
+    /// should stop creating new rooms, prepare to reconnect after the close,
+    /// and expect the server to close the WebSocket with private close code
+    /// `4000` (`server_shutdown`) at or before `deadline_ms`. Pre-v3
+    /// recipients never receive this message; every recipient still receives
+    /// the semantic close frame.
+    ///
+    /// NOTE: appended at the END of the enum (after `RelayStats`) so any
+    /// future positional/discriminant-sensitive encoding keeps prior
+    /// discriminants stable; the current wire encodings are name-based.
+    GoingAway {
+        /// Unix epoch millisecond deadline when the server will force-close
+        /// remaining sockets with close code 4000.
+        deadline_ms: u64,
+        /// Optional operator hint for client retry backoff.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u64>,
+    },
 }
 
 /// Custom serde module for `bytes::Bytes` serialization

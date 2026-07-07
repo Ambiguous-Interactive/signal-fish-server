@@ -1,12 +1,12 @@
 //! Server behavior configuration types.
 
 use super::defaults::{
-    default_empty_room_timeout, default_enable_reconnection, default_event_buffer_size,
-    default_heartbeat_throttle_secs, default_inactive_room_timeout, default_max_join_attempts,
-    default_max_players, default_max_room_creations, default_max_rooms_per_game,
-    default_max_signal_errors, default_max_signals, default_ping_timeout,
-    default_rate_limit_time_window, default_reconnection_window, default_region_id,
-    default_room_cleanup_interval,
+    default_drain_grace_secs, default_empty_room_timeout, default_enable_reconnection,
+    default_event_buffer_size, default_heartbeat_throttle_secs, default_inactive_room_timeout,
+    default_max_join_attempts, default_max_players, default_max_room_creations,
+    default_max_rooms_per_game, default_max_signal_errors, default_max_signals,
+    default_ping_timeout, default_rate_limit_time_window, default_reconnection_window,
+    default_region_id, default_room_cleanup_interval,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,10 @@ pub struct ServerConfig {
     /// Interval for room cleanup task (seconds)
     #[serde(default = "default_room_cleanup_interval")]
     pub room_cleanup_interval: u64,
+    /// Grace period between shutdown drain start and forced close 4000 (seconds).
+    /// Set to 0 to retain legacy immediate shutdown behavior.
+    #[serde(default = "default_drain_grace_secs")]
+    pub drain_grace_secs: u64,
     /// Maximum number of rooms per game
     #[serde(default = "default_max_rooms_per_game")]
     pub max_rooms_per_game: usize,
@@ -62,6 +66,7 @@ impl Default for ServerConfig {
             default_max_players: default_max_players(),
             ping_timeout: default_ping_timeout(),
             room_cleanup_interval: default_room_cleanup_interval(),
+            drain_grace_secs: default_drain_grace_secs(),
             max_rooms_per_game: default_max_rooms_per_game(),
             empty_room_timeout: default_empty_room_timeout(),
             inactive_room_timeout: default_inactive_room_timeout(),

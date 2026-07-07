@@ -1,5 +1,6 @@
 use crate::protocol::RoomId;
 use std::collections::HashSet;
+use std::future::Future;
 
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
@@ -78,6 +79,11 @@ impl EnhancedGameServer {
     /// application mapping cleanup) only happen once per room, even if multiple
     /// instances attempt cleanup simultaneously.
     pub async fn cleanup_task(&self) {
+        self.cleanup_task_until(std::future::pending::<()>()).await;
+    }
+
+    /// Cleanup task variant that exits when `shutdown` resolves.
+    pub async fn cleanup_task_until(&self, shutdown: impl Future<Output = ()>) {
         // Clamp to a 1s floor: `room_cleanup_interval` is validated `> 0` at
         // startup (`validate_config_security`), but guard here too because the
         // server is constructible directly via the public API, and
@@ -90,9 +96,19 @@ impl EnhancedGameServer {
         );
         let empty_timeout = chrono_duration_from_std(self.config.empty_room_timeout);
         let inactive_timeout = chrono_duration_from_std(self.config.inactive_room_timeout);
+        tokio::pin!(shutdown);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                () = &mut shutdown => {
+                    tracing::info!(
+                        instance_id = %self.instance_id,
+                        "Cleanup task stopping for server shutdown"
+                    );
+                    break;
+                }
+                _ = interval.tick() => {}
+            }
 
             // Cleanup expired clients
             let expired_clients = self

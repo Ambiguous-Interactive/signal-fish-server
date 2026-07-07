@@ -23,7 +23,7 @@ mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::ProtocolConfig;
-use signal_fish_server::protocol::ClientMessage;
+use signal_fish_server::protocol::{ClientMessage, RoomJoinedPayload, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
 use std::sync::Arc;
@@ -107,6 +107,22 @@ async fn authenticate(ws: &mut WsStream) {
         platform: None,
         game_data_format: None,
         protocol_version: Some(2),
+        supported_transports: None,
+        supported_topologies: None,
+    };
+    let json = serde_json::to_string(&auth).expect("serialize Authenticate");
+    ws.send(Message::Text(json.into()))
+        .await
+        .expect("send Authenticate");
+}
+
+async fn authenticate_v3(ws: &mut WsStream) {
+    let auth = ClientMessage::Authenticate {
+        app_id: "close-code-test".to_string(),
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version: Some(3),
         supported_transports: None,
         supported_topologies: None,
     };
@@ -227,6 +243,68 @@ async fn idle_timeout_closes_with_4004() {
     assert_eq!(reason, "idle_timeout");
 }
 
+/// A shutdown drain sends the v3 `GoingAway` advisory, then closes with
+/// `4000 server_shutdown`. The disconnect must not create a pending
+/// reconnection record: a shutting-down single-process server cannot honor
+/// instance-local reconnect state after exit.
+#[tokio::test]
+async fn shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record() {
+    let mut config = base_config();
+    config.drain_grace = tokio::time::Duration::from_secs(1);
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("test config enables reconnection");
+    let addr = start_server(server.clone()).await;
+
+    let mut ws = connect(addr).await;
+    authenticate_v3(&mut ws).await;
+    let joined = join_payload(&mut ws, "ShutdownPeer").await;
+    assert!(
+        joined.reconnection_token.is_some(),
+        "v3 join should pre-issue a reconnect token so shutdown can prove it is discarded"
+    );
+    let player_id = joined.player_id;
+
+    let drain = server.begin_shutdown_drain();
+    assert!(
+        drain.started_by_this_call,
+        "test should be the first drain initiator"
+    );
+    assert_eq!(server.announce_shutdown_drain(drain).await, 1);
+    assert_eq!(
+        server.close_connections_for_shutdown(),
+        1,
+        "shutdown should request close for the connected peer"
+    );
+
+    let (deadline_ms, retry_after_secs) = read_going_away(&mut ws).await;
+    assert_eq!(deadline_ms, drain.deadline_ms);
+    assert_eq!(retry_after_secs, Some(1));
+
+    let (code, reason) = read_close_frame(&mut ws, "shutdown drain").await;
+    assert_eq!(code, 4000, "shutdown must close with 4000 ({reason})");
+    assert_eq!(reason, "server_shutdown");
+
+    let deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
+    loop {
+        if server.get_client_room(&player_id).await.is_none() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "shutdown disconnect did not unregister the player"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !reconnection_manager
+            .has_pending_reconnection(&player_id)
+            .await,
+        "shutdown drain-close must not leave a claimable reconnection record"
+    );
+}
+
 /// Join a room over a whole `WsStream` (drains until `RoomJoined`).
 async fn join(ws: &mut WsStream, player_name: &str) {
     let join = ClientMessage::JoinRoom {
@@ -242,6 +320,56 @@ async fn join(ws: &mut WsStream, player_name: &str) {
         .await
         .expect("send JoinRoom");
     wait_for_room_joined(ws, player_name).await;
+}
+
+async fn join_payload(ws: &mut WsStream, player_name: &str) -> Box<RoomJoinedPayload> {
+    let join = ClientMessage::JoinRoom {
+        game_name: "close_code_game".to_string(),
+        room_code: Some("CLOSE2".to_string()),
+        player_name: player_name.to_string(),
+        max_players: Some(4),
+        supports_authority: Some(false),
+        relay_transport: None,
+    };
+    let json = serde_json::to_string(&join).expect("serialize JoinRoom");
+    ws.send(Message::Text(json.into()))
+        .await
+        .expect("send JoinRoom");
+    loop {
+        let frame = tokio::time::timeout(CLOSE_DEADLINE, ws.next())
+            .await
+            .expect("timed out waiting for RoomJoined")
+            .expect("connection closed while joining")
+            .expect("websocket error while joining");
+        let Message::Text(text) = frame else { continue };
+        let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
+        match message {
+            ServerMessage::RoomJoined(payload) => return payload,
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("join failed for {player_name}: {reason} ({error_code:?})")
+            }
+            _ => continue,
+        }
+    }
+}
+
+async fn read_going_away(ws: &mut WsStream) -> (u64, Option<u64>) {
+    loop {
+        let frame = tokio::time::timeout(CLOSE_DEADLINE, ws.next())
+            .await
+            .expect("timed out waiting for GoingAway")
+            .expect("connection closed before GoingAway")
+            .expect("websocket error while waiting for GoingAway");
+        let Message::Text(text) = frame else { continue };
+        let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
+        if let ServerMessage::GoingAway {
+            deadline_ms,
+            retry_after_secs,
+        } = message
+        {
+            return (deadline_ms, retry_after_secs);
+        }
+    }
 }
 
 async fn wait_for_room_joined(ws: &mut WsStream, player_name: &str) {
