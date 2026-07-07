@@ -431,6 +431,17 @@ impl ConnectionManager {
         })
     }
 
+    /// Read the current relay stamp without advancing the sequence counter.
+    /// Used for v3 `Reconnected.sender_watermarks`: a reconnecting client needs
+    /// the sender's authoritative tail (`seq` may be 0 when that sender has not
+    /// relayed any game data in this incarnation), not a newly allocated stamp.
+    pub fn current_relay_stamp(&self, player_id: &PlayerId) -> Option<RelayStamp> {
+        self.clients.get(player_id).map(|client| RelayStamp {
+            seq: client.game_data_seq,
+            epoch: client.game_data_epoch,
+        })
+    }
+
     /// Read the current incarnation [`epoch`](ClientConnection::game_data_epoch)
     /// for `player_id` without advancing anything. Used when building v3 room
     /// snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a recipient
@@ -550,6 +561,46 @@ impl ConnectionManager {
         } else {
             None
         }
+    }
+
+    /// Undo a reconnect identity swap after the post-reassign restore path fails.
+    ///
+    /// `reassign_connection` must run before the reconnect baseline is built so
+    /// the payload can read the restored player's negotiated protocol and fresh
+    /// epoch. If that baseline cannot be enqueued, the WebSocket task keeps using
+    /// `current_player_id` because `handle_reconnect` returns `false`; restore the
+    /// connection map to match that task before it handles more teardown or input.
+    pub fn restore_reassigned_connection(
+        &self,
+        current_player_id: &PlayerId,
+        reconnect_player_id: &PlayerId,
+    ) -> Option<ClientDeliveryHandle> {
+        if self.clients.contains_key(current_player_id) {
+            return None;
+        }
+
+        let (_, reassigned_connection) = self.clients.remove(reconnect_player_id)?;
+
+        let delivery = reassigned_connection.delivery_handle();
+        let restored_client = ClientConnection {
+            room_id: None,
+            last_ping: Instant::now(),
+            last_heartbeat_update: None,
+            sender: delivery.sender.clone(),
+            close: delivery.close.clone(),
+            client_addr: reassigned_connection.client_addr,
+            game_data_format: reassigned_connection.game_data_format,
+            app_info: reassigned_connection.app_info,
+            protocol: reassigned_connection.protocol,
+            transport_status: None,
+            game_data_seq: 0,
+            game_data_epoch: 0,
+        };
+
+        self.clients.insert(*current_player_id, restored_client);
+        self.metrics
+            .rekey_connection_delivery_stats(reconnect_player_id, *current_player_id);
+        Some(delivery)
     }
 
     /// Request a close for `player_id`'s connection with an explicit reason,

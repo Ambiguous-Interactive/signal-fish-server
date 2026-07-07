@@ -211,6 +211,15 @@ pub struct ReconnectedPayload {
     /// resync from this payload's snapshot fields).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayStatus>,
+    /// Authoritative per-sender relay baseline for this room (v3+ only).
+    ///
+    /// A reconnecting client never receives missed `GameData`; it resyncs from
+    /// the room snapshot. These watermarks tell it the current `(epoch, seq)`
+    /// tail for every current room member so any post-reconnect gap can be
+    /// attributed to its own absence or replay truncation, not silent relay
+    /// loss. Empty — and absent from the wire — for pre-v3 recipients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sender_watermarks: Vec<SenderWatermark>,
     /// Fresh (rotated) reconnection token for this room, replacing the one
     /// just used (v3+ recipients only; absent on the v2 wire via
     /// `skip_serializing_if`). Store it for the NEXT unexpected disconnect —
@@ -219,6 +228,15 @@ pub struct ReconnectedPayload {
     /// `RoomJoinedPayload::reconnection_token`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnection_token: Option<String>,
+}
+
+/// A v3 reconnect baseline for one current room member's relayed game-data
+/// stream.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SenderWatermark {
+    pub player_id: PlayerId,
+    pub epoch: u32,
+    pub seq: u64,
 }
 
 /// Completeness of `Reconnected.missed_events` (v3+ recipients only; the field

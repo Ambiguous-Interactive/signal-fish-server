@@ -1,8 +1,8 @@
 use crate::auth::AppInfo;
 use crate::config::AppAuthEntry;
 use crate::coordination::{
-    ClientDeliveryHandle, ConnectionCloseSignal, DeliveryOutcome, InMemoryRoomOperationCoordinator,
-    MessageCoordinator, RoomOperationCoordinatorTrait,
+    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome,
+    InMemoryRoomOperationCoordinator, MessageCoordinator, RoomOperationCoordinatorTrait,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
@@ -814,6 +814,43 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(())
     }
 
+    async fn broadcast_to_room_except_with_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+    ) -> anyhow::Result<()> {
+        // Lock ordering matches `collect_room_recipients` and reconnect's
+        // initial-message registration path. Holding these read locks while
+        // `build_message` allocates a relay stamp makes stamp allocation and
+        // recipient snapshot one ordered operation relative to reconnect
+        // baselines, which take the write side of the same room lock.
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+
+        let recipients = room_players
+            .get(room_id)
+            .map(|players| {
+                players
+                    .iter()
+                    .filter(|player_id| *player_id != except_player)
+                    .filter_map(|player_id| {
+                        clients
+                            .get(player_id)
+                            .map(|handle| (*player_id, handle.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let message = build_message();
+        drop(clients);
+        drop(room_players);
+
+        self.deliver_to_all(recipients, message).await;
+        Ok(())
+    }
+
     async fn register_local_client(
         &self,
         player_id: PlayerId,
@@ -837,6 +874,76 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             clients.insert(player_id, delivery);
         }
         Ok(())
+    }
+
+    async fn register_local_client_with_initial_message<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        // Lock ordering matches `register_local_client` and
+        // `collect_room_recipients`. While this write lock is held, broadcasts
+        // cannot snapshot room recipients. The reconnect path uses that to:
+        // (1) wait for every pre-existing broadcast snapshot to finish, (2)
+        // capture the sender watermarks, (3) queue `Reconnected`, and (4)
+        // register the player into the room before later broadcasts can route.
+        let mut room_players = self.room_players.write().await;
+        let mut clients = self.local_clients.write().await;
+
+        self.metrics.increment_websocket_delivery_attempts();
+        let stats = self.metrics.connection_delivery_stats(&player_id);
+        let outcome = match delivery.sender.try_send(build_message()) {
+            Ok(()) => {
+                self.metrics.increment_websocket_deliveries_enqueued();
+                if let Some(stats) = &stats {
+                    stats
+                        .sent_to_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                room_players
+                    .entry(room_id)
+                    .or_insert_with(HashSet::new)
+                    .insert(player_id);
+                clients.insert(player_id, delivery);
+                DeliveryOutcome::Delivered
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                tracing::debug!(
+                    %player_id,
+                    %room_id,
+                    "Initial room message skipped: recipient connection already closing"
+                );
+                DeliveryOutcome::ChannelClosed
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics.increment_websocket_backpressure_events();
+                let initiated_close = delivery.close.request_close(CloseReason::SlowConsumer);
+                if initiated_close {
+                    self.metrics.increment_websocket_slow_consumer_disconnects();
+                }
+                self.metrics.increment_websocket_messages_dropped();
+                if let Some(stats) = &stats {
+                    stats
+                        .backpressure_events
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    stats
+                        .dropped_for_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                tracing::warn!(
+                    %player_id,
+                    %room_id,
+                    initiated_close,
+                    "Initial room message queue was full; closing recipient instead of registering it"
+                );
+                DeliveryOutcome::SlowConsumer
+            }
+        };
+
+        Ok(outcome)
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {

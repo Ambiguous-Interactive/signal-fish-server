@@ -357,11 +357,12 @@ room-created response type.
     "supports_authority": true,
     "current_players": [
       {
-        "id": "player-id",
+        "id": "player-id-1",
         "name": "Player 1",
         "is_authority": false,
         "is_ready": false,
-        "connected_at": "2024-01-01T00:00:00Z"
+        "connected_at": "2024-01-01T00:00:00Z",
+        "epoch": 1
       }
     ],
     "is_authority": false,
@@ -670,7 +671,10 @@ traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
 `replay` field (v3+ recipients only) reports the completeness of that list —
 `complete`, `truncated` (the ring evicted an event the player needed, so
 `missed_events` is only a suffix), or `unavailable` (replay disabled,
-`event_buffer_size = 0`). See [Reconnection Flow](#reconnection-flow).
+`event_buffer_size = 0`). v3+ recipients also receive
+`sender_watermarks`, the authoritative `(epoch, seq)` tail for every current
+room member, so they can re-baseline after skipped `GameData`. See
+[Reconnection Flow](#reconnection-flow).
 
 ```json
 
@@ -685,11 +689,12 @@ traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
     "supports_authority": true,
     "current_players": [
       {
-        "id": "player-id",
+        "id": "player-id-1",
         "name": "Player 1",
         "is_authority": false,
         "is_ready": false,
-        "connected_at": "2024-01-01T00:00:00Z"
+        "connected_at": "2024-01-01T00:00:00Z",
+        "epoch": 1
       }
     ],
     "is_authority": false,
@@ -698,7 +703,14 @@ traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
     "relay_type": "matchbox",
     "current_spectators": [],
     "missed_events": [],
-    "replay": "complete"
+    "replay": "complete",
+    "sender_watermarks": [
+      {
+        "player_id": "player-id-1",
+        "epoch": 1,
+        "seq": 42
+      }
+    ]
   }
 }
 
@@ -922,10 +934,12 @@ bounded per-room replay ring and returned in the `Reconnected` payload's
 `missed_events` list, with the `replay` field reporting completeness
 (`complete` / `truncated` / `unavailable`). High-rate data-path traffic
 (`GameData` / `Signal`) is **not** replayed, and a `truncated` or
-`unavailable` replay means control history is incomplete — so clients must
-still treat reconnection as requiring an application-level state resync (for
-example, have the authority or another peer re-send the current game state
-after `PlayerReconnected`).
+`unavailable` replay means control history is incomplete. v3 clients also use
+`sender_watermarks` from `Reconnected` to reset each current member's
+`(epoch, seq)` baseline after their absence; clients must still treat
+reconnection as requiring an application-level state resync (for example, have
+the authority or another peer re-send the current game state after
+`PlayerReconnected`).
 
 ## Protocol v3 additions
 
@@ -1389,10 +1403,13 @@ the backwards `seq` jump to the `epoch` bump directly, rather than having to
 correlate a separately-ordered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected`
 control message. Each member's current epoch is also carried on the room
 snapshots — `RoomJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
-`PlayerReconnected.epoch`, and the `Reconnected` member snapshot — so you can
-baseline a sender's stream before its first relayed frame arrives. Like `seq`,
-`epoch` is stripped for pre-v3 (v2) recipients (their bytes stay byte-identical), so
-its absence and its presence are both part of the frozen wire contract.
+`PlayerReconnected.epoch`, and the `Reconnected` member snapshot — plus
+`Reconnected.sender_watermarks`, which carries each current member's last
+stamped `seq` in that epoch. Together they let a reconnecting client baseline a
+sender's stream before its first post-reconnect frame arrives. Like `seq`,
+`epoch` and `sender_watermarks` are stripped for pre-v3 (v2) recipients (their
+bytes stay byte-identical), so absence and presence are both part of the frozen
+wire contract.
 
 The `epoch` value is only meaningful **relatively**: baseline each sender from
 the `epoch` you first observe for it (on a snapshot or its first frame) and

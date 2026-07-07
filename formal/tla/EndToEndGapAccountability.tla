@@ -1,7 +1,7 @@
 ------------------------ MODULE EndToEndGapAccountability ------------------------
 (***************************************************************************)
 (* The FLAGSHIP end-to-end gap-accountability contract (P10.D4): the       *)
-(* protocol v4 promise that a client, driven ONLY by what the server puts   *)
+(* protocol v3 promise that a client, driven ONLY by what the server puts   *)
 (* on its socket, can classify every sequence discontinuity it ever         *)
 (* observes — and that the reconnection SNAPSHOT heals the tail the server   *)
 (* dropped when it evicted the client. This composes three previously       *)

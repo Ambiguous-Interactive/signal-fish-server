@@ -49,16 +49,19 @@ impl EnhancedGameServer {
     /// Handle JSON game data fan-out with coordination.
     pub async fn handle_game_data(&self, player_id: &PlayerId, data: serde_json::Value) {
         if let Some(room_id) = self.get_client_room(player_id).await {
-            let stamp = self.connection_manager.next_relay_stamp(player_id);
-            self.broadcast_game_data(
+            let connection_manager = &self.connection_manager;
+            self.broadcast_game_data_with(
                 player_id,
                 &room_id,
-                ServerMessage::GameData {
-                    from_player: *player_id,
-                    data,
-                    seq: stamp.map(|s| s.seq),
-                    epoch: stamp.map(|s| s.epoch),
-                },
+                Box::new(move || {
+                    let stamp = connection_manager.next_relay_stamp(player_id);
+                    ServerMessage::GameData {
+                        from_player: *player_id,
+                        data,
+                        seq: stamp.map(|s| s.seq),
+                        epoch: stamp.map(|s| s.epoch),
+                    }
+                }),
             )
             .await;
         }
@@ -99,17 +102,20 @@ impl EnhancedGameServer {
         }
 
         if let Some(room_id) = self.get_client_room(player_id).await {
-            let stamp = self.connection_manager.next_relay_stamp(player_id);
-            self.broadcast_game_data(
+            let connection_manager = &self.connection_manager;
+            self.broadcast_game_data_with(
                 player_id,
                 &room_id,
-                ServerMessage::GameDataBinary {
-                    from_player: *player_id,
-                    encoding,
-                    payload,
-                    seq: stamp.map(|s| s.seq),
-                    epoch: stamp.map(|s| s.epoch),
-                },
+                Box::new(move || {
+                    let stamp = connection_manager.next_relay_stamp(player_id);
+                    ServerMessage::GameDataBinary {
+                        from_player: *player_id,
+                        encoding,
+                        payload,
+                        seq: stamp.map(|s| s.seq),
+                        epoch: stamp.map(|s| s.epoch),
+                    }
+                }),
             )
             .await;
         }
@@ -129,11 +135,11 @@ impl EnhancedGameServer {
     /// cross-instance bus (`distributed::SequencedMessage` serializes the
     /// whole message); the in-memory single-instance coordinator is the only
     /// production backend today, so no remote instance can re-stamp or lose it.
-    async fn broadcast_game_data(
-        &self,
-        player_id: &PlayerId,
+    async fn broadcast_game_data_with<'a>(
+        &'a self,
+        player_id: &'a PlayerId,
         room_id: &RoomId,
-        message: ServerMessage,
+        build_message: Box<dyn FnOnce() -> ServerMessage + Send + 'a>,
     ) {
         // Count every GameData message accepted for relay. This is the sole
         // increment site for the `game_data_messages` metric (both the JSON and
@@ -148,7 +154,11 @@ impl EnhancedGameServer {
 
         if let Err(e) = self
             .message_coordinator
-            .broadcast_to_room_except(room_id, player_id, Arc::new(message))
+            .broadcast_to_room_except_with_message(
+                room_id,
+                player_id,
+                Box::new(move || Arc::new(build_message())),
+            )
             .await
         {
             tracing::error!(

@@ -511,6 +511,24 @@ components:
             PlayerJoined, Reconnected) so a v3 recipient learns each member's
             epoch before that member's first relayed frame. Absent for pre-v3
             recipients (byte-identical wire).
+    SenderWatermark:
+      type: object
+      required: [player_id, epoch, seq]
+      description: >-
+        v3 only: authoritative reconnect baseline for one current room
+        member's relayed GameData stream. `seq` is the last server-stamped
+        relay sequence in that member's current incarnation (0 means none yet);
+        `epoch` is the member's current incarnation epoch. Reconnecting clients
+        use these watermarks to re-baseline after missed GameData is deliberately
+        not replayed.
+      properties:
+        player_id: { $ref: '#/components/schemas/PlayerId' }
+        epoch:
+          type: integer
+          minimum: 1
+        seq:
+          type: integer
+          minimum: 0
     SpectatorInfo:
       type: object
       required: [id, name, connected_at]
@@ -1128,6 +1146,14 @@ components:
               # Completeness of missed_events; v3+ recipients only (absent on
               # the v2 wire). See the ReplayStatus schema for the contract.
               $ref: '#/components/schemas/ReplayStatus'
+            sender_watermarks:
+              type: array
+              description: >-
+                v3+ recipients only (absent on the v2 wire). Authoritative
+                per-sender `(epoch, seq)` baselines for current room members;
+                required to classify gaps after GameData skipped during the
+                reconnecting client's absence.
+              items: { $ref: '#/components/schemas/SenderWatermark' }
             reconnection_token:
               type: string
               description: >-

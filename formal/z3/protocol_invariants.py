@@ -21,7 +21,7 @@ Functions modeled (faithful to the Rust source — anchors are stable):
   (``get_missed_events``'s ``evicted_watermark > last_sequence`` over
    ``EventBuffer::push``'s max-evicted watermark invariant)
 - ``negotiate_protocol_version``        — src/config/protocol.rs:87
-- per-(sender, room) relay stamping     — the protocol v4 sequencing design
+- per-(sender, room) relay stamping     — the protocol v3 sequencing design
   (``stamp = counter + 1``; leave/rejoin resets the counter to 0)
 - delivery-contract counter deltas      — src/coordination/mod.rs
   (``deliver_or_disconnect`` + ``finalize_closed_connection``; the SMT twin
@@ -414,7 +414,7 @@ def proof_set_f() -> None:
 #             .min(max_protocol_version)
 #             .max(min_protocol_version)
 # Quantified over every server range validated by `ProtocolConfig::validate`
-# with the v4 ceiling (2 <= min <= max <= 4) and every client request
+# with the v3 ceiling (2 <= min <= max <= 3) and every client request
 # (including the omitted-version v2 default).
 # ---------------------------------------------------------------------------
 def proof_set_g() -> None:
@@ -430,7 +430,7 @@ def proof_set_g() -> None:
 
     # Exact mirror of the Rust expression, including the unwrap_or default.
     negotiated = zmax(zmin(If(has_client, client, smin), smax), smin)
-    valid_range = And(smin >= 2, smax <= 4, smin <= smax)
+    valid_range = And(smin >= 2, smax <= 3, smin <= smax)
     valid_client = client >= 0  # u16 domain
 
     # G1: the result always lands inside the served range.
@@ -463,7 +463,7 @@ def proof_set_g() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Proof set H — v4 per-(sender, room) stamp discipline (the sequencing design
+# Proof set H — v3 per-(sender, room) stamp discipline (the sequencing design
 # model-checked in formal/tla/SequencedRelay.tla): the server stamps
 # `seq = counter + 1` and then stores the stamp back as the counter, so the
 # k-th message of an epoch carries stamp k; a leave/rejoin resets the counter
@@ -472,7 +472,7 @@ def proof_set_g() -> None:
 # bracket rather than a stamping artifact.
 # ---------------------------------------------------------------------------
 def proof_set_h() -> None:
-    print("Proof set H — v4 sequence stamping (per-epoch monotone + contiguous)")
+    print("Proof set H — v3 sequence stamping (per-epoch monotone + contiguous)")
     counter = Int("counter")
 
     def stamp(c):

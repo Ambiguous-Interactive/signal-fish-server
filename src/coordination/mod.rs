@@ -337,12 +337,65 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Build and broadcast a room message while the implementation still holds
+    /// the room-routing snapshot lock.
+    ///
+    /// The in-memory coordinator overrides this for v3 game-data stamping: the
+    /// sender's next `(epoch, seq)` must be allocated in the same critical
+    /// section that snapshots recipients, so a reconnect baseline can never
+    /// observe a stamp whose broadcast has not yet chosen whether the restored
+    /// socket is a recipient. Test coordinators that do not model concurrent
+    /// routing can use this fallback.
+    async fn broadcast_to_room_except_with_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+    ) -> anyhow::Result<()> {
+        self.broadcast_to_room_except(room_id, except_player, build_message())
+            .await
+    }
+
     async fn register_local_client(
         &self,
         player_id: PlayerId,
         room_id: Option<RoomId>,
         delivery: ClientDeliveryHandle,
     ) -> anyhow::Result<()>;
+
+    /// Queue an initial message on a room-bound connection before it becomes
+    /// visible to room broadcasts.
+    ///
+    /// The in-memory coordinator overrides this to hold the same room-routing
+    /// write lock used by registration while `build_message` runs, so a
+    /// reconnect baseline can be captured, queued, and registered without a
+    /// broadcast observing the connection halfway through the transition. Test
+    /// coordinators that do not model concurrent routing may use this fallback.
+    async fn register_local_client_with_initial_message<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        let outcome = match delivery.sender.try_send(build_message()) {
+            Ok(()) => DeliveryOutcome::Delivered,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                DeliveryOutcome::ChannelClosed
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                delivery.close.request_close(CloseReason::SlowConsumer);
+                DeliveryOutcome::SlowConsumer
+            }
+        };
+
+        if outcome == DeliveryOutcome::Delivered {
+            self.register_local_client(player_id, Some(room_id), delivery)
+                .await?;
+        }
+
+        Ok(outcome)
+    }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()>;
 
@@ -382,8 +435,9 @@ pub struct MembershipUpdate {
 mod tests {
     use super::*;
     use crate::metrics::ServerMetrics;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
     /// Slow-consumer grace used by these tests. Under
     /// `#[tokio::test(start_paused = true)]` the clock only advances when every
@@ -418,6 +472,88 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(capacity);
         let (close, listener) = ConnectionCloseSignal::channel();
         (ClientDeliveryHandle { sender: tx, close }, rx, listener)
+    }
+
+    #[derive(Default)]
+    struct FallbackCoordinator {
+        broadcasts_except: Mutex<Vec<(RoomId, PlayerId, ServerMessage)>>,
+        registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageCoordinator for FallbackCoordinator {
+        async fn send_to_player(
+            &self,
+            _player_id: &PlayerId,
+            _message: Arc<ServerMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn try_send_to_player(
+            &self,
+            _player_id: &PlayerId,
+            _message: Arc<ServerMessage>,
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        async fn broadcast_to_room(
+            &self,
+            _room_id: &RoomId,
+            _message: Arc<ServerMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn broadcast_to_room_except(
+            &self,
+            room_id: &RoomId,
+            except_player: &PlayerId,
+            message: Arc<ServerMessage>,
+        ) -> anyhow::Result<()> {
+            self.broadcasts_except.lock().await.push((
+                *room_id,
+                *except_player,
+                (*message).clone(),
+            ));
+            Ok(())
+        }
+
+        async fn register_local_client(
+            &self,
+            player_id: PlayerId,
+            room_id: Option<RoomId>,
+            _delivery: ClientDeliveryHandle,
+        ) -> anyhow::Result<()> {
+            self.registrations.lock().await.push((player_id, room_id));
+            Ok(())
+        }
+
+        async fn unregister_local_client(&self, _player_id: &PlayerId) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn should_process_message(
+            &self,
+            _message: &crate::distributed::SequencedMessage,
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        async fn mark_message_processed(
+            &self,
+            _message: &crate::distributed::SequencedMessage,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn handle_bus_message(
+            &self,
+            _message: crate::distributed::SequencedMessage,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// Exact conservation law at unit scope, where `deliver_or_disconnect` is
@@ -472,6 +608,108 @@ mod tests {
             spins += 1;
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn default_broadcast_builder_delegates_to_except_broadcast_once() {
+        let coordinator = FallbackCoordinator::default();
+        let room_id = RoomId::from_u128(0x11111111111111111111111111111111);
+        let sender = PlayerId::from_u128(0x22222222222222222222222222222222);
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_builder = Arc::clone(&build_calls);
+
+        coordinator
+            .broadcast_to_room_except_with_message(
+                &room_id,
+                &sender,
+                Box::new(move || {
+                    calls_for_builder.fetch_add(1, Ordering::Relaxed);
+                    test_message()
+                }),
+            )
+            .await
+            .expect("default fallback broadcast succeeds");
+
+        assert_eq!(
+            build_calls.load(Ordering::Relaxed),
+            1,
+            "the fallback must build exactly one message"
+        );
+        let broadcasts = coordinator.broadcasts_except.lock().await;
+        assert_eq!(
+            broadcasts.len(),
+            1,
+            "the fallback must delegate to broadcast_to_room_except"
+        );
+        let (broadcast_room, except_player, message) = &broadcasts[0];
+        assert_eq!(*broadcast_room, room_id);
+        assert_eq!(*except_player, sender);
+        assert!(
+            matches!(message, ServerMessage::Pong),
+            "unexpected fallback broadcast message: {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_initial_registration_registers_only_after_delivery() {
+        let coordinator = FallbackCoordinator::default();
+        let room_id = RoomId::from_u128(0x33333333333333333333333333333333);
+        let player = PlayerId::from_u128(0x44444444444444444444444444444444);
+        let (handle, mut rx, _listener) = delivery_handle(1);
+
+        let outcome = coordinator
+            .register_local_client_with_initial_message(
+                player,
+                room_id,
+                handle,
+                Box::new(test_message),
+            )
+            .await
+            .expect("default fallback registration succeeds");
+
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
+        let initial_message = rx
+            .try_recv()
+            .expect("initial message must be queued before registration");
+        assert!(
+            matches!(initial_message.as_ref(), ServerMessage::Pong),
+            "unexpected initial message"
+        );
+        assert_eq!(
+            coordinator.registrations.lock().await.as_slice(),
+            &[(player, Some(room_id))],
+            "the fallback must register the client after queuing the initial message"
+        );
+
+        let blocked_player = PlayerId::from_u128(0x55555555555555555555555555555555);
+        let (blocked_handle, blocked_rx, blocked_listener) = delivery_handle(1);
+        blocked_handle
+            .sender
+            .try_send(test_message())
+            .expect("prefill the single-slot queue");
+
+        let outcome = coordinator
+            .register_local_client_with_initial_message(
+                blocked_player,
+                room_id,
+                blocked_handle,
+                Box::new(test_message),
+            )
+            .await
+            .expect("full-queue fallback returns an outcome, not an error");
+
+        assert_eq!(outcome, DeliveryOutcome::SlowConsumer);
+        assert_eq!(
+            coordinator.registrations.lock().await.as_slice(),
+            &[(player, Some(room_id))],
+            "the fallback must not register a client whose initial message was not queued"
+        );
+        assert_eq!(
+            blocked_listener.requested_reason(),
+            Some(CloseReason::SlowConsumer),
+            "the fallback must request a slow-consumer close for a full initial queue"
+        );
+        drop(blocked_rx);
     }
 
     /// (a) Fast path: an attempt against a queue with room is enqueued

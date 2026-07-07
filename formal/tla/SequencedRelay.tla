@@ -1,7 +1,7 @@
 ------------------------------ MODULE SequencedRelay ------------------------------
 (***************************************************************************)
-(* The protocol v4 per-sender relay-sequencing contract (the DESIGN being  *)
-(* implemented for spec/ protocol v4; the delivery substrate is the #131   *)
+(* The protocol v3 per-sender relay-sequencing contract (the DESIGN being  *)
+(* implemented for protocol v3; the delivery substrate is the #131         *)
 (* contract already modeled in DeliveryContract.tla):                      *)
 (*                                                                         *)
 (*   The server stamps every relayed game-data message with a strictly     *)
@@ -324,7 +324,7 @@ TypeOK ==
     /\ justified \in [Recipients -> BOOLEAN]
     /\ accountable \in [Recipients -> BOOLEAN]
 
-(* THE v4 sequencing invariant: no reachable state leaves any recipient     *)
+(* THE v3 sequencing invariant: no reachable state leaves any recipient     *)
 (* holding an unexplained gap — every observed non-contiguity was bracketed *)
 (* by a notification the recipient received (its own eviction + reconnect,  *)
 (* or the sender's PlayerLeft / PlayerReconnected).                         *)

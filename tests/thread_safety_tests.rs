@@ -985,6 +985,171 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
     );
 }
 
+/// F23: Game-data message building is serialized with reconnect baseline capture.
+///
+/// A reconnect baseline must not observe a sender watermark while a broadcast
+/// with that same stamp has not yet snapshotted recipients. This test blocks a
+/// broadcast message builder while it holds the room-routing read lock, then
+/// verifies that `register_local_client_with_initial_message` cannot build its
+/// baseline until the broadcast releases that lock. The restored recipient then
+/// receives only its initial baseline frame, proving it was not in the already
+/// stamped broadcast's recipient snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is_fixed() {
+    use signal_fish_server::coordination::{
+        ClientDeliveryHandle, ConnectionCloseSignal, DeliveryOutcome, MessageCoordinator,
+    };
+    use signal_fish_server::server::InMemoryMessageCoordinator;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let room_id = Uuid::new_v4();
+    let sender_id = Uuid::new_v4();
+    let existing_recipient_id = Uuid::new_v4();
+    let reconnecting_id = Uuid::new_v4();
+
+    let (existing_tx, mut existing_rx) = tokio::sync::mpsc::channel(8);
+    coordinator
+        .register_local_client(
+            existing_recipient_id,
+            Some(room_id),
+            ClientDeliveryHandle {
+                sender: existing_tx,
+                close: ConnectionCloseSignal::detached(),
+            },
+        )
+        .await
+        .expect("existing recipient should register");
+
+    let (builder_started_tx, builder_started_rx) = std::sync::mpsc::channel();
+    let (release_builder_tx, release_builder_rx) = std::sync::mpsc::channel();
+    let allocated_stamp = Arc::new(AtomicU64::new(0));
+
+    let broadcast = {
+        let coordinator = Arc::clone(&coordinator);
+        let allocated_stamp = Arc::clone(&allocated_stamp);
+        tokio::spawn(async move {
+            coordinator
+                .broadcast_to_room_except_with_message(
+                    &room_id,
+                    &sender_id,
+                    Box::new(move || {
+                        allocated_stamp.store(1, Ordering::SeqCst);
+                        builder_started_tx
+                            .send(())
+                            .expect("test should still wait for builder start");
+                        tokio::task::block_in_place(|| {
+                            release_builder_rx
+                                .recv()
+                                .expect("test should release the broadcast builder");
+                        });
+                        Arc::new(ServerMessage::GameData {
+                            from_player: sender_id,
+                            data: serde_json::json!({ "kind": "blocked-broadcast" }),
+                            seq: Some(1),
+                            epoch: Some(1),
+                        })
+                    }),
+                )
+                .await
+                .expect("broadcast should complete");
+        })
+    };
+
+    tokio::task::block_in_place(|| {
+        builder_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("broadcast builder should start");
+    });
+    assert_eq!(
+        allocated_stamp.load(Ordering::SeqCst),
+        1,
+        "broadcast builder should allocate its stamp before blocking"
+    );
+
+    let baseline_built = Arc::new(AtomicBool::new(false));
+    let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::channel(8);
+    let reconnect = {
+        let coordinator = Arc::clone(&coordinator);
+        let baseline_built = Arc::clone(&baseline_built);
+        tokio::spawn(async move {
+            coordinator
+                .register_local_client_with_initial_message(
+                    reconnecting_id,
+                    room_id,
+                    ClientDeliveryHandle {
+                        sender: reconnect_tx,
+                        close: ConnectionCloseSignal::detached(),
+                    },
+                    Box::new(move || {
+                        baseline_built.store(true, Ordering::SeqCst);
+                        Arc::new(ServerMessage::Pong)
+                    }),
+                )
+                .await
+                .expect("reconnect registration should complete")
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !baseline_built.load(Ordering::SeqCst),
+        "reconnect baseline was built while the stamped broadcast had not yet \
+         fixed its recipient snapshot"
+    );
+
+    release_builder_tx
+        .send(())
+        .expect("broadcast builder should still be blocked");
+    broadcast.await.expect("broadcast task should not panic");
+    assert_eq!(
+        reconnect.await.expect("reconnect task should not panic"),
+        DeliveryOutcome::Delivered
+    );
+    assert!(
+        baseline_built.load(Ordering::SeqCst),
+        "reconnect baseline should build after the broadcast snapshot lock releases"
+    );
+
+    match reconnect_rx
+        .recv()
+        .await
+        .expect("reconnected recipient should receive its baseline")
+        .as_ref()
+    {
+        ServerMessage::Pong => {}
+        other => panic!("expected initial Pong baseline, got {other:?}"),
+    }
+    match reconnect_rx.try_recv() {
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        Ok(message) => {
+            panic!("reconnected recipient received already-snapshotted message: {message:?}")
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            panic!("reconnected recipient queue disconnected before verification")
+        }
+    }
+
+    match existing_rx
+        .recv()
+        .await
+        .expect("existing recipient should receive the broadcast")
+        .as_ref()
+    {
+        ServerMessage::GameData {
+            from_player,
+            seq,
+            epoch,
+            ..
+        } => {
+            assert_eq!(*from_player, sender_id);
+            assert_eq!(*seq, Some(1));
+            assert_eq!(*epoch, Some(1));
+        }
+        other => panic!("expected blocked GameData broadcast, got {other:?}"),
+    }
+}
+
 fn drain_pending_messages(
     receiver: &mut tokio::sync::mpsc::Receiver<Arc<ServerMessage>>,
     context: &str,

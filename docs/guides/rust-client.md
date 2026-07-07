@@ -163,6 +163,16 @@ pub struct PlayerInfo {
     pub is_authority: bool,
     pub is_ready: bool,
     pub connected_at: DateTime<Utc>,
+    #[serde(default)]
+    pub epoch: Option<u32>,
+}
+
+/// v3 reconnect baseline for one current room member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SenderWatermark {
+    pub player_id: PlayerId,
+    pub epoch: u32,
+    pub seq: u64,
 }
 
 /// Information about a spectator watching a room.
@@ -342,6 +352,10 @@ pub enum ServerMessage {
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
         missed_events: Vec<ServerMessage>,
+        #[serde(default)]
+        replay: Option<String>,
+        #[serde(default)]
+        sender_watermarks: Vec<SenderWatermark>,
     },
     /// Reconnection failed.
     ReconnectionFailed {
@@ -1293,6 +1307,15 @@ pub struct PlayerInfo {
     pub is_authority: bool,
     pub is_ready: bool,
     pub connected_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub epoch: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SenderWatermark {
+    pub player_id: PlayerId,
+    pub epoch: u32,
+    pub seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1447,6 +1470,10 @@ pub enum ServerMessage {
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
         missed_events: Vec<ServerMessage>,
+        #[serde(default)]
+        replay: Option<String>,
+        #[serde(default)]
+        sender_watermarks: Vec<SenderWatermark>,
     },
     ReconnectionFailed {
         reason: String,
