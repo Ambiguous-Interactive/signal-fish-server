@@ -431,6 +431,17 @@ impl ConnectionManager {
         })
     }
 
+    /// Read the current relay stamp without advancing the sequence counter.
+    /// Used for v3 `Reconnected.sender_watermarks`: a reconnecting client needs
+    /// the sender's authoritative tail (`seq` may be 0 when that sender has not
+    /// relayed any game data in this incarnation), not a newly allocated stamp.
+    pub fn current_relay_stamp(&self, player_id: &PlayerId) -> Option<RelayStamp> {
+        self.clients.get(player_id).map(|client| RelayStamp {
+            seq: client.game_data_seq,
+            epoch: client.game_data_epoch,
+        })
+    }
+
     /// Read the current incarnation [`epoch`](ClientConnection::game_data_epoch)
     /// for `player_id` without advancing anything. Used when building v3 room
     /// snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a recipient

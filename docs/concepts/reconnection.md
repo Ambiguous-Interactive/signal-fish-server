@@ -100,14 +100,16 @@ the completeness contract):
         "name": "Alice",
         "is_authority": true,
         "is_ready": false,
-        "connected_at": "2025-01-15T10:30:00Z"
+        "connected_at": "2025-01-15T10:30:00Z",
+        "epoch": 1
       },
       {
         "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2025-01-15T10:31:00Z"
+        "connected_at": "2025-01-15T10:31:00Z",
+        "epoch": 2
       }
     ],
     "is_authority": true,
@@ -141,7 +143,19 @@ the completeness contract):
         }
       }
     ],
-    "replay": "complete"
+    "replay": "complete",
+    "sender_watermarks": [
+      {
+        "player_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "epoch": 1,
+        "seq": 12
+      },
+      {
+        "player_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "epoch": 2,
+        "seq": 0
+      }
+    ]
   }
 }
 ```
@@ -164,6 +178,13 @@ unchanged — no `replay` key) and takes one of three values:
 v2 clients should always resync from the snapshot fields; the replayed
 events are a convenience, not a completeness guarantee, without the
 `replay` field.
+
+The `sender_watermarks` field is also v3-only. It gives one authoritative
+`(epoch, seq)` baseline for every current room member, including the
+reconnected player (`seq: 0` when that member has not relayed `GameData` in
+its current incarnation). `missed_events` never contains `GameData`; use the
+snapshot plus application-level state sync for gameplay, and use
+`sender_watermarks` only to resume relay gap accounting.
 
 Other players in the room receive a `PlayerReconnected` notification so
 they know you are back:
@@ -207,7 +228,7 @@ Server restores player
   - Restores authority role if previously held
   - Notifies other players via PlayerReconnected
   - Sends Reconnected with full room state + missed events
-    (+ the v3-only replay completeness field)
+    (+ v3-only replay completeness and sender watermark fields)
 ```
 
 ## Reconnection Window

@@ -1,6 +1,6 @@
 --------------------------- MODULE ControlPriorityDelivery ---------------------------
 (***************************************************************************)
-(* Spec-FIRST for the protocol-v4 P10.E2 delivery revision (the design is   *)
+(* Spec-FIRST for the protocol-v3 P10.E2 delivery revision (the design is   *)
 (* not yet implemented — this module is merged BEFORE the code and pins the *)
 (* two properties the queue split must satisfy):                            *)
 (*                                                                         *)

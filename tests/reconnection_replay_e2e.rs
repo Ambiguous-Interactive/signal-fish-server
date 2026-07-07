@@ -811,6 +811,10 @@ async fn v2_recipient_gets_no_replay_key() {
         "the v2 wire must stay byte-identical: no replay key allowed: {raw}"
     );
     assert!(
+        !data.contains_key("sender_watermarks"),
+        "the v2 wire must stay byte-identical: no sender_watermarks key allowed: {raw}"
+    );
+    assert!(
         data.get("missed_events")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|events| !events.is_empty()),
@@ -899,6 +903,132 @@ async fn game_data_is_never_replayed() {
         reconnected.replay,
         Some(ReplayStatus::Complete),
         "skipping GameData is by design, not truncation"
+    );
+    let watermark_for_a = reconnected
+        .sender_watermarks
+        .iter()
+        .find(|watermark| watermark.player_id == joined_a.player_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "v3 reconnect must baseline the sender whose GameData was skipped: {:?}",
+                reconnected.sender_watermarks
+            )
+        });
+    assert_eq!(
+        (watermark_for_a.epoch, watermark_for_a.seq),
+        (1, 3),
+        "the reconnect watermark must report PeerA's authoritative tail after the three skipped GameData frames"
+    );
+    let watermark_for_b = reconnected
+        .sender_watermarks
+        .iter()
+        .find(|watermark| watermark.player_id == joined_b.player_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "v3 reconnect must include the restored player's fresh baseline: {:?}",
+                reconnected.sender_watermarks
+            )
+        });
+    assert_eq!(
+        watermark_for_b.seq, 0,
+        "the restored player has not relayed GameData in its new incarnation yet"
+    );
+
+    assert_message_conservation(&game_server.metrics()).await;
+}
+
+#[tokio::test]
+async fn reconnected_baseline_precedes_room_data_during_reconnect() {
+    let (addr, game_server) = start_server_default().await;
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, "reconnect-order-game", None, "PeerA").await;
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3(&mut peer_b).await;
+    let joined_b = join_room(
+        &mut peer_b,
+        "reconnect-order-game",
+        Some(joined_a.room_code.clone()),
+        "PeerB",
+    )
+    .await;
+
+    let token = register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+    let _ = peer_b.close(None).await;
+
+    let sender_task = tokio::spawn(async move {
+        for n in 0..64u64 {
+            send(
+                &mut peer_a,
+                &ClientMessage::GameData {
+                    data: serde_json::json!({ "phase": "during-reconnect", "n": n }),
+                },
+            )
+            .await;
+            tokio::task::yield_now().await;
+        }
+        peer_a
+    });
+
+    let mut replacement = connect(addr).await;
+    authenticate_v3(&mut replacement).await;
+    send(
+        &mut replacement,
+        &ClientMessage::Reconnect {
+            player_id: joined_b.player_id,
+            room_id: joined_b.room_id,
+            auth_token: token,
+        },
+    )
+    .await;
+
+    let first = next_server_message(&mut replacement).await;
+    let ServerMessage::Reconnected(reconnected) = first else {
+        panic!("Reconnected must be the first room frame after Reconnect, got {first:?}");
+    };
+    let sender_watermark = reconnected
+        .sender_watermarks
+        .iter()
+        .find(|watermark| watermark.player_id == joined_a.player_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "Reconnected must baseline PeerA before room data resumes: {:?}",
+                reconnected.sender_watermarks
+            )
+        });
+    let baseline_seq = sender_watermark.seq;
+
+    let mut peer_a = sender_task.await.expect("sender task panicked");
+    send(
+        &mut peer_a,
+        &ClientMessage::GameData {
+            data: serde_json::json!({ "phase": "post-baseline-marker" }),
+        },
+    )
+    .await;
+
+    let first_data_seq = next_matching_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "first data after reconnect baseline",
+        |message| match message {
+            ServerMessage::GameData {
+                from_player, seq, ..
+            } if from_player == joined_a.player_id => seq,
+            ServerMessage::Error {
+                message,
+                error_code,
+            } => panic!("replacement got server error: {message} ({error_code:?})"),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(
+        first_data_seq,
+        baseline_seq + 1,
+        "the first room data after Reconnected must continue from sender_watermarks"
     );
 
     assert_message_conservation(&game_server.metrics()).await;

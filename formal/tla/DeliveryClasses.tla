@@ -1,6 +1,6 @@
 ------------------------------ MODULE DeliveryClasses ------------------------------
 (***************************************************************************)
-(* Spec-FIRST for the protocol-v4 P10.E2 delivery-classes revision (the     *)
+(* Spec-FIRST for the protocol-v3 P10.E2 delivery-classes revision (the     *)
 (* design is NOT yet implemented — this module is merged BEFORE the code and *)
 (* pins the class-accounting contract the queue split must satisfy). It is   *)
 (* the wire-contract twin of `ServerMessage::DeliveryReport`. It is a         *)

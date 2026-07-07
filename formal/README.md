@@ -32,13 +32,13 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
-| `tla/SequencedRelay.tla`      | v4 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
-| `tla/ReconnectReplay.tla`     | v4 reconnect replay: faithful replay, honest status + the split-brain theorem      |
+| `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
+| `tla/ReconnectReplay.tla`     | v3 reconnect replay: faithful replay, honest status + the split-brain theorem      |
 | `tla/RoomLifecycleGC.tla`     | Room GC vs activity refresh + the reconnection-window guard (BUG-1)                |
 | `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
-| `tla/ControlPriorityDelivery.tla` | Spec-first for v4/P10.E2: control-priority queue split + sojourn eviction (liveness) |
-| `tla/DeliveryClasses.tla`     | Spec-first for v4/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
-| `tla/EndToEndGapAccountability.tla` | Flagship v4/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
+| `tla/ControlPriorityDelivery.tla` | Spec-first for v3/P10.E2: control-priority queue split + sojourn eviction (liveness) |
+| `tla/DeliveryClasses.tla`     | Spec-first for v3/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
+| `tla/EndToEndGapAccountability.tla` | Flagship v3/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
@@ -291,7 +291,7 @@ mid-protocol state with no enabled action).
 
 ## Single-instance theorems (split brain / ARCH-10)
 
-Several of the v4 relay/reconnect invariants are **theorems of a single relay
+Several of the v3 relay/reconnect invariants are **theorems of a single relay
 instance** — they hold for one process that owns a room, and are _false_ once a
 load balancer lets the same room live on two instances at once. This is not a
 gap in the proofs; it is a deliberately documented boundary of the design. The
@@ -372,7 +372,7 @@ against the provable inversion region, not a liveness proof under unbounded load
 
 ## Delivery-revision spec-first (control priority + sojourn)
 
-`ControlPriorityDelivery.tla` is **spec-first** for the protocol-v4 P10.E2
+`ControlPriorityDelivery.tla` is **spec-first** for the protocol-v3 P10.E2
 delivery revision — it is merged BEFORE the code and pins the two properties the
 queue split must satisfy, composing with the #131 `DeliveryContract.tla`
 substrate rather than re-deriving it. Frames are modeled by CLASS (data | ctrl)

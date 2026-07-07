@@ -217,7 +217,9 @@ A client is conformant when it passes these scenarios:
 - [ ] **Heartbeat:** the connection survives an idle period because `Ping` is
       sent.
 - [ ] **Reconnect (if implemented):** drop and `Reconnect` with the join
-      `auth_token`, then replay `missed_events`.
+      `auth_token`, replay control-only `missed_events`, resync gameplay state
+      at the application layer, and for v3 apply `sender_watermarks` as
+      per-sender `(epoch, seq)` baselines.
 - [ ] **v3 negotiation (if implemented):** advertise WebRTC, receive a
       `SessionPlan`, complete the offer/answer/ICE exchange following
       `you_initiate`, and **fall back to relay** when WebRTC fails.

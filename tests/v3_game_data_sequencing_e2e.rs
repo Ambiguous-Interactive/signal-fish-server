@@ -642,7 +642,7 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     authenticate_v3(&mut sender).await;
     authenticate_v3(&mut healthy).await;
     authenticate_v3(&mut victim).await;
-    join_room(&mut sender, "SEQGAP", "GapSender").await;
+    let (sender_id, _) = join_room(&mut sender, "SEQGAP", "GapSender").await;
     join_room(&mut healthy, "SEQGAP", "GapHealthy").await;
     let (victim_id, room_id) = join_room(&mut victim, "SEQGAP", "GapVictim").await;
 
@@ -786,7 +786,7 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
         },
     )
     .await;
-    next_matching_server_message_within(
+    let reconnect_payload = next_matching_server_message_within(
         &mut reconnected,
         SERVER_MESSAGE_TIMEOUT,
         "reconnect response",
@@ -799,6 +799,25 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
         },
     )
     .await;
+    let sender_watermark = reconnect_payload
+        .sender_watermarks
+        .iter()
+        .find(|watermark| watermark.player_id == sender_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "reconnect must baseline the still-connected sender: {:?}",
+                reconnect_payload.sender_watermarks
+            )
+        });
+    assert_eq!(
+        sender_watermark.epoch, 1,
+        "the sender never rejoined, so its epoch stays at the original incarnation"
+    );
+    assert_eq!(
+        sender_watermark.seq,
+        WARMUP + FLOOD,
+        "the reconnect watermark reports the sender's tail before the marker frame"
+    );
 
     // One marker frame from the (never-disconnected) sender: its counter has
     // kept counting, so the reconnected victim observes the gap.
@@ -813,7 +832,7 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     let marker_seq = marker[0].seq.expect("marker frame carries seq");
     assert_eq!(
         marker_seq,
-        WARMUP + FLOOD + 1,
+        sender_watermark.seq + 1,
         "the sender's counter continues across the victim's eviction"
     );
     let gap = marker_seq - last_seen - 1;

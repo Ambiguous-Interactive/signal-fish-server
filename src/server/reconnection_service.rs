@@ -1,5 +1,6 @@
 use crate::protocol::{
-    ErrorCode, PlayerId, PlayerInfo, ReconnectedPayload, ReplayStatus, RoomId, ServerMessage,
+    ErrorCode, PlayerId, PlayerInfo, ReconnectedPayload, ReplayStatus, RoomId, SenderWatermark,
+    ServerMessage,
 };
 use crate::reconnection::{ClaimedReconnection, DisconnectedPlayer, ReconnectionManager};
 use std::sync::Arc;
@@ -567,18 +568,6 @@ impl EnhancedGameServer {
             .message_coordinator
             .unregister_local_client(current_player_id)
             .await;
-        if let Err(err) = self
-            .message_coordinator
-            .register_local_client(*reconnect_player_id, Some(*room_id), reassigned_delivery)
-            .await
-        {
-            tracing::warn!(
-                %reconnect_player_id,
-                %room_id,
-                error = %err,
-                "Failed to register reassigned connection with coordinator"
-            );
-        }
 
         // Update database last_seen
         if let Err(e) = self
@@ -633,42 +622,105 @@ impl EnhancedGameServer {
             None
         };
 
-        // Send reconnected message
-        let _ = self
+        let reconnection_token = self
+            .pre_issue_reconnection_token_for(reconnect_player_id, *room_id)
+            .await;
+        let ice_servers = self.pregather_ice_servers(&room, reconnect_player_id);
+        let missed_events = missed_events.events;
+        let response_room_id = *room_id;
+        let response_player_id = *reconnect_player_id;
+        let room_code = room.code.clone();
+        let game_name = room.game_name.clone();
+        let max_players = room.max_players;
+        let supports_authority = room.supports_authority;
+        let lobby_state = room.lobby_state.clone();
+        let response_ready_players = ready_players.clone();
+        let relay_type = room.relay_type.clone();
+        let current_spectators = room.get_spectators();
+        let response_players = current_players.clone();
+
+        // Queue `Reconnected` before putting the restored connection back into
+        // room routing. The coordinator holds the room-routing write lock while
+        // this closure runs. Game-data broadcasts allocate their relay stamp in
+        // the same coordinator read section that snapshots recipients, so every
+        // earlier stamp is reflected in the watermarks and cannot route to this
+        // socket; later broadcasts cannot route to it until after the baseline
+        // frame is queued.
+        let initial_delivery = self
             .message_coordinator
-            .send_to_player(
-                reconnect_player_id,
-                Arc::new(ServerMessage::Reconnected(Box::new(ReconnectedPayload {
-                    room_id: *room_id,
-                    room_code: room.code.clone(),
-                    player_id: *reconnect_player_id,
-                    game_name: room.game_name.clone(),
-                    max_players: room.max_players,
-                    supports_authority: room.supports_authority,
-                    current_players: current_players.clone(),
-                    is_authority,
-                    lobby_state: room.lobby_state.clone(),
-                    ready_players: ready_players.clone(),
-                    relay_type: room.relay_type.clone(),
-                    current_spectators: room.get_spectators(),
-                    // v3 ICE pre-gather (deferred refinement): empty —
-                    // and skipped on the wire — unless this reconnector passes
-                    // the pre-gather gate (its original credentials may have
-                    // expired while it was away), so v2 bytes are untouched. A
-                    // reconnect into a Finalized room gets fresh ICE from the
-                    // late-join SessionPlan below instead (never both).
-                    ice_servers: self.pregather_ice_servers(&room, reconnect_player_id),
-                    missed_events: missed_events.events,
-                    replay,
-                    // Rotate: the token just used was consumed with the
-                    // completed claim; the restored player gets a fresh one
-                    // for its NEXT unexpected disconnect (v3+ only).
-                    reconnection_token: self
-                        .pre_issue_reconnection_token_for(reconnect_player_id, *room_id)
-                        .await,
-                }))),
+            .register_local_client_with_initial_message(
+                *reconnect_player_id,
+                *room_id,
+                reassigned_delivery,
+                Box::new(move || {
+                    let sender_watermarks = if recipient_is_v3 {
+                        response_players
+                            .iter()
+                            .filter_map(|player| {
+                                self.connection_manager.current_relay_stamp(&player.id).map(
+                                    |stamp| SenderWatermark {
+                                        player_id: player.id,
+                                        epoch: stamp.epoch,
+                                        seq: stamp.seq,
+                                    },
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    Arc::new(ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+                        room_id: response_room_id,
+                        room_code,
+                        player_id: response_player_id,
+                        game_name,
+                        max_players,
+                        supports_authority,
+                        current_players: response_players,
+                        is_authority,
+                        lobby_state,
+                        ready_players: response_ready_players,
+                        relay_type,
+                        current_spectators,
+                        // v3 ICE pre-gather (deferred refinement): empty —
+                        // and skipped on the wire — unless this reconnector passes
+                        // the pre-gather gate (its original credentials may have
+                        // expired while it was away), so v2 bytes are untouched. A
+                        // reconnect into a Finalized room gets fresh ICE from the
+                        // late-join SessionPlan below instead (never both).
+                        ice_servers,
+                        missed_events,
+                        replay,
+                        sender_watermarks,
+                        // Rotate: the token just used was consumed with the
+                        // completed claim; the restored player gets a fresh one
+                        // for its NEXT unexpected disconnect (v3+ only).
+                        reconnection_token,
+                    })))
+                }),
             )
             .await;
+        match initial_delivery {
+            Ok(crate::coordination::DeliveryOutcome::Delivered) => {}
+            Ok(outcome) => {
+                tracing::warn!(
+                    %reconnect_player_id,
+                    %room_id,
+                    ?outcome,
+                    "Reconnection restored state but could not queue the Reconnected baseline"
+                );
+                return true;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %reconnect_player_id,
+                    %room_id,
+                    error = %err,
+                    "Failed to atomically register reassigned connection with coordinator"
+                );
+                return true;
+            }
+        }
 
         // Notify other players. Recorded for replay BEFORE delivery (the
         // room's ring persists when other players are still pending): a

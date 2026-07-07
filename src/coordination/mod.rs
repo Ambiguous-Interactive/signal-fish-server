@@ -337,12 +337,65 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Build and broadcast a room message while the implementation still holds
+    /// the room-routing snapshot lock.
+    ///
+    /// The in-memory coordinator overrides this for v3 game-data stamping: the
+    /// sender's next `(epoch, seq)` must be allocated in the same critical
+    /// section that snapshots recipients, so a reconnect baseline can never
+    /// observe a stamp whose broadcast has not yet chosen whether the restored
+    /// socket is a recipient. Test coordinators that do not model concurrent
+    /// routing can use this fallback.
+    async fn broadcast_to_room_except_with_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+    ) -> anyhow::Result<()> {
+        self.broadcast_to_room_except(room_id, except_player, build_message())
+            .await
+    }
+
     async fn register_local_client(
         &self,
         player_id: PlayerId,
         room_id: Option<RoomId>,
         delivery: ClientDeliveryHandle,
     ) -> anyhow::Result<()>;
+
+    /// Queue an initial message on a room-bound connection before it becomes
+    /// visible to room broadcasts.
+    ///
+    /// The in-memory coordinator overrides this to hold the same room-routing
+    /// write lock used by registration while `build_message` runs, so a
+    /// reconnect baseline can be captured, queued, and registered without a
+    /// broadcast observing the connection halfway through the transition. Test
+    /// coordinators that do not model concurrent routing may use this fallback.
+    async fn register_local_client_with_initial_message<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        let outcome = match delivery.sender.try_send(build_message()) {
+            Ok(()) => DeliveryOutcome::Delivered,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                DeliveryOutcome::ChannelClosed
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                delivery.close.request_close(CloseReason::SlowConsumer);
+                DeliveryOutcome::SlowConsumer
+            }
+        };
+
+        if outcome == DeliveryOutcome::Delivered {
+            self.register_local_client(player_id, Some(room_id), delivery)
+                .await?;
+        }
+
+        Ok(outcome)
+    }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()>;
 

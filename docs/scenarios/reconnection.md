@@ -3,7 +3,8 @@
 This scenario shows a client recovering from a dropped connection. When a player disconnects, the server holds a
 reconnection slot and issues an authentication token. The client opens a fresh WebSocket and sends `Reconnect`
 with its `player_id`, `room_id`, and `auth_token`; the server replies with `Reconnected`, carrying the current
-room state plus every event the client missed while away. The failure case (an invalid token) is shown at the end.
+room state plus replayable control events the client missed while away. The failure case (an invalid token) is
+shown at the end.
 
 Throughout this page:
 
@@ -46,8 +47,9 @@ Bob sends:
 }
 ```
 
-The server validates the token, re-seats Bob, and replies with the full current room state plus the events he
-missed:
+The server validates the token, re-seats Bob, and replies with the full current room state plus any replayable
+control events he missed. High-rate `GameData` is not replayed; Bob resynchronizes gameplay from the room snapshot
+and application state:
 
 ```json
 {
@@ -65,14 +67,16 @@ missed:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:00Z"
+        "connected_at": "2026-06-14T10:00:00Z",
+        "epoch": 1
       },
       {
         "id": "00000000-0000-0000-0000-00000000000b",
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:30Z"
+        "connected_at": "2026-06-14T10:00:30Z",
+        "epoch": 2
       }
     ],
     "is_authority": false,
@@ -83,17 +87,18 @@ missed:
     ],
     "relay_type": "matchbox",
     "current_spectators": [],
-    "missed_events": [
+    "missed_events": [],
+    "replay": "complete",
+    "sender_watermarks": [
       {
-        "type": "GameData",
-        "data": {
-          "from_player": "00000000-0000-0000-0000-00000000000a",
-          "data": {
-            "action": "move",
-            "x": 100,
-            "y": 200
-          }
-        }
+        "player_id": "00000000-0000-0000-0000-00000000000a",
+        "epoch": 1,
+        "seq": 42
+      },
+      {
+        "player_id": "00000000-0000-0000-0000-00000000000b",
+        "epoch": 2,
+        "seq": 0
       }
     ]
   }
@@ -111,9 +116,10 @@ At the same time, the server tells the other members that Bob is back with `Play
 }
 ```
 
-Next: Bob's client reconciles its local state from `current_players` / `lobby_state`, then replays the
-`missed_events` array **in order** to catch up on gameplay that happened while he was away (here, one `GameData`
-move from Alice). The game resumes.
+Next: Bob's client reconciles its local state from `current_players` / `lobby_state`, replays any
+`missed_events` control entries **in order**, and asks the game authority or peers for the current gameplay state.
+For v3 relay sequencing, `sender_watermarks` resets Bob's per-sender `(epoch, seq)` baselines after his absence.
+The game resumes after that application-level resync.
 
 ## 3. v3 note — reconnecting into an active session
 

@@ -811,6 +811,9 @@ fn golden_server_reconnected() {
         // v3-only replay-status field: `None` is skipped entirely, so the
         // golden v2 bytes below stay byte-identical.
         replay: None,
+        // v3-only reconnect watermarks: empty is skipped entirely, preserving
+        // the frozen v2 wire shape.
+        sender_watermarks: Vec::new(),
         reconnection_token: None,
     }));
     assert_json(

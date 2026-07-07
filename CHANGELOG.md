@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added v3-only `Reconnected.sender_watermarks` (P10.E5). A v3 reconnect now
+  carries every current room member's authoritative `(epoch, seq)` relay tail,
+  allowing clients to re-baseline after missed `GameData` that is deliberately
+  not replayed. The field is omitted for negotiated-v2 reconnects, preserving
+  the frozen v2 wire shape.
 - Added the v3-only `ProtocolInfo.transports` capability array (P10.E8). A
   negotiated-v3 handshake now advertises the current server message lane as
   `["websocket"]`, reserving the protocol seam for a future relay transport

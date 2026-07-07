@@ -399,7 +399,7 @@ mod protocol_version_tests {
 
         // v3 client + v3 server => 3
         assert_eq!(cfg.negotiate_protocol_version(Some(3)), 3);
-        // a stale v4-era (or future) client is clamped down to the ceiling (3)
+        // a stale future-version client is clamped down to the ceiling (3)
         assert_eq!(cfg.negotiate_protocol_version(Some(4)), 3);
         // client beyond server max => clamped to max
         assert_eq!(cfg.negotiate_protocol_version(Some(9)), 3);
