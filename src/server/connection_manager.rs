@@ -612,7 +612,8 @@ impl ConnectionManager {
     /// without unregistering it here (the caller's own teardown follows).
     /// First requested reason wins, so callers use this to pin a SPECIFIC
     /// close code — e.g. the activity reaper's `ActivityTimeout` — before the
-    /// generic `Unregistered` of [`Self::remove_client`] would apply.
+    /// generic `Unregistered` of [`Self::remove_client`] would apply. Shutdown
+    /// is the priority reason and can supersede an earlier lifecycle close.
     /// Returns whether this call initiated the close.
     pub fn request_close_for(
         &self,
@@ -624,21 +625,37 @@ impl ConnectionManager {
             .is_some_and(|connection| connection.close.request_close(reason))
     }
 
+    #[cfg(test)]
     pub fn remove_client(&self, player_id: &PlayerId) -> Option<ClientConnection> {
+        self.remove_client_for_unregistration(player_id, || false)
+            .map(|(connection, _)| connection)
+    }
+
+    pub fn remove_client_for_unregistration<F>(
+        &self,
+        player_id: &PlayerId,
+        is_draining: F,
+    ) -> Option<(ClientConnection, crate::coordination::CloseReason)>
+    where
+        F: FnOnce() -> bool,
+    {
         self.clients.remove(player_id).map(|(_, connection)| {
             self.release_ip_slot(connection.client_addr.ip());
             self.metrics.unregister_connection_delivery_stats(player_id);
             // Every unregistration positively tears down the socket tasks:
             // without this, a connection unregistered by the activity reaper
             // lingers half-alive (undeliverable but still holding its socket)
-            // until an idle timeout fires. First requested reason wins, so a
-            // slow-consumer close initiated by the delivery layer is not
-            // overwritten. Reconnection reassignment deliberately bypasses
-            // this method, so surviving connections are never closed here.
-            connection
-                .close
-                .request_close(crate::coordination::CloseReason::Unregistered);
-            connection
+            // until an idle timeout fires. The caller supplies the final reason
+            // at removal time so shutdown drain can still win a late race.
+            // Reconnection reassignment deliberately bypasses this method, so
+            // surviving connections are never closed here.
+            let close_reason = if is_draining() {
+                crate::coordination::CloseReason::Shutdown
+            } else {
+                crate::coordination::CloseReason::Unregistered
+            };
+            connection.close.request_close(close_reason);
+            (connection, close_reason)
         })
     }
 
@@ -842,6 +859,29 @@ mod tests {
             .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("registrations resume after slot release");
+    }
+
+    #[tokio::test]
+    async fn remove_client_for_unregistration_uses_drain_predicate_at_close_request() {
+        let manager = make_manager(1);
+        let addr: SocketAddr = "127.0.0.1:5001".parse().unwrap();
+        let (tx, _rx) = channel();
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let player_id = manager
+            .register_client(tx, close, addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+
+        let (_connection, reason) = manager
+            .remove_client_for_unregistration(&player_id, || true)
+            .expect("client should be removed");
+
+        assert_eq!(reason, crate::coordination::CloseReason::Shutdown);
+        assert_eq!(
+            listener.requested_reason(),
+            Some(crate::coordination::CloseReason::Shutdown),
+            "removal must request shutdown when the final drain predicate is true"
+        );
     }
 
     /// GAP-3 regression: a 16-player session behind a single NAT must be

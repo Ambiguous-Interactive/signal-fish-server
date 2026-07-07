@@ -3,12 +3,15 @@ use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
-use crate::database::DatabaseConfig;
-use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, ServerMessage};
+use crate::coordination::{ClientDeliveryHandle, MessageCoordinator};
+use crate::database::{create_database, DatabaseConfig, GameDatabase};
+use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
+use dashmap::DashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use tokio::sync::{mpsc, watch, Notify, RwLock};
 use tokio::time::{timeout, Duration};
 
 async fn create_test_server() -> Arc<EnhancedGameServer> {
@@ -33,6 +36,378 @@ async fn create_test_server_with_config(config: ServerConfig) -> Arc<EnhancedGam
     .expect("failed to construct test server")
 }
 
+async fn create_test_server_with_message_coordinator(
+    config: ServerConfig,
+    message_coordinator: Arc<dyn MessageCoordinator>,
+) -> Arc<EnhancedGameServer> {
+    let database: Arc<dyn GameDatabase> = Arc::from(
+        create_database(DatabaseConfig::InMemory)
+            .await
+            .expect("failed to create test database"),
+    );
+    database
+        .initialize()
+        .await
+        .expect("failed to initialize test database");
+
+    let instance_id = uuid::Uuid::new_v4();
+    let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+    let metrics_config = MetricsConfig::default();
+    let cache_refresh_interval =
+        Duration::from_secs(metrics_config.dashboard_cache_refresh_interval_secs.max(1));
+    let cache_ttl = Duration::from_secs(metrics_config.dashboard_cache_ttl_secs.max(1));
+    let history_capacity = DashboardMetricsCache::history_capacity_for_window(
+        cache_refresh_interval,
+        metrics_config.dashboard_cache_history_window_secs.max(1),
+    );
+    let dashboard_metrics_cache = Arc::new(DashboardMetricsCache::new(
+        cache_refresh_interval,
+        cache_ttl,
+        Arc::clone(&metrics),
+        history_capacity,
+        &metrics_config.dashboard_cache_history_fields,
+    ));
+    dashboard_metrics_cache.spawn(Arc::clone(&database));
+
+    let rate_limiter = Arc::new(RoomRateLimiter::new(config.rate_limit_config.clone()));
+    Arc::clone(&rate_limiter).start_cleanup_task();
+
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let connection_manager = ConnectionManager::new(
+        config.max_connections_per_ip,
+        Arc::clone(&metrics),
+        Arc::clone(&message_coordinator),
+        config.websocket_config.delivery_stats_interval_secs > 0,
+    );
+    let reconnection_manager = if config.enable_reconnection {
+        Some(Arc::new(crate::reconnection::ReconnectionManager::new(
+            config.reconnection_window.as_secs(),
+            config.event_buffer_size,
+            Arc::clone(&metrics),
+        )))
+    } else {
+        None
+    };
+    let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
+        Arc::new(InMemoryRoomOperationCoordinator::new(
+            Arc::clone(&message_coordinator),
+            Arc::clone(&distributed_lock),
+            Arc::clone(&database),
+            reconnection_manager.clone(),
+        ));
+    let protocol_config = ProtocolConfig::default();
+    let room_applications = Arc::new(DashMap::new());
+    let spectator_service = SpectatorService::new(
+        Arc::clone(&database),
+        Arc::clone(&message_coordinator),
+        Arc::clone(&room_applications),
+        protocol_config.clone(),
+        reconnection_manager.clone(),
+    );
+
+    let (shutdown_drain_tx, _) = watch::channel(false);
+    Arc::new(EnhancedGameServer {
+        database,
+        connection_manager,
+        config,
+        protocol_config,
+        relay_type_config: RelayTypeConfig::default(),
+        session_config: SessionConfig::default(),
+        turn_config: TurnConfig::default(),
+        rate_limiter,
+        metrics,
+        message_coordinator,
+        room_coordinator,
+        distributed_lock,
+        instance_id,
+        reconnection_manager,
+        auth_middleware: Arc::new(crate::auth::AuthMiddleware::disabled()),
+        room_applications,
+        active_session_plans: DashMap::new(),
+        spectator_service,
+        transport_security: TransportSecurityConfig::default(),
+        dashboard_metrics_cache,
+        shutdown_drain_deadline_ms: AtomicU64::new(0),
+        shutdown_drain_tx,
+        active_socket_tasks: AtomicUsize::new(0),
+        active_socket_tasks_notify: Notify::new(),
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DrainTrigger {
+    SpectatorLeftSend,
+    RoomlessRegister,
+    UnregisterLocal,
+    RoomLeftSend,
+    PlayerLeftBroadcast,
+    FirstFarewellTrySend,
+}
+
+struct DrainTriggerCoordinator {
+    trigger: DrainTrigger,
+    server: StdMutex<Option<Weak<EnhancedGameServer>>>,
+    triggered: AtomicBool,
+    try_send_calls: AtomicUsize,
+    room_left_send_calls: AtomicUsize,
+    player_left_broadcast_calls: AtomicUsize,
+    clients: RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
+    room_players: RwLock<HashMap<RoomId, HashSet<PlayerId>>>,
+}
+
+impl DrainTriggerCoordinator {
+    fn new(trigger: DrainTrigger) -> Self {
+        Self {
+            trigger,
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+            try_send_calls: AtomicUsize::new(0),
+            room_left_send_calls: AtomicUsize::new(0),
+            player_left_broadcast_calls: AtomicUsize::new(0),
+            clients: RwLock::new(HashMap::new()),
+            room_players: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn attach_server(&self, server: &Arc<EnhancedGameServer>) {
+        *self
+            .server
+            .lock()
+            .expect("drain trigger server lock poisoned") = Some(Arc::downgrade(server));
+    }
+
+    fn begin_drain_once(&self) {
+        if self.triggered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let server = self
+            .server
+            .lock()
+            .expect("drain trigger server lock poisoned")
+            .clone()
+            .and_then(|server| server.upgrade())
+            .expect("test coordinator must be attached before triggering drain");
+        server.begin_shutdown_drain();
+    }
+
+    async fn deliver_to(&self, player_id: &PlayerId, message: Arc<ServerMessage>) -> bool {
+        self.clients
+            .read()
+            .await
+            .get(player_id)
+            .is_some_and(|handle| handle.sender.try_send(message).is_ok())
+    }
+
+    async fn recipients_for(
+        &self,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+    ) -> Vec<ClientDeliveryHandle> {
+        let room_players = self.room_players.read().await;
+        let clients = self.clients.read().await;
+        room_players
+            .get(room_id)
+            .map(|players| {
+                players
+                    .iter()
+                    .filter(|player_id| Some(*player_id) != except_player)
+                    .filter_map(|player_id| clients.get(player_id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageCoordinator for DrainTriggerCoordinator {
+    async fn send_to_player(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        if self.trigger == DrainTrigger::SpectatorLeftSend
+            && matches!(message.as_ref(), ServerMessage::SpectatorLeft { .. })
+        {
+            self.begin_drain_once();
+        }
+        let _ = self.deliver_to(player_id, message).await;
+        Ok(())
+    }
+
+    async fn send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+    ) -> anyhow::Result<bool> {
+        if self.trigger == DrainTrigger::SpectatorLeftSend
+            && matches!(message.as_ref(), ServerMessage::SpectatorLeft { .. })
+        {
+            self.begin_drain_once();
+        }
+        if self.trigger == DrainTrigger::RoomLeftSend
+            && matches!(message.as_ref(), ServerMessage::RoomLeft)
+        {
+            self.begin_drain_once();
+        }
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        if matches!(message.as_ref(), ServerMessage::RoomLeft) {
+            self.room_left_send_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(self.deliver_to(player_id, message).await)
+    }
+
+    async fn try_send_to_player(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        self.try_send_calls.fetch_add(1, Ordering::Relaxed);
+        if self.trigger == DrainTrigger::FirstFarewellTrySend {
+            self.begin_drain_once();
+        }
+        Ok(self.deliver_to(player_id, message).await)
+    }
+
+    async fn try_send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<bool> {
+        self.try_send_calls.fetch_add(1, Ordering::Relaxed);
+        if self.trigger == DrainTrigger::FirstFarewellTrySend {
+            self.begin_drain_once();
+        }
+        if !should_send() {
+            return Ok(false);
+        }
+        Ok(self.deliver_to(player_id, message).await)
+    }
+
+    async fn broadcast_to_room_except_if_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        if self.trigger == DrainTrigger::PlayerLeftBroadcast
+            && matches!(message.as_ref(), ServerMessage::PlayerLeft { .. })
+        {
+            self.begin_drain_once();
+        }
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        before_send().await;
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        if matches!(message.as_ref(), ServerMessage::PlayerLeft { .. }) {
+            self.player_left_broadcast_calls
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        for handle in self.recipients_for(room_id, Some(except_player)).await {
+            let _ = handle.sender.try_send(Arc::clone(&message));
+        }
+        Ok(true)
+    }
+
+    async fn broadcast_to_room(
+        &self,
+        room_id: &RoomId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        for handle in self.recipients_for(room_id, None).await {
+            let _ = handle.sender.try_send(Arc::clone(&message));
+        }
+        Ok(())
+    }
+
+    async fn broadcast_to_room_except(
+        &self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        for handle in self.recipients_for(room_id, Some(except_player)).await {
+            let _ = handle.sender.try_send(Arc::clone(&message));
+        }
+        Ok(())
+    }
+
+    async fn register_local_client(
+        &self,
+        player_id: PlayerId,
+        room_id: Option<RoomId>,
+        delivery: ClientDeliveryHandle,
+    ) -> anyhow::Result<()> {
+        let existing_client = self.clients.read().await.contains_key(&player_id);
+        if let Some(room_id) = room_id {
+            self.room_players
+                .write()
+                .await
+                .entry(room_id)
+                .or_default()
+                .insert(player_id);
+        } else if self.trigger == DrainTrigger::RoomlessRegister && existing_client {
+            self.begin_drain_once();
+        }
+        self.clients.write().await.insert(player_id, delivery);
+        Ok(())
+    }
+
+    async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
+        if self.trigger == DrainTrigger::UnregisterLocal {
+            self.begin_drain_once();
+        }
+        self.room_players.write().await.retain(|_, players| {
+            players.remove(player_id);
+            !players.is_empty()
+        });
+        self.clients.write().await.remove(player_id);
+        Ok(())
+    }
+
+    async fn should_process_message(
+        &self,
+        _message: &crate::distributed::SequencedMessage,
+    ) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    async fn mark_message_processed(
+        &self,
+        _message: &crate::distributed::SequencedMessage,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn handle_bus_message(
+        &self,
+        _message: crate::distributed::SequencedMessage,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn handle_membership_update(
+        &self,
+        _update: crate::coordination::MembershipUpdate,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 async fn register_client(
     server: &EnhancedGameServer,
     addr: SocketAddr,
@@ -49,6 +424,40 @@ async fn register_client(
         .await
         .expect("client registration succeeds");
     (player_id, receiver)
+}
+
+async fn wait_for_backpressure_event(server: &EnhancedGameServer) {
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("delivery should reach the backpressure wait");
+}
+
+fn assert_next_message_matches(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+    matches_expected: impl FnOnce(&ServerMessage) -> bool,
+) {
+    match receiver.try_recv() {
+        Ok(message) if matches_expected(message.as_ref()) => {}
+        Ok(message) => panic!("{context}: unexpected message {message:?}"),
+        Err(err) => panic!("{context}: expected queued message, got {err:?}"),
+    }
+}
+
+fn assert_no_queued_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, context: &str) {
+    match receiver.try_recv() {
+        Ok(message) => panic!("{context}: unexpected queued message {message:?}"),
+        Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+    }
 }
 
 #[tokio::test]
@@ -333,6 +742,71 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn draining_room_creation_rejection_does_not_wait_on_full_queue() {
+    let server = create_test_server().await;
+    let (sender, mut receiver) = mpsc::channel(1);
+    let fill_sender = sender.clone();
+    let player_id = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48015".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("client registration succeeds");
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("test setup should fill outbound queue");
+
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    timeout(
+        Duration::from_millis(100),
+        server.handle_join_room(
+            &player_id,
+            "test-game".to_string(),
+            None,
+            "player".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        ),
+    )
+    .await
+    .expect("drain rejection must not wait for slow-consumer delivery timeout");
+
+    assert_next_message_matches(&mut receiver, "pre-filled queue item", |message| {
+        matches!(message, ServerMessage::Pong)
+    });
+    assert_no_queued_message(
+        &mut receiver,
+        "full queue should skip the drain rejection instead of waiting",
+    );
+    assert_eq!(
+        server
+            .metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0,
+        "best-effort drain rejection must not reclassify the client as slow consumer"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("game_room_cap:test-game")
+            .await
+            .expect("room cap lock check succeeds"),
+        "drain rejection should still happen before room-cap lock acquisition"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn draining_server_rejects_late_client_registration() {
     let server = create_test_server().await;
     let drain = server.begin_shutdown_drain();
@@ -357,6 +831,623 @@ async fn draining_server_rejects_late_client_registration() {
     assert!(
         server.connection_manager.client_ids().is_empty(),
         "drain-rejected registration must not leave a client in the connection manager"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_unregister_upgrades_activity_timeout_close_to_shutdown() {
+    let server = create_test_server().await;
+    let (sender, _receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48016".parse().unwrap())
+        .await
+        .expect("client registration succeeds before drain");
+
+    assert!(
+        server.connection_manager.request_close_for(
+            &player_id,
+            crate::coordination::CloseReason::ActivityTimeout
+        ),
+        "test setup should pin the activity-timeout race loser first"
+    );
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    server.unregister_client(&player_id).await;
+
+    assert_eq!(
+        listener.requested_reason(),
+        Some(crate::coordination::CloseReason::Shutdown),
+        "draining unregister must restore the semantic shutdown close"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_unregister_rechecks_drain_after_mid_unregister_detach() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::SpectatorLeftSend,
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+    coordinator.attach_server(&server);
+
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48017".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("WATCH1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+
+    let (sender, mut receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let spectator = server
+        .register_client_with_close(sender, close, "127.0.0.1:48018".parse().unwrap())
+        .await
+        .expect("spectator registration succeeds before drain");
+    server
+        .spectator_service
+        .join(
+            &spectator,
+            "test-game".to_string(),
+            "WATCH1".to_string(),
+            "watcher".to_string(),
+        )
+        .await
+        .expect("spectator join succeeds");
+    assert_next_message_matches(&mut receiver, "spectator join confirmation", |message| {
+        matches!(message, ServerMessage::SpectatorJoined(_))
+    });
+    assert_next_message_matches(
+        &mut creator_rx,
+        "spectator join room notification",
+        |message| matches!(message, ServerMessage::NewSpectatorJoined { .. }),
+    );
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("reconnection enabled for test server");
+    let pending_reconnect = PlayerId::new_v4();
+    let _token = reconnection_manager
+        .register_disconnection(pending_reconnect, room.id, false, None, 0)
+        .await;
+    assert!(
+        !server.is_draining(),
+        "test setup must not enter drain before unregister begins"
+    );
+
+    server.unregister_client(&spectator).await;
+
+    assert!(
+        coordinator.triggered.load(Ordering::Acquire),
+        "SpectatorLeft delivery should start drain during unregister"
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        Some(crate::coordination::CloseReason::Shutdown),
+        "unregister must re-read drain state after awaited detach work"
+    );
+    assert_no_queued_message(
+        &mut receiver,
+        "drain during spectator detach must skip SpectatorLeft",
+    );
+    assert_no_queued_message(
+        &mut creator_rx,
+        "drain during spectator detach must skip SpectatorDisconnected",
+    );
+    let replay = reconnection_manager.get_missed_events(&room.id, 0).await;
+    assert!(
+        replay
+            .events
+            .iter()
+            .all(|event| !matches!(event, ServerMessage::SpectatorDisconnected { .. })),
+        "drain during spectator detach must not replay-record SpectatorDisconnected"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::RoomlessRegister));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+    coordinator.attach_server(&server);
+
+    let (sender, mut receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48020".parse().unwrap())
+        .await
+        .expect("client registration succeeds before drain");
+    let (survivor_id, mut survivor_receiver) =
+        register_client(&server, "127.0.0.1:48021".parse().unwrap()).await;
+
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("DRAIN2".to_string()),
+            4,
+            true,
+            player_id,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&player_id, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor_id,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor_id, room.id)
+        .await;
+
+    server.unregister_client(&player_id).await;
+
+    assert!(
+        coordinator.triggered.load(Ordering::Acquire),
+        "roomless re-registration in leave_room should start drain"
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        Some(crate::coordination::CloseReason::Shutdown),
+        "shutdown drain must win over normal unregister after leave_room awaits"
+    );
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("reconnection enabled for test server");
+    assert!(
+        !reconnection_manager
+            .has_pending_reconnection(&player_id)
+            .await,
+        "pending reconnect created before drain must be discarded"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .reconnection_sessions_active
+            .load(Ordering::Relaxed),
+        0,
+        "discarding the drain-lost reconnect should restore the active gauge"
+    );
+    assert_no_queued_message(&mut receiver, "drain during leave_room must skip RoomLeft");
+    assert_no_queued_message(
+        &mut survivor_receiver,
+        "drain during leave_room must skip PlayerLeft",
+    );
+    assert_eq!(
+        coordinator.room_left_send_calls.load(Ordering::Relaxed),
+        0,
+        "RoomLeft delivery path must not run after drain starts"
+    );
+    assert_eq!(
+        coordinator
+            .player_left_broadcast_calls
+            .load(Ordering::Relaxed),
+        0,
+        "PlayerLeft broadcast path must not run after drain starts"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_unregister_upgrades_close_when_drain_starts_during_coordinator_unregister() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnregisterLocal));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+    coordinator.attach_server(&server);
+
+    let (sender, _receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48022".parse().unwrap())
+        .await
+        .expect("client registration succeeds before drain");
+
+    server.unregister_client(&player_id).await;
+
+    assert!(
+        coordinator.triggered.load(Ordering::Acquire),
+        "coordinator unregister should start drain"
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        Some(crate::coordination::CloseReason::Shutdown),
+        "final drain check must upgrade close reason before remove_client"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::RoomLeftSend));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+    coordinator.attach_server(&server);
+
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48023".parse().unwrap()).await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48024".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("DRAIN3".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+
+    server.leave_room(&leaver).await;
+
+    assert!(
+        coordinator.triggered.load(Ordering::Acquire),
+        "RoomLeft conditional send should start drain"
+    );
+    assert_eq!(
+        coordinator.room_left_send_calls.load(Ordering::Relaxed),
+        0,
+        "RoomLeft must not be delivered after drain starts inside send"
+    );
+    assert_eq!(
+        coordinator
+            .player_left_broadcast_calls
+            .load(Ordering::Relaxed),
+        0,
+        "PlayerLeft must not broadcast after drain starts inside RoomLeft send"
+    );
+    assert_no_queued_message(
+        &mut leaver_rx,
+        "RoomLeft must not be delivered after drain starts inside send",
+    );
+    assert_no_queued_message(
+        &mut survivor_rx,
+        "PlayerLeft must not be delivered after drain starts inside send",
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_leave_room_cancels_backpressured_roomleft() {
+    let server = create_test_server().await;
+    let (sender, mut receiver) = mpsc::channel(1);
+    let fill_sender = sender.clone();
+    let leaver = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48027".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("client registration succeeds");
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("test setup should fill leaver queue");
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("DRAIN5".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+
+    let leave_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server.leave_room(&leaver).await;
+        }
+    });
+
+    wait_for_backpressure_event(&server).await;
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test should start drain while RoomLeft is waiting for queue capacity"
+    );
+    timeout(Duration::from_secs(1), leave_task)
+        .await
+        .expect("leave task should finish after drain cancels delivery")
+        .expect("leave task should not panic");
+
+    assert_next_message_matches(&mut receiver, "pre-filled leaver queue item", |message| {
+        matches!(message, ServerMessage::Pong)
+    });
+    assert_no_queued_message(
+        &mut receiver,
+        "RoomLeft must not be enqueued after drain starts while backpressured",
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PlayerLeftBroadcast,
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+    coordinator.attach_server(&server);
+
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48025".parse().unwrap()).await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48026".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("DRAIN4".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+    let pending_reconnect = PlayerId::new_v4();
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("reconnection enabled for test server");
+    let _token = reconnection_manager
+        .register_disconnection(pending_reconnect, room.id, false, None, 0)
+        .await;
+
+    server.leave_room(&leaver).await;
+
+    assert!(
+        coordinator.triggered.load(Ordering::Acquire),
+        "PlayerLeft conditional broadcast should start drain"
+    );
+    assert_eq!(
+        coordinator.room_left_send_calls.load(Ordering::Relaxed),
+        1,
+        "RoomLeft should be delivered before drain starts in the PlayerLeft boundary test"
+    );
+    assert_eq!(
+        coordinator
+            .player_left_broadcast_calls
+            .load(Ordering::Relaxed),
+        0,
+        "PlayerLeft must not broadcast after drain starts inside broadcast"
+    );
+    assert_next_message_matches(&mut leaver_rx, "leaver RoomLeft", |message| {
+        matches!(message, ServerMessage::RoomLeft)
+    });
+    assert_no_queued_message(
+        &mut survivor_rx,
+        "PlayerLeft must not be delivered after drain starts inside broadcast",
+    );
+    let replay = reconnection_manager.get_missed_events(&room.id, 0).await;
+    assert!(
+        replay
+            .events
+            .iter()
+            .all(|event| !matches!(event, ServerMessage::PlayerLeft { .. })),
+        "PlayerLeft must not be replay-recorded after drain starts inside broadcast"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
+    let server = create_test_server().await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48028".parse().unwrap()).await;
+    let (survivor_sender, mut survivor_rx) = mpsc::channel(1);
+    let fill_survivor = survivor_sender.clone();
+    let survivor = server
+        .connection_manager
+        .register_client(
+            survivor_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48029".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("survivor registration succeeds");
+    fill_survivor
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("test setup should fill survivor queue");
+    let room = server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("DRAIN6".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+    let pending_reconnect = PlayerId::new_v4();
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("reconnection enabled for test server");
+    let _token = reconnection_manager
+        .register_disconnection(pending_reconnect, room.id, false, None, 0)
+        .await;
+
+    let leave_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server.leave_room(&leaver).await;
+        }
+    });
+
+    wait_for_backpressure_event(&server).await;
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test should start drain while PlayerLeft is waiting for queue capacity"
+    );
+    timeout(Duration::from_secs(1), leave_task)
+        .await
+        .expect("leave task should finish after drain cancels broadcast")
+        .expect("leave task should not panic");
+
+    assert_next_message_matches(&mut leaver_rx, "leaver RoomLeft", |message| {
+        matches!(message, ServerMessage::RoomLeft)
+    });
+    assert_next_message_matches(
+        &mut survivor_rx,
+        "pre-filled survivor queue item",
+        |message| matches!(message, ServerMessage::Pong),
+    );
+    assert_no_queued_message(
+        &mut survivor_rx,
+        "PlayerLeft must not be enqueued after drain starts while backpressured",
+    );
+    let replay = reconnection_manager.get_missed_events(&room.id, 0).await;
+    assert!(
+        replay
+            .events
+            .iter()
+            .all(|event| !matches!(event, ServerMessage::PlayerLeft { .. })),
+        "PlayerLeft must not be replay-recorded when drain cancels the broadcast"
     );
 }
 
@@ -529,5 +1620,171 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
             .reconnection_sessions_active
             .load(Ordering::Relaxed),
         0
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_cleanup_task_exits_without_activity_timeout_eviction() {
+    let server = create_test_server_with_config(ServerConfig {
+        ping_timeout: Duration::ZERO,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (player_id, _receiver) = register_client(&server, "127.0.0.1:48014".parse().unwrap()).await;
+
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test must transition the server into draining"
+    );
+
+    timeout(
+        Duration::from_secs(1),
+        server.cleanup_task_until(std::future::pending::<()>()),
+    )
+    .await
+    .expect("cleanup task should stop after observing shutdown drain");
+
+    assert!(
+        server.connection_manager.client_ids().contains(&player_id),
+        "shutdown drain must stop the activity reaper before it can evict with 4003"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_cleanup_task_stops_when_drain_starts_during_activity_farewell() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::FirstFarewellTrySend,
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig {
+            ping_timeout: Duration::ZERO,
+            ..ServerConfig::default()
+        },
+        message_coordinator,
+    )
+    .await;
+    coordinator.attach_server(&server);
+
+    let (sender, mut receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48019".parse().unwrap())
+        .await
+        .expect("client registration succeeds before drain");
+
+    timeout(
+        Duration::from_secs(1),
+        server.cleanup_task_until(std::future::pending::<()>()),
+    )
+    .await
+    .expect("cleanup task should stop after drain starts during farewell");
+
+    assert!(
+        coordinator.try_send_calls.load(Ordering::Acquire) > 0,
+        "test must drive the activity farewell path"
+    );
+    assert!(server.is_draining(), "farewell path should trigger drain");
+    assert!(
+        server.connection_manager.client_ids().contains(&player_id),
+        "drain that starts mid-tick must prevent activity-timeout eviction"
+    );
+    assert_no_queued_message(
+        &mut receiver,
+        "activity-timeout farewell must not be enqueued after drain starts",
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        None,
+        "activity reaper must not pin a 4003 close after drain starts"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        0,
+        "no expired-player metric should be recorded when drain stops eviction"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_cleanup_task_skips_activity_farewell_when_drain_starts_during_inmemory_lookup() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_millis(
+            ServerConfig::default()
+                .websocket_config
+                .slow_consumer_timeout_ms,
+        ),
+        Arc::new(crate::metrics::ServerMetrics::new()),
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig {
+            ping_timeout: Duration::ZERO,
+            ..ServerConfig::default()
+        },
+        message_coordinator,
+    )
+    .await;
+
+    let (sender, mut receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48030".parse().unwrap())
+        .await
+        .expect("client registration succeeds before drain");
+
+    let coordinator_write = coordinator.local_clients.write().await;
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .cleanup_task_until(std::future::pending::<()>())
+                .await;
+        }
+    });
+    tokio::pin!(cleanup_task);
+
+    assert!(
+        timeout(Duration::from_millis(50), &mut cleanup_task)
+            .await
+            .is_err(),
+        "cleanup should block on the in-memory coordinator lookup before drain starts"
+    );
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test should start drain while farewell lookup is blocked"
+    );
+    drop(coordinator_write);
+
+    timeout(Duration::from_secs(1), &mut cleanup_task)
+        .await
+        .expect("cleanup task should finish after drain cancels farewell")
+        .expect("cleanup task should not panic");
+
+    assert!(
+        server.connection_manager.client_ids().contains(&player_id),
+        "drain must stop activity eviction after the delayed lookup"
+    );
+    assert_no_queued_message(
+        &mut receiver,
+        "ActivityTimeout farewell must not be enqueued after drain starts during lookup",
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        None,
+        "activity reaper must not pin 4003 after drain starts during lookup"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        0,
+        "no expired-player metric should be recorded when drain cancels eviction"
     );
 }

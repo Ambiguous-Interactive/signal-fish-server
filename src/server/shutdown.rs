@@ -65,12 +65,15 @@ impl EnhancedGameServer {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => ShutdownDrain {
-                deadline_ms,
-                grace,
-                retry_after_secs: retry_after_secs(grace),
-                started_by_this_call: true,
-            },
+            Ok(_) => {
+                let _ = self.shutdown_drain_tx.send(true);
+                ShutdownDrain {
+                    deadline_ms,
+                    grace,
+                    retry_after_secs: retry_after_secs(grace),
+                    started_by_this_call: true,
+                }
+            }
             Err(existing_deadline_ms) => ShutdownDrain {
                 deadline_ms: existing_deadline_ms,
                 grace,
@@ -78,6 +81,10 @@ impl EnhancedGameServer {
                 started_by_this_call: false,
             },
         }
+    }
+
+    pub(crate) fn shutdown_drain_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown_drain_tx.subscribe()
     }
 
     /// Best-effort v3 shutdown advisory fan-out.
@@ -173,6 +180,29 @@ fn unix_deadline_ms_after(grace: Duration) -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
+    unix_deadline_ms_after_since(now, grace)
+}
+
+fn unix_deadline_ms_after_since(now: Duration, grace: Duration) -> u64 {
     let deadline = now.saturating_add(grace);
-    u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)
+    u64::try_from(deadline.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_deadline_ms_after_never_returns_drain_sentinel() {
+        assert_eq!(
+            unix_deadline_ms_after_since(Duration::ZERO, Duration::ZERO),
+            1
+        );
+        assert_eq!(
+            unix_deadline_ms_after_since(Duration::from_millis(41), Duration::from_millis(1)),
+            42
+        );
+    }
 }

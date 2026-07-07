@@ -98,7 +98,7 @@ impl EnhancedGameServer {
         let inactive_timeout = chrono_duration_from_std(self.config.inactive_room_timeout);
         tokio::pin!(shutdown);
 
-        loop {
+        'cleanup: loop {
             tokio::select! {
                 () = &mut shutdown => {
                     tracing::info!(
@@ -110,17 +110,26 @@ impl EnhancedGameServer {
                 _ = interval.tick() => {}
             }
 
+            if self.is_draining() {
+                tracing::info!(
+                    instance_id = %self.instance_id,
+                    "Cleanup task stopping for server shutdown drain"
+                );
+                break 'cleanup;
+            }
+
             // Cleanup expired clients
             let expired_clients = self
                 .connection_manager
                 .collect_expired_clients(self.config.ping_timeout);
 
-            let expired_client_count = expired_clients.len() as u64;
-            if expired_client_count > 0 {
-                self.metrics
-                    .add_expired_players_cleaned(expired_client_count);
+            if self.is_draining() {
+                tracing::info!(
+                    instance_id = %self.instance_id,
+                    "Cleanup task stopping for server shutdown drain before activity eviction"
+                );
+                break 'cleanup;
             }
-
             // Loud eviction: tell each expired client WHY it is being closed
             // before the unregister tears its socket down. Farewells are
             // best-effort by contract — they never wait on a full queue and
@@ -128,11 +137,19 @@ impl EnhancedGameServer {
             // eviction itself is the authoritative signal) — so this sweep is
             // non-blocking regardless of how many clients expired at once.
             for player_id in &expired_clients {
+                if self.is_draining() {
+                    tracing::info!(
+                        instance_id = %self.instance_id,
+                        "Cleanup task stopping for server shutdown drain during activity farewell"
+                    );
+                    break 'cleanup;
+                }
                 // Milliseconds, not truncated seconds: sub-second windows
                 // (tests, aggressive deployments) must not read as "0 seconds".
                 let timeout_ms = self.config.ping_timeout.as_millis();
+                let should_send = || !self.is_draining();
                 let enqueued = self
-                    .send_farewell_to_player(
+                    .send_farewell_to_player_if(
                         player_id,
                         format!(
                             "Disconnected: no activity received for {timeout_ms} ms \
@@ -142,6 +159,7 @@ impl EnhancedGameServer {
                         // the socket-level `websocket.idle_timeout_secs` close;
                         // this eviction is the activity reaper's.
                         Some(crate::protocol::ErrorCode::ActivityTimeout),
+                        &should_send,
                     )
                     .await;
                 if !enqueued {
@@ -152,7 +170,18 @@ impl EnhancedGameServer {
                 }
             }
 
+            let mut evicted_client_count = 0u64;
+            let mut stop_for_drain = false;
             for player_id in expired_clients {
+                if self.is_draining() {
+                    tracing::info!(
+                        instance_id = %self.instance_id,
+                        "Cleanup task stopping for server shutdown drain during activity eviction"
+                    );
+                    stop_for_drain = true;
+                    break;
+                }
+                evicted_client_count += 1;
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
                 // Pin the ActivityTimeout close code (4003) before the
                 // unregistration's generic reason could win the first-wins
@@ -163,6 +192,13 @@ impl EnhancedGameServer {
                     crate::coordination::CloseReason::ActivityTimeout,
                 );
                 self.unregister_client(&player_id).await;
+            }
+            if evicted_client_count > 0 {
+                self.metrics
+                    .add_expired_players_cleaned(evicted_client_count);
+            }
+            if stop_for_drain {
+                break 'cleanup;
             }
 
             // Rooms with an unexpired reconnection record must survive both

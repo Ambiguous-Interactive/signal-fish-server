@@ -1,6 +1,6 @@
 use crate::coordination::{
-    deliver_or_disconnect, ClientDeliveryHandle, CloseReason, ConnectionCloseSignal,
-    DeliveryOutcome,
+    deliver_or_disconnect, ClientDeliveryHandle, CloseReason, ConnectionCloseListener,
+    ConnectionCloseSignal, DeliveryOutcome,
 };
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, PlayerId, PlayerNameRulesPayload,
@@ -87,6 +87,27 @@ fn enqueue_farewell_message(
         Err(mpsc::error::TrySendError::Closed(_)) => {
             tracing::debug!(%player_id, context, "Farewell not enqueued: connection already closed");
         }
+    }
+}
+
+fn resolve_final_close_reason(
+    observed_reason: Option<CloseReason>,
+    close_listener: &ConnectionCloseListener,
+) -> Option<CloseReason> {
+    match close_listener.requested_reason() {
+        Some(CloseReason::Shutdown) => Some(CloseReason::Shutdown),
+        current_reason => observed_reason.or(current_reason),
+    }
+}
+
+fn close_frame_reason_for_server(
+    reason: Option<CloseReason>,
+    server: &EnhancedGameServer,
+) -> CloseReason {
+    if server.is_draining() {
+        CloseReason::Shutdown
+    } else {
+        reason.unwrap_or(CloseReason::Unregistered)
     }
 }
 
@@ -214,7 +235,7 @@ async fn finalize_closed_connection(
     // request, i.e. the connection was simply unregistered everywhere — is
     // the same normal closure, so the coded frame is TOTAL over server-side
     // teardowns: no path falls back to a bare, code-less close.
-    let reason = reason.unwrap_or(CloseReason::Unregistered);
+    let reason = close_frame_reason_for_server(reason, server);
     let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
         code: reason.websocket_close_code(),
         reason: reason.close_frame_reason().into(),
@@ -608,9 +629,7 @@ pub(super) async fn handle_socket(
         // `None` for a plain rx-closed shutdown (all delivery handles dropped
         // by unregistration), which `finalize_closed_connection` maps to the
         // normal `Unregistered` closure (WebSocket code 1000).
-        let reason = close_request
-            .flatten()
-            .or_else(|| send_task_close.requested_reason());
+        let reason = resolve_final_close_reason(close_request.flatten(), &send_task_close);
         let current_player_id = *effective_player_id_for_send.read().await;
         finalize_closed_connection(
             &mut sender,
@@ -1322,6 +1341,66 @@ mod tests {
         let mut empty: Vec<Transport> = Vec::new();
         dedup_preserving_order(&mut empty);
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_close_reason_prefers_current_shutdown_after_older_wake_reason() {
+        let (signal, mut listener) = ConnectionCloseSignal::channel();
+
+        assert!(signal.request_close(CloseReason::ActivityTimeout));
+        let observed_reason = listener.closed().await;
+        assert_eq!(observed_reason, Some(CloseReason::ActivityTimeout));
+
+        assert!(
+            signal.request_close(CloseReason::Shutdown),
+            "shutdown drain must be able to supersede an earlier lifecycle reason"
+        );
+
+        assert_eq!(
+            resolve_final_close_reason(observed_reason, &listener),
+            Some(CloseReason::Shutdown),
+            "the close frame must use the current shutdown reason, not the older wake reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_frame_reason_prefers_shutdown_started_after_reason_resolution() {
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::AuthMaintenanceConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+
+        assert_eq!(
+            close_frame_reason_for_server(Some(CloseReason::ActivityTimeout), &server),
+            CloseReason::ActivityTimeout
+        );
+
+        assert!(
+            server.begin_shutdown_drain().started_by_this_call,
+            "test must transition the server into draining"
+        );
+
+        assert_eq!(
+            close_frame_reason_for_server(Some(CloseReason::ActivityTimeout), &server),
+            CloseReason::Shutdown,
+            "shutdown drain that starts during final flush must still own the close frame"
+        );
+        assert_eq!(
+            close_frame_reason_for_server(None, &server),
+            CloseReason::Shutdown,
+            "plain unregistration also becomes shutdown once drain is active"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

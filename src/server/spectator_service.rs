@@ -12,6 +12,7 @@ use crate::protocol::{
     SpectatorJoinedPayload, SpectatorStateChangeReason,
 };
 use crate::reconnection::ReconnectionManager;
+use tokio::sync::watch;
 
 #[cfg(test)]
 use crate::protocol::Room;
@@ -218,6 +219,17 @@ impl SpectatorService {
         player_id: &PlayerId,
         reason: SpectatorStateChangeReason,
     ) -> bool {
+        let (_drain_tx, drain_rx) = watch::channel(false);
+        self.detach_if(player_id, reason, &|| true, drain_rx).await
+    }
+
+    pub(crate) async fn detach_if(
+        &self,
+        player_id: &PlayerId,
+        reason: SpectatorStateChangeReason,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+    ) -> bool {
         let Some((_, room_id)) = self.spectator_rooms.remove(player_id) else {
             return false;
         };
@@ -261,7 +273,7 @@ impl SpectatorService {
 
         let _ = self
             .message_coordinator
-            .send_to_player(
+            .send_to_player_if(
                 player_id,
                 Arc::new(ServerMessage::SpectatorLeft {
                     room_id: Some(room_id),
@@ -269,6 +281,8 @@ impl SpectatorService {
                     reason: Some(reason.clone()),
                     current_spectators: current_spectators.clone(),
                 }),
+                should_send,
+                drain.clone(),
             )
             .await;
 
@@ -278,12 +292,26 @@ impl SpectatorService {
                 reason: Some(reason),
                 current_spectators,
             });
-            self.record_replayable_room_event(&room.id, notification.as_ref())
-                .await;
-
+            let replay_notification = Arc::clone(&notification);
+            let room_id_for_replay = room.id;
             let _ = self
                 .message_coordinator
-                .broadcast_to_room(&room.id, notification)
+                .broadcast_to_room_except_if_with_hook(
+                    &room.id,
+                    player_id,
+                    notification,
+                    should_send,
+                    drain,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            self.record_replayable_room_event(
+                                &room_id_for_replay,
+                                replay_notification.as_ref(),
+                            )
+                            .await;
+                        })
+                    }),
+                )
                 .await;
         }
 
@@ -373,10 +401,18 @@ mod tests {
 
         async fn broadcast_to_room_except(
             &self,
-            _room_id: &RoomId,
-            _except_player: &PlayerId,
-            _message: Arc<ServerMessage>,
+            room_id: &RoomId,
+            except_player: &PlayerId,
+            message: Arc<ServerMessage>,
         ) -> Result<()> {
+            if let Ok(Some(room)) = self.database.get_room_by_id(room_id).await {
+                let mut sent = self.sent.lock().await;
+                for player_id in room.players.keys() {
+                    if player_id != except_player {
+                        sent.push((*player_id, (*message).clone()));
+                    }
+                }
+            }
             Ok(())
         }
 

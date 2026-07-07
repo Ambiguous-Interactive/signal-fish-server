@@ -425,24 +425,77 @@ impl EnhancedGameServer {
             tracing::warn!(%player_id, "Could not find existing delivery handle for player when leaving room");
         }
 
+        if self.is_draining() {
+            tracing::info!(
+                %player_id,
+                %room_id,
+                "Skipping normal room-leave traffic because shutdown drain started"
+            );
+            return;
+        }
+
+        let should_send = || !self.is_draining();
+
         // First send confirmation to the leaving player
         let _ = self
             .message_coordinator
-            .send_to_player(player_id, Arc::new(ServerMessage::RoomLeft))
+            .send_to_player_if(
+                player_id,
+                Arc::new(ServerMessage::RoomLeft),
+                &should_send,
+                self.shutdown_drain_receiver(),
+            )
             .await;
 
-        // Then notify other players (excluding the player who left). Recorded
-        // for reconnection replay BEFORE delivery (buffered even if the
-        // broadcast partially fails).
+        if self.is_draining() {
+            tracing::info!(
+                %player_id,
+                %room_id,
+                "Skipping peer leave broadcast because shutdown drain started"
+            );
+            return;
+        }
+
+        // Then notify other players (excluding the player who left). For this
+        // drain-sensitive path, replay is recorded only after conditional
+        // delivery is not canceled by shutdown drain.
         let player_left = ServerMessage::PlayerLeft {
             player_id: *player_id,
         };
-        self.record_replayable_room_event(&room_id, &player_left)
-            .await;
+        let player_left = Arc::new(player_left);
+        let replay_message = Arc::clone(&player_left);
+        let server = self;
+        let room_id_for_replay = room_id;
+        let drain = self.shutdown_drain_receiver();
         let _ = self
             .message_coordinator
-            .broadcast_to_room_except(&room_id, player_id, Arc::new(player_left))
+            .broadcast_to_room_except_if_with_hook(
+                &room_id,
+                player_id,
+                player_left,
+                &should_send,
+                drain,
+                Box::new(move || {
+                    Box::pin(async move {
+                        server
+                            .record_replayable_room_event(
+                                &room_id_for_replay,
+                                replay_message.as_ref(),
+                            )
+                            .await;
+                    })
+                }),
+            )
             .await;
+
+        if self.is_draining() {
+            tracing::info!(
+                %player_id,
+                %room_id,
+                "Skipping departure session re-plan because shutdown drain started"
+            );
+            return;
+        }
 
         // v3 mid-session re-planning (after the PlayerLeft broadcast): if the
         // departed player hosted the room's active non-relay session, re-elect
@@ -714,15 +767,31 @@ impl EnhancedGameServer {
     }
 
     async fn reject_join_for_shutdown_drain(&self, player_id: &PlayerId) {
-        let _ = self
+        match self
             .message_coordinator
-            .send_to_player(
+            .try_send_to_player(
                 player_id,
                 Arc::new(ServerMessage::RoomJoinFailed {
                     reason: "Server is draining for shutdown".to_string(),
                     error_code: Some(crate::protocol::ErrorCode::ServerDraining),
                 }),
             )
-            .await;
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    %player_id,
+                    "Shutdown drain room-creation rejection skipped: queue full or connection gone"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(
+                    %player_id,
+                    error = %err,
+                    "Shutdown drain room-creation rejection failed"
+                );
+            }
+        }
     }
 }

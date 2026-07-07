@@ -121,6 +121,23 @@ impl EnhancedGameServer {
         }
     }
 
+    pub(crate) async fn discard_pending_reconnection_for_shutdown_drain(
+        &self,
+        player_id: &PlayerId,
+    ) {
+        if let Some(reconnection_manager) = &self.reconnection_manager {
+            if reconnection_manager
+                .discard_pending_reconnection(player_id)
+                .await
+            {
+                tracing::debug!(
+                    %player_id,
+                    "Discarded pending reconnection record after shutdown drain won disconnect race"
+                );
+            }
+        }
+    }
+
     pub(crate) async fn register_disconnection_for_reconnect(
         &self,
         player_id: &PlayerId,
@@ -367,6 +384,7 @@ impl EnhancedGameServer {
             );
             return false;
         };
+        let last_sequence = disconnected.last_sequence;
         let mut restored_membership = false;
         let mut restored_authority = false;
 
@@ -414,47 +432,6 @@ impl EnhancedGameServer {
                     .await;
             }
         };
-
-        // Get missed events (fetched before the claim completes below — the
-        // completion may release the room's replay ring when this player is
-        // the last one pending).
-        let mut missed_events = reconnection_manager
-            .get_missed_events(room_id, disconnected.last_sequence)
-            .await;
-        // Never replay the reconnecting player's OWN membership deltas back to
-        // it: on reconnect it is being RESTORED (its presence is in the
-        // `Reconnected` snapshot and peers get `PlayerReconnected`), so a
-        // buffered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` for THIS
-        // player is a self-referential teardown artifact, not room news it
-        // missed. (This also keeps the replay stable regardless of how many
-        // times the player's disconnect was registered before it reconnected.)
-        missed_events.events.retain(|event| match event {
-            ServerMessage::PlayerLeft { player_id }
-            | ServerMessage::PlayerReconnected { player_id, .. } => {
-                player_id != reconnect_player_id
-            }
-            ServerMessage::PlayerJoined { player } => player.id != *reconnect_player_id,
-            _ => true,
-        });
-
-        // v3 wire gate for REPLAYED snapshots. The replay ring stores
-        // `PlayerJoined` / `PlayerReconnected` in their live-broadcast form —
-        // carrying the v3 incarnation `epoch` — but `missed_events` is embedded
-        // in the `Reconnected` payload and so BYPASSES the per-recipient strip in
-        // `websocket::sending` (which only rewrites the top-level frame). Strip
-        // `epoch` for a pre-v3 (v2) reconnector so its `Reconnected` stays
-        // byte-identical to the frozen v2 wire. The reconnecting socket's
-        // negotiated version lives on `current_player_id` here (the reassignment
-        // to `reconnect_player_id` happens below), and the protocol survives it.
-        if self.client_protocol(current_player_id).version < 3 {
-            for event in &mut missed_events.events {
-                match event {
-                    ServerMessage::PlayerJoined { player } => player.epoch = None,
-                    ServerMessage::PlayerReconnected { epoch, .. } => *epoch = None,
-                    _ => {}
-                }
-            }
-        }
 
         if !room.players.contains_key(reconnect_player_id) {
             let Some(player_info) = disconnected.player_info.clone() else {
@@ -627,29 +604,10 @@ impl EnhancedGameServer {
         }
         let is_authority = room.authority_player == Some(*reconnect_player_id);
 
-        // Replay completeness (v3+ recipients only; absent on the v2 wire,
-        // mirroring the per-recipient `ice_servers` gate below). The connection
-        // was reassigned above, so the reconnecting socket's negotiated
-        // protocol is queryable under the restored player id. `Unavailable`
-        // (ring disabled) wins over `Truncated`: a zero-capacity ring evicts
-        // everything, but the honest contract is "replay is off, resync".
-        let replay = if self.client_protocol(reconnect_player_id).version >= 3 {
-            Some(if reconnection_manager.event_buffer_size() == 0 {
-                ReplayStatus::Unavailable
-            } else if missed_events.truncated {
-                ReplayStatus::Truncated
-            } else {
-                ReplayStatus::Complete
-            })
-        } else {
-            None
-        };
-
         let reconnection_token = self
             .pre_issue_reconnection_token_for(reconnect_player_id, *room_id)
             .await;
         let ice_servers = self.pregather_ice_servers(&room, reconnect_player_id);
-        let missed_events = missed_events.events;
         let response_room_id = *room_id;
         let response_player_id = *reconnect_player_id;
         let room_code = room.code.clone();
@@ -661,65 +619,128 @@ impl EnhancedGameServer {
         let relay_type = room.relay_type.clone();
         let current_spectators = room.get_spectators();
         let response_players = current_players.clone();
+        let reconnection_manager_for_baseline = Arc::clone(reconnection_manager);
+        let server = self;
 
         // Queue `Reconnected` before putting the restored connection back into
         // room routing. The coordinator holds the room-routing write lock while
-        // this closure runs. Game-data broadcasts allocate their relay stamp in
-        // the same coordinator read section that snapshots recipients, so every
+        // this async closure runs. Room-control broadcasts record replay under
+        // the corresponding read lock, so missed-event capture cannot slip
+        // before an older broadcast's replay record while the restored socket
+        // also misses live delivery. Game-data broadcasts allocate their relay
+        // stamp in the same read section that snapshots recipients, so every
         // earlier stamp is reflected in the watermarks and cannot route to this
         // socket; later broadcasts cannot route to it until after the baseline
         // frame is queued.
         let initial_delivery = self
             .message_coordinator
-            .register_local_client_with_initial_message(
+            .register_local_client_with_initial_message_async(
                 *reconnect_player_id,
                 *room_id,
                 reassigned_delivery,
                 Box::new(move || {
-                    let sender_watermarks = if recipient_is_v3 {
-                        response_players
-                            .iter()
-                            .filter_map(|player| {
-                                self.connection_manager.current_relay_stamp(&player.id).map(
-                                    |stamp| SenderWatermark {
-                                        player_id: player.id,
-                                        epoch: stamp.epoch,
-                                        seq: stamp.seq,
-                                    },
-                                )
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    Arc::new(ServerMessage::Reconnected(Box::new(ReconnectedPayload {
-                        room_id: response_room_id,
-                        room_code,
-                        player_id: response_player_id,
-                        game_name,
-                        max_players,
-                        supports_authority,
-                        current_players: response_players,
-                        is_authority,
-                        lobby_state,
-                        ready_players: response_ready_players,
-                        relay_type,
-                        current_spectators,
-                        // v3 ICE pre-gather (deferred refinement): empty —
-                        // and skipped on the wire — unless this reconnector passes
-                        // the pre-gather gate (its original credentials may have
-                        // expired while it was away), so v2 bytes are untouched. A
-                        // reconnect into a Finalized room gets fresh ICE from the
-                        // late-join SessionPlan below instead (never both).
-                        ice_servers,
-                        missed_events,
-                        replay,
-                        sender_watermarks,
-                        // Rotate: the token just used was consumed with the
-                        // completed claim; the restored player gets a fresh one
-                        // for its NEXT unexpected disconnect (v3+ only).
-                        reconnection_token,
-                    })))
+                    Box::pin(async move {
+                        // Get missed events inside the coordinator registration
+                        // critical section. Completion below may release the
+                        // room's replay ring when this player is the last one
+                        // pending, so this remains the last capture point.
+                        let mut missed_events = reconnection_manager_for_baseline
+                            .get_missed_events(&response_room_id, last_sequence)
+                            .await;
+                        // Never replay the reconnecting player's OWN membership
+                        // deltas back to it: on reconnect it is being RESTORED
+                        // (its presence is in the `Reconnected` snapshot and
+                        // peers get `PlayerReconnected`), so a buffered
+                        // self-delta is not room news it missed.
+                        missed_events.events.retain(|event| match event {
+                            ServerMessage::PlayerLeft { player_id }
+                            | ServerMessage::PlayerReconnected { player_id, .. } => {
+                                *player_id != response_player_id
+                            }
+                            ServerMessage::PlayerJoined { player } => {
+                                player.id != response_player_id
+                            }
+                            _ => true,
+                        });
+
+                        // The replay ring stores v3 incarnation epochs in live
+                        // broadcast form, but `missed_events` is embedded in
+                        // `Reconnected` and bypasses per-recipient top-level
+                        // stripping. Strip those fields for pre-v3 reconnectors.
+                        if !recipient_is_v3 {
+                            for event in &mut missed_events.events {
+                                match event {
+                                    ServerMessage::PlayerJoined { player } => player.epoch = None,
+                                    ServerMessage::PlayerReconnected { epoch, .. } => *epoch = None,
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        // Replay completeness (v3+ recipients only; absent on
+                        // the v2 wire). `Unavailable` wins over `Truncated`: a
+                        // zero-capacity ring evicts everything, but the honest
+                        // contract is "replay is off, resync".
+                        let replay = if recipient_is_v3 {
+                            Some(
+                                if reconnection_manager_for_baseline.event_buffer_size() == 0 {
+                                    ReplayStatus::Unavailable
+                                } else if missed_events.truncated {
+                                    ReplayStatus::Truncated
+                                } else {
+                                    ReplayStatus::Complete
+                                },
+                            )
+                        } else {
+                            None
+                        };
+                        let missed_events = missed_events.events;
+                        let sender_watermarks = if recipient_is_v3 {
+                            response_players
+                                .iter()
+                                .filter_map(|player| {
+                                    server
+                                        .connection_manager
+                                        .current_relay_stamp(&player.id)
+                                        .map(|stamp| SenderWatermark {
+                                            player_id: player.id,
+                                            epoch: stamp.epoch,
+                                            seq: stamp.seq,
+                                        })
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        Arc::new(ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+                            room_id: response_room_id,
+                            room_code,
+                            player_id: response_player_id,
+                            game_name,
+                            max_players,
+                            supports_authority,
+                            current_players: response_players,
+                            is_authority,
+                            lobby_state,
+                            ready_players: response_ready_players,
+                            relay_type,
+                            current_spectators,
+                            // v3 ICE pre-gather (deferred refinement): empty —
+                            // and skipped on the wire — unless this reconnector passes
+                            // the pre-gather gate (its original credentials may have
+                            // expired while it was away), so v2 bytes are untouched. A
+                            // reconnect into a Finalized room gets fresh ICE from the
+                            // late-join SessionPlan below instead (never both).
+                            ice_servers,
+                            missed_events,
+                            replay,
+                            sender_watermarks,
+                            // Rotate: the token just used was consumed with the
+                            // completed claim; the restored player gets a fresh one
+                            // for its NEXT unexpected disconnect (v3+ only).
+                            reconnection_token,
+                        })))
+                    })
                 }),
             )
             .await;

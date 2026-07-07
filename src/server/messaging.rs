@@ -48,4 +48,24 @@ impl EnhancedGameServer {
             .await
             .unwrap_or(false)
     }
+
+    pub async fn send_farewell_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: String,
+        error_code: Option<ErrorCode>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> bool {
+        self.message_coordinator
+            .try_send_to_player_if(
+                player_id,
+                Arc::new(ServerMessage::Error {
+                    message,
+                    error_code,
+                }),
+                should_send,
+            )
+            .await
+            .unwrap_or(false)
+    }
 }

@@ -100,7 +100,9 @@ impl CloseReason {
 /// connection everywhere) also completes the paired
 /// [`ConnectionCloseListener`], so unregistration alone is enough to end the
 /// connection's I/O tasks — no message can be quietly routed into a
-/// half-alive socket.
+/// half-alive socket. `Shutdown` is the one priority reason: once process
+/// drain starts, a semantic 4000 close supersedes earlier lifecycle eviction
+/// reasons that raced the drain.
 #[derive(Debug, Clone)]
 pub struct ConnectionCloseSignal {
     tx: tokio::sync::watch::Sender<Option<CloseReason>>,
@@ -121,17 +123,23 @@ impl ConnectionCloseSignal {
         Self::channel().0
     }
 
-    /// Request the connection be closed. The first reason wins; repeat
-    /// requests are no-ops. Returns whether this call set the reason.
+    /// Request the connection be closed. The first reason wins, except that
+    /// `Shutdown` may supersede any previous non-shutdown reason. Returns
+    /// whether this call set or upgraded the reason.
     pub fn request_close(&self, reason: CloseReason) -> bool {
-        self.tx.send_if_modified(|current| {
-            if current.is_none() {
-                *current = Some(reason);
-                true
-            } else {
-                false
-            }
-        })
+        self.tx
+            .send_if_modified(|current| match (*current, reason) {
+                (None, _) => {
+                    *current = Some(reason);
+                    true
+                }
+                (Some(CloseReason::Shutdown), _) => false,
+                (Some(_), CloseReason::Shutdown) => {
+                    *current = Some(CloseReason::Shutdown);
+                    true
+                }
+                (Some(_), _) => false,
+            })
     }
 }
 
@@ -304,6 +312,20 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    async fn send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<bool> {
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        self.send_to_player(player_id, message).await?;
+        Ok(true)
+    }
+
     /// Best-effort, non-waiting delivery for pre-close farewells.
     ///
     /// Use ONLY for advisory frames sent to a connection that is about to be
@@ -322,6 +344,25 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<bool>;
 
+    /// Best-effort delivery guarded by caller-owned state that may change while
+    /// the coordinator awaits its routing lookup.
+    ///
+    /// Implementations should evaluate `should_send` immediately before the
+    /// non-blocking enqueue, after any awaited lookup/lock acquisition. The
+    /// default keeps test doubles simple; production coordinators override it
+    /// to close the awaited-lookup race.
+    async fn try_send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<bool> {
+        if !should_send() {
+            return Ok(false);
+        }
+        self.try_send_to_player(player_id, message).await
+    }
+
     async fn broadcast_to_room(
         &self,
         room_id: &RoomId,
@@ -334,6 +375,31 @@ pub trait MessageCoordinator: Send + Sync {
         except_player: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
+
+    async fn broadcast_to_room_except_if_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: tokio::sync::watch::Receiver<bool>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        before_send().await;
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        self.broadcast_to_room_except(room_id, except_player, message)
+            .await?;
+        Ok(true)
+    }
 
     /// Build and broadcast a room message while the implementation still holds
     /// the room-routing snapshot lock.
@@ -393,6 +459,35 @@ pub trait MessageCoordinator: Send + Sync {
         }
 
         Ok(outcome)
+    }
+
+    /// Async-builder variant of
+    /// [`Self::register_local_client_with_initial_message`].
+    ///
+    /// Production uses this for reconnection: the replay baseline is fetched
+    /// while the room-routing registration lock is held, so replay capture,
+    /// initial-frame enqueue, and room routing registration are one ordered
+    /// transition relative to live room broadcasts.
+    async fn register_local_client_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        build_message: Box<
+            dyn FnOnce() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Arc<ServerMessage>> + Send + 'a>,
+                > + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        let message = build_message().await;
+        self.register_local_client_with_initial_message(
+            player_id,
+            room_id,
+            delivery,
+            Box::new(move || message),
+        )
+        .await
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()>;
@@ -994,10 +1089,10 @@ mod tests {
         assert_conservation(&metrics);
     }
 
-    /// (f) First close reason wins: a second request is a no-op (returns
-    /// false) and the listener observes the original reason — repeatedly.
+    /// (f) First non-shutdown close reason wins: a second ordinary request is
+    /// a no-op (returns false) and the listener observes the original reason.
     #[tokio::test]
-    async fn close_signal_first_reason_wins_and_listener_observes_it() {
+    async fn close_signal_first_non_shutdown_reason_wins_and_listener_observes_it() {
         let (signal, mut listener) = ConnectionCloseSignal::channel();
 
         assert!(
@@ -1013,6 +1108,23 @@ mod tests {
         // The listener is level-triggered: once closed, it stays closed with
         // the same (first) reason.
         assert_eq!(listener.closed().await, Some(CloseReason::SlowConsumer));
+    }
+
+    /// Shutdown drain is the priority lifecycle close: it must be able to
+    /// restore the semantic 4000 close when activity cleanup raced first.
+    #[tokio::test]
+    async fn close_signal_shutdown_supersedes_previous_lifecycle_reason() {
+        let (signal, mut listener) = ConnectionCloseSignal::channel();
+
+        assert!(signal.request_close(CloseReason::ActivityTimeout));
+        assert!(signal.request_close(CloseReason::Shutdown));
+        assert!(
+            !signal.request_close(CloseReason::SlowConsumer),
+            "shutdown remains the final reason once requested"
+        );
+
+        assert_eq!(listener.closed().await, Some(CloseReason::Shutdown));
+        assert_eq!(listener.closed().await, Some(CloseReason::Shutdown));
     }
 
     /// (f) Dropping every signal clone without a reason completes the
@@ -1054,9 +1166,12 @@ mod tests {
         assert!(signal.request_close(CloseReason::IdleTimeout));
         assert_eq!(listener.requested_reason(), Some(CloseReason::IdleTimeout));
 
-        // First reason wins in the peek too.
+        // First non-shutdown reason wins in the peek too.
         assert!(!signal.request_close(CloseReason::Unregistered));
         assert_eq!(listener.requested_reason(), Some(CloseReason::IdleTimeout));
+
+        assert!(signal.request_close(CloseReason::Shutdown));
+        assert_eq!(listener.requested_reason(), Some(CloseReason::Shutdown));
     }
 
     /// The RFC 6455 private-range close-code assignments are documented
