@@ -53,6 +53,9 @@ const RELAY_SEND_SETTLE_MS = 250;
 /** Grace period between meeting all success criteria and exiting. */
 const EXIT_LINGER_MS = 250;
 
+/** Retry cadence for an exchange send that raced a data-channel open edge. */
+const EXCHANGE_RETRY_MS = 50;
+
 /**
  * Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
  * `Ping` mandatory for every client (the server evicts idle connections);
@@ -173,6 +176,8 @@ class Orchestrator {
   private readonly peerStatusFrom = new Set<string>();
   private readonly sentLabels = new Map<string, Set<string>>();
   private readonly receivedLabels = new Map<string, Set<string>>();
+  private readonly pendingExchangePeers = new Set<string>();
+  private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
   private lingerUntil: number | null = null;
@@ -554,6 +559,9 @@ class Orchestrator {
     if (!this.relaySent && this.relaySendAt !== null) {
       wake = Math.min(wake, this.relaySendAt);
     }
+    if (this.exchangeRetryAt !== null) {
+      wake = Math.min(wake, this.exchangeRetryAt);
+    }
     if (this.transportStatus === null && this.p2pDeadline !== null) {
       wake = Math.min(wake, this.p2pDeadline);
     }
@@ -619,6 +627,10 @@ class Orchestrator {
 
     if (!this.relaySent && this.relaySendAt !== null && now >= this.relaySendAt) {
       this.sendRelayPayload();
+    }
+
+    if (this.exchangeRetryAt !== null && now >= this.exchangeRetryAt) {
+      this.flushPendingExchangeSends();
     }
 
     if (this.transportStatus === null && this.p2pDeadline !== null && now >= this.p2pDeadline) {
@@ -921,39 +933,69 @@ class Orchestrator {
     this.connectedPairs.add(peer);
     emit({ event: 'p2p_pair_connected', peer });
     if (this.config.exchange) {
-      for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
-        const channel = this.engine.channel(peer, label);
-        if (channel === undefined) {
-          emit({
-            event: 'error',
-            message: `open pair with ${peer} is missing channel ${label}`,
-          });
-          continue;
-        }
-        // The exact documented exchange payload (stable field order).
-        const text = `{"from":"${this.myId}","channel":"${label}","seq":0}`;
-        try {
-          channel.send(text);
-        } catch (error) {
-          emit({
-            event: 'error',
-            message: `send on ${label} to ${peer} failed: ${describe(error)}`,
-          });
-          continue;
-        }
-        let labels = this.sentLabels.get(peer);
-        if (labels === undefined) {
-          labels = new Set();
-          this.sentLabels.set(peer, labels);
-        }
-        labels.add(label);
-        emit({ event: 'channel_message_sent', peer, label, text });
-      }
+      this.pendingExchangePeers.add(peer);
+      this.flushPendingExchangeSends();
     }
     // All expected pairs connected resolves the overall status early.
     if (this.transportStatus === null && this.allExpectedPairsConnected()) {
       this.resolveTransportStatus();
     }
+  }
+
+  private flushPendingExchangeSends(): void {
+    for (const peer of Array.from(this.pendingExchangePeers)) {
+      if (this.trySendExchange(peer)) {
+        this.pendingExchangePeers.delete(peer);
+      }
+    }
+    this.exchangeRetryAt =
+      this.pendingExchangePeers.size === 0 ? null : Date.now() + EXCHANGE_RETRY_MS;
+  }
+
+  /**
+   * Try to send all still-unsent exchange labels for a connected pair.
+   *
+   * Browser data-channel open callbacks and `send()` readiness can be slightly
+   * reordered in Chromium under load. The pair remains valid; defer the send
+   * until the channel itself reports `open` at the point of use.
+   */
+  private trySendExchange(peer: string): boolean {
+    let complete = true;
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      const sent = this.sentLabels.get(peer);
+      if (sent?.has(label)) {
+        continue;
+      }
+      const channel = this.engine.channel(peer, label);
+      if (channel === undefined) {
+        emit({
+          event: 'error',
+          message: `open pair with ${peer} is missing channel ${label}`,
+        });
+        complete = false;
+        continue;
+      }
+      if (channel.readyState !== 'open') {
+        complete = false;
+        continue;
+      }
+      // The exact documented exchange payload (stable field order).
+      const text = `{"from":"${this.myId}","channel":"${label}","seq":0}`;
+      try {
+        channel.send(text);
+      } catch {
+        complete = false;
+        continue;
+      }
+      let labels = this.sentLabels.get(peer);
+      if (labels === undefined) {
+        labels = new Set();
+        this.sentLabels.set(peer, labels);
+      }
+      labels.add(label);
+      emit({ event: 'channel_message_sent', peer, label, text });
+    }
+    return complete;
   }
 
   /**
