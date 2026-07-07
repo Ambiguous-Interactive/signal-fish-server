@@ -833,7 +833,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .map(|players| {
                 players
                     .iter()
-                    .filter(|player_id| Some(*player_id) != Some(except_player))
+                    .filter(|player_id| *player_id != except_player)
                     .filter_map(|player_id| {
                         clients
                             .get(player_id)

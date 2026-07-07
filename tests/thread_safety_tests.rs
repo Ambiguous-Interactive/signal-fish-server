@@ -1038,9 +1038,11 @@ async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is
                         builder_started_tx
                             .send(())
                             .expect("test should still wait for builder start");
-                        release_builder_rx
-                            .recv()
-                            .expect("test should release the broadcast builder");
+                        tokio::task::block_in_place(|| {
+                            release_builder_rx
+                                .recv()
+                                .expect("test should release the broadcast builder");
+                        });
                         Arc::new(ServerMessage::GameData {
                             from_player: sender_id,
                             data: serde_json::json!({ "kind": "blocked-broadcast" }),
@@ -1054,9 +1056,11 @@ async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is
         })
     };
 
-    builder_started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("broadcast builder should start");
+    tokio::task::block_in_place(|| {
+        builder_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("broadcast builder should start");
+    });
     assert_eq!(
         allocated_stamp.load(Ordering::SeqCst),
         1,
