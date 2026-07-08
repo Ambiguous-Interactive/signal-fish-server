@@ -4,8 +4,11 @@ use crate::config::{
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
 use crate::coordination::{ClientDeliveryHandle, MessageCoordinator};
-use crate::database::{create_database, DatabaseConfig, GameDatabase};
-use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
+use crate::database::{create_database, DatabaseConfig, GameDatabase, RoomCleanupOutcome};
+use crate::protocol::{
+    ConnectionInfo, ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage,
+    SpectatorInfo,
+};
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -40,6 +43,18 @@ async fn create_test_server_with_message_coordinator(
     config: ServerConfig,
     message_coordinator: Arc<dyn MessageCoordinator>,
 ) -> Arc<EnhancedGameServer> {
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let database = create_test_database().await;
+    create_test_server_with_message_coordinator_and_lock(
+        config,
+        message_coordinator,
+        distributed_lock,
+        database,
+    )
+    .await
+}
+
+async fn create_test_database() -> Arc<dyn GameDatabase> {
     let database: Arc<dyn GameDatabase> = Arc::from(
         create_database(DatabaseConfig::InMemory)
             .await
@@ -49,7 +64,15 @@ async fn create_test_server_with_message_coordinator(
         .initialize()
         .await
         .expect("failed to initialize test database");
+    database
+}
 
+async fn create_test_server_with_message_coordinator_and_lock(
+    config: ServerConfig,
+    message_coordinator: Arc<dyn MessageCoordinator>,
+    distributed_lock: Arc<dyn DistributedLock>,
+    database: Arc<dyn GameDatabase>,
+) -> Arc<EnhancedGameServer> {
     let instance_id = uuid::Uuid::new_v4();
     let metrics = Arc::new(crate::metrics::ServerMetrics::new());
     let metrics_config = MetricsConfig::default();
@@ -72,7 +95,6 @@ async fn create_test_server_with_message_coordinator(
     let rate_limiter = Arc::new(RoomRateLimiter::new(config.rate_limit_config.clone()));
     Arc::clone(&rate_limiter).start_cleanup_task();
 
-    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
     let connection_manager = ConnectionManager::new(
         config.max_connections_per_ip,
         Arc::clone(&metrics),
@@ -132,6 +154,367 @@ async fn create_test_server_with_message_coordinator(
         active_socket_tasks: AtomicUsize::new(0),
         active_socket_tasks_notify: Notify::new(),
     })
+}
+
+struct DrainOnLockAcquire {
+    key: String,
+    inner: InMemoryDistributedLock,
+    server: StdMutex<Option<Weak<EnhancedGameServer>>>,
+    triggered: AtomicBool,
+}
+
+impl DrainOnLockAcquire {
+    fn new(key: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            inner: InMemoryDistributedLock::new(),
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+        }
+    }
+
+    fn attach_server(&self, server: &Arc<EnhancedGameServer>) {
+        *self
+            .server
+            .lock()
+            .expect("drain trigger server lock poisoned") = Some(Arc::downgrade(server));
+    }
+
+    fn begin_drain_after_matching_acquire(&self, key: &str) {
+        if key != self.key || self.triggered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let server = self
+            .server
+            .lock()
+            .expect("drain trigger server lock poisoned")
+            .clone()
+            .and_then(|server| server.upgrade())
+            .expect("test lock must be attached before triggering drain");
+        server.begin_shutdown_drain();
+    }
+}
+
+#[async_trait::async_trait]
+impl DistributedLock for DrainOnLockAcquire {
+    async fn acquire(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<crate::distributed::LockHandle> {
+        let handle = self.inner.acquire(key, ttl).await?;
+        self.begin_drain_after_matching_acquire(key);
+        Ok(handle)
+    }
+
+    async fn try_acquire(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> anyhow::Result<Option<crate::distributed::LockHandle>> {
+        let handle = self.inner.try_acquire(key, ttl).await?;
+        if handle.is_some() {
+            self.begin_drain_after_matching_acquire(key);
+        }
+        Ok(handle)
+    }
+
+    async fn extend(
+        &self,
+        handle: &crate::distributed::LockHandle,
+        ttl: Duration,
+    ) -> anyhow::Result<bool> {
+        self.inner.extend(handle, ttl).await
+    }
+
+    async fn release(&self, handle: &crate::distributed::LockHandle) -> anyhow::Result<bool> {
+        self.inner.release(handle).await
+    }
+
+    async fn is_locked(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.is_locked(key).await
+    }
+
+    async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
+        self.inner.cleanup_expired_locks().await
+    }
+}
+
+struct DrainAfterCreateDatabase {
+    inner: Arc<dyn GameDatabase>,
+    server: StdMutex<Option<Weak<EnhancedGameServer>>>,
+    triggered: AtomicBool,
+}
+
+impl DrainAfterCreateDatabase {
+    fn new(inner: Arc<dyn GameDatabase>) -> Self {
+        Self {
+            inner,
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+        }
+    }
+
+    fn attach_server(&self, server: &Arc<EnhancedGameServer>) {
+        *self
+            .server
+            .lock()
+            .expect("drain trigger server lock poisoned") = Some(Arc::downgrade(server));
+    }
+
+    fn begin_drain_once(&self) {
+        if self.triggered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let server = self
+            .server
+            .lock()
+            .expect("drain trigger server lock poisoned")
+            .clone()
+            .and_then(|server| server.upgrade())
+            .expect("test database must be attached before triggering drain");
+        server.begin_shutdown_drain();
+    }
+}
+
+#[async_trait::async_trait]
+impl GameDatabase for DrainAfterCreateDatabase {
+    async fn initialize(&self) -> anyhow::Result<()> {
+        self.inner.initialize().await
+    }
+
+    async fn create_room(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<uuid::Uuid>,
+    ) -> anyhow::Result<Room> {
+        let room = self
+            .inner
+            .create_room(
+                game_name,
+                room_code,
+                max_players,
+                supports_authority,
+                creator_id,
+                relay_type,
+                region_id,
+                application_id,
+            )
+            .await?;
+        self.begin_drain_once();
+        Ok(room)
+    }
+
+    async fn set_room_application_id(
+        &self,
+        room_id: &RoomId,
+        application_id: uuid::Uuid,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .set_room_application_id(room_id, application_id)
+            .await
+    }
+
+    async fn clear_room_application_id(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        self.inner.clear_room_application_id(room_id).await
+    }
+
+    async fn get_room(&self, game_name: &str, room_code: &str) -> anyhow::Result<Option<Room>> {
+        self.inner.get_room(game_name, room_code).await
+    }
+
+    async fn get_room_by_id(&self, room_id: &RoomId) -> anyhow::Result<Option<Room>> {
+        self.inner.get_room_by_id(room_id).await
+    }
+
+    async fn add_player_to_room(
+        &self,
+        room_id: &RoomId,
+        player: PlayerInfo,
+    ) -> anyhow::Result<bool> {
+        self.inner.add_player_to_room(room_id, player).await
+    }
+
+    async fn remove_player_from_room(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> anyhow::Result<Option<PlayerInfo>> {
+        self.inner.remove_player_from_room(room_id, player_id).await
+    }
+
+    async fn update_room_authority(
+        &self,
+        room_id: &RoomId,
+        authority_player: Option<PlayerId>,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .update_room_authority(room_id, authority_player)
+            .await
+    }
+
+    async fn request_room_authority(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        become_authority: bool,
+    ) -> anyhow::Result<(bool, Option<String>)> {
+        self.inner
+            .request_room_authority(room_id, player_id, become_authority)
+            .await
+    }
+
+    async fn update_player_name(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        name: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .update_player_name(room_id, player_id, name)
+            .await
+    }
+
+    async fn update_player_connection_info(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        connection_info: ConnectionInfo,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .update_player_connection_info(room_id, player_id, connection_info)
+            .await
+    }
+
+    async fn get_room_players(&self, room_id: &RoomId) -> anyhow::Result<Vec<PlayerInfo>> {
+        self.inner.get_room_players(room_id).await
+    }
+
+    async fn cleanup_empty_rooms(
+        &self,
+        empty_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
+    ) -> anyhow::Result<Vec<RoomId>> {
+        self.inner
+            .cleanup_empty_rooms(empty_timeout, protected)
+            .await
+    }
+
+    async fn cleanup_expired_rooms(
+        &self,
+        empty_timeout: chrono::Duration,
+        inactive_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
+    ) -> anyhow::Result<RoomCleanupOutcome> {
+        self.inner
+            .cleanup_expired_rooms(empty_timeout, inactive_timeout, protected)
+            .await
+    }
+
+    async fn update_room_activity(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        self.inner.update_room_activity(room_id).await
+    }
+
+    async fn delete_room(&self, room_id: &RoomId) -> anyhow::Result<bool> {
+        self.inner.delete_room(room_id).await
+    }
+
+    async fn get_game_room_count(&self, game_name: &str) -> anyhow::Result<usize> {
+        self.inner.get_game_room_count(game_name).await
+    }
+
+    async fn health_check(&self) -> bool {
+        self.inner.health_check().await
+    }
+
+    async fn update_player_last_seen(&self, player_id: &PlayerId) -> anyhow::Result<()> {
+        self.inner.update_player_last_seen(player_id).await
+    }
+
+    async fn get_rooms_by_game(&self) -> anyhow::Result<HashMap<String, usize>> {
+        self.inner.get_rooms_by_game().await
+    }
+
+    async fn get_player_count_percentiles(&self) -> anyhow::Result<HashMap<String, f64>> {
+        self.inner.get_player_count_percentiles().await
+    }
+
+    async fn get_game_player_percentiles(
+        &self,
+    ) -> anyhow::Result<HashMap<String, HashMap<String, f64>>> {
+        self.inner.get_game_player_percentiles().await
+    }
+
+    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        self.inner.transition_room_to_lobby(room_id).await
+    }
+
+    async fn transition_room_to_waiting(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        self.inner.transition_room_to_waiting(room_id).await
+    }
+
+    async fn toggle_player_ready(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> anyhow::Result<Option<(LobbyState, Vec<PlayerId>, bool)>> {
+        self.inner.toggle_player_ready(room_id, player_id).await
+    }
+
+    async fn finalize_room_game(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        self.inner.finalize_room_game(room_id).await
+    }
+
+    async fn add_spectator_to_room(
+        &self,
+        room_id: &RoomId,
+        spectator: SpectatorInfo,
+    ) -> anyhow::Result<bool> {
+        self.inner.add_spectator_to_room(room_id, spectator).await
+    }
+
+    async fn remove_spectator_from_room(
+        &self,
+        room_id: &RoomId,
+        spectator_id: &PlayerId,
+    ) -> anyhow::Result<Option<SpectatorInfo>> {
+        self.inner
+            .remove_spectator_from_room(room_id, spectator_id)
+            .await
+    }
+
+    async fn get_room_spectators(&self, room_id: &RoomId) -> anyhow::Result<Vec<SpectatorInfo>> {
+        self.inner.get_room_spectators(room_id).await
+    }
+
+    async fn try_claim_room_cleanup(
+        &self,
+        room_id: &RoomId,
+        cleanup_type: &str,
+        instance_id: &uuid::Uuid,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .try_claim_room_cleanup(room_id, cleanup_type, instance_id)
+            .await
+    }
+
+    async fn cleanup_old_room_cleanup_events(&self) -> anyhow::Result<u64> {
+        self.inner.cleanup_old_room_cleanup_events().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self.inner.as_any()
+    }
+
+    async fn admin_user_exists(&self, email: &str) -> anyhow::Result<bool> {
+        self.inner.admin_user_exists(email).await
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -738,6 +1121,164 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
             "drain rejection should happen before room-cap lock acquisition"
         );
     }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_room_creation_rechecks_after_cap_lock_race() {
+    let trigger_lock = Arc::new(DrainOnLockAcquire::new("game_room_cap:test-game"));
+    let distributed_lock: Arc<dyn DistributedLock> = trigger_lock.clone();
+    let message_coordinator: Arc<dyn MessageCoordinator> =
+        Arc::new(InMemoryMessageCoordinator::new());
+    let database = create_test_database().await;
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        message_coordinator,
+        distributed_lock,
+        database,
+    )
+    .await;
+    trigger_lock.attach_server(&server);
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48030".parse().unwrap()).await;
+
+    server
+        .handle_join_room(
+            &player_id,
+            "test-game".to_string(),
+            Some("RACE01".to_string()),
+            "player".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        server.is_draining(),
+        "test lock should transition the server into draining after cap-lock acquisition"
+    );
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("channel still open")
+        .expect("join failure message present");
+    match response.as_ref() {
+        ServerMessage::RoomJoinFailed { reason, error_code } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::ServerDraining),
+                "room creation that races with drain should be reported as SERVER_DRAINING"
+            );
+            assert!(
+                reason.contains("draining"),
+                "rejection reason should mention draining: {reason}"
+            );
+        }
+        other => panic!("expected RoomJoinFailed, got {other:?}"),
+    }
+
+    assert!(
+        server
+            .database
+            .get_room("test-game", "RACE01")
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "room must not be created after the server enters drain"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("room_join:test-game:RACE01")
+            .await
+            .expect("room join lock check succeeds"),
+        "room-join lock must be released after late drain rejection"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("game_room_cap:test-game")
+            .await
+            .expect("room cap lock check succeeds"),
+        "room-cap lock must be released after late drain rejection"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_room_creation_rolls_back_after_create_race() {
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let message_coordinator: Arc<dyn MessageCoordinator> =
+        Arc::new(InMemoryMessageCoordinator::new());
+    let database = Arc::new(DrainAfterCreateDatabase::new(create_test_database().await));
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        message_coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    database.attach_server(&server);
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48031".parse().unwrap()).await;
+
+    server
+        .handle_join_room(
+            &player_id,
+            "test-game".to_string(),
+            Some("RACE02".to_string()),
+            "player".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        server.is_draining(),
+        "test lock should transition the server into draining after room creation"
+    );
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("channel still open")
+        .expect("join failure message present");
+    match response.as_ref() {
+        ServerMessage::RoomJoinFailed { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::ServerDraining),
+                "room creation that finishes during drain should be reported as SERVER_DRAINING"
+            );
+        }
+        other => panic!("expected RoomJoinFailed, got {other:?}"),
+    }
+
+    assert!(
+        server
+            .database
+            .get_room("test-game", "RACE02")
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "room created during drain must be rolled back before releasing the join lock"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("room_join:test-game:RACE02")
+            .await
+            .expect("room join lock check succeeds"),
+        "room-join lock must be released after rollback"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("game_room_cap:test-game")
+            .await
+            .expect("room cap lock check succeeds"),
+        "room-cap lock must be released after rollback"
+    );
 }
 
 #[tokio::test]

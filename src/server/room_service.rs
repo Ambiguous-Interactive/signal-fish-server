@@ -647,91 +647,116 @@ impl EnhancedGameServer {
             }
             Ok(None) => {
                 if self.is_draining() {
-                    return Err(JoinRoomError::ServerDraining);
-                }
-
-                // Enforce per-game room cap before creating a new room
-                let cap_lock_key = format!("game_room_cap:{game_name}");
-                match self
-                    .distributed_lock
-                    .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
-                    .await
-                {
-                    Ok(lock) => {
-                        self.metrics.increment_room_cap_lock_acquisitions();
-                        game_cap_lock = Some(lock);
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to acquire cap lock: {}", err);
-                        self.metrics.increment_room_cap_lock_failures();
-                    }
-                }
-
-                match self.database.get_game_room_count(game_name).await {
-                    Ok(current_room_count)
-                        if current_room_count >= self.config.max_rooms_per_game =>
+                    Err(JoinRoomError::ServerDraining)
+                } else {
+                    // Enforce per-game room cap before creating a new room
+                    let cap_lock_key = format!("game_room_cap:{game_name}");
+                    match self
+                        .distributed_lock
+                        .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
+                        .await
                     {
-                        self.metrics.increment_room_cap_denials();
-                        if let Some(lock) = &game_cap_lock {
-                            let _ = self.distributed_lock.release(lock).await;
+                        Ok(lock) => {
+                            self.metrics.increment_room_cap_lock_acquisitions();
+                            game_cap_lock = Some(lock);
                         }
-                        Err(JoinRoomError::MaxRoomsPerGameExceeded(
-                            MaxRoomsPerGameExceededError {
-                                game_name: game_name.to_string(),
-                                current: current_room_count,
-                                limit: self.config.max_rooms_per_game,
-                            },
-                        ))
+                        Err(err) => {
+                            tracing::error!("Failed to acquire cap lock: {}", err);
+                            self.metrics.increment_room_cap_lock_failures();
+                        }
                     }
-                    Ok(_) => {
-                        let relay_type = self.resolve_relay_type(game_name);
-                        let client_app_id = self.client_app_id(player_id);
-                        let region_id = self.region_id().to_string();
-                        let created_room = self
-                            .database
-                            .create_room(
-                                game_name.to_string(),
-                                Some(room_code.to_string()),
-                                max_players,
-                                supports_authority,
-                                *player_id,
-                                relay_type,
-                                region_id.clone(),
-                                client_app_id,
-                            )
-                            .await;
 
-                        if let Some(lock) = &game_cap_lock {
-                            let _ = self.distributed_lock.release(lock).await;
+                    match self.database.get_game_room_count(game_name).await {
+                        Ok(_) if self.is_draining() => {
+                            self.release_game_cap_lock(&game_cap_lock).await;
+                            Err(JoinRoomError::ServerDraining)
                         }
+                        Ok(current_room_count)
+                            if current_room_count >= self.config.max_rooms_per_game =>
+                        {
+                            self.metrics.increment_room_cap_denials();
+                            self.release_game_cap_lock(&game_cap_lock).await;
+                            Err(JoinRoomError::MaxRoomsPerGameExceeded(
+                                MaxRoomsPerGameExceededError {
+                                    game_name: game_name.to_string(),
+                                    current: current_room_count,
+                                    limit: self.config.max_rooms_per_game,
+                                },
+                            ))
+                        }
+                        Ok(_) => {
+                            let relay_type = self.resolve_relay_type(game_name);
+                            let client_app_id = self.client_app_id(player_id);
+                            let region_id = self.region_id().to_string();
+                            let created_room = self
+                                .database
+                                .create_room(
+                                    game_name.to_string(),
+                                    Some(room_code.to_string()),
+                                    max_players,
+                                    supports_authority,
+                                    *player_id,
+                                    relay_type,
+                                    region_id.clone(),
+                                    client_app_id,
+                                )
+                                .await;
 
-                        match created_room {
-                            Ok(mut room) => {
-                                self.metrics.increment_rooms_created();
-                                self.metrics.increment_players_joined();
-                                if let Some(app_id) = client_app_id {
-                                    self.record_room_application(&room.id, app_id).await;
+                            match created_room {
+                                Ok(room) if self.is_draining() => {
+                                    match self.database.delete_room(&room.id).await {
+                                        Ok(true) => {}
+                                        Ok(false) => {
+                                            tracing::warn!(
+                                                room_id = %room.id,
+                                                "Room created during shutdown drain was already absent during rollback"
+                                            );
+                                        }
+                                        Err(err) => {
+                                            tracing::error!(
+                                                room_id = %room.id,
+                                                error = %err,
+                                                "Failed to roll back room created during shutdown drain"
+                                            );
+                                        }
+                                    }
+                                    self.release_game_cap_lock(&game_cap_lock).await;
+                                    Err(JoinRoomError::ServerDraining)
                                 }
-                                if let Err(e) = self
-                                    .database
-                                    .update_player_name(&room.id, player_id, player_name)
-                                    .await
-                                {
-                                    tracing::warn!(%player_id, "Failed to update creator name: {}", e);
-                                } else if let Some(creator_info) = room.players.get_mut(player_id) {
-                                    creator_info.name = player_name.to_string();
+                                Ok(mut room) => {
+                                    self.release_game_cap_lock(&game_cap_lock).await;
+                                    self.metrics.increment_rooms_created();
+                                    self.metrics.increment_players_joined();
+                                    if let Some(app_id) = client_app_id {
+                                        self.record_room_application(&room.id, app_id).await;
+                                    }
+                                    if let Err(e) = self
+                                        .database
+                                        .update_player_name(&room.id, player_id, player_name)
+                                        .await
+                                    {
+                                        tracing::warn!(%player_id, "Failed to update creator name: {}", e);
+                                    } else if let Some(creator_info) =
+                                        room.players.get_mut(player_id)
+                                    {
+                                        creator_info.name = player_name.to_string();
+                                    }
+                                    Ok(room)
                                 }
-                                Ok(room)
+                                Err(e) => {
+                                    self.release_game_cap_lock(&game_cap_lock).await;
+                                    Err(anyhow::anyhow!(e).into())
+                                }
                             }
-                            Err(e) => Err(anyhow::anyhow!(e).into()),
                         }
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to read room count for cap enforcement: {}", err);
-                        if let Some(lock) = &game_cap_lock {
-                            let _ = self.distributed_lock.release(lock).await;
+                        Err(err) => {
+                            tracing::error!(
+                                "Failed to read room count for cap enforcement: {}",
+                                err
+                            );
+                            self.release_game_cap_lock(&game_cap_lock).await;
+                            Err(err.into())
                         }
-                        Err(err.into())
                     }
                 }
             }
@@ -740,6 +765,12 @@ impl EnhancedGameServer {
 
         let _ = self.distributed_lock.release(&lock_handle).await;
         result
+    }
+
+    async fn release_game_cap_lock(&self, game_cap_lock: &Option<LockHandle>) {
+        if let Some(lock) = game_cap_lock {
+            let _ = self.distributed_lock.release(lock).await;
+        }
     }
 
     async fn join_would_create_room_while_draining(

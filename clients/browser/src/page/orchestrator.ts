@@ -177,7 +177,7 @@ class Orchestrator {
   private readonly sentLabels = new Map<string, Set<string>>();
   private readonly receivedLabels = new Map<string, Set<string>>();
   private readonly pendingExchangePeers = new Set<string>();
-  private readonly reportedExchangeSendFailures = new Set<string>();
+  private readonly reportedExchangeDiagnostics = new Set<string>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
@@ -969,10 +969,14 @@ class Orchestrator {
       }
       const channel = this.engine.channel(peer, label);
       if (channel === undefined) {
-        emit({
-          event: 'error',
-          message: `open pair with ${peer} is missing channel ${label}`,
-        });
+        const diagnosticKey = `missing\0${peer}\0${label}`;
+        if (!this.reportedExchangeDiagnostics.has(diagnosticKey)) {
+          this.reportedExchangeDiagnostics.add(diagnosticKey);
+          emit({
+            event: 'error',
+            message: `open pair with ${peer} is missing channel ${label}`,
+          });
+        }
         complete = false;
         continue;
       }
@@ -985,9 +989,9 @@ class Orchestrator {
       try {
         channel.send(text);
       } catch (error) {
-        const diagnosticKey = `${peer}\0${label}`;
-        if (!this.reportedExchangeSendFailures.has(diagnosticKey)) {
-          this.reportedExchangeSendFailures.add(diagnosticKey);
+        const diagnosticKey = `send\0${peer}\0${label}`;
+        if (!this.reportedExchangeDiagnostics.has(diagnosticKey)) {
+          this.reportedExchangeDiagnostics.add(diagnosticKey);
           const message =
             `data-channel exchange send to ${peer} on ${label} failed while channel was open; ` +
             `bufferedAmount=${channel.bufferedAmount}; will retry: ${describe(error)}`;
