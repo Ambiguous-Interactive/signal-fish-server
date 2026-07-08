@@ -372,11 +372,7 @@ async fn finish_background_shutdown(
 }
 
 async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(err) = tokio::signal::ctrl_c().await {
-            tracing::error!(error = %err, "Failed to install Ctrl+C shutdown handler");
-        }
-    };
+    let ctrl_c = wait_for_ctrl_c_shutdown(tokio::signal::ctrl_c());
 
     #[cfg(unix)]
     {
@@ -400,6 +396,13 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         ctrl_c.await;
+    }
+}
+
+async fn wait_for_ctrl_c_shutdown(ctrl_c: impl std::future::Future<Output = std::io::Result<()>>) {
+    if let Err(err) = ctrl_c.await {
+        tracing::error!(error = %err, "Failed to install Ctrl+C shutdown handler");
+        std::future::pending::<()>().await;
     }
 }
 
@@ -433,8 +436,10 @@ fn extract_client_fingerprint(headers: &HeaderMap) -> Option<ClientCertificateFi
 
 #[cfg(test)]
 mod cli_tests {
-    use super::Cli;
+    use super::{wait_for_ctrl_c_shutdown, Cli};
     use clap::Parser;
+    use std::io;
+    use std::time::Duration;
 
     #[test]
     fn test_cli_default_no_flags() {
@@ -490,5 +495,31 @@ mod cli_tests {
     fn test_cli_version() {
         let result = Cli::try_parse_from(["signal-fish-server", "--version"]);
         assert!(result.is_err()); // --version causes early exit
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_completion_allows_shutdown() {
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_ctrl_c_shutdown(async { Ok(()) }),
+        )
+        .await
+        .expect("successful Ctrl+C future should complete shutdown wait");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_install_error_waits_forever() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(25),
+            wait_for_ctrl_c_shutdown(async {
+                Err(io::Error::other("synthetic Ctrl+C installation failure"))
+            }),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Ctrl+C installation failure must not trigger shutdown"
+        );
     }
 }
