@@ -1027,11 +1027,14 @@ clamped). `/v2/ws` behavior is unchanged.
 
 **Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
 chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor, where
-no v3 messages are emitted at all. This is the relay-floor guarantee: v2 and v3 clients interoperate, always.
+no server-driven P2P plan messages (`SessionPlan` or `NewPeer`) are emitted for that room. WebRTC `Signal` relay
+remains transport-gated between same-room v3 WebRTC peers; informational status, connection-level diagnostics,
+and shutdown advisories (`TransportStatus`, `PeerTransportStatus`, `RelayStats`, `GoingAway`) keep their own
+feature gates. This is the relay-floor guarantee: v2 and v3 clients interoperate, always.
 
 ### New v3 messages
 
-These six messages exist only on a negotiated v3 connection.
+These seven messages exist only on a negotiated v3 connection.
 
 | Message | Direction | Purpose |
 |---|---|---|
@@ -1040,6 +1043,7 @@ These six messages exist only on a negotiated v3 connection.
 | `SessionPlan` | server → client | Per-recipient session directive emitted at finalization (alongside `GameStarting`) |
 | `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
 | `PeerTransportStatus` | server → client | A same-room peer's reported transport state changed (fan-out of an accepted `TransportStatus`) |
+| `RelayStats` | server → client | Optional per-connection relay delivery counters when `websocket.delivery_stats_interval_secs` is enabled |
 | `GoingAway` | server → client | Shutdown-drain advisory sent before the server closes the socket with `4000 server_shutdown` |
 
 #### Signal

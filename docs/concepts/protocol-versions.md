@@ -55,8 +55,9 @@ loses) its P2P path always has a working transport to fall back to.
 
 **All-members-v3 required for any upgrade.** A non-relay plan requires _every_ member of the room to be
 v3-capable _and_ to support the chosen topology and transport. A single v2 (or relay-only) member forces the
-whole room to the relay floor, where **no** `SessionPlan` is emitted and no v3 message reaches any client. So a v3
-control message can never be delivered to a v2 client, and a mixed room behaves exactly like v2.
+whole room to the relay floor, where **no** `SessionPlan` is emitted and no `NewPeer` pairing is generated. A
+v3-only server message can still never be delivered to a v2 client; every v3-only path has its own negotiated-v3
+recipient gate. Mixed rooms keep the authoritative `GameData` path on the v2-compatible relay floor.
 
 The selection happens once, at lobby finalization, by walking a richest-first ladder and settling on the first
 rung that fits the per-game desired ceiling, has its transport enabled in config, and is supported by every
@@ -106,8 +107,9 @@ omitted with the other v3-only fields on negotiated v2 connections.
 
 ### 2. Handle the v3 server messages
 
-These arrive only on a negotiated v3 connection. The session messages arrive only when the room upgrades past the
-relay floor; the reliability/shutdown messages are independently gated by their features:
+These messages exist only on negotiated v3 connections. The server-driven session plan messages (`SessionPlan`,
+`NewPeer`) arrive only when the room upgrades past the relay floor. `Signal` is WebRTC-transport-gated between
+same-room v3 peers; status, reliability, and shutdown messages are independently gated by their features:
 
 - `SessionPlan` (server → client) — your per-recipient session directive: `topology`, `transport`, the `peers`
   to connect to (each with an `initiate` flag), `ice_servers`, optional `host`, and `fallback: "relay"`.

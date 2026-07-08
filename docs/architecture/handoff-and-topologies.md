@@ -14,7 +14,7 @@ A negotiated v3 room resolves to exactly one topology for its lifetime:
 
 - **Relay** — the v2 server-relay hub, and the universal floor. Every client
   supports it; `GameData` is fanned out through the server. A relay room emits no
-  `SessionPlan` and behaves byte-identically to v2.
+  `SessionPlan`, and its authoritative game-data path stays v2-compatible.
 - **Host** — a star around one elected authoritative peer (the host). Each client
   connects only to the host; clients never connect to each other. Used with the
   `webrtc` or `direct` transport.
@@ -76,9 +76,11 @@ choose_session_plan(members, config)         # ladder walk; all-members-v3 gate
              send SessionPlan  (after GameStarting, ordering preserved)
 ```
 
-The all-members-v3 gate is the back-compat invariant: a single v2 or relay-only
-member forces the whole room to the relay floor, so a v3 control message can never
-reach a v2 client. This holds for finalize, late join, reconnect, and signal.
+The all-members-v3 gate is the back-compat invariant for server-driven P2P
+plans: a single v2 or relay-only member forces the room plan to the relay floor,
+so no `SessionPlan` or `NewPeer` pairing is emitted for that room. Every
+v3-only message still has a negotiated-v3 recipient gate, so it can never reach
+a v2 client; `Signal` itself is same-room plus WebRTC-transport gated.
 
 ## Per-recipient peer lists
 
