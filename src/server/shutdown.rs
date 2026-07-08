@@ -177,10 +177,22 @@ impl EnhancedGameServer {
     /// waits on the parent WebSocket handler lifetime instead of connection-map
     /// membership. It returns the number of handlers still active at timeout.
     pub async fn wait_for_shutdown_connections(&self, max_wait: Duration) -> usize {
+        self.wait_for_shutdown_connections_after_active_check(max_wait, || {})
+            .await
+    }
+
+    async fn wait_for_shutdown_connections_after_active_check(
+        &self,
+        max_wait: Duration,
+        mut after_active_check: impl FnMut(),
+    ) -> usize {
         let deadline = tokio::time::Instant::now() + max_wait;
         loop {
             let notified = self.active_socket_tasks_notify.notified();
             tokio::pin!(notified);
+            // Arm the waiter before reading the counter so the zero-task
+            // transition cannot pass between the state check and the await.
+            let _ = notified.as_mut().enable();
 
             let active_tasks = self.active_socket_tasks.load(Ordering::Acquire);
             if active_tasks == 0 {
@@ -191,6 +203,8 @@ impl EnhancedGameServer {
             if now >= deadline {
                 return active_tasks;
             }
+
+            after_active_check();
 
             tokio::select! {
                 () = &mut notified => {}
@@ -352,5 +366,39 @@ mod tests {
             matches!(duplicate_advisory, Err(TryRecvError::Empty)),
             "duplicate drain should not enqueue another GoingAway"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_connection_wait_does_not_miss_zero_transition_after_count_check() {
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            AuthMaintenanceConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+        let mut guard = Some(server.track_socket_task());
+
+        let remaining = tokio::select! {
+            remaining = server.wait_for_shutdown_connections_after_active_check(
+                Duration::from_secs(30),
+                || {
+                    drop(guard.take());
+                },
+            ) => remaining,
+            () = tokio::time::sleep(Duration::from_millis(1)) => {
+                panic!("shutdown wait missed the zero-active notification");
+            }
+        };
+
+        assert_eq!(remaining, 0);
     }
 }
