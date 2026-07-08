@@ -35,8 +35,8 @@
 
 use proptest::prelude::*;
 use signal_fish_server::coordination::{
-    deliver_or_disconnect, ClientDeliveryHandle, CloseReason, ConnectionCloseSignal,
-    DeliveryOutcome,
+    deliver_or_disconnect, ClientDeliveryHandle, CloseReason, ConnectionCloseListener,
+    ConnectionCloseSignal, DeliveryOutcome,
 };
 use signal_fish_server::metrics::ServerMetrics;
 use signal_fish_server::protocol::ServerMessage;
@@ -46,6 +46,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+async fn closed_with_timeout(
+    listener: &mut ConnectionCloseListener,
+    context: &str,
+) -> Option<CloseReason> {
+    tokio::time::timeout(Duration::from_secs(1), listener.closed())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+}
 
 // ---------------------------------------------------------------------------
 // Part 1a — EventBuffer vs a perfect-recall reference (pure, no runtime)
@@ -490,7 +499,7 @@ proptest! {
             // requested reason (when any was requested).
             if let Some(expected_reason) = model.expected_reason {
                 assert_eq!(
-                    listener.closed().await,
+                    closed_with_timeout(&mut listener, "model delivery close").await,
                     Some(expected_reason),
                     "the close listener must observe the FIRST requested reason"
                 );

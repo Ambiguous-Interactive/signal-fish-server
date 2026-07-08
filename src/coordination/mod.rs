@@ -722,6 +722,15 @@ mod tests {
         }
     }
 
+    async fn closed_with_timeout(
+        listener: &mut ConnectionCloseListener,
+        context: &str,
+    ) -> Option<CloseReason> {
+        tokio::time::timeout(Duration::from_secs(1), listener.closed())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+    }
+
     #[tokio::test]
     async fn default_broadcast_builder_delegates_to_except_broadcast_once() {
         let coordinator = FallbackCoordinator::default();
@@ -1181,7 +1190,7 @@ mod tests {
             0
         );
         assert_eq!(
-            listener.closed().await,
+            closed_with_timeout(&mut listener, "stuck recipient close").await,
             Some(CloseReason::SlowConsumer),
             "the stuck connection must be asked to close as a slow consumer"
         );
@@ -1301,10 +1310,16 @@ mod tests {
             "a second close request must be a no-op"
         );
 
-        assert_eq!(listener.closed().await, Some(CloseReason::SlowConsumer));
+        assert_eq!(
+            closed_with_timeout(&mut listener, "first non-shutdown close").await,
+            Some(CloseReason::SlowConsumer)
+        );
         // The listener is level-triggered: once closed, it stays closed with
         // the same (first) reason.
-        assert_eq!(listener.closed().await, Some(CloseReason::SlowConsumer));
+        assert_eq!(
+            closed_with_timeout(&mut listener, "repeated first non-shutdown close").await,
+            Some(CloseReason::SlowConsumer)
+        );
     }
 
     /// Shutdown drain is the priority lifecycle close: it must be able to
@@ -1320,8 +1335,14 @@ mod tests {
             "shutdown remains the final reason once requested"
         );
 
-        assert_eq!(listener.closed().await, Some(CloseReason::Shutdown));
-        assert_eq!(listener.closed().await, Some(CloseReason::Shutdown));
+        assert_eq!(
+            closed_with_timeout(&mut listener, "shutdown close").await,
+            Some(CloseReason::Shutdown)
+        );
+        assert_eq!(
+            closed_with_timeout(&mut listener, "repeated shutdown close").await,
+            Some(CloseReason::Shutdown)
+        );
     }
 
     /// (f) Dropping every signal clone without a reason completes the
@@ -1335,7 +1356,9 @@ mod tests {
 
         // A listener parked BEFORE the drop must be woken by it.
         let mut waiting_listener = listener.clone();
-        let waiter = tokio::spawn(async move { waiting_listener.closed().await });
+        let waiter = tokio::spawn(async move {
+            closed_with_timeout(&mut waiting_listener, "waiting dropped-signal listener").await
+        });
         // Let the waiter park on `changed()` before dropping the signals.
         tokio::task::yield_now().await;
 
@@ -1349,7 +1372,10 @@ mod tests {
 
         // A listener that starts waiting AFTER the drop resolves immediately.
         let mut late_listener = listener;
-        assert_eq!(late_listener.closed().await, None);
+        assert_eq!(
+            closed_with_timeout(&mut late_listener, "late dropped-signal listener").await,
+            None
+        );
     }
 
     /// The non-blocking peek used by terminal paths to recover a reason an

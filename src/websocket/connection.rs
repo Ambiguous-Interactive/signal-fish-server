@@ -1273,6 +1273,15 @@ mod tests {
     use std::net::SocketAddr;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
+    async fn closed_with_timeout(
+        listener: &mut ConnectionCloseListener,
+        context: &str,
+    ) -> Option<CloseReason> {
+        tokio::time::timeout(Duration::from_secs(1), listener.closed())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+    }
+
     #[test]
     fn negotiate_capabilities_v2_is_relay_only_even_if_p2p_advertised() {
         // A connection negotiated below v3 must be relay-only regardless of what
@@ -1348,7 +1357,8 @@ mod tests {
         let (signal, mut listener) = ConnectionCloseSignal::channel();
 
         assert!(signal.request_close(CloseReason::ActivityTimeout));
-        let observed_reason = listener.closed().await;
+        let observed_reason =
+            closed_with_timeout(&mut listener, "initial activity-timeout close").await;
         assert_eq!(observed_reason, Some(CloseReason::ActivityTimeout));
 
         assert!(
