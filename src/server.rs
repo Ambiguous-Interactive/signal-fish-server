@@ -61,6 +61,7 @@ mod spectator_service;
 use connection_manager::ConnectionManager;
 pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
+pub use shutdown::ShutdownDrain;
 use spectator_service::SpectatorService;
 
 // Removed unused imports

@@ -177,6 +177,7 @@ class Orchestrator {
   private readonly sentLabels = new Map<string, Set<string>>();
   private readonly receivedLabels = new Map<string, Set<string>>();
   private readonly pendingExchangePeers = new Set<string>();
+  private readonly reportedExchangeSendFailures = new Set<string>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
@@ -983,7 +984,16 @@ class Orchestrator {
       const text = `{"from":"${this.myId}","channel":"${label}","seq":0}`;
       try {
         channel.send(text);
-      } catch {
+      } catch (error) {
+        const diagnosticKey = `${peer}\0${label}`;
+        if (!this.reportedExchangeSendFailures.has(diagnosticKey)) {
+          this.reportedExchangeSendFailures.add(diagnosticKey);
+          const message =
+            `data-channel exchange send to ${peer} on ${label} failed while channel was open; ` +
+            `bufferedAmount=${channel.bufferedAmount}; will retry: ${describe(error)}`;
+          emit({ event: 'error', message });
+          console.error(message);
+        }
         complete = false;
         continue;
       }
