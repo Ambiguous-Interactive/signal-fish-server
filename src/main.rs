@@ -316,17 +316,21 @@ async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch:
     tracing::info!(
         deadline_ms = drain.deadline_ms,
         grace_ms = drain.grace.as_millis() as u64,
+        started_by_this_call = drain.started_by_this_call,
         "Server shutdown drain started"
     );
     let going_away_sent = server.announce_shutdown_drain(drain).await;
-    tracing::info!(going_away_sent, "Shutdown GoingAway advisories enqueued");
+    tracing::info!(
+        going_away_sent,
+        started_by_this_call = drain.started_by_this_call,
+        "Shutdown GoingAway advisories enqueued"
+    );
 
     let _ = shutdown_tx.send(true);
 
-    if let Some(remaining_grace) = drain.grace.checked_sub(drain_started_at.elapsed()) {
-        if remaining_grace > std::time::Duration::ZERO {
-            tokio::time::sleep(remaining_grace).await;
-        }
+    let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
+    if wait_before_close > std::time::Duration::ZERO {
+        tokio::time::sleep(wait_before_close).await;
     }
 
     let close_requests = server.close_connections_for_shutdown();

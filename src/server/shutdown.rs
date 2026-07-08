@@ -38,6 +38,28 @@ pub struct ShutdownDrain {
     pub started_by_this_call: bool,
 }
 
+impl ShutdownDrain {
+    /// How long the caller should wait before forcing shutdown closes.
+    ///
+    /// The first drain owner waits out the grace time it has not already spent
+    /// announcing. Later observers use the already-advertised deadline instead
+    /// of extending shutdown by another full grace window.
+    pub fn wait_before_close(self, elapsed_since_start: Duration) -> Duration {
+        self.wait_before_close_since(elapsed_since_start, unix_epoch_ms_now())
+    }
+
+    fn wait_before_close_since(self, elapsed_since_start: Duration, now_ms: u64) -> Duration {
+        if self.started_by_this_call {
+            return self
+                .grace
+                .checked_sub(elapsed_since_start)
+                .unwrap_or(Duration::ZERO);
+        }
+
+        Duration::from_millis(self.deadline_ms.saturating_sub(now_ms))
+    }
+}
+
 impl EnhancedGameServer {
     /// Track a real WebSocket handler for bounded shutdown waiting.
     pub(crate) fn track_socket_task(self: &Arc<Self>) -> SocketTaskGuard {
@@ -92,6 +114,14 @@ impl EnhancedGameServer {
     /// The close frame is the authoritative signal. `GoingAway` is advisory, so
     /// this never waits behind a full queue during shutdown.
     pub async fn announce_shutdown_drain(&self, drain: ShutdownDrain) -> usize {
+        if !drain.started_by_this_call {
+            tracing::debug!(
+                deadline_ms = drain.deadline_ms,
+                "Skipping duplicate shutdown GoingAway advisory for existing drain"
+            );
+            return 0;
+        }
+
         let message = Arc::new(ServerMessage::GoingAway {
             deadline_ms: drain.deadline_ms,
             retry_after_secs: drain.retry_after_secs,
@@ -177,10 +207,17 @@ fn retry_after_secs(grace: Duration) -> Option<u64> {
 }
 
 fn unix_deadline_ms_after(grace: Duration) -> u64 {
-    let now = SystemTime::now()
+    unix_deadline_ms_after_since(unix_epoch_duration_now(), grace)
+}
+
+fn unix_epoch_ms_now() -> u64 {
+    u64::try_from(unix_epoch_duration_now().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn unix_epoch_duration_now() -> Duration {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    unix_deadline_ms_after_since(now, grace)
+        .unwrap_or(Duration::ZERO)
 }
 
 fn unix_deadline_ms_after_since(now: Duration, grace: Duration) -> u64 {
@@ -192,7 +229,15 @@ fn unix_deadline_ms_after_since(now: Duration, grace: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{NegotiatedProtocol, ServerConfig};
     use super::*;
+    use crate::config::{
+        AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
+        SessionConfig, TransportSecurityConfig, TurnConfig,
+    };
+    use crate::database::DatabaseConfig;
+    use crate::protocol::{Topology, Transport};
+    use tokio::sync::mpsc::error::TryRecvError;
 
     #[test]
     fn unix_deadline_ms_after_never_returns_drain_sentinel() {
@@ -203,6 +248,109 @@ mod tests {
         assert_eq!(
             unix_deadline_ms_after_since(Duration::from_millis(41), Duration::from_millis(1)),
             42
+        );
+    }
+
+    #[test]
+    fn first_shutdown_drain_waits_only_unelapsed_grace() {
+        let drain = ShutdownDrain {
+            deadline_ms: 1_000,
+            grace: Duration::from_secs(30),
+            retry_after_secs: Some(30),
+            started_by_this_call: true,
+        };
+
+        assert_eq!(
+            drain.wait_before_close_since(Duration::from_secs(2), 0),
+            Duration::from_secs(28)
+        );
+        assert_eq!(
+            drain.wait_before_close_since(Duration::from_secs(31), 0),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn observed_shutdown_drain_waits_until_existing_deadline() {
+        let drain = ShutdownDrain {
+            deadline_ms: 1_100,
+            grace: Duration::from_secs(30),
+            retry_after_secs: Some(30),
+            started_by_this_call: false,
+        };
+
+        assert_eq!(
+            drain.wait_before_close_since(Duration::from_secs(2), 1_000),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            drain.wait_before_close_since(Duration::ZERO, 1_100),
+            Duration::ZERO
+        );
+        assert_eq!(
+            drain.wait_before_close_since(Duration::ZERO, 1_200),
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_shutdown_drain_does_not_reannounce_goingaway() {
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            AuthMaintenanceConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let player_id = server
+            .register_client(sender, "127.0.0.1:48990".parse().unwrap())
+            .await
+            .expect("client registration succeeds");
+        server.set_client_protocol(
+            &player_id,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay],
+                topologies: vec![Topology::Relay],
+            },
+        );
+
+        let first_drain = server.begin_shutdown_drain();
+        assert!(first_drain.started_by_this_call);
+        assert_eq!(server.announce_shutdown_drain(first_drain).await, 1);
+        let first_message = receiver
+            .recv()
+            .await
+            .expect("first drain should enqueue GoingAway");
+        assert!(matches!(
+            &*first_message,
+            ServerMessage::GoingAway { deadline_ms, .. } if *deadline_ms == first_drain.deadline_ms
+        ));
+
+        let observed_drain = server.begin_shutdown_drain();
+        assert!(!observed_drain.started_by_this_call);
+        assert_eq!(
+            observed_drain.deadline_ms, first_drain.deadline_ms,
+            "later callers must observe the original advertised deadline"
+        );
+        assert_eq!(
+            server.announce_shutdown_drain(observed_drain).await,
+            0,
+            "observed drains must not send a duplicate advisory"
+        );
+        let duplicate_advisory = receiver.try_recv();
+        assert!(
+            matches!(duplicate_advisory, Err(TryRecvError::Empty)),
+            "duplicate drain should not enqueue another GoingAway"
         );
     }
 }
