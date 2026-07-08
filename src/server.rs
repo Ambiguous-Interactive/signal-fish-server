@@ -1279,6 +1279,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 })
                 .collect();
             if !slow_consumers.is_empty() {
+                self.record_reserved_cancellations(&reservations);
                 let mut clients = self.local_clients.write().await;
                 for player_id in &slow_consumers {
                     clients.remove(player_id);
