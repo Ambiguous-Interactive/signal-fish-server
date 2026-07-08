@@ -92,7 +92,10 @@ jobs:
       - name: Install mold + clang linker
         # Mirrors Dockerfile / .devcontainer (mold + clang). scripts/run-mutants.sh
         # sets CARGO_TARGET_<triple>_LINKER=clang + RUSTFLAGS="-C link-arg=-fuse-ld=mold".
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold clang
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (warm + save the shared mutants cache)
         uses: Swatinem/rust-cache@v2.9.1
@@ -134,8 +137,8 @@ jobs:
         # match every "/N" denominator in this file (job name + the run step).
         # Enforced by test_mutation_shard_matrix_is_complete_contiguous_partition.
         # N=18: --in-place runs each shard's mutants SERIALLY, and a mutant costs
-        # ~20-25s (incremental lib rebuild + relink + lib test run). With ~215
-        # mutants that is ~215/18 ≈ 12 mutants/shard ≈ <5 min/shard. The feasibility
+        # ~20-25s (incremental lib rebuild + relink + lib test run). With ~227
+        # mutants that is ~227/18 ≈ 13 mutants/shard ≈ <5 min/shard. The feasibility
         # of {mutant-count, N, per-mutant budget, timeout} is asserted by
         # test_mutation_shard_budget_is_feasible_vs_timeout.
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
@@ -159,7 +162,10 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Install mold + clang linker
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold clang
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (restore the warm shared cache)
         uses: Swatinem/rust-cache@v2.9.1

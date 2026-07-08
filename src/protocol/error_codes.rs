@@ -103,6 +103,10 @@ pub enum ErrorCode {
     /// socket-level `websocket.idle_timeout_secs` close. Sent best-effort as
     /// a final `Error` frame before the close.
     ActivityTimeout,
+    /// The server is draining for shutdown and is rejecting new room creation.
+    /// Existing connections will close with WebSocket close code 4000
+    /// (`server_shutdown`) at the drain deadline.
+    ServerDraining,
 }
 
 impl ErrorCode {
@@ -285,6 +289,9 @@ impl ErrorCode {
             Self::ActivityTimeout => {
                 "The server received no messages from this connection within its activity window and evicted it. Send periodic Ping messages (or any traffic) to stay connected."
             }
+            Self::ServerDraining => {
+                "The server is draining for shutdown and is not accepting new room creation. Retry on another instance or after the drain deadline."
+            }
         }
     }
 }
@@ -353,6 +360,7 @@ mod tests {
             ErrorCode::GameStartForbidden,
             ErrorCode::SlowConsumer,
             ErrorCode::ActivityTimeout,
+            ErrorCode::ServerDraining,
         ];
 
         for error_code in &error_codes {

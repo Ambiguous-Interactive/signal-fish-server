@@ -57,6 +57,7 @@ pub fn test_server_config() -> ServerConfig {
         default_max_players: 4,
         ping_timeout: Duration::from_secs(10),
         room_cleanup_interval: Duration::from_secs(1), // Fast cleanup for tests
+        drain_grace: Duration::from_secs(30),
         max_rooms_per_game: 100,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: 10,

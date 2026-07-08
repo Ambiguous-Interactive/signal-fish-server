@@ -105,6 +105,31 @@ impl ServerProcess {
         child.kill().await.expect("kill the server process");
     }
 
+    /// Send SIGTERM to the child without waiting for it to exit.
+    #[cfg(unix)]
+    pub fn send_sigterm(&mut self) {
+        let child = self
+            .child
+            .as_mut()
+            .expect("server process was already killed");
+        let pid = child.id().expect("server child has a process id");
+        let status = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .expect("spawn kill -TERM");
+        assert!(status.success(), "kill -TERM exited with {status}");
+    }
+
+    /// Wait for the child to exit after an externally-sent signal.
+    pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let mut child = self
+            .child
+            .take()
+            .expect("server process was already killed");
+        child.wait().await.expect("wait for server process")
+    }
+
     /// The child's captured stdout/stderr, for spawn-failure diagnostics.
     fn captured_output(&self) -> String {
         let read = |label: &str, path: &PathBuf| {

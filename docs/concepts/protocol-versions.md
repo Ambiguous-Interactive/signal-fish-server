@@ -18,9 +18,11 @@ it always works.
 **Protocol v3 is additive capability negotiation on top of that floor.** A v3-capable client advertises which
 transports and topologies it supports, and the server can _upgrade_ a room from relay to a peer-to-peer plan —
 `host` or `mesh` topology over the `direct` or `webrtc` transport — when (and only when) every member supports
-it. Everything v2 does still happens byte-for-byte; v3 only adds optional `Authenticate` fields, five new
-message types, and an optional ICE list. The relay floor is always present underneath, and any peer that cannot
-establish (or loses) its P2P path falls back to it. A v2 client on a v3 server observes pure v2 behavior.
+it. Everything v2 does still happens byte-for-byte; v3 only adds optional `Authenticate` fields, v3-only
+messages (`SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus`, `GoingAway`, plus opt-in
+`RelayStats`), and optional v3 fields such as ICE lists and relay sequence metadata. The relay floor is always
+present underneath, and any peer that cannot establish (or loses) its P2P path falls back to it. A v2 client on a
+v3 server observes pure v2 behavior.
 
 ## Comparison
 
@@ -28,7 +30,7 @@ establish (or loses) its P2P path falls back to it. A v2 client on a v3 server o
 | --- | --- | --- |
 | Endpoint | `/v2/ws` (default protocol version 2) | `/v3/ws` (default protocol version 3); same handler as `/v2/ws` |
 | `Authenticate` fields | `app_id` (+ optional `sdk_version`, `platform`, `game_data_format`) | v2 fields **plus** optional `protocol_version`, `supported_transports`, `supported_topologies` |
-| Message set | v2 messages (incl. `StartGame` to finalize the lobby) | v2 messages **plus** `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus` |
+| Message set | v2 messages (incl. `StartGame` to finalize the lobby) | v2 messages **plus** `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus`, `GoingAway`, and opt-in `RelayStats` |
 | Topologies | `relay` only | `relay`, `host`, `mesh` (room-wide, chosen at finalization) |
 | Transports | `relay` only | `relay`, `direct`, `webrtc` |
 | ICE / TURN | none | STUN always in a WebRTC plan; ephemeral per-player TURN when `turn.enabled`; optional ICE pre-gather on `RoomJoined` / `Reconnected` |
@@ -53,8 +55,9 @@ loses) its P2P path always has a working transport to fall back to.
 
 **All-members-v3 required for any upgrade.** A non-relay plan requires _every_ member of the room to be
 v3-capable _and_ to support the chosen topology and transport. A single v2 (or relay-only) member forces the
-whole room to the relay floor, where **no** `SessionPlan` is emitted and no v3 message reaches any client. So a v3
-control message can never be delivered to a v2 client, and a mixed room behaves exactly like v2.
+whole room to the relay floor, where **no** `SessionPlan` is emitted and no `NewPeer` pairing is generated. A
+v3-only server message can still never be delivered to a v2 client; every v3-only path has its own negotiated-v3
+recipient gate. Mixed rooms keep the authoritative `GameData` path on the v2-compatible relay floor.
 
 The selection happens once, at lobby finalization, by walking a richest-first ladder and settling on the first
 rung that fits the per-game desired ceiling, has its transport enabled in config, and is supported by every
@@ -102,9 +105,11 @@ negotiated result comes back in the extended `ProtocolInfo` (`protocol_version`,
 `max_protocol_version`, `transports`). For negotiated v3, `transports` currently advertises `["websocket"]`; it is
 omitted with the other v3-only fields on negotiated v2 connections.
 
-### 2. Handle the five new server messages
+### 2. Handle the v3 server messages
 
-These arrive only on a negotiated v3 connection, and only when the room upgrades past the relay floor:
+These messages exist only on negotiated v3 connections. The server-driven session plan messages (`SessionPlan`,
+`NewPeer`) arrive only when the room upgrades past the relay floor. `Signal` is WebRTC-transport-gated between
+same-room v3 peers; status, reliability, and shutdown messages are independently gated by their features:
 
 - `SessionPlan` (server → client) — your per-recipient session directive: `topology`, `transport`, the `peers`
   to connect to (each with an `initiate` flag), `ice_servers`, optional `host`, and `fallback: "relay"`.
@@ -116,6 +121,9 @@ These arrive only on a negotiated v3 connection, and only when the room upgrades
   Informational; drives metrics. Optional.
 - `PeerTransportStatus` (server → client) — a same-room peer's transport state changed. Informational. Optional
   to act on.
+- `RelayStats` (server → client) — optional delivery counters when
+  `websocket.delivery_stats_interval_secs` is nonzero.
+- `GoingAway` (server → client) — shutdown-drain advisory before close code `4000 server_shutdown`.
 
 ### 3. Know what is optional vs required
 
@@ -127,6 +135,8 @@ These arrive only on a negotiated v3 connection, and only when the room upgrades
 | Handle `NewPeer` | required if you support late joins into a `webrtc` session |
 | Send `TransportStatus` | optional (metrics only) |
 | Handle `PeerTransportStatus` | optional |
+| Handle `RelayStats` | optional diagnostics |
+| Handle `GoingAway` | optional but recommended for clean shutdown UX |
 | Pre-gather ICE from `RoomJoined` / `Reconnected` | optional latency optimization |
 
 If you never implement P2P, you still gain nothing and lose nothing: the relay floor carries all `GameData`.

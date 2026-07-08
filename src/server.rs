@@ -6,6 +6,7 @@ use crate::coordination::{
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
+use crate::metrics::ConnectionDeliveryStats;
 use crate::protocol::{
     room_codes, GameDataEncoding, PlayerId, RoomId, ServerMessage, SpectatorStateChangeReason,
     Transport,
@@ -15,9 +16,10 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, Notify, RwLock};
 use tokio::time::Duration;
 use uuid::Uuid;
 
@@ -32,6 +34,8 @@ mod dashboard_cache;
 mod game_data;
 mod heartbeat;
 mod maintenance;
+#[cfg(test)]
+mod message_coordinator_tests;
 mod message_router;
 #[cfg(test)]
 mod message_router_tests;
@@ -47,6 +51,7 @@ mod room_service_tests;
 mod session_policy;
 #[cfg(test)]
 mod session_policy_tests;
+mod shutdown;
 mod signaling;
 #[cfg(test)]
 mod signaling_tests;
@@ -56,6 +61,7 @@ mod spectator_service;
 use connection_manager::ConnectionManager;
 pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
+pub use shutdown::ShutdownDrain;
 use spectator_service::SpectatorService;
 
 // Removed unused imports
@@ -104,12 +110,24 @@ pub struct EnhancedGameServer {
     transport_security: crate::config::TransportSecurityConfig,
     /// Cached metrics used by the admin dashboard
     dashboard_metrics_cache: Arc<DashboardMetricsCache>,
+    /// Nonzero once graceful shutdown drain has started; stores the advertised
+    /// Unix epoch millisecond close deadline.
+    shutdown_drain_deadline_ms: AtomicU64,
+    /// Wakes drain-sensitive delivery paths so they can cancel backpressured
+    /// normal traffic before it is enqueued after drain begins.
+    shutdown_drain_tx: watch::Sender<bool>,
+    /// Active real WebSocket handlers. During shutdown these stay registered
+    /// until both socket halves have completed their bounded close path.
+    active_socket_tasks: AtomicUsize,
+    active_socket_tasks_notify: Notify,
 }
 
 #[derive(Debug, Error)]
 pub enum RegisterClientError {
     #[error("Too many connections from your IP ({current}/{limit})")]
     IpLimitExceeded { current: usize, limit: usize },
+    #[error("Server is draining for shutdown")]
+    ServerDraining,
 }
 
 #[derive(Debug, Error)]
@@ -125,6 +143,7 @@ pub struct ServerConfig {
     pub default_max_players: u8,
     pub ping_timeout: Duration,
     pub room_cleanup_interval: Duration,
+    pub drain_grace: Duration,
     pub max_rooms_per_game: usize,
     pub rate_limit_config: RateLimitConfig,
     pub empty_room_timeout: Duration,
@@ -157,6 +176,7 @@ impl Default for ServerConfig {
             default_max_players: 8,
             ping_timeout: Duration::from_secs(30),
             room_cleanup_interval: Duration::from_secs(60),
+            drain_grace: Duration::from_secs(30),
             max_rooms_per_game: 1000,
             rate_limit_config: RateLimitConfig::default(),
             empty_room_timeout: Duration::from_secs(300),
@@ -285,6 +305,7 @@ impl EnhancedGameServer {
             reconnection_manager.clone(),
         );
 
+        let (shutdown_drain_tx, _) = watch::channel(false);
         let server = Arc::new(Self {
             database,
             connection_manager,
@@ -306,6 +327,10 @@ impl EnhancedGameServer {
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
+            shutdown_drain_deadline_ms: AtomicU64::new(0),
+            shutdown_drain_tx,
+            active_socket_tasks: AtomicUsize::new(0),
+            active_socket_tasks_notify: Notify::new(),
         });
 
         Ok(server)
@@ -356,9 +381,18 @@ impl EnhancedGameServer {
         close: ConnectionCloseSignal,
         client_addr: SocketAddr,
     ) -> Result<PlayerId, RegisterClientError> {
-        self.connection_manager
+        if self.is_draining() {
+            return Err(RegisterClientError::ServerDraining);
+        }
+        let player_id = self
+            .connection_manager
             .register_client(sender, close, client_addr, self.instance_id)
-            .await
+            .await?;
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(&player_id, CloseReason::Shutdown);
+        }
+        Ok(player_id)
     }
 
     /// Record inbound activity for a client so the activity reaper
@@ -531,42 +565,113 @@ impl EnhancedGameServer {
         };
 
         // Clean up spectator state (if this client was observing a room)
+        let should_send_spectator_detach = || !self.is_draining();
         let _ = self
             .spectator_service
-            .detach(player_id, SpectatorStateChangeReason::Disconnected)
+            .detach_if(
+                player_id,
+                SpectatorStateChangeReason::Disconnected,
+                &should_send_spectator_detach,
+                self.shutdown_drain_receiver(),
+            )
             .await;
 
+        let mut registered_reconnect = false;
+
         // Register disconnection for potential reconnection (before removing from room)
-        if let Some(room_id) = room_id_opt {
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(player_id, CloseReason::Shutdown);
+            self.discard_pre_issued_reconnection_token(player_id).await;
+        } else if let Some(room_id) = room_id_opt {
             self.register_disconnection_for_reconnect(player_id, room_id, was_authority)
                 .await;
+            registered_reconnect = true;
         } else {
             // No room to reconnect into: any token pre-issued at an earlier
             // join must not outlive the connection (bounded-map contract).
             self.discard_pre_issued_reconnection_token(player_id).await;
         }
 
-        // Remove from room if joined
-        if let Some(room_id) = room_id_opt {
-            tracing::info!(%player_id, %room_id, "Removing player from room during unregister");
-            self.leave_room(player_id).await;
-            // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
-            // Tests should properly handle the asynchronous nature of message delivery
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(player_id, CloseReason::Shutdown);
+            // Stop routing before quiet room cleanup so shutdown teardown cannot
+            // enqueue normal room-leave traffic ahead of the semantic close.
+            if let Err(e) = self
+                .message_coordinator
+                .unregister_local_client(player_id)
+                .await
+            {
+                tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+            }
+
+            if let Some(room_id) = room_id_opt {
+                tracing::info!(%player_id, %room_id, draining = true, "Removing player from room during unregister");
+                self.remove_player_for_shutdown_drain(player_id, &room_id)
+                    .await;
+            }
+        } else {
+            // Remove from room if joined
+            if let Some(room_id) = room_id_opt {
+                tracing::info!(%player_id, %room_id, draining = false, "Removing player from room during unregister");
+                self.leave_room(player_id).await;
+                // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
+                // Tests should properly handle the asynchronous nature of message delivery
+            }
+
+            if self.is_draining() {
+                self.connection_manager
+                    .request_close_for(player_id, CloseReason::Shutdown);
+                if registered_reconnect {
+                    self.discard_pending_reconnection_for_shutdown_drain(player_id)
+                        .await;
+                }
+                // Stop routing before any remaining quiet room cleanup.
+                if let Err(e) = self
+                    .message_coordinator
+                    .unregister_local_client(player_id)
+                    .await
+                {
+                    tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+                }
+                if let Some(room_id) = self.get_client_room(player_id).await {
+                    tracing::info!(%player_id, %room_id, draining = true, "Removing player from room during unregister");
+                    self.remove_player_for_shutdown_drain(player_id, &room_id)
+                        .await;
+                }
+            } else {
+                // Unregister from the message coordinator BEFORE tearing the socket
+                // down: once routing stops, no new message can be enqueued into a
+                // connection whose send task is already flushing its final drain.
+                if let Err(e) = self
+                    .message_coordinator
+                    .unregister_local_client(player_id)
+                    .await
+                {
+                    tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+                }
+            }
         }
 
-        // Unregister from the message coordinator BEFORE tearing the socket
-        // down: once routing stops, no new message can be enqueued into a
-        // connection whose send task is already flushing its final drain.
-        if let Err(e) = self
-            .message_coordinator
-            .unregister_local_client(player_id)
-            .await
-        {
-            tracing::warn!(%player_id, "Failed to unregister client from coordinator: {}", e);
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(player_id, CloseReason::Shutdown);
+            if registered_reconnect {
+                self.discard_pending_reconnection_for_shutdown_drain(player_id)
+                    .await;
+            }
         }
 
-        // Remove client connection (also requests the socket tasks to close)
-        if self.connection_manager.remove_client(player_id).is_some() {
+        // Remove client connection (also requests the socket tasks to close).
+        let removed = self
+            .connection_manager
+            .remove_client_for_unregistration(player_id, || self.is_draining());
+        if let Some((_connection, close_reason)) = removed {
+            if close_reason == CloseReason::Shutdown && registered_reconnect {
+                self.discard_pending_reconnection_for_shutdown_drain(player_id)
+                    .await;
+            }
             self.metrics.decrement_active_connections();
         }
 
@@ -628,6 +733,21 @@ pub struct InMemoryMessageCoordinator {
     slow_consumer_timeout: Duration,
     #[allow(dead_code)]
     instance_id: Uuid,
+}
+
+enum ConditionalDeliveryReservation {
+    Reserved {
+        player_id: PlayerId,
+        sender: mpsc::Sender<Arc<ServerMessage>>,
+        permit: mpsc::OwnedPermit<Arc<ServerMessage>>,
+        stats: Option<Arc<ConnectionDeliveryStats>>,
+    },
+    ChannelClosed {
+        player_id: PlayerId,
+        sender: mpsc::Sender<Arc<ServerMessage>>,
+    },
+    SlowConsumer(PlayerId),
+    Canceled,
 }
 
 use std::collections::HashSet;
@@ -741,6 +861,247 @@ impl InMemoryMessageCoordinator {
             })
             .unwrap_or_default()
     }
+
+    fn record_canceled_delivery(&self, player_id: PlayerId) {
+        self.metrics.increment_websocket_deliveries_canceled();
+        tracing::debug!(%player_id, "Conditional delivery canceled after attempt");
+    }
+
+    fn record_reserved_cancellations(&self, reservations: &[ConditionalDeliveryReservation]) {
+        for reservation in reservations {
+            if let ConditionalDeliveryReservation::Reserved { player_id, .. } = reservation {
+                self.record_canceled_delivery(*player_id);
+            }
+        }
+    }
+
+    async fn deliver_to_one_if(
+        &self,
+        player_id: PlayerId,
+        handle: ClientDeliveryHandle,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        mut drain: watch::Receiver<bool>,
+    ) -> Option<DeliveryOutcome> {
+        if *drain.borrow() || !should_send() {
+            return None;
+        }
+
+        self.metrics.increment_websocket_delivery_attempts();
+        let connection_stats = self.metrics.connection_delivery_stats(&player_id);
+        let message = match handle.sender.try_send(message) {
+            Ok(()) => {
+                self.metrics.increment_websocket_deliveries_enqueued();
+                if let Some(stats) = &connection_stats {
+                    stats
+                        .sent_to_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Some(DeliveryOutcome::Delivered);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                tracing::debug!(
+                    %player_id,
+                    "Recipient connection already closing; message unroutable"
+                );
+                return Some(DeliveryOutcome::ChannelClosed);
+            }
+            Err(mpsc::error::TrySendError::Full(message)) => message,
+        };
+
+        self.metrics.increment_websocket_backpressure_events();
+        if let Some(stats) = &connection_stats {
+            stats
+                .backpressure_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        let reserve = handle.sender.reserve();
+        tokio::pin!(reserve);
+        let timeout = tokio::time::sleep(self.slow_consumer_timeout);
+        tokio::pin!(timeout);
+
+        tokio::select! {
+            result = &mut reserve => match result {
+                Ok(permit) => {
+                    if *drain.borrow() || !should_send() {
+                        self.record_canceled_delivery(player_id);
+                        return None;
+                    }
+                    permit.send(message);
+                    self.metrics.increment_websocket_deliveries_enqueued();
+                    if let Some(stats) = &connection_stats {
+                        stats
+                            .sent_to_you
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Some(DeliveryOutcome::Delivered)
+                }
+                Err(_receiver_gone) => {
+                    self.metrics.increment_websocket_deliveries_channel_closed();
+                    tracing::debug!(%player_id, "Recipient connection closed while backpressured");
+                    Some(DeliveryOutcome::ChannelClosed)
+                }
+            },
+            changed = drain.changed() => {
+                if changed.is_ok() && *drain.borrow() {
+                    tracing::debug!(%player_id, "Conditional delivery canceled for shutdown drain");
+                }
+                self.record_canceled_delivery(player_id);
+                None
+            }
+            _ = &mut timeout => {
+                if *drain.borrow() || !should_send() {
+                    self.record_canceled_delivery(player_id);
+                    return None;
+                }
+                let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
+                if initiated_close {
+                    self.metrics.increment_websocket_slow_consumer_disconnects();
+                }
+                self.metrics.increment_websocket_messages_dropped();
+                if let Some(stats) = &connection_stats {
+                    stats
+                        .dropped_for_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                tracing::warn!(
+                    %player_id,
+                    timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                    initiated_close,
+                    "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
+                     instead of silently dropping messages"
+                );
+                Some(DeliveryOutcome::SlowConsumer)
+            }
+        }
+    }
+
+    async fn reserve_one_if(
+        &self,
+        player_id: PlayerId,
+        handle: ClientDeliveryHandle,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        mut drain: watch::Receiver<bool>,
+    ) -> ConditionalDeliveryReservation {
+        if *drain.borrow() || !should_send() {
+            return ConditionalDeliveryReservation::Canceled;
+        }
+
+        self.metrics.increment_websocket_delivery_attempts();
+        let stats = self.metrics.connection_delivery_stats(&player_id);
+        let sender = handle.sender.clone();
+        match sender.clone().try_reserve_owned() {
+            Ok(permit) => ConditionalDeliveryReservation::Reserved {
+                player_id,
+                sender,
+                permit,
+                stats,
+            },
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                tracing::debug!(
+                    %player_id,
+                    "Recipient connection already closing; message unroutable"
+                );
+                ConditionalDeliveryReservation::ChannelClosed { player_id, sender }
+            }
+            Err(mpsc::error::TrySendError::Full(sender)) => {
+                self.metrics.increment_websocket_backpressure_events();
+                if let Some(stats) = &stats {
+                    stats
+                        .backpressure_events
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                let reserved_sender = sender.clone();
+                let reserve = sender.reserve_owned();
+                tokio::pin!(reserve);
+                let timeout = tokio::time::sleep(self.slow_consumer_timeout);
+                tokio::pin!(timeout);
+
+                tokio::select! {
+                    result = &mut reserve => match result {
+                        Ok(permit) => {
+                            if *drain.borrow() || !should_send() {
+                                self.record_canceled_delivery(player_id);
+                                ConditionalDeliveryReservation::Canceled
+                            } else {
+                                ConditionalDeliveryReservation::Reserved {
+                                    player_id,
+                                    sender: reserved_sender.clone(),
+                                    permit,
+                                    stats,
+                                }
+                            }
+                        }
+                        Err(_receiver_gone) => {
+                            self.metrics.increment_websocket_deliveries_channel_closed();
+                            tracing::debug!(%player_id, "Recipient connection closed while backpressured");
+                            ConditionalDeliveryReservation::ChannelClosed {
+                                player_id,
+                                sender: reserved_sender.clone(),
+                            }
+                        }
+                    },
+                    changed = drain.changed() => {
+                        if changed.is_ok() && *drain.borrow() {
+                            tracing::debug!(%player_id, "Conditional delivery reservation canceled for shutdown drain");
+                        }
+                        self.record_canceled_delivery(player_id);
+                        ConditionalDeliveryReservation::Canceled
+                    }
+                    _ = &mut timeout => {
+                        if *drain.borrow() || !should_send() {
+                            self.record_canceled_delivery(player_id);
+                            return ConditionalDeliveryReservation::Canceled;
+                        }
+                        let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
+                        if initiated_close {
+                            self.metrics.increment_websocket_slow_consumer_disconnects();
+                        }
+                        self.metrics.increment_websocket_messages_dropped();
+                        if let Some(stats) = &stats {
+                            stats
+                                .dropped_for_you
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        tracing::warn!(
+                            %player_id,
+                            timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                            initiated_close,
+                            "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
+                             instead of silently dropping messages"
+                        );
+                        ConditionalDeliveryReservation::SlowConsumer(player_id)
+                    }
+                }
+            }
+        }
+    }
+
+    fn reservations_cover_recipients(
+        reservations: &[ConditionalDeliveryReservation],
+        recipients: &[(PlayerId, ClientDeliveryHandle)],
+    ) -> bool {
+        reservations.len() == recipients.len()
+            && recipients.iter().all(|(player_id, handle)| {
+                reservations.iter().any(|reservation| match reservation {
+                    ConditionalDeliveryReservation::Reserved {
+                        player_id: reserved_player,
+                        sender,
+                        ..
+                    }
+                    | ConditionalDeliveryReservation::ChannelClosed {
+                        player_id: reserved_player,
+                        sender,
+                    } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
+                    ConditionalDeliveryReservation::SlowConsumer(_)
+                    | ConditionalDeliveryReservation::Canceled => false,
+                })
+            })
+    }
 }
 
 #[async_trait::async_trait]
@@ -762,6 +1123,27 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(())
     }
 
+    async fn send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+    ) -> anyhow::Result<bool> {
+        let handle = { self.local_clients.read().await.get(player_id).cloned() };
+        let Some(handle) = handle else {
+            tracing::debug!(%player_id, "Player not registered with coordinator; conditional message unroutable");
+            return Ok(false);
+        };
+        let outcome = self
+            .deliver_to_one_if(*player_id, handle, message, should_send, drain)
+            .await;
+        if outcome == Some(DeliveryOutcome::SlowConsumer) {
+            self.local_clients.write().await.remove(player_id);
+        }
+        Ok(outcome == Some(DeliveryOutcome::Delivered))
+    }
+
     async fn try_send_to_player(
         &self,
         player_id: &PlayerId,
@@ -778,6 +1160,37 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 // Advisory frame to a connection that is being closed anyway:
                 // do not wait, do not escalate, do not overwrite the close
                 // reason. The teardown itself is the loud signal.
+                tracing::debug!(
+                    %player_id,
+                    "Farewell skipped: outbound queue full on a closing connection"
+                );
+                Ok(false)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(%player_id, "Farewell skipped: connection already closed");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn try_send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<bool> {
+        let handle = { self.local_clients.read().await.get(player_id).cloned() };
+        let Some(handle) = handle else {
+            tracing::debug!(%player_id, "Farewell skipped: player not registered with coordinator");
+            return Ok(false);
+        };
+        if !should_send() {
+            tracing::debug!(%player_id, "Farewell skipped: caller state changed before enqueue");
+            return Ok(false);
+        }
+        match handle.sender.try_send(message) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::debug!(
                     %player_id,
                     "Farewell skipped: outbound queue full on a closing connection"
@@ -812,6 +1225,140 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .await;
         self.deliver_to_all(recipients, message).await;
         Ok(())
+    }
+
+    async fn broadcast_to_room_except_if_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        let mut before_send = Some(before_send);
+
+        loop {
+            if *drain.borrow() || !should_send() {
+                tracing::debug!(%room_id, %except_player, "Conditional room broadcast skipped: caller state changed before replay hook");
+                return Ok(false);
+            }
+
+            let recipients = self
+                .collect_room_recipients(room_id, Some(except_player))
+                .await;
+
+            let reservations =
+                futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
+                    self.reserve_one_if(*player_id, handle.clone(), should_send, drain.clone())
+                }))
+                .await;
+
+            if reservations
+                .iter()
+                .any(|reservation| matches!(reservation, ConditionalDeliveryReservation::Canceled))
+                || *drain.borrow()
+                || !should_send()
+            {
+                self.record_reserved_cancellations(&reservations);
+                tracing::debug!(%room_id, %except_player, "Conditional room broadcast canceled before replay record");
+                return Ok(false);
+            }
+
+            let slow_consumers: Vec<PlayerId> = reservations
+                .iter()
+                .filter_map(|reservation| match reservation {
+                    ConditionalDeliveryReservation::SlowConsumer(player_id) => Some(*player_id),
+                    ConditionalDeliveryReservation::Reserved { .. }
+                    | ConditionalDeliveryReservation::ChannelClosed { .. }
+                    | ConditionalDeliveryReservation::Canceled => None,
+                })
+                .collect();
+            if !slow_consumers.is_empty() {
+                self.record_reserved_cancellations(&reservations);
+                let mut clients = self.local_clients.write().await;
+                for player_id in &slow_consumers {
+                    clients.remove(player_id);
+                }
+                continue;
+            }
+
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
+                .get(room_id)
+                .map(|players| {
+                    players
+                        .iter()
+                        .filter(|player_id| *player_id != except_player)
+                        .filter_map(|player_id| {
+                            clients
+                                .get(player_id)
+                                .map(|handle| (*player_id, handle.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if !Self::reservations_cover_recipients(&reservations, &current_recipients) {
+                self.record_reserved_cancellations(&reservations);
+                drop(clients);
+                drop(room_players);
+                continue;
+            }
+
+            if *drain.borrow() || !should_send() {
+                self.record_reserved_cancellations(&reservations);
+                tracing::debug!(%room_id, %except_player, "Conditional room broadcast canceled before replay record");
+                return Ok(false);
+            }
+
+            // No capacity wait happens while these routing locks are held.
+            // Once this final drain check passes, the broadcast is committed:
+            // the hook and permit sends are kept in the same critical section
+            // so reconnect registration cannot observe a baseline between
+            // replay recording and live delivery.
+            let Some(before_send) = before_send.take() else {
+                tracing::error!(%room_id, %except_player, "Conditional room broadcast replay hook was already consumed");
+                return Ok(false);
+            };
+            // The hook runs while the routing locks above are still held.
+            // Keep hook implementations from calling back into MessageCoordinator
+            // or awaiting work that depends on these locks.
+            before_send().await;
+
+            let mut delivered = false;
+            for reservation in reservations {
+                match reservation {
+                    ConditionalDeliveryReservation::Reserved { permit, stats, .. } => {
+                        permit.send(Arc::clone(&message));
+                        delivered = true;
+                        self.metrics.increment_websocket_deliveries_enqueued();
+                        if let Some(stats) = &stats {
+                            stats
+                                .sent_to_you
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    ConditionalDeliveryReservation::ChannelClosed { .. } => {}
+                    ConditionalDeliveryReservation::SlowConsumer(_)
+                    | ConditionalDeliveryReservation::Canceled => {
+                        tracing::debug!(
+                            %room_id,
+                            %except_player,
+                            "Conditional room broadcast canceled by stale reservation state"
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+
+            return Ok(delivered);
+        }
     }
 
     async fn broadcast_to_room_except_with_message<'a>(
@@ -895,6 +1442,81 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         self.metrics.increment_websocket_delivery_attempts();
         let stats = self.metrics.connection_delivery_stats(&player_id);
         let outcome = match delivery.sender.try_send(build_message()) {
+            Ok(()) => {
+                self.metrics.increment_websocket_deliveries_enqueued();
+                if let Some(stats) = &stats {
+                    stats
+                        .sent_to_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                room_players
+                    .entry(room_id)
+                    .or_insert_with(HashSet::new)
+                    .insert(player_id);
+                clients.insert(player_id, delivery);
+                DeliveryOutcome::Delivered
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                tracing::debug!(
+                    %player_id,
+                    %room_id,
+                    "Initial room message skipped: recipient connection already closing"
+                );
+                DeliveryOutcome::ChannelClosed
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics.increment_websocket_backpressure_events();
+                let initiated_close = delivery.close.request_close(CloseReason::SlowConsumer);
+                if initiated_close {
+                    self.metrics.increment_websocket_slow_consumer_disconnects();
+                }
+                self.metrics.increment_websocket_messages_dropped();
+                if let Some(stats) = &stats {
+                    stats
+                        .backpressure_events
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    stats
+                        .dropped_for_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                tracing::warn!(
+                    %player_id,
+                    %room_id,
+                    initiated_close,
+                    "Initial room message queue was full; closing recipient instead of registering it"
+                );
+                DeliveryOutcome::SlowConsumer
+            }
+        };
+
+        Ok(outcome)
+    }
+
+    async fn register_local_client_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        build_message: Box<
+            dyn FnOnce() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Arc<ServerMessage>> + Send + 'a>,
+                > + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        // Same lock ordering and routing transition as the sync builder, but
+        // the async builder itself is part of the critical section. Reconnect
+        // uses this to fetch replay after every older broadcast has either
+        // recorded or skipped its event, and before any newer broadcast can
+        // snapshot this restored socket as live.
+        let mut room_players = self.room_players.write().await;
+        let mut clients = self.local_clients.write().await;
+
+        let message = build_message().await;
+        self.metrics.increment_websocket_delivery_attempts();
+        let stats = self.metrics.connection_delivery_stats(&player_id);
+        let outcome = match delivery.sender.try_send(message) {
             Ok(()) => {
                 self.metrics.increment_websocket_deliveries_enqueued();
                 if let Some(stats) = &stats {

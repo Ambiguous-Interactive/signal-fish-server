@@ -14,7 +14,8 @@ use signal_fish_server::security::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket;
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::watch;
 
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
@@ -113,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         default_max_players: cfg.server.default_max_players,
         ping_timeout: tokio::time::Duration::from_secs(cfg.server.ping_timeout),
         room_cleanup_interval: tokio::time::Duration::from_secs(cfg.server.room_cleanup_interval),
+        drain_grace: tokio::time::Duration::from_secs(cfg.server.drain_grace_secs),
         max_rooms_per_game: cfg.server.max_rooms_per_game,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: cfg.rate_limit.max_room_creations,
@@ -157,11 +159,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Start cleanup task
     let cleanup_server = game_server.clone();
-    tokio::spawn(async move {
-        cleanup_server.cleanup_task().await;
+    let cleanup_shutdown_rx = shutdown_rx.clone();
+    let cleanup_task = tokio::spawn(async move {
+        cleanup_server
+            .cleanup_task_until(wait_for_shutdown(cleanup_shutdown_rx))
+            .await;
     });
+
+    let shutdown_server = game_server.clone();
+    let shutdown_task = tokio::spawn(run_shutdown_drain(shutdown_server, shutdown_tx.clone()));
 
     // Create enhanced protocol router with CORS configuration
     let enhanced_router =
@@ -257,9 +267,21 @@ async fn main() -> anyhow::Result<()> {
             "Server started over HTTPS with TLS enabled - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
         );
 
-        axum_server::bind_rustls(addr, tls_config)
+        let tls_handle = axum_server::Handle::new();
+        let tls_shutdown_handle = tls_handle.clone();
+        let tls_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown(tls_shutdown_rx).await;
+            tls_shutdown_handle.graceful_shutdown(None);
+        });
+
+        let serve_result = axum_server::bind_rustls(addr, tls_config)
+            .handle(tls_handle)
             .serve(make_service)
-            .await?;
+            .await;
+
+        finish_background_shutdown(shutdown_tx, shutdown_rx, shutdown_task, cleanup_task).await;
+        serve_result?;
 
         return Ok(());
     }
@@ -272,9 +294,119 @@ async fn main() -> anyhow::Result<()> {
         "Server started over HTTP - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
     );
 
-    axum::serve(listener, make_service).await?;
+    let serve_result = axum::serve(listener, make_service)
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+        .await;
+
+    finish_background_shutdown(shutdown_tx, shutdown_rx, shutdown_task, cleanup_task).await;
+    serve_result?;
 
     Ok(())
+}
+
+async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch::Sender<bool>) {
+    shutdown_signal().await;
+
+    let drain_started_at = tokio::time::Instant::now();
+    let drain = server.begin_shutdown_drain();
+    tracing::info!(
+        deadline_ms = drain.deadline_ms,
+        grace_ms = drain.grace.as_millis() as u64,
+        started_by_this_call = drain.started_by_this_call,
+        "Server shutdown drain started"
+    );
+    let going_away_sent = server.announce_shutdown_drain(drain).await;
+    tracing::info!(
+        going_away_sent,
+        started_by_this_call = drain.started_by_this_call,
+        "Shutdown GoingAway advisories enqueued"
+    );
+
+    let _ = shutdown_tx.send(true);
+
+    let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
+    if wait_before_close > std::time::Duration::ZERO {
+        tokio::time::sleep(wait_before_close).await;
+    }
+
+    let close_requests = server.close_connections_for_shutdown();
+    tracing::info!(close_requests, "Shutdown close requests issued");
+
+    let settle_timeout = shutdown_connection_settle_timeout();
+    let remaining_connections = server.wait_for_shutdown_connections(settle_timeout).await;
+    if remaining_connections > 0 {
+        tracing::warn!(
+            remaining_connections,
+            settle_ms = settle_timeout.as_millis() as u64,
+            "Shutdown drain ended with connections still registered"
+        );
+    }
+}
+
+fn shutdown_connection_settle_timeout() -> Duration {
+    websocket::registered_connection_shutdown_settle_timeout()
+}
+
+async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
+    loop {
+        if *shutdown_rx.borrow() {
+            return;
+        }
+        if shutdown_rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn finish_background_shutdown(
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
+    shutdown_task: tokio::task::JoinHandle<()>,
+    cleanup_task: tokio::task::JoinHandle<()>,
+) {
+    let shutdown_started = *shutdown_rx.borrow();
+    let _ = shutdown_tx.send(true);
+    if shutdown_started {
+        let _ = shutdown_task.await;
+    } else {
+        shutdown_task.abort();
+    }
+    let _ = cleanup_task.await;
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = wait_for_ctrl_c_shutdown(tokio::signal::ctrl_c());
+
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "Failed to install SIGTERM shutdown handler");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            () = ctrl_c => {}
+            () = terminate => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+    }
+}
+
+async fn wait_for_ctrl_c_shutdown(ctrl_c: impl std::future::Future<Output = std::io::Result<()>>) {
+    if let Err(err) = ctrl_c.await {
+        tracing::error!(error = %err, "Failed to install Ctrl+C shutdown handler");
+        std::future::pending::<()>().await;
+    }
 }
 
 async fn capture_client_fingerprint(mut req: Request, next: Next) -> Result<Response, Infallible> {
@@ -307,8 +439,10 @@ fn extract_client_fingerprint(headers: &HeaderMap) -> Option<ClientCertificateFi
 
 #[cfg(test)]
 mod cli_tests {
-    use super::Cli;
+    use super::{shutdown_connection_settle_timeout, wait_for_ctrl_c_shutdown, websocket, Cli};
     use clap::Parser;
+    use std::io;
+    use std::time::Duration;
 
     #[test]
     fn test_cli_default_no_flags() {
@@ -364,5 +498,45 @@ mod cli_tests {
     fn test_cli_version() {
         let result = Cli::try_parse_from(["signal-fish-server", "--version"]);
         assert!(result.is_err()); // --version causes early exit
+    }
+
+    #[test]
+    fn shutdown_connection_settle_timeout_covers_registered_close_sequence() {
+        assert_eq!(
+            shutdown_connection_settle_timeout(),
+            websocket::CONNECTION_CLOSE_WRITE_TIMEOUT
+                .saturating_mul(websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
+        );
+        assert_eq!(
+            websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS,
+            3,
+            "registered shutdown close uses flush, semantic close, and sink close budgets"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_completion_allows_shutdown() {
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_ctrl_c_shutdown(async { Ok(()) }),
+        )
+        .await
+        .expect("successful Ctrl+C future should complete shutdown wait");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_install_error_waits_forever() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(25),
+            wait_for_ctrl_c_shutdown(async {
+                Err(io::Error::other("synthetic Ctrl+C installation failure"))
+            }),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Ctrl+C installation failure must not trigger shutdown"
+        );
     }
 }

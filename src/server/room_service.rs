@@ -2,7 +2,7 @@ use super::{EnhancedGameServer, MaxRoomsPerGameExceededError};
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
-    ErrorCode, PlayerId, PlayerInfo, RelayTransport, Room, RoomJoinedPayload, ServerMessage,
+    ErrorCode, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload, ServerMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +33,10 @@ pub(super) enum JoinRoomError {
     /// (→ `MAX_ROOMS_PER_GAME_EXCEEDED`).
     #[error(transparent)]
     MaxRoomsPerGameExceeded(#[from] MaxRoomsPerGameExceededError),
+    /// The server is draining for shutdown and must not create new rooms
+    /// (→ `SERVER_DRAINING`).
+    #[error("Server is draining for shutdown")]
+    ServerDraining,
     /// Any other failure — storage, lock, name validation, broadcast — an
     /// infrastructure fault that must NOT masquerade as a specific business
     /// rejection (→ `ROOM_CREATION_FAILED`).
@@ -47,6 +51,7 @@ impl JoinRoomError {
         match self {
             Self::RoomFull => ErrorCode::RoomFull,
             Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
+            Self::ServerDraining => ErrorCode::ServerDraining,
             Self::Internal(_) => ErrorCode::RoomCreationFailed,
         }
     }
@@ -80,8 +85,16 @@ impl EnhancedGameServer {
         );
         let _span_guard = room_join_span.enter();
 
-        // Rate limiting check
         let is_room_creation = room_code.is_none();
+        if self
+            .join_would_create_room_while_draining(&game_name, room_code.as_deref())
+            .await
+        {
+            self.reject_join_for_shutdown_drain(player_id).await;
+            return;
+        }
+
+        // Rate limiting check
         let rate_limit_result = if is_room_creation {
             self.rate_limiter.check_room_creation(player_id).await
         } else {
@@ -412,24 +425,77 @@ impl EnhancedGameServer {
             tracing::warn!(%player_id, "Could not find existing delivery handle for player when leaving room");
         }
 
+        if self.is_draining() {
+            tracing::info!(
+                %player_id,
+                %room_id,
+                "Skipping normal room-leave traffic because shutdown drain started"
+            );
+            return;
+        }
+
+        let should_send = || !self.is_draining();
+
         // First send confirmation to the leaving player
         let _ = self
             .message_coordinator
-            .send_to_player(player_id, Arc::new(ServerMessage::RoomLeft))
+            .send_to_player_if(
+                player_id,
+                Arc::new(ServerMessage::RoomLeft),
+                &should_send,
+                self.shutdown_drain_receiver(),
+            )
             .await;
 
-        // Then notify other players (excluding the player who left). Recorded
-        // for reconnection replay BEFORE delivery (buffered even if the
-        // broadcast partially fails).
+        if self.is_draining() {
+            tracing::info!(
+                %player_id,
+                %room_id,
+                "Skipping peer leave broadcast because shutdown drain started"
+            );
+            return;
+        }
+
+        // Then notify other players (excluding the player who left). For this
+        // drain-sensitive path, replay is recorded only after conditional
+        // delivery is not canceled by shutdown drain.
         let player_left = ServerMessage::PlayerLeft {
             player_id: *player_id,
         };
-        self.record_replayable_room_event(&room_id, &player_left)
-            .await;
+        let player_left = Arc::new(player_left);
+        let replay_message = Arc::clone(&player_left);
+        let server = self;
+        let room_id_for_replay = room_id;
+        let drain = self.shutdown_drain_receiver();
         let _ = self
             .message_coordinator
-            .broadcast_to_room_except(&room_id, player_id, Arc::new(player_left))
+            .broadcast_to_room_except_if_with_hook(
+                &room_id,
+                player_id,
+                player_left,
+                &should_send,
+                drain,
+                Box::new(move || {
+                    Box::pin(async move {
+                        server
+                            .record_replayable_room_event(
+                                &room_id_for_replay,
+                                replay_message.as_ref(),
+                            )
+                            .await;
+                    })
+                }),
+            )
             .await;
+
+        if self.is_draining() {
+            tracing::info!(
+                %player_id,
+                %room_id,
+                "Skipping departure session re-plan because shutdown drain started"
+            );
+            return;
+        }
 
         // v3 mid-session re-planning (after the PlayerLeft broadcast): if the
         // departed player hosted the room's active non-relay session, re-elect
@@ -468,6 +534,50 @@ impl EnhancedGameServer {
             room_code = latest_room_code.as_deref().unwrap_or("unknown"),
             instance_id = %self.instance_id,
             "Player left room with distributed coordination"
+        );
+    }
+
+    /// Remove shutdown-drained membership without emitting normal leave traffic.
+    ///
+    /// During process shutdown every connected client is already getting the
+    /// v3 `GoingAway` advisory and semantic 4000 close frame. Enqueuing normal
+    /// `RoomLeft` / `PlayerLeft` traffic in between makes the shutdown contract
+    /// noisy and can delay the close frame behind irrelevant room updates.
+    pub(super) async fn remove_player_for_shutdown_drain(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) {
+        let player_removed = match self
+            .database
+            .remove_player_from_room(room_id, player_id)
+            .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                tracing::error!(%player_id, %room_id, error = %err, "Failed to remove draining player from room");
+                false
+            }
+        };
+
+        if player_removed {
+            self.metrics.increment_players_left();
+        }
+
+        if self
+            .connection_manager
+            .clear_room_assignment(player_id)
+            .is_none()
+        {
+            tracing::warn!(%player_id, %room_id, "Could not clear draining player's room assignment");
+        }
+
+        tracing::info!(
+            %player_id,
+            %room_id,
+            instance_id = %self.instance_id,
+            "Player removed from room during shutdown drain"
         );
     }
 
@@ -536,88 +646,117 @@ impl EnhancedGameServer {
                 }
             }
             Ok(None) => {
-                // Enforce per-game room cap before creating a new room
-                let cap_lock_key = format!("game_room_cap:{game_name}");
-                match self
-                    .distributed_lock
-                    .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
-                    .await
-                {
-                    Ok(lock) => {
-                        self.metrics.increment_room_cap_lock_acquisitions();
-                        game_cap_lock = Some(lock);
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to acquire cap lock: {}", err);
-                        self.metrics.increment_room_cap_lock_failures();
-                    }
-                }
-
-                match self.database.get_game_room_count(game_name).await {
-                    Ok(current_room_count)
-                        if current_room_count >= self.config.max_rooms_per_game =>
+                if self.is_draining() {
+                    Err(JoinRoomError::ServerDraining)
+                } else {
+                    // Enforce per-game room cap before creating a new room
+                    let cap_lock_key = format!("game_room_cap:{game_name}");
+                    match self
+                        .distributed_lock
+                        .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
+                        .await
                     {
-                        self.metrics.increment_room_cap_denials();
-                        if let Some(lock) = &game_cap_lock {
-                            let _ = self.distributed_lock.release(lock).await;
+                        Ok(lock) => {
+                            self.metrics.increment_room_cap_lock_acquisitions();
+                            game_cap_lock = Some(lock);
                         }
-                        Err(JoinRoomError::MaxRoomsPerGameExceeded(
-                            MaxRoomsPerGameExceededError {
-                                game_name: game_name.to_string(),
-                                current: current_room_count,
-                                limit: self.config.max_rooms_per_game,
-                            },
-                        ))
+                        Err(err) => {
+                            tracing::error!("Failed to acquire cap lock: {}", err);
+                            self.metrics.increment_room_cap_lock_failures();
+                        }
                     }
-                    Ok(_) => {
-                        let relay_type = self.resolve_relay_type(game_name);
-                        let client_app_id = self.client_app_id(player_id);
-                        let region_id = self.region_id().to_string();
-                        let created_room = self
-                            .database
-                            .create_room(
-                                game_name.to_string(),
-                                Some(room_code.to_string()),
-                                max_players,
-                                supports_authority,
-                                *player_id,
-                                relay_type,
-                                region_id.clone(),
-                                client_app_id,
-                            )
-                            .await;
 
-                        if let Some(lock) = &game_cap_lock {
-                            let _ = self.distributed_lock.release(lock).await;
+                    match self.database.get_game_room_count(game_name).await {
+                        Ok(_) if self.is_draining() => {
+                            self.release_game_cap_lock(&game_cap_lock).await;
+                            Err(JoinRoomError::ServerDraining)
                         }
+                        Ok(current_room_count)
+                            if current_room_count >= self.config.max_rooms_per_game =>
+                        {
+                            self.metrics.increment_room_cap_denials();
+                            self.release_game_cap_lock(&game_cap_lock).await;
+                            Err(JoinRoomError::MaxRoomsPerGameExceeded(
+                                MaxRoomsPerGameExceededError {
+                                    game_name: game_name.to_string(),
+                                    current: current_room_count,
+                                    limit: self.config.max_rooms_per_game,
+                                },
+                            ))
+                        }
+                        Ok(_) => {
+                            let relay_type = self.resolve_relay_type(game_name);
+                            let client_app_id = self.client_app_id(player_id);
+                            let region_id = self.region_id().to_string();
+                            let created_room = self
+                                .database
+                                .create_room(
+                                    game_name.to_string(),
+                                    Some(room_code.to_string()),
+                                    max_players,
+                                    supports_authority,
+                                    *player_id,
+                                    relay_type,
+                                    region_id.clone(),
+                                    client_app_id,
+                                )
+                                .await;
 
-                        match created_room {
-                            Ok(mut room) => {
-                                self.metrics.increment_rooms_created();
-                                self.metrics.increment_players_joined();
-                                if let Some(app_id) = client_app_id {
-                                    self.record_room_application(&room.id, app_id).await;
+                            match created_room {
+                                Ok(room) if self.is_draining() => {
+                                    match self.database.delete_room(&room.id).await {
+                                        Ok(true) => {}
+                                        Ok(false) => {
+                                            tracing::warn!(
+                                                room_id = %room.id,
+                                                "Room created during shutdown drain was already absent during rollback"
+                                            );
+                                        }
+                                        Err(err) => {
+                                            tracing::error!(
+                                                room_id = %room.id,
+                                                error = %err,
+                                                "Failed to roll back room created during shutdown drain"
+                                            );
+                                        }
+                                    }
+                                    self.release_game_cap_lock(&game_cap_lock).await;
+                                    Err(JoinRoomError::ServerDraining)
                                 }
-                                if let Err(e) = self
-                                    .database
-                                    .update_player_name(&room.id, player_id, player_name)
-                                    .await
-                                {
-                                    tracing::warn!(%player_id, "Failed to update creator name: {}", e);
-                                } else if let Some(creator_info) = room.players.get_mut(player_id) {
-                                    creator_info.name = player_name.to_string();
+                                Ok(mut room) => {
+                                    self.release_game_cap_lock(&game_cap_lock).await;
+                                    self.metrics.increment_rooms_created();
+                                    self.metrics.increment_players_joined();
+                                    if let Some(app_id) = client_app_id {
+                                        self.record_room_application(&room.id, app_id).await;
+                                    }
+                                    if let Err(e) = self
+                                        .database
+                                        .update_player_name(&room.id, player_id, player_name)
+                                        .await
+                                    {
+                                        tracing::warn!(%player_id, "Failed to update creator name: {}", e);
+                                    } else if let Some(creator_info) =
+                                        room.players.get_mut(player_id)
+                                    {
+                                        creator_info.name = player_name.to_string();
+                                    }
+                                    Ok(room)
                                 }
-                                Ok(room)
+                                Err(e) => {
+                                    self.release_game_cap_lock(&game_cap_lock).await;
+                                    Err(anyhow::anyhow!(e).into())
+                                }
                             }
-                            Err(e) => Err(anyhow::anyhow!(e).into()),
                         }
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to read room count for cap enforcement: {}", err);
-                        if let Some(lock) = &game_cap_lock {
-                            let _ = self.distributed_lock.release(lock).await;
+                        Err(err) => {
+                            tracing::error!(
+                                "Failed to read room count for cap enforcement: {}",
+                                err
+                            );
+                            self.release_game_cap_lock(&game_cap_lock).await;
+                            Err(err.into())
                         }
-                        Err(err.into())
                     }
                 }
             }
@@ -626,5 +765,64 @@ impl EnhancedGameServer {
 
         let _ = self.distributed_lock.release(&lock_handle).await;
         result
+    }
+
+    async fn release_game_cap_lock(&self, game_cap_lock: &Option<LockHandle>) {
+        if let Some(lock) = game_cap_lock {
+            let _ = self.distributed_lock.release(lock).await;
+        }
+    }
+
+    async fn join_would_create_room_while_draining(
+        &self,
+        game_name: &str,
+        room_code: Option<&str>,
+    ) -> bool {
+        if !self.is_draining() {
+            return false;
+        }
+
+        let Some(room_code) = room_code else {
+            return true;
+        };
+
+        if validation::validate_room_code_with_config(room_code, &self.protocol_config).is_err() {
+            return false;
+        }
+
+        let room_code = room_code.to_uppercase();
+        matches!(
+            self.database.get_room(game_name, &room_code).await,
+            Ok(None)
+        )
+    }
+
+    async fn reject_join_for_shutdown_drain(&self, player_id: &PlayerId) {
+        match self
+            .message_coordinator
+            .try_send_to_player(
+                player_id,
+                Arc::new(ServerMessage::RoomJoinFailed {
+                    reason: "Server is draining for shutdown".to_string(),
+                    error_code: Some(crate::protocol::ErrorCode::ServerDraining),
+                }),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    %player_id,
+                    "Shutdown drain room-creation rejection skipped: queue full or connection gone"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(
+                    %player_id,
+                    error = %err,
+                    "Shutdown drain room-creation rejection failed"
+                );
+            }
+        }
     }
 }

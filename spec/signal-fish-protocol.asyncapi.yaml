@@ -137,6 +137,7 @@ channels:
       Error: { $ref: '#/components/messages/Error' }
       PeerTransportStatus: { $ref: '#/components/messages/PeerTransportStatus' }
       RelayStats: { $ref: '#/components/messages/RelayStats' }
+      GoingAway: { $ref: '#/components/messages/GoingAway' }
 
 operations:
   sendToServer:
@@ -192,6 +193,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/Error' }
       - { $ref: '#/channels/signaling/messages/PeerTransportStatus' }
       - { $ref: '#/channels/signaling/messages/RelayStats' }
+      - { $ref: '#/channels/signaling/messages/GoingAway' }
 
 components:
   messages:
@@ -369,6 +371,10 @@ components:
         v3: periodic per-connection relay-delivery statistics (opt-in via
         websocket.delivery_stats_interval_secs; never sent to pre-v3 clients).
       payload: { $ref: '#/components/schemas/RelayStats' }
+    GoingAway:
+      title: GoingAway
+      summary: 'v3: graceful shutdown-drain advisory before close code 4000.'
+      payload: { $ref: '#/components/schemas/GoingAway' }
 
   schemas:
     # ---------------------------------------------------------------------
@@ -471,6 +477,7 @@ components:
         - GAME_START_FORBIDDEN
         - SLOW_CONSUMER
         - ACTIVITY_TIMEOUT
+        - SERVER_DRAINING
 
     # ---------------------------------------------------------------------
     # Shared object schemas
@@ -1337,4 +1344,24 @@ components:
               description: >-
                 Deliveries that had to wait on this connection's momentarily
                 full outbound queue.
+      required: [type, data]
+    GoingAway:
+      type: object
+      description: >-
+        v3 only. Best-effort graceful-shutdown advisory emitted when the
+        server starts draining. The WebSocket close frame with code 4000 is
+        authoritative; pre-v3 clients receive only that close frame.
+      properties:
+        type: { const: GoingAway }
+        data:
+          type: object
+          required: [deadline_ms]
+          properties:
+            deadline_ms:
+              type: integer
+              description: Unix epoch millisecond deadline when the server will force close.
+            retry_after_secs:
+              type: integer
+              nullable: true
+              description: Optional operator retry hint.
       required: [type, data]

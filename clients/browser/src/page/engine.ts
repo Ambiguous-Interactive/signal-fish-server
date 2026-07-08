@@ -172,8 +172,13 @@ export class Engine {
       return false;
     }
     link.openLabels.add(label);
+    const reliable = link.channels.get(RELIABLE_LABEL);
+    const unreliable = link.channels.get(UNRELIABLE_LABEL);
     const fullyOpen =
-      link.openLabels.has(RELIABLE_LABEL) && link.openLabels.has(UNRELIABLE_LABEL);
+      link.openLabels.has(RELIABLE_LABEL) &&
+      link.openLabels.has(UNRELIABLE_LABEL) &&
+      reliable?.readyState === 'open' &&
+      unreliable?.readyState === 'open';
     if (fullyOpen && !link.pairConnected) {
       link.pairConnected = true;
       return true;
@@ -228,7 +233,12 @@ export class Engine {
     // either way so the open edge can never be missed.
     let openNotified = false;
     const notifyOpen = () => {
-      if (!openNotified) {
+      const link = this.peers.get(peer);
+      if (
+        !openNotified &&
+        channel.readyState === 'open' &&
+        link?.channels.get(label) === channel
+      ) {
         openNotified = true;
         this.callbacks.onChannelOpen(peer, label);
       }

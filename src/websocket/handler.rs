@@ -2,8 +2,8 @@ use crate::security::ClientCertificateFingerprint;
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Extension, State};
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -48,6 +48,10 @@ async fn websocket_handler_with_default(
     fingerprint: Option<Extension<ClientCertificateFingerprint>>,
     default_protocol_version: u16,
 ) -> Response {
+    if server.is_draining() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "server is draining").into_response();
+    }
+
     let token_binding_cfg = server.token_binding_config().clone();
     let client_offered_binding =
         client_requested_subprotocol(&headers, &token_binding_cfg.subprotocol);

@@ -43,15 +43,15 @@
 //!    SAME port rejects the old reconnect identity (`ReconnectionFailed`, the
 //!    in-memory registry died with the old process), and a fresh session works.
 //!
-//! A graceful-shutdown scenario is deliberately ABSENT: `src/main.rs` installs
-//! no signal handler (`axum::serve` runs without `with_graceful_shutdown`, and
-//! the crate contains no `ctrl_c`/SIGTERM handling), so there is no documented
-//! graceful-exit behavior to pin.
+//! A graceful-shutdown scenario sends SIGTERM to the real binary and requires
+//! v3 `GoingAway`, close code `4000 server_shutdown`, and clean process exit.
 
 mod v3_conformance_helpers;
 mod websocket_test_helpers;
 
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use serde_json::json;
@@ -79,6 +79,14 @@ const APP_ID: &str = "multiprocess-conformance-app";
 /// under pathological load. (The server-spawn / connect / health ceilings live
 /// with the harness in `websocket_test_helpers::server_process`.)
 const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(unix)]
+fn now_unix_ms() -> u64 {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 /// This suite's config overlay, deep-merged over the shared harness's base
 /// config (`websocket_test_helpers::server_process`): in-memory + webrtc, with
@@ -201,6 +209,39 @@ async fn expect_socket_closed_within(ws: &mut WsStream, timeout: Duration, conte
     }
 }
 
+#[cfg(unix)]
+async fn expect_close_frame_within(
+    ws: &mut WsStream,
+    timeout: Duration,
+    context: &str,
+) -> (u16, String) {
+    let deadline = deadline_after(timeout);
+    loop {
+        match tokio::time::timeout_at(deadline, ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                return (frame.code.into(), frame.reason.to_string());
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("{context}: close frame had no code")
+            }
+            Ok(Some(Ok(frame @ (Message::Text(_) | Message::Binary(_))))) => {
+                panic!(
+                    "{context}: no ServerMessage may be pending while awaiting \
+                     the close frame, got {frame:?}"
+                )
+            }
+            Ok(Some(Ok(_control_frame))) => {}
+            Ok(Some(Err(error))) => {
+                panic!("{context}: websocket error before close frame: {error}")
+            }
+            Ok(None) => panic!("{context}: stream ended before close frame"),
+            Err(_elapsed) => {
+                panic!("{context}: socket did not observe a close frame within {timeout:?}")
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn multiprocess_mesh_n3_full_session_over_real_tcp() {
     let server = spawn_server(config_overlay("mesh")).await;
@@ -276,6 +317,65 @@ async fn multiprocess_mesh_n3_full_session_over_real_tcp() {
     }
 
     drop(server);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn multiprocess_sigterm_gracefully_drains_with_goingaway_and_4000() {
+    let mut server = spawn_server(json!({
+        "server": {
+            "drain_grace_secs": 1
+        },
+        "session": {
+            "default_topology": "mesh",
+            "enable_webrtc": true
+        }
+    }))
+    .await;
+    let game = "mp-drain";
+
+    let mut peer = connect_client(server.port).await;
+    authenticate_v3(&mut peer).await;
+    let joined = join_room(&mut peer, game, None, "DrainPeer", 2).await;
+    assert!(
+        joined.reconnection_token.is_some(),
+        "v3 join should expose the pre-issued reconnect token before shutdown"
+    );
+
+    let before_deadline_ms = now_unix_ms();
+    server.send_sigterm();
+
+    let (deadline_ms, retry_after_secs) = next_matching_server_message_within(
+        &mut peer,
+        SOCKET_CLOSE_TIMEOUT,
+        "shutdown GoingAway",
+        |message| match message {
+            ServerMessage::GoingAway {
+                deadline_ms,
+                retry_after_secs,
+            } => Some((deadline_ms, retry_after_secs)),
+            _ => None,
+        },
+    )
+    .await;
+    assert!(
+        deadline_ms >= before_deadline_ms,
+        "GoingAway deadline must be an absolute future-ish unix ms timestamp"
+    );
+    assert_eq!(retry_after_secs, Some(1));
+
+    let (code, reason) =
+        expect_close_frame_within(&mut peer, SOCKET_CLOSE_TIMEOUT, "shutdown close").await;
+    assert_eq!(code, 4000, "SIGTERM drain must close with 4000 ({reason})");
+    assert_eq!(reason, "server_shutdown");
+
+    let status = tokio::time::timeout(SOCKET_CLOSE_TIMEOUT, server.wait_for_exit())
+        .await
+        .expect("server process did not exit after graceful drain");
+    assert!(
+        status.success(),
+        "server should exit cleanly after SIGTERM drain, got {status}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

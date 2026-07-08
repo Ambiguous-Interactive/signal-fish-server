@@ -112,6 +112,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS` | `server.default_max_players` | `8` | Default max players per room |
 | `SIGNAL_FISH__SERVER__PING_TIMEOUT` | `server.ping_timeout` | `30` | Seconds before a silent client is dropped |
 | `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL` | `server.room_cleanup_interval` | `60` | Seconds between room cleanup sweeps (must be > 0) |
+| `SIGNAL_FISH__SERVER__DRAIN_GRACE_SECS` | `server.drain_grace_secs` | `30` | Seconds between shutdown drain start and forced close `4000`; `0` closes immediately |
 | `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME` | `server.max_rooms_per_game` | `1000` | Max rooms allowed per game name |
 | `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT` | `server.empty_room_timeout` | `300` | Seconds before an empty room is removed |
 | `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT` | `server.inactive_room_timeout` | `3600` | Seconds before an inactive room is removed |

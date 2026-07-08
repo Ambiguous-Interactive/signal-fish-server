@@ -384,6 +384,29 @@ impl ReconnectionManager {
         self.pre_issued.write().await.remove(player_id);
     }
 
+    pub async fn discard_pending_reconnection(&self, player_id: &PlayerId) -> bool {
+        let mut players = self.disconnected_players.write().await;
+        let removed = players.remove(player_id);
+        let room_to_clear = removed.as_ref().and_then(|record| {
+            let room_id = record.disconnected.room_id;
+            let others_waiting = players.values().any(|pending| {
+                pending.disconnected.player_id != record.disconnected.player_id
+                    && pending.disconnected.room_id == room_id
+            });
+            (!others_waiting).then_some(room_id)
+        });
+        drop(players);
+
+        if removed.is_some() {
+            self.metrics.decrement_reconnection_sessions_active();
+        }
+        if let Some(room_id) = room_to_clear {
+            self.event_buffers.write().await.remove(&room_id);
+        }
+
+        removed.is_some()
+    }
+
     /// Register a player disconnection.
     ///
     /// `last_epoch` is the disconnecting connection's game-data incarnation

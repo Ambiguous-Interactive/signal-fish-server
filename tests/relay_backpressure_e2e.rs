@@ -415,8 +415,8 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
 ///    while the healthy peer keeps receiving (the room keeps flowing);
 /// 2. the active-connections gauge returns to its pre-stall baseline within
 ///    the slow-consumer timeout + the bounded close writes
-///    (`CLOSE_WRITE_TIMEOUT`, 1s each for farewell and close handshake) +
-///    generous scheduling margin;
+///    (`CLOSE_WRITE_TIMEOUT`, 1s each for farewell, semantic close frame, and
+///    close handshake) + generous scheduling margin;
 /// 3. (Linux only) the process's open-fd count returns to its pre-stall
 ///    baseline — the wedged socket's file descriptor is genuinely released,
 ///    not leaked to a zombie task;
@@ -435,10 +435,11 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
     /// Hard cap on the flood so a broken eviction path fails the test loudly
     /// instead of flooding forever (reached only when eviction never happens).
     const FLOOD_MESSAGE_CAP: u64 = 50_000;
-    /// Reclaim deadline: slow_consumer_timeout (300ms) + two bounded close
-    /// writes (1s CLOSE_WRITE_TIMEOUT each: farewell frame, close handshake)
-    /// + generous margin for oversubscribed runners. A ceiling, not an
-    /// expected wait — polling returns the instant the state holds.
+    /// Reclaim deadline: slow_consumer_timeout (300ms) + three bounded close
+    /// writes (1s CLOSE_WRITE_TIMEOUT each: farewell frame, semantic close
+    /// frame, close handshake) + generous margin for oversubscribed runners. A
+    /// ceiling, not an expected wait — polling returns the instant the state
+    /// holds.
     const RECLAIM_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(15);
 
     let mut server_config = ServerConfig::default();

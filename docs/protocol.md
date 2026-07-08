@@ -525,12 +525,19 @@ surface and are never renumbered):
 
 | Code | Reason string | Meaning |
 | ---- | ------------- | ------- |
-| `4000` | `server_shutdown` | The server is shutting down (reserved; no in-process trigger today) |
+| `4000` | `server_shutdown` | The server is shutting down after a graceful drain |
 | `4001` | `auth_timeout` | Never authenticated within `websocket.auth_timeout_secs` |
 | `4002` | `slow_consumer` | Evicted by the delivery contract (outbound queue full past `websocket.slow_consumer_timeout_ms`) |
 | `4003` | `activity_timeout` | Evicted by the `server.ping_timeout` activity reaper |
 | `4004` | `idle_timeout` | No inbound frame within `websocket.idle_timeout_secs` |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
+
+During a shutdown drain the process stops accepting new WebSocket upgrades,
+rejects new room creation with `SERVER_DRAINING`, sends v3 clients a best-effort
+[`GoingAway`](#goingaway) advisory, then closes remaining sockets with `4000
+server_shutdown` after `server.drain_grace_secs` (default 30). Shutdown-drain
+disconnects do not arm reconnection tokens; the instance is going away, so
+clients should create or join a fresh room on another healthy instance.
 
 ### LobbyStateChanged
 
@@ -944,10 +951,11 @@ the authority or another peer re-send the current game state after
 ## Protocol v3 additions
 
 Protocol v3 is a **purely additive** layer on top of the v2 wire contract documented above. Everything in the
-preceding sections still applies unchanged; v3 only adds optional `Authenticate` fields, five new message types,
-a capability-negotiation handshake, and an optional `ice_servers` field on `RoomJoined` / `Reconnected` (the
-[ICE pre-gather](#ice-pre-gather), emitted only to v3 WebRTC-capable clients). A v2 client never sends or receives
-a v3 message — the relay floor is the universal default and a v2 client observes byte-identical v2 behavior.
+preceding sections still applies unchanged; v3 adds optional `Authenticate` fields, v3-only messages, a
+capability-negotiation handshake, relay reliability metadata, and optional `ice_servers` fields on `RoomJoined` /
+`Reconnected` (the [ICE pre-gather](#ice-pre-gather), emitted only to v3 WebRTC-capable clients). A v2 client never
+sends or receives a v3 message — the relay floor is the universal default and a v2 client observes byte-identical v2
+behavior.
 
 Canonical wire samples for this section:
 
@@ -1019,11 +1027,14 @@ clamped). `/v2/ws` behavior is unchanged.
 
 **Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
 chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor, where
-no v3 messages are emitted at all. This is the relay-floor guarantee: v2 and v3 clients interoperate, always.
+no server-driven P2P plan messages (`SessionPlan` or `NewPeer`) are emitted for that room. WebRTC `Signal` relay
+remains transport-gated between same-room v3 WebRTC peers; informational status, connection-level diagnostics,
+and shutdown advisories (`TransportStatus`, `PeerTransportStatus`, `RelayStats`, `GoingAway`) keep their own
+feature gates. This is the relay-floor guarantee: v2 and v3 clients interoperate, always.
 
 ### New v3 messages
 
-These five messages exist only on a negotiated v3 connection.
+These seven messages exist only on a negotiated v3 connection.
 
 | Message | Direction | Purpose |
 |---|---|---|
@@ -1032,6 +1043,8 @@ These five messages exist only on a negotiated v3 connection.
 | `SessionPlan` | server → client | Per-recipient session directive emitted at finalization (alongside `GameStarting`) |
 | `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
 | `PeerTransportStatus` | server → client | A same-room peer's reported transport state changed (fan-out of an accepted `TransportStatus`) |
+| `RelayStats` | server → client | Optional per-connection relay delivery counters when `websocket.delivery_stats_interval_secs` is enabled |
+| `GoingAway` | server → client | Shutdown-drain advisory sent before the server closes the socket with `4000 server_shutdown` |
 
 #### Signal
 
@@ -1200,6 +1213,32 @@ Semantics:
   informational status about a _peer's_ data path — useful even to a relay-only v3 member — not an instruction
   for the recipient to use that transport.
 - **Purely informational**, like the report it relays: it never changes how the server relays `GameData`.
+
+#### GoingAway
+
+`GoingAway` is a best-effort v3 advisory emitted when the server begins a
+graceful shutdown drain. It gives clients an absolute drain deadline before the
+authoritative WebSocket close frame arrives:
+
+```json
+{
+  "type": "GoingAway",
+  "data": { "deadline_ms": 1700000000000, "retry_after_secs": 30 }
+}
+```
+
+Fields:
+
+- `deadline_ms` - Unix epoch millisecond time at or before which the server will
+  close the socket with `4000 server_shutdown`.
+- `retry_after_secs` - optional operator hint for reconnect backoff. It is
+  omitted when the drain is configured for immediate close.
+
+The close frame is authoritative. A v3 client may miss `GoingAway` if its socket
+is already congested, and v2 clients never receive the advisory. In both cases,
+`4000 server_shutdown` is the shutdown signal. A shutdown drain does not preserve
+room/reconnect state on this single-instance server; clients should not attempt
+to claim a stored reconnection token after observing `GoingAway` or `4000`.
 
 ### Topology / transport selection ladder
 
@@ -1441,9 +1480,12 @@ and only when `websocket.delivery_stats_interval_secs` is nonzero (default
 ```
 
 Counters are cumulative for the life of the connection. `dropped_for_you`
-becoming nonzero always coincides with your own slow-consumer disconnect;
-`backpressure_events` rising while your `seq` stream stays contiguous means
-you are draining slower than senders produce — pace yourself or expect
+covers messages the server abandoned for this connection: undeliverable
+payload replacements can increment it while you remain connected, and all
+other drops coincide with your own slow-consumer disconnect. Shutdown-drain or
+predicate-canceled control traffic skipped before enqueue is not counted as a
+drop. `backpressure_events` rising while your `seq` stream stays contiguous
+means you are draining slower than senders produce — pace yourself or expect
 eviction. Together with `seq`, this lets a client attribute loss ("server
 dropped and told me" vs "my own bug") without server log access.
 

@@ -30,9 +30,7 @@ use std::sync::Arc;
 /// the disconnect (issue #136, F1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
-    /// The server is shutting down. Defined for the close-code contract;
-    /// no in-process trigger exists today (the binary installs no graceful
-    /// shutdown handler), but embedders and future shutdown paths must use
+    /// The server is shutting down. The binary's graceful shutdown drain uses
     /// this reason rather than overloading `Unregistered`.
     Shutdown,
     /// The connection never completed authentication within
@@ -102,7 +100,9 @@ impl CloseReason {
 /// connection everywhere) also completes the paired
 /// [`ConnectionCloseListener`], so unregistration alone is enough to end the
 /// connection's I/O tasks — no message can be quietly routed into a
-/// half-alive socket.
+/// half-alive socket. `Shutdown` is the one priority reason: once process
+/// drain starts, a semantic 4000 close supersedes earlier lifecycle eviction
+/// reasons that raced the drain.
 #[derive(Debug, Clone)]
 pub struct ConnectionCloseSignal {
     tx: tokio::sync::watch::Sender<Option<CloseReason>>,
@@ -123,17 +123,23 @@ impl ConnectionCloseSignal {
         Self::channel().0
     }
 
-    /// Request the connection be closed. The first reason wins; repeat
-    /// requests are no-ops. Returns whether this call set the reason.
+    /// Request the connection be closed. The first reason wins, except that
+    /// `Shutdown` may supersede any previous non-shutdown reason. Returns
+    /// whether this call set or upgraded the reason.
     pub fn request_close(&self, reason: CloseReason) -> bool {
-        self.tx.send_if_modified(|current| {
-            if current.is_none() {
-                *current = Some(reason);
-                true
-            } else {
-                false
-            }
-        })
+        self.tx
+            .send_if_modified(|current| match (*current, reason) {
+                (None, _) => {
+                    *current = Some(reason);
+                    true
+                }
+                (Some(CloseReason::Shutdown), _) => false,
+                (Some(_), CloseReason::Shutdown) => {
+                    *current = Some(CloseReason::Shutdown);
+                    true
+                }
+                (Some(_), _) => false,
+            })
     }
 }
 
@@ -306,6 +312,20 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    async fn send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<bool> {
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        self.send_to_player(player_id, message).await?;
+        Ok(true)
+    }
+
     /// Best-effort, non-waiting delivery for pre-close farewells.
     ///
     /// Use ONLY for advisory frames sent to a connection that is about to be
@@ -324,6 +344,25 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<bool>;
 
+    /// Best-effort delivery guarded by caller-owned state that may change while
+    /// the coordinator awaits its routing lookup.
+    ///
+    /// Implementations should evaluate `should_send` immediately before the
+    /// non-blocking enqueue, after any awaited lookup/lock acquisition. The
+    /// default keeps test doubles simple; production coordinators override it
+    /// to close the awaited-lookup race.
+    async fn try_send_to_player_if(
+        &self,
+        player_id: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<bool> {
+        if !should_send() {
+            return Ok(false);
+        }
+        self.try_send_to_player(player_id, message).await
+    }
+
     async fn broadcast_to_room(
         &self,
         room_id: &RoomId,
@@ -336,6 +375,38 @@ pub trait MessageCoordinator: Send + Sync {
         except_player: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
+
+    /// Conditionally broadcast a committed room event after running a replay hook.
+    ///
+    /// Production implementations may run `before_send` while holding routing
+    /// locks or equivalent recipient-snapshot guards so replay recording and
+    /// live delivery stay in one critical section. Hook implementations must
+    /// not call back into `MessageCoordinator` or await work that can depend on
+    /// those locks.
+    async fn broadcast_to_room_except_if_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: tokio::sync::watch::Receiver<bool>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        if *drain.borrow() || !should_send() {
+            return Ok(false);
+        }
+        // The hook records replayable state in real call sites. Once it runs,
+        // the live broadcast is committed too; a second guard here would allow
+        // replay-only records with no matching live delivery.
+        before_send().await;
+        self.broadcast_to_room_except(room_id, except_player, message)
+            .await?;
+        Ok(true)
+    }
 
     /// Build and broadcast a room message while the implementation still holds
     /// the room-routing snapshot lock.
@@ -397,6 +468,35 @@ pub trait MessageCoordinator: Send + Sync {
         Ok(outcome)
     }
 
+    /// Async-builder variant of
+    /// [`Self::register_local_client_with_initial_message`].
+    ///
+    /// Production uses this for reconnection: the replay baseline is fetched
+    /// while the room-routing registration lock is held, so replay capture,
+    /// initial-frame enqueue, and room routing registration are one ordered
+    /// transition relative to live room broadcasts.
+    async fn register_local_client_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        build_message: Box<
+            dyn FnOnce() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Arc<ServerMessage>> + Send + 'a>,
+                > + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        let message = build_message().await;
+        self.register_local_client_with_initial_message(
+            player_id,
+            room_id,
+            delivery,
+            Box::new(move || message),
+        )
+        .await
+    }
+
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()>;
 
     async fn should_process_message(
@@ -435,7 +535,7 @@ pub struct MembershipUpdate {
 mod tests {
     use super::*;
     use crate::metrics::ServerMetrics;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::Mutex;
 
@@ -474,19 +574,37 @@ mod tests {
         (ClientDeliveryHandle { sender: tx, close }, rx, listener)
     }
 
-    #[derive(Default)]
     struct FallbackCoordinator {
+        sends: Mutex<Vec<(PlayerId, ServerMessage)>>,
         broadcasts_except: Mutex<Vec<(RoomId, PlayerId, ServerMessage)>>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
+        try_send_attempts: AtomicUsize,
+        try_send_result: AtomicBool,
+    }
+
+    impl Default for FallbackCoordinator {
+        fn default() -> Self {
+            Self {
+                sends: Mutex::default(),
+                broadcasts_except: Mutex::default(),
+                registrations: Mutex::default(),
+                try_send_attempts: AtomicUsize::default(),
+                try_send_result: AtomicBool::new(true),
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl MessageCoordinator for FallbackCoordinator {
         async fn send_to_player(
             &self,
-            _player_id: &PlayerId,
-            _message: Arc<ServerMessage>,
+            player_id: &PlayerId,
+            message: Arc<ServerMessage>,
         ) -> anyhow::Result<()> {
+            self.sends
+                .lock()
+                .await
+                .push((*player_id, (*message).clone()));
             Ok(())
         }
 
@@ -495,7 +613,8 @@ mod tests {
             _player_id: &PlayerId,
             _message: Arc<ServerMessage>,
         ) -> anyhow::Result<bool> {
-            Ok(true)
+            self.try_send_attempts.fetch_add(1, Ordering::Relaxed);
+            Ok(self.try_send_result.load(Ordering::Relaxed))
         }
 
         async fn broadcast_to_room(
@@ -610,6 +729,15 @@ mod tests {
         }
     }
 
+    async fn closed_with_timeout(
+        listener: &mut ConnectionCloseListener,
+        context: &str,
+    ) -> Option<CloseReason> {
+        tokio::time::timeout(Duration::from_secs(1), listener.closed())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+    }
+
     #[tokio::test]
     async fn default_broadcast_builder_delegates_to_except_broadcast_once() {
         let coordinator = FallbackCoordinator::default();
@@ -648,6 +776,184 @@ mod tests {
             matches!(message, ServerMessage::Pong),
             "unexpected fallback broadcast message: {message:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn default_conditional_player_send_respects_drain_and_predicate() {
+        for (context, drain_started, predicate_allows, expected_sent, expected_sends) in [
+            ("normal delivery", false, true, true, 1),
+            ("drain already active", true, true, false, 0),
+            ("caller predicate false", false, false, false, 0),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let player = PlayerId::from_u128(0x66666666666666666666666666666666);
+            let (_drain_tx, drain_rx) = tokio::sync::watch::channel(drain_started);
+            let should_send = || predicate_allows;
+
+            let sent = coordinator
+                .send_to_player_if(&player, test_message(), &should_send, drain_rx)
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional send failed: {err}"));
+
+            assert_eq!(sent, expected_sent, "{context}: unexpected return value");
+            let sends = coordinator.sends.lock().await;
+            assert_eq!(
+                sends.len(),
+                expected_sends,
+                "{context}: unexpected direct-send side effects"
+            );
+            if expected_sent {
+                assert_eq!(sends[0].0, player, "{context}: sent to wrong player");
+                assert!(
+                    matches!(sends[0].1, ServerMessage::Pong),
+                    "{context}: sent unexpected message: {:?}",
+                    sends[0].1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_conditional_try_send_respects_predicate_and_delegates() {
+        for (context, predicate_allows, delegate_result, expected_sent, expected_attempts) in [
+            ("delegated success", true, true, true, 1),
+            ("delegated failure", true, false, false, 1),
+            ("caller predicate false", false, true, false, 0),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            coordinator
+                .try_send_result
+                .store(delegate_result, Ordering::Relaxed);
+            let player = PlayerId::from_u128(0x77777777777777777777777777777777);
+            let should_send = || predicate_allows;
+
+            let sent = coordinator
+                .try_send_to_player_if(&player, test_message(), &should_send)
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional try-send failed: {err}"));
+
+            assert_eq!(sent, expected_sent, "{context}: unexpected return value");
+            assert_eq!(
+                coordinator.try_send_attempts.load(Ordering::Relaxed),
+                expected_attempts,
+                "{context}: unexpected try-send attempt count"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn default_conditional_broadcast_checks_guards_before_hook() {
+        for (context, drain_started, predicate_allows) in [
+            ("drain already active", true, true),
+            ("caller predicate false", false, false),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let room_id = RoomId::from_u128(0x88888888888888888888888888888888);
+            let sender = PlayerId::from_u128(0x99999999999999999999999999999999);
+            let (_drain_tx, drain_rx) = tokio::sync::watch::channel(drain_started);
+            let hook_calls = Arc::new(AtomicUsize::new(0));
+            let hook_calls_for_hook = Arc::clone(&hook_calls);
+            let should_send = || predicate_allows;
+
+            let sent = coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &sender,
+                    test_message(),
+                    &should_send,
+                    drain_rx,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_calls_for_hook.fetch_add(1, Ordering::Relaxed);
+                        })
+                    }),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional broadcast failed: {err}"));
+
+            assert!(!sent, "{context}: broadcast must be skipped");
+            assert_eq!(
+                hook_calls.load(Ordering::Relaxed),
+                0,
+                "{context}: skipped broadcast must not run its hook"
+            );
+            assert!(
+                coordinator.broadcasts_except.lock().await.is_empty(),
+                "{context}: skipped broadcast must not delegate"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum HookChange {
+        None,
+        StartDrain,
+        RejectPredicate,
+    }
+
+    #[tokio::test]
+    async fn default_conditional_broadcast_commits_once_hook_runs() {
+        for (context, hook_change) in [
+            ("normal delivery", HookChange::None),
+            ("hook starts drain", HookChange::StartDrain),
+            ("hook rejects predicate", HookChange::RejectPredicate),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let room_id = RoomId::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);
+            let sender = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb);
+            let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+            let predicate_allows = Arc::new(AtomicBool::new(true));
+            let predicate_for_call = Arc::clone(&predicate_allows);
+            let should_send = move || predicate_for_call.load(Ordering::Relaxed);
+            let predicate_for_hook = Arc::clone(&predicate_allows);
+            let hook_calls = Arc::new(AtomicUsize::new(0));
+            let hook_calls_for_hook = Arc::clone(&hook_calls);
+
+            let sent = coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &sender,
+                    test_message(),
+                    &should_send,
+                    drain_rx,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_calls_for_hook.fetch_add(1, Ordering::Relaxed);
+                            match hook_change {
+                                HookChange::None => {}
+                                HookChange::StartDrain => {
+                                    let _ = drain_tx.send(true);
+                                }
+                                HookChange::RejectPredicate => {
+                                    predicate_for_hook.store(false, Ordering::Relaxed);
+                                }
+                            }
+                        })
+                    }),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional broadcast failed: {err}"));
+
+            assert!(sent, "{context}: broadcast must commit once the hook runs");
+            assert_eq!(
+                hook_calls.load(Ordering::Relaxed),
+                1,
+                "{context}: hook should run exactly once"
+            );
+            let broadcasts = coordinator.broadcasts_except.lock().await;
+            assert_eq!(
+                broadcasts.len(),
+                1,
+                "{context}: committed broadcast must delegate exactly once"
+            );
+            let (broadcast_room, except_player, message) = &broadcasts[0];
+            assert_eq!(*broadcast_room, room_id, "{context}: wrong broadcast room");
+            assert_eq!(*except_player, sender, "{context}: wrong excluded sender");
+            assert!(
+                matches!(message, ServerMessage::Pong),
+                "{context}: unexpected broadcast message: {message:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -891,7 +1197,7 @@ mod tests {
             0
         );
         assert_eq!(
-            listener.closed().await,
+            closed_with_timeout(&mut listener, "stuck recipient close").await,
             Some(CloseReason::SlowConsumer),
             "the stuck connection must be asked to close as a slow consumer"
         );
@@ -996,10 +1302,10 @@ mod tests {
         assert_conservation(&metrics);
     }
 
-    /// (f) First close reason wins: a second request is a no-op (returns
-    /// false) and the listener observes the original reason — repeatedly.
+    /// (f) First non-shutdown close reason wins: a second ordinary request is
+    /// a no-op (returns false) and the listener observes the original reason.
     #[tokio::test]
-    async fn close_signal_first_reason_wins_and_listener_observes_it() {
+    async fn close_signal_first_non_shutdown_reason_wins_and_listener_observes_it() {
         let (signal, mut listener) = ConnectionCloseSignal::channel();
 
         assert!(
@@ -1011,10 +1317,39 @@ mod tests {
             "a second close request must be a no-op"
         );
 
-        assert_eq!(listener.closed().await, Some(CloseReason::SlowConsumer));
+        assert_eq!(
+            closed_with_timeout(&mut listener, "first non-shutdown close").await,
+            Some(CloseReason::SlowConsumer)
+        );
         // The listener is level-triggered: once closed, it stays closed with
         // the same (first) reason.
-        assert_eq!(listener.closed().await, Some(CloseReason::SlowConsumer));
+        assert_eq!(
+            closed_with_timeout(&mut listener, "repeated first non-shutdown close").await,
+            Some(CloseReason::SlowConsumer)
+        );
+    }
+
+    /// Shutdown drain is the priority lifecycle close: it must be able to
+    /// restore the semantic 4000 close when activity cleanup raced first.
+    #[tokio::test]
+    async fn close_signal_shutdown_supersedes_previous_lifecycle_reason() {
+        let (signal, mut listener) = ConnectionCloseSignal::channel();
+
+        assert!(signal.request_close(CloseReason::ActivityTimeout));
+        assert!(signal.request_close(CloseReason::Shutdown));
+        assert!(
+            !signal.request_close(CloseReason::SlowConsumer),
+            "shutdown remains the final reason once requested"
+        );
+
+        assert_eq!(
+            closed_with_timeout(&mut listener, "shutdown close").await,
+            Some(CloseReason::Shutdown)
+        );
+        assert_eq!(
+            closed_with_timeout(&mut listener, "repeated shutdown close").await,
+            Some(CloseReason::Shutdown)
+        );
     }
 
     /// (f) Dropping every signal clone without a reason completes the
@@ -1028,7 +1363,9 @@ mod tests {
 
         // A listener parked BEFORE the drop must be woken by it.
         let mut waiting_listener = listener.clone();
-        let waiter = tokio::spawn(async move { waiting_listener.closed().await });
+        let waiter = tokio::spawn(async move {
+            closed_with_timeout(&mut waiting_listener, "waiting dropped-signal listener").await
+        });
         // Let the waiter park on `changed()` before dropping the signals.
         tokio::task::yield_now().await;
 
@@ -1042,7 +1379,10 @@ mod tests {
 
         // A listener that starts waiting AFTER the drop resolves immediately.
         let mut late_listener = listener;
-        assert_eq!(late_listener.closed().await, None);
+        assert_eq!(
+            closed_with_timeout(&mut late_listener, "late dropped-signal listener").await,
+            None
+        );
     }
 
     /// The non-blocking peek used by terminal paths to recover a reason an
@@ -1056,9 +1396,12 @@ mod tests {
         assert!(signal.request_close(CloseReason::IdleTimeout));
         assert_eq!(listener.requested_reason(), Some(CloseReason::IdleTimeout));
 
-        // First reason wins in the peek too.
+        // First non-shutdown reason wins in the peek too.
         assert!(!signal.request_close(CloseReason::Unregistered));
         assert_eq!(listener.requested_reason(), Some(CloseReason::IdleTimeout));
+
+        assert!(signal.request_close(CloseReason::Shutdown));
+        assert_eq!(listener.requested_reason(), Some(CloseReason::Shutdown));
     }
 
     /// The RFC 6455 private-range close-code assignments are documented

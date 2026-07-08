@@ -124,12 +124,13 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         snapshot.connections.websocket_slow_consumer_disconnects,
     );
     // Delivery conservation counters: together with the drop counter above,
-    // enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped
-    // at any quiescent point (drops also cover messages abandoned after enqueue).
+    // enqueued + channel_closed + canceled <= attempts <=
+    // enqueued + channel_closed + canceled + dropped at any quiescent point
+    // (drops also cover messages abandoned after enqueue).
     counter(
         &mut buf,
         "signal_fish_websocket_delivery_attempts_total",
-        "Delivery attempts routed through the reliable delivery path (one per message per recipient)",
+        "Delivery attempts routed through reliable server delivery paths (one per message per recipient)",
         snapshot.connections.websocket_delivery_attempts,
     );
     counter(
@@ -143,6 +144,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "signal_fish_websocket_deliveries_channel_closed_total",
         "Delivery attempts that found the recipient's connection already closing (a normal disconnect race, not a delivery fault)",
         snapshot.connections.websocket_deliveries_channel_closed,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_deliveries_canceled_total",
+        "Conditional delivery attempts canceled before enqueue because the commit condition no longer held: shutdown drain, caller predicate, or recipient snapshot (not a delivery fault)",
+        snapshot.connections.websocket_deliveries_canceled,
     );
 
     counter(
@@ -706,29 +713,30 @@ mod tests {
     async fn test_render_prometheus_metrics_includes_delivery_conservation_counters() {
         let metrics = ServerMetrics::new();
         // Drive each conservation counter to a distinct, non-default value so
-        // the rendered lines are unambiguous, shaped like a real trace: five
-        // attempts resolving as three enqueued, one channel-closed, and one
-        // slow-consumer drop (attempts == enqueued + channel_closed + dropped).
-        for _ in 0..5 {
+        // the rendered lines are unambiguous, shaped like a real trace: six
+        // attempts resolving as three enqueued, one channel-closed, one
+        // canceled, and one slow-consumer drop.
+        for _ in 0..6 {
             metrics.increment_websocket_delivery_attempts();
         }
         for _ in 0..3 {
             metrics.increment_websocket_deliveries_enqueued();
         }
         metrics.increment_websocket_deliveries_channel_closed();
+        metrics.increment_websocket_deliveries_canceled();
         metrics.increment_websocket_messages_dropped();
 
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
 
         // Exact HELP assertions keep operator semantics from drifting: these
-        // three counters (plus the drop counter) carry the delivery
+        // four counters (plus the drop counter) carry the delivery
         // conservation law, so their meanings must stay precise.
         let expectations = [
             (
                 "signal_fish_websocket_delivery_attempts_total",
-                "Delivery attempts routed through the reliable delivery path (one per message per recipient)",
-                5u64,
+                "Delivery attempts routed through reliable server delivery paths (one per message per recipient)",
+                6u64,
             ),
             (
                 "signal_fish_websocket_deliveries_enqueued_total",
@@ -738,6 +746,11 @@ mod tests {
             (
                 "signal_fish_websocket_deliveries_channel_closed_total",
                 "Delivery attempts that found the recipient's connection already closing (a normal disconnect race, not a delivery fault)",
+                1,
+            ),
+            (
+                "signal_fish_websocket_deliveries_canceled_total",
+                "Conditional delivery attempts canceled before enqueue because the commit condition no longer held: shutdown drain, caller predicate, or recipient snapshot (not a delivery fault)",
                 1,
             ),
         ];

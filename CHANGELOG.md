@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added graceful shutdown drain (P10.E3). `SIGTERM`/Ctrl-C now stop new WebSocket
+  upgrades, reject room-creating joins with `SERVER_DRAINING`, send v3 clients a
+  best-effort `GoingAway { deadline_ms, retry_after_secs }` advisory, then close
+  remaining sockets with `4000 server_shutdown` after `server.drain_grace_secs`
+  (default 30; `0` closes immediately). Shutdown-drain closes do not arm
+  reconnection tokens because the single instance is exiting; clients should
+  create or join a fresh room on another healthy instance.
 - Added v3-only `Reconnected.sender_watermarks` (P10.E5). A v3 reconnect now
   carries every current room member's authoritative `(epoch, seq)` relay tail,
   allowing clients to re-baseline after missed `GameData` that is deliberately
@@ -175,9 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MessageTooLarge` error frame. Config validation now rejects `security.max_message_size = 0`
   with a direct diagnostic.
 - Added delivery-conservation counters (`signal_fish_websocket_delivery_attempts_total`,
-  `..._deliveries_enqueued_total`, `..._deliveries_channel_closed_total`) carrying the invariant
-  `enqueued + channel_closed ≤ attempts ≤ enqueued + channel_closed + dropped`, asserted by
-  every relay-touching e2e test.
+  `..._deliveries_enqueued_total`, `..._deliveries_channel_closed_total`,
+  `..._deliveries_canceled_total`) carrying the invariant `enqueued + channel_closed + canceled ≤
+  attempts ≤ enqueued + channel_closed + canceled + dropped`, asserted by every relay-touching e2e
+  test.
 - Added an extensive delivery verification stack: real-socket wedged-write/backpressure tests, a
   delivery ledger (zero-loss-or-loud-disconnect as a machine-checked predicate), a chaos TCP
   proxy (pause/throttle/fragment/RST), rate-controlled soaks, a reconnect-churn leak check, a

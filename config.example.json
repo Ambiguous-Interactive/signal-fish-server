@@ -4,6 +4,7 @@
     "default_max_players": 8,
     "ping_timeout": 30,
     "room_cleanup_interval": 60,
+    "drain_grace_secs": 30,
     "max_rooms_per_game": 1000,
     "empty_room_timeout": 300,
     "inactive_room_timeout": 3600,

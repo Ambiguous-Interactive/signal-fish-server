@@ -29,6 +29,7 @@ pub struct DeliveryCounters {
     pub attempts: u64,
     pub enqueued: u64,
     pub channel_closed: u64,
+    pub canceled: u64,
     pub dropped: u64,
     pub slow_consumer_disconnects: u64,
     pub backpressure_events: u64,
@@ -128,6 +129,7 @@ pub async fn scrape_delivery_counters(port: u16) -> DeliveryCounters {
             &text,
             "signal_fish_websocket_deliveries_channel_closed_total",
         ),
+        canceled: sample_value(&text, "signal_fish_websocket_deliveries_canceled_total"),
         dropped: sample_value(&text, "signal_fish_websocket_messages_dropped_total"),
         slow_consumer_disconnects: sample_value(
             &text,
@@ -141,20 +143,22 @@ pub async fn scrape_delivery_counters(port: u16) -> DeliveryCounters {
 /// The delivery-conservation law over a scraped snapshot, mirrored from
 /// `websocket_test_helpers::assert_message_conservation`:
 ///
-/// `enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped`
+/// `enqueued + channel_closed + canceled <= attempts <= enqueued + channel_closed + canceled + dropped`
 ///
 /// Call only at quiescent points (every send completed and observed), because
 /// an in-flight delivery has its attempt counted before its outcome exists.
 pub fn assert_scraped_message_conservation(counters: &DeliveryCounters) {
-    let resolved = counters.enqueued + counters.channel_closed;
+    let resolved = counters.enqueued + counters.channel_closed + counters.canceled;
     assert!(
         resolved <= counters.attempts && counters.attempts <= resolved + counters.dropped,
         "delivery conservation violated on the scraped counters: expected \
-         enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped, got \
-         attempts={} enqueued={} channel_closed={} dropped={}",
+         enqueued + channel_closed + canceled <= attempts <= enqueued + channel_closed + \
+         canceled + dropped, got attempts={} enqueued={} channel_closed={} canceled={} \
+         dropped={}",
         counters.attempts,
         counters.enqueued,
         counters.channel_closed,
+        counters.canceled,
         counters.dropped
     );
 }
@@ -168,6 +172,7 @@ mod tests {
 # TYPE signal_fish_websocket_delivery_attempts_total counter\n\
 signal_fish_websocket_delivery_attempts_total 42\n\
 signal_fish_connections_active 3\n\
+signal_fish_websocket_deliveries_canceled_total 1\n\
 signal_fish_websocket_messages_dropped_total 0\n";
 
     #[test]
@@ -183,6 +188,13 @@ signal_fish_websocket_messages_dropped_total 0\n";
         assert_eq!(
             sample_value(EXPOSITION, "signal_fish_websocket_messages_dropped_total"),
             0
+        );
+        assert_eq!(
+            sample_value(
+                EXPOSITION,
+                "signal_fish_websocket_deliveries_canceled_total"
+            ),
+            1
         );
     }
 
@@ -216,8 +228,9 @@ signal_fish_websocket_messages_dropped_total 0\n";
     fn conservation_law_accepts_balanced_and_rejects_unbalanced() {
         let balanced = DeliveryCounters {
             attempts: 10,
-            enqueued: 7,
+            enqueued: 6,
             channel_closed: 2,
+            canceled: 1,
             dropped: 1,
             slow_consumer_disconnects: 1,
             backpressure_events: 4,
