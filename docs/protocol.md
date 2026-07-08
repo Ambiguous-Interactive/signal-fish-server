@@ -1480,9 +1480,12 @@ and only when `websocket.delivery_stats_interval_secs` is nonzero (default
 ```
 
 Counters are cumulative for the life of the connection. `dropped_for_you`
-becoming nonzero always coincides with your own slow-consumer disconnect;
-`backpressure_events` rising while your `seq` stream stays contiguous means
-you are draining slower than senders produce — pace yourself or expect
+covers messages the server abandoned for this connection: undeliverable
+payload replacements can increment it while you remain connected, and all
+other drops coincide with your own slow-consumer disconnect. Shutdown-drain or
+predicate-canceled control traffic skipped before enqueue is not counted as a
+drop. `backpressure_events` rising while your `seq` stream stays contiguous
+means you are draining slower than senders produce — pace yourself or expect
 eviction. Together with `seq`, this lets a client attribute loss ("server
 dropped and told me" vs "my own bug") without server log access.
 

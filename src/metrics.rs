@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 /// monotonic diagnostics, never synchronization.
 #[derive(Debug, Default)]
 pub struct ConnectionDeliveryStats {
-    /// Messages the reliable delivery path enqueued for this connection.
+    /// Messages the reliable delivery paths enqueued for this connection.
     pub sent_to_you: AtomicU64,
     /// Messages abandoned for this connection (slow-consumer timeout drops
     /// and undeliverable-encoding replacements).
@@ -31,10 +31,10 @@ pub struct ConnectionDeliveryStats {
 pub struct ServerMetrics {
     /// Per-connection delivery statistics keyed by player id (see
     /// [`ConnectionDeliveryStats`]). Lives here — beside the server-wide
-    /// delivery counters — because `coordination::deliver_or_disconnect`
-    /// already receives `(metrics, player_id)` at every delivery site, so the
-    /// per-connection ledger needs no new plumbing through the delivery
-    /// handles. Populated only when RelayStats emission is enabled.
+    /// delivery counters — because the reliable server delivery paths already
+    /// carry `(metrics, player_id)`, so the per-connection ledger needs no new
+    /// plumbing through the delivery handles. Populated only when RelayStats
+    /// emission is enabled.
     connection_delivery_stats:
         dashmap::DashMap<crate::protocol::PlayerId, Arc<ConnectionDeliveryStats>>,
 
@@ -51,14 +51,15 @@ pub struct ServerMetrics {
     /// Connections force-closed because their outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`.
     pub websocket_slow_consumer_disconnects: AtomicU64,
-    /// Delivery attempts routed through the reliable delivery path
-    /// (`coordination::deliver_or_disconnect`): one per message per recipient,
-    /// counted before the outcome is known. Together with
+    /// Delivery attempts routed through the reliable server delivery and
+    /// reservation paths: one per message per recipient, counted before the
+    /// outcome is known. Together with
     /// `websocket_deliveries_enqueued`, `websocket_deliveries_channel_closed`,
-    /// and `websocket_messages_dropped` this carries the delivery conservation
-    /// law — every attempt resolves as exactly one of enqueued, channel-closed,
-    /// or slow-consumer drop, so at any quiescent point
-    /// `enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped`
+    /// `websocket_deliveries_canceled`, and `websocket_messages_dropped` this
+    /// carries the delivery conservation law — every attempt resolves as
+    /// enqueued, channel-closed, canceled before enqueue, or slow-consumer
+    /// drop, so at any quiescent point
+    /// `enqueued + channel_closed + canceled <= attempts <= enqueued + channel_closed + canceled + dropped`
     /// (the drop counter also tallies messages abandoned with a closing
     /// connection *after* they were enqueued, hence the upper bound rather
     /// than exact equality).
@@ -73,6 +74,12 @@ pub struct ServerMetrics {
     /// closing (its queue receiver gone), whether up front or while
     /// backpressured. A normal disconnect race, not a delivery fault.
     pub websocket_deliveries_channel_closed: AtomicU64,
+    /// Conditional delivery attempts canceled before enqueue because the
+    /// commit condition no longer held: shutdown drain began, the caller
+    /// predicate became false, or a reserved recipient snapshot went stale.
+    /// These are intentional skips, not delivery drops and not per-connection
+    /// loss.
+    pub websocket_deliveries_canceled: AtomicU64,
 
     // Room operation metrics
     pub rooms_created: AtomicU64,
@@ -293,6 +300,7 @@ pub struct ConnectionMetrics {
     pub websocket_delivery_attempts: u64,
     pub websocket_deliveries_enqueued: u64,
     pub websocket_deliveries_channel_closed: u64,
+    pub websocket_deliveries_canceled: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -477,6 +485,7 @@ impl ServerMetrics {
             websocket_delivery_attempts: AtomicU64::new(0),
             websocket_deliveries_enqueued: AtomicU64::new(0),
             websocket_deliveries_channel_closed: AtomicU64::new(0),
+            websocket_deliveries_canceled: AtomicU64::new(0),
             rooms_created: AtomicU64::new(0),
             rooms_joined: AtomicU64::new(0),
             room_creation_failures: AtomicU64::new(0),
@@ -615,7 +624,7 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record one delivery attempt entering the reliable delivery path,
+    /// Record one delivery attempt entering the reliable delivery paths,
     /// before its outcome is known (see the field doc for the conservation
     /// law this anchors).
     pub fn increment_websocket_delivery_attempts(&self) {
@@ -634,6 +643,13 @@ impl ServerMetrics {
     /// already closing (queue receiver gone).
     pub fn increment_websocket_deliveries_channel_closed(&self) {
         self.websocket_deliveries_channel_closed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one conditional delivery attempt intentionally canceled before
+    /// enqueue because the commit condition no longer held.
+    pub fn increment_websocket_deliveries_canceled(&self) {
+        self.websocket_deliveries_canceled
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1218,6 +1234,9 @@ impl ServerMetrics {
                     .load(Ordering::Relaxed),
                 websocket_deliveries_channel_closed: self
                     .websocket_deliveries_channel_closed
+                    .load(Ordering::Relaxed),
+                websocket_deliveries_canceled: self
+                    .websocket_deliveries_canceled
                     .load(Ordering::Relaxed),
             },
             rooms: RoomMetrics {

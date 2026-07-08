@@ -34,6 +34,8 @@ mod dashboard_cache;
 mod game_data;
 mod heartbeat;
 mod maintenance;
+#[cfg(test)]
+mod message_coordinator_tests;
 mod message_router;
 #[cfg(test)]
 mod message_router_tests;
@@ -859,27 +861,15 @@ impl InMemoryMessageCoordinator {
             .unwrap_or_default()
     }
 
-    fn record_canceled_delivery(
-        &self,
-        player_id: PlayerId,
-        stats: Option<&Arc<ConnectionDeliveryStats>>,
-    ) {
-        self.metrics.increment_websocket_messages_dropped();
-        if let Some(stats) = stats {
-            stats
-                .dropped_for_you
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+    fn record_canceled_delivery(&self, player_id: PlayerId) {
+        self.metrics.increment_websocket_deliveries_canceled();
         tracing::debug!(%player_id, "Conditional delivery canceled after attempt");
     }
 
     fn record_reserved_cancellations(&self, reservations: &[ConditionalDeliveryReservation]) {
         for reservation in reservations {
-            if let ConditionalDeliveryReservation::Reserved {
-                player_id, stats, ..
-            } = reservation
-            {
-                self.record_canceled_delivery(*player_id, stats.as_ref());
+            if let ConditionalDeliveryReservation::Reserved { player_id, .. } = reservation {
+                self.record_canceled_delivery(*player_id);
             }
         }
     }
@@ -935,7 +925,7 @@ impl InMemoryMessageCoordinator {
             result = &mut reserve => match result {
                 Ok(permit) => {
                     if *drain.borrow() || !should_send() {
-                        self.record_canceled_delivery(player_id, connection_stats.as_ref());
+                        self.record_canceled_delivery(player_id);
                         return None;
                     }
                     permit.send(message);
@@ -957,12 +947,12 @@ impl InMemoryMessageCoordinator {
                 if changed.is_ok() && *drain.borrow() {
                     tracing::debug!(%player_id, "Conditional delivery canceled for shutdown drain");
                 }
-                self.record_canceled_delivery(player_id, connection_stats.as_ref());
+                self.record_canceled_delivery(player_id);
                 None
             }
             _ = &mut timeout => {
                 if *drain.borrow() || !should_send() {
-                    self.record_canceled_delivery(player_id, connection_stats.as_ref());
+                    self.record_canceled_delivery(player_id);
                     return None;
                 }
                 let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
@@ -1034,7 +1024,7 @@ impl InMemoryMessageCoordinator {
                     result = &mut reserve => match result {
                         Ok(permit) => {
                             if *drain.borrow() || !should_send() {
-                                self.record_canceled_delivery(player_id, stats.as_ref());
+                                self.record_canceled_delivery(player_id);
                                 ConditionalDeliveryReservation::Canceled
                             } else {
                                 ConditionalDeliveryReservation::Reserved {
@@ -1058,12 +1048,12 @@ impl InMemoryMessageCoordinator {
                         if changed.is_ok() && *drain.borrow() {
                             tracing::debug!(%player_id, "Conditional delivery reservation canceled for shutdown drain");
                         }
-                        self.record_canceled_delivery(player_id, stats.as_ref());
+                        self.record_canceled_delivery(player_id);
                         ConditionalDeliveryReservation::Canceled
                     }
                     _ = &mut timeout => {
                         if *drain.borrow() || !should_send() {
-                            self.record_canceled_delivery(player_id, stats.as_ref());
+                            self.record_canceled_delivery(player_id);
                             return ConditionalDeliveryReservation::Canceled;
                         }
                         let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);

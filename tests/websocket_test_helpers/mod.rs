@@ -22,15 +22,16 @@ const SKIPPED_MESSAGE_LIMIT: usize = 8;
 
 /// Assert the server's delivery-conservation law over its metrics.
 ///
-/// Every delivery attempt routed through `coordination::deliver_or_disconnect`
-/// resolves as exactly one of: enqueued on the recipient's outbound queue,
-/// unroutable because the recipient's channel already closed, or abandoned as
-/// a slow-consumer drop. `websocket_messages_dropped` additionally counts
+/// Every attempt routed through the reliable server delivery paths resolves as
+/// exactly one of: enqueued on the recipient's outbound queue, unroutable
+/// because the recipient's channel already closed, canceled before enqueue
+/// because a conditional commit condition no longer held, or abandoned as a
+/// slow-consumer drop. `websocket_messages_dropped` additionally counts
 /// messages abandoned with a closing connection *after* they were enqueued
 /// (a slow consumer's undrained queue, a failed close-time flush), so the law
 /// over the exported counters is two-sided rather than an exact equality:
 ///
-/// `enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped`
+/// `enqueued + channel_closed + canceled <= attempts <= enqueued + channel_closed + canceled + dropped`
 ///
 /// Self-stabilizing: an in-flight delivery has its attempt counted before its
 /// outcome exists, so a snapshot can transiently read `attempts` one (or a
@@ -49,7 +50,7 @@ pub async fn assert_message_conservation(metrics: &ServerMetrics) {
     const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
     let deadline = Instant::now() + QUIESCENCE_DEADLINE;
-    let (mut attempts, mut enqueued, mut channel_closed, mut dropped);
+    let (mut attempts, mut enqueued, mut channel_closed, mut canceled, mut dropped);
     loop {
         attempts = metrics.websocket_delivery_attempts.load(Ordering::Relaxed);
         enqueued = metrics
@@ -58,9 +59,12 @@ pub async fn assert_message_conservation(metrics: &ServerMetrics) {
         channel_closed = metrics
             .websocket_deliveries_channel_closed
             .load(Ordering::Relaxed);
+        canceled = metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed);
         dropped = metrics.websocket_messages_dropped.load(Ordering::Relaxed);
 
-        let resolved = enqueued + channel_closed;
+        let resolved = enqueued + channel_closed + canceled;
         if resolved <= attempts && attempts <= resolved + dropped {
             return;
         }
@@ -72,8 +76,9 @@ pub async fn assert_message_conservation(metrics: &ServerMetrics) {
     panic!(
         "delivery conservation violated (stable past the {QUIESCENCE_DEADLINE:?} quiescence \
          deadline): expected \
-         enqueued + channel_closed <= attempts <= enqueued + channel_closed + dropped, got \
-         attempts={attempts} enqueued={enqueued} channel_closed={channel_closed} dropped={dropped}"
+         enqueued + channel_closed + canceled <= attempts <= enqueued + channel_closed + \
+         canceled + dropped, got attempts={attempts} enqueued={enqueued} \
+         channel_closed={channel_closed} canceled={canceled} dropped={dropped}"
     );
 }
 

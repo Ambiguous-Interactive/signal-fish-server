@@ -182,9 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MessageTooLarge` error frame. Config validation now rejects `security.max_message_size = 0`
   with a direct diagnostic.
 - Added delivery-conservation counters (`signal_fish_websocket_delivery_attempts_total`,
-  `..._deliveries_enqueued_total`, `..._deliveries_channel_closed_total`) carrying the invariant
-  `enqueued + channel_closed ≤ attempts ≤ enqueued + channel_closed + dropped`, asserted by
-  every relay-touching e2e test.
+  `..._deliveries_enqueued_total`, `..._deliveries_channel_closed_total`,
+  `..._deliveries_canceled_total`) carrying the invariant `enqueued + channel_closed + canceled ≤
+  attempts ≤ enqueued + channel_closed + canceled + dropped`, asserted by every relay-touching e2e
+  test.
 - Added an extensive delivery verification stack: real-socket wedged-write/backpressure tests, a
   delivery ledger (zero-loss-or-loud-disconnect as a machine-checked predicate), a chaos TCP
   proxy (pause/throttle/fragment/RST), rate-controlled soaks, a reconnect-churn leak check, a
