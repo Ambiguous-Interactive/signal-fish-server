@@ -17,10 +17,6 @@ use signal_fish_server::websocket;
 use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
-// Mirrors the websocket close-frame flush timeout; shutdown should wait long
-// enough for semantic 4000 close frames, but not extend the drain indefinitely.
-const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
-
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
 #[command(name = "signal-fish-server")]
@@ -336,16 +332,19 @@ async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch:
     let close_requests = server.close_connections_for_shutdown();
     tracing::info!(close_requests, "Shutdown close requests issued");
 
-    let remaining_connections = server
-        .wait_for_shutdown_connections(SHUTDOWN_CONNECTION_SETTLE_TIMEOUT)
-        .await;
+    let settle_timeout = shutdown_connection_settle_timeout();
+    let remaining_connections = server.wait_for_shutdown_connections(settle_timeout).await;
     if remaining_connections > 0 {
         tracing::warn!(
             remaining_connections,
-            settle_ms = SHUTDOWN_CONNECTION_SETTLE_TIMEOUT.as_millis() as u64,
+            settle_ms = settle_timeout.as_millis() as u64,
             "Shutdown drain ended with connections still registered"
         );
     }
+}
+
+fn shutdown_connection_settle_timeout() -> Duration {
+    websocket::registered_connection_shutdown_settle_timeout()
 }
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -440,7 +439,7 @@ fn extract_client_fingerprint(headers: &HeaderMap) -> Option<ClientCertificateFi
 
 #[cfg(test)]
 mod cli_tests {
-    use super::{wait_for_ctrl_c_shutdown, Cli};
+    use super::{shutdown_connection_settle_timeout, wait_for_ctrl_c_shutdown, websocket, Cli};
     use clap::Parser;
     use std::io;
     use std::time::Duration;
@@ -499,6 +498,20 @@ mod cli_tests {
     fn test_cli_version() {
         let result = Cli::try_parse_from(["signal-fish-server", "--version"]);
         assert!(result.is_err()); // --version causes early exit
+    }
+
+    #[test]
+    fn shutdown_connection_settle_timeout_covers_registered_close_sequence() {
+        assert_eq!(
+            shutdown_connection_settle_timeout(),
+            websocket::CONNECTION_CLOSE_WRITE_TIMEOUT
+                .saturating_mul(websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
+        );
+        assert_eq!(
+            websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS,
+            3,
+            "registered shutdown close uses flush, semantic close, and sink close budgets"
+        );
     }
 
     #[tokio::test]

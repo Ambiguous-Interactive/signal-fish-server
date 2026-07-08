@@ -19,12 +19,18 @@ use tokio::time::Instant;
 use super::batching::{send_batch, MessageBatcher};
 use super::sending::{send_immediate_server_message, send_single_message};
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
+use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
 
-/// Upper bound on the farewell error frame + close handshake writes issued
-/// while force-closing a connection. The client's TCP window is often already
-/// full when this runs (that is usually why its queue overflowed), so these
-/// writes are strictly best-effort.
-const CLOSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+#[repr(u32)]
+enum RegisteredConnectionCloseStep {
+    FlushQueuedMessages,
+    SemanticCloseFrame,
+    SinkClose,
+    Count,
+}
+
+pub(super) const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
+    RegisteredConnectionCloseStep::Count as u32;
 
 /// Enqueue a message on this connection's own outbound queue, honoring the
 /// server-wide no-silent-drop contract: backpressure while the queue is
@@ -111,6 +117,16 @@ fn close_frame_reason_for_server(
     }
 }
 
+async fn registered_close_write_timeout<F, T>(
+    _step: RegisteredConnectionCloseStep,
+    operation: F,
+) -> Result<T, tokio::time::error::Elapsed>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(CLOSE_WRITE_TIMEOUT, operation).await
+}
+
 /// Final actions of the send task once a server-side close was requested.
 ///
 /// - Slow consumer: the queue contents are abandoned **by design** (the
@@ -182,25 +198,28 @@ async fn finalize_closed_connection(
             // states end the drain: `Empty` means the flush is complete, and
             // `Disconnected` means every delivery handle is gone AND the
             // buffer is empty — also a completed flush.
-            let flush = tokio::time::timeout(CLOSE_WRITE_TIMEOUT, async {
-                // Not a `while let`: the repo-wide try_recv policy
-                // (tests/async_timeout_policy_scan.rs) requires both terminal
-                // channel states to be matched explicitly.
-                #[allow(clippy::while_let_loop)]
-                loop {
-                    match rx.try_recv() {
-                        Ok(message) => batcher.queue(message),
-                        Err(
-                            mpsc::error::TryRecvError::Empty
-                            | mpsc::error::TryRecvError::Disconnected,
-                        ) => break,
+            let flush = registered_close_write_timeout(
+                RegisteredConnectionCloseStep::FlushQueuedMessages,
+                async {
+                    // Not a `while let`: the repo-wide try_recv policy
+                    // (tests/async_timeout_policy_scan.rs) requires both terminal
+                    // channel states to be matched explicitly.
+                    #[allow(clippy::while_let_loop)]
+                    loop {
+                        match rx.try_recv() {
+                            Ok(message) => batcher.queue(message),
+                            Err(
+                                mpsc::error::TryRecvError::Empty
+                                | mpsc::error::TryRecvError::Disconnected,
+                            ) => break,
+                        }
                     }
-                }
-                if batcher.is_empty() {
-                    return Ok(());
-                }
-                send_batch(sender, batcher, player_id, server).await
-            })
+                    if batcher.is_empty() {
+                        return Ok(());
+                    }
+                    send_batch(sender, batcher, player_id, server).await
+                },
+            )
             .await;
             let flush_timed_out = flush.is_err();
             match flush {
@@ -240,7 +259,12 @@ async fn finalize_closed_connection(
         code: reason.websocket_close_code(),
         reason: reason.close_frame_reason().into(),
     }));
-    match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await {
+    match registered_close_write_timeout(
+        RegisteredConnectionCloseStep::SemanticCloseFrame,
+        sender.send(close_frame),
+    )
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
             tracing::debug!(%player_id, error = %err, "Failed to write semantic close frame");
@@ -250,7 +274,9 @@ async fn finalize_closed_connection(
         }
     }
 
-    match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await {
+    match registered_close_write_timeout(RegisteredConnectionCloseStep::SinkClose, sender.close())
+        .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
             tracing::debug!(%player_id, error = %err, "WebSocket close handshake failed");
@@ -358,14 +384,43 @@ pub(super) async fn handle_socket(
                 message: format!("Too many connections from your IP ({current}/{limit})"),
                 error_code: Some(ErrorCode::TooManyConnections),
             };
-            if let Err(err) = send_immediate_server_message(&mut sender, &error_message).await {
-                tracing::debug!(
-                    client_addr = %addr,
-                    error = %err,
-                    "Failed to send IP limit error frame"
-                );
+            match tokio::time::timeout(
+                CLOSE_WRITE_TIMEOUT,
+                send_immediate_server_message(&mut sender, &error_message),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        error = %err,
+                        "Failed to send IP limit error frame"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        "Timed out sending IP limit error frame"
+                    );
+                }
             }
-            let _ = sender.close().await;
+            match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        error = %err,
+                        "Failed to close IP-limited WebSocket registration"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        "Timed out closing IP-limited WebSocket registration"
+                    );
+                }
+            }
             return;
         }
         Err(RegisterClientError::ServerDraining) => {
@@ -389,7 +444,22 @@ pub(super) async fn handle_socket(
                     );
                 }
             }
-            let _ = sender.close().await;
+            match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        error = %err,
+                        "Failed to close late shutdown WebSocket registration"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        client_addr = %addr,
+                        "Timed out closing late shutdown WebSocket registration"
+                    );
+                }
+            }
             return;
         }
     };
