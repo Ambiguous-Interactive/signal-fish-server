@@ -63,7 +63,7 @@ cancelled**. Three compounding causes:
    previous one — incremental compilation never gets locality and per-mutant cost
    grew (measured ~55s and climbing).
 3. **Per-mutant relink.** Every mutant relinks the crate; a slow linker multiplies
-   that across ~229 mutants × N shards.
+   that across ~227 mutants × N shards.
 
 Net effect: each shard paid a full cold build before testing a single mutant, so
 the 20-min timeout fired before any shard finished.
@@ -104,9 +104,9 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
    the test, so the build no longer compiles ~20 integration-test binaries per
    mutant. **Rule:** keep `--lib` in `additional_cargo_args` (not
    `additional_cargo_test_args`); never re-add `--all-features` — the scoped
-   modules have zero feature gates, so `cargo mutants --list` stays 229 either way.
+   modules have zero feature gates, so `cargo mutants --list` stays 227 either way.
 6. **Shard count sized for serial execution.** `--in-place` runs each shard's
-   mutants SERIALLY (one source tree, no `-j`). Resharded **6 → 18**: 229 mutants
+   mutants SERIALLY (one source tree, no `-j`). Resharded **6 → 18**: 227 mutants
    ÷ 18 ≈ 13/shard × ~22s ≈ <5 min/shard; `timeout-minutes: 10`. **Rule:** when
    the mutant count or per-mutant cost changes, re-size N so each serial shard
    still finishes well under the timeout.
@@ -119,7 +119,7 @@ Treat these four quantities as one interlocked budget — changing any one witho
 re-checking the others can silently reintroduce the cancellation:
 
 ```text
-{ mutant-count (~229), shard-count N, per-shard timeout, per-mutant budget }
+{ mutant-count (~227), shard-count N, per-shard timeout, per-mutant budget }
 ```
 
 - **Per-shard target: < 5 min.** `ceil(mutant-count / N) × per-mutant-budget`

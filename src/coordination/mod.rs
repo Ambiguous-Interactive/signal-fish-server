@@ -392,10 +392,10 @@ pub trait MessageCoordinator: Send + Sync {
         if *drain.borrow() || !should_send() {
             return Ok(false);
         }
+        // The hook records replayable state in real call sites. Once it runs,
+        // the live broadcast is committed too; a second guard here would allow
+        // replay-only records with no matching live delivery.
         before_send().await;
-        if *drain.borrow() || !should_send() {
-            return Ok(false);
-        }
         self.broadcast_to_room_except(room_id, except_player, message)
             .await?;
         Ok(true)
@@ -528,7 +528,7 @@ pub struct MembershipUpdate {
 mod tests {
     use super::*;
     use crate::metrics::ServerMetrics;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::Mutex;
 
@@ -567,19 +567,37 @@ mod tests {
         (ClientDeliveryHandle { sender: tx, close }, rx, listener)
     }
 
-    #[derive(Default)]
     struct FallbackCoordinator {
+        sends: Mutex<Vec<(PlayerId, ServerMessage)>>,
         broadcasts_except: Mutex<Vec<(RoomId, PlayerId, ServerMessage)>>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
+        try_send_attempts: AtomicUsize,
+        try_send_result: AtomicBool,
+    }
+
+    impl Default for FallbackCoordinator {
+        fn default() -> Self {
+            Self {
+                sends: Mutex::default(),
+                broadcasts_except: Mutex::default(),
+                registrations: Mutex::default(),
+                try_send_attempts: AtomicUsize::default(),
+                try_send_result: AtomicBool::new(true),
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl MessageCoordinator for FallbackCoordinator {
         async fn send_to_player(
             &self,
-            _player_id: &PlayerId,
-            _message: Arc<ServerMessage>,
+            player_id: &PlayerId,
+            message: Arc<ServerMessage>,
         ) -> anyhow::Result<()> {
+            self.sends
+                .lock()
+                .await
+                .push((*player_id, (*message).clone()));
             Ok(())
         }
 
@@ -588,7 +606,8 @@ mod tests {
             _player_id: &PlayerId,
             _message: Arc<ServerMessage>,
         ) -> anyhow::Result<bool> {
-            Ok(true)
+            self.try_send_attempts.fetch_add(1, Ordering::Relaxed);
+            Ok(self.try_send_result.load(Ordering::Relaxed))
         }
 
         async fn broadcast_to_room(
@@ -741,6 +760,184 @@ mod tests {
             matches!(message, ServerMessage::Pong),
             "unexpected fallback broadcast message: {message:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn default_conditional_player_send_respects_drain_and_predicate() {
+        for (context, drain_started, predicate_allows, expected_sent, expected_sends) in [
+            ("normal delivery", false, true, true, 1),
+            ("drain already active", true, true, false, 0),
+            ("caller predicate false", false, false, false, 0),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let player = PlayerId::from_u128(0x66666666666666666666666666666666);
+            let (_drain_tx, drain_rx) = tokio::sync::watch::channel(drain_started);
+            let should_send = || predicate_allows;
+
+            let sent = coordinator
+                .send_to_player_if(&player, test_message(), &should_send, drain_rx)
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional send failed: {err}"));
+
+            assert_eq!(sent, expected_sent, "{context}: unexpected return value");
+            let sends = coordinator.sends.lock().await;
+            assert_eq!(
+                sends.len(),
+                expected_sends,
+                "{context}: unexpected direct-send side effects"
+            );
+            if expected_sent {
+                assert_eq!(sends[0].0, player, "{context}: sent to wrong player");
+                assert!(
+                    matches!(sends[0].1, ServerMessage::Pong),
+                    "{context}: sent unexpected message: {:?}",
+                    sends[0].1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_conditional_try_send_respects_predicate_and_delegates() {
+        for (context, predicate_allows, delegate_result, expected_sent, expected_attempts) in [
+            ("delegated success", true, true, true, 1),
+            ("delegated failure", true, false, false, 1),
+            ("caller predicate false", false, true, false, 0),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            coordinator
+                .try_send_result
+                .store(delegate_result, Ordering::Relaxed);
+            let player = PlayerId::from_u128(0x77777777777777777777777777777777);
+            let should_send = || predicate_allows;
+
+            let sent = coordinator
+                .try_send_to_player_if(&player, test_message(), &should_send)
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional try-send failed: {err}"));
+
+            assert_eq!(sent, expected_sent, "{context}: unexpected return value");
+            assert_eq!(
+                coordinator.try_send_attempts.load(Ordering::Relaxed),
+                expected_attempts,
+                "{context}: unexpected try-send attempt count"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn default_conditional_broadcast_checks_guards_before_hook() {
+        for (context, drain_started, predicate_allows) in [
+            ("drain already active", true, true),
+            ("caller predicate false", false, false),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let room_id = RoomId::from_u128(0x88888888888888888888888888888888);
+            let sender = PlayerId::from_u128(0x99999999999999999999999999999999);
+            let (_drain_tx, drain_rx) = tokio::sync::watch::channel(drain_started);
+            let hook_calls = Arc::new(AtomicUsize::new(0));
+            let hook_calls_for_hook = Arc::clone(&hook_calls);
+            let should_send = || predicate_allows;
+
+            let sent = coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &sender,
+                    test_message(),
+                    &should_send,
+                    drain_rx,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_calls_for_hook.fetch_add(1, Ordering::Relaxed);
+                        })
+                    }),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional broadcast failed: {err}"));
+
+            assert!(!sent, "{context}: broadcast must be skipped");
+            assert_eq!(
+                hook_calls.load(Ordering::Relaxed),
+                0,
+                "{context}: skipped broadcast must not run its hook"
+            );
+            assert!(
+                coordinator.broadcasts_except.lock().await.is_empty(),
+                "{context}: skipped broadcast must not delegate"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum HookChange {
+        None,
+        StartDrain,
+        RejectPredicate,
+    }
+
+    #[tokio::test]
+    async fn default_conditional_broadcast_commits_once_hook_runs() {
+        for (context, hook_change) in [
+            ("normal delivery", HookChange::None),
+            ("hook starts drain", HookChange::StartDrain),
+            ("hook rejects predicate", HookChange::RejectPredicate),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let room_id = RoomId::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);
+            let sender = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb);
+            let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+            let predicate_allows = Arc::new(AtomicBool::new(true));
+            let predicate_for_call = Arc::clone(&predicate_allows);
+            let should_send = move || predicate_for_call.load(Ordering::Relaxed);
+            let predicate_for_hook = Arc::clone(&predicate_allows);
+            let hook_calls = Arc::new(AtomicUsize::new(0));
+            let hook_calls_for_hook = Arc::clone(&hook_calls);
+
+            let sent = coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &sender,
+                    test_message(),
+                    &should_send,
+                    drain_rx,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_calls_for_hook.fetch_add(1, Ordering::Relaxed);
+                            match hook_change {
+                                HookChange::None => {}
+                                HookChange::StartDrain => {
+                                    let _ = drain_tx.send(true);
+                                }
+                                HookChange::RejectPredicate => {
+                                    predicate_for_hook.store(false, Ordering::Relaxed);
+                                }
+                            }
+                        })
+                    }),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: conditional broadcast failed: {err}"));
+
+            assert!(sent, "{context}: broadcast must commit once the hook runs");
+            assert_eq!(
+                hook_calls.load(Ordering::Relaxed),
+                1,
+                "{context}: hook should run exactly once"
+            );
+            let broadcasts = coordinator.broadcasts_except.lock().await;
+            assert_eq!(
+                broadcasts.len(),
+                1,
+                "{context}: committed broadcast must delegate exactly once"
+            );
+            let (broadcast_room, except_player, message) = &broadcasts[0];
+            assert_eq!(*broadcast_room, room_id, "{context}: wrong broadcast room");
+            assert_eq!(*except_player, sender, "{context}: wrong excluded sender");
+            assert!(
+                matches!(message, ServerMessage::Pong),
+                "{context}: unexpected broadcast message: {message:?}"
+            );
+        }
     }
 
     #[tokio::test]
