@@ -219,8 +219,13 @@ impl SpectatorService {
         player_id: &PlayerId,
         reason: SpectatorStateChangeReason,
     ) -> bool {
-        let (_drain_tx, drain_rx) = watch::channel(false);
-        self.detach_if(player_id, reason, &|| true, drain_rx).await
+        let (drain_tx, drain_rx) = watch::channel(false);
+        let should_send = || true;
+        let detached = self
+            .detach_if(player_id, reason, &should_send, drain_rx)
+            .await;
+        drop(drain_tx);
+        detached
     }
 
     pub(crate) async fn detach_if(

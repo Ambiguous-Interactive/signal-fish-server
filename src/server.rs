@@ -1334,6 +1334,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 tracing::error!(%room_id, %except_player, "Conditional room broadcast replay hook was already consumed");
                 return Ok(false);
             };
+            // The hook runs while the routing locks above are still held.
+            // Keep hook implementations from calling back into MessageCoordinator
+            // or awaiting work that depends on these locks.
             before_send().await;
 
             let mut delivered = false;

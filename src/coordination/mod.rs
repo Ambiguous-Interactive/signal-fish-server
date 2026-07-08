@@ -376,6 +376,13 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Conditionally broadcast a committed room event after running a replay hook.
+    ///
+    /// Production implementations may run `before_send` while holding routing
+    /// locks or equivalent recipient-snapshot guards so replay recording and
+    /// live delivery stay in one critical section. Hook implementations must
+    /// not call back into `MessageCoordinator` or await work that can depend on
+    /// those locks.
     async fn broadcast_to_room_except_if_with_hook<'a>(
         &'a self,
         room_id: &RoomId,
