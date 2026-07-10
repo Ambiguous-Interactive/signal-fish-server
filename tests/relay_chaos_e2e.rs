@@ -33,11 +33,10 @@ use signal_fish_server::websocket::create_router;
 use test_helpers::{create_test_server, create_test_server_with_config};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use websocket_test_helpers::assert_message_conservation;
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
+use websocket_test_helpers::conformance::ConformanceAuditor;
 use websocket_test_helpers::delivery_ledger::{
-    extract, DeliveryLedger, DisconnectReason, LedgerPayload, ReceiverExpectation,
-    SenderExpectation,
+    LedgerPayload, ReceiverExpectation, SenderExpectation,
 };
 
 type WsStream =
@@ -121,18 +120,10 @@ async fn join_room(
 
 /// Record one text frame into the ledger for `receiver_name`; returns any
 /// `PlayerLeft` id observed instead. Server errors fail loudly.
-fn record_frame(ledger: &DeliveryLedger, receiver_name: &str, text: &str) -> Option<PlayerId> {
-    let message: ServerMessage = serde_json::from_str(text).expect("valid ServerMessage");
+fn record_frame(auditor: &ConformanceAuditor, receiver_name: &str, text: &str) -> Option<PlayerId> {
+    let message = auditor.record_text_frame(receiver_name, text);
     match message {
-        ServerMessage::GameData { data, .. } => {
-            let (sender, seq) = extract(&data).unwrap_or_else(|| {
-                panic!("{receiver_name}: GameData without ledger fields: {data}")
-            });
-            // `server_seq: None` until the server stamps per-connection
-            // delivery sequences (see the ledger's cross-check hook).
-            ledger.record(receiver_name, &sender, seq, None);
-            None
-        }
+        ServerMessage::GameData { .. } => None,
         ServerMessage::PlayerLeft { player_id } => Some(player_id),
         ServerMessage::Error {
             message,
@@ -209,7 +200,7 @@ async fn rst_during_relay_heals_room_and_conserves() {
         let _watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
         let victim_id = join_room(&mut victim_sink, &mut victim_rx, ROOM, "Victim").await;
 
-        let ledger = Arc::new(DeliveryLedger::new());
+        let ledger = Arc::new(ConformanceAuditor::new());
 
         // The victim drains through the proxy until the RST severs it, then
         // records its own (gap-free-prefix) disconnect.
@@ -224,10 +215,7 @@ async fn rst_during_relay_heals_room_and_conserves() {
                     Some(Ok(_)) => continue,
                 }
             }
-            victim_ledger.note_receiver_disconnected(
-                "Victim",
-                DisconnectReason::InjectedFault("tcp-rst mid-relay".to_string()),
-            );
+            victim_ledger.note_injected_fault("Victim", "tcp-rst mid-relay");
         });
 
         let mut payload = LedgerPayload::new("Sender", PAYLOAD_PADDING_BYTES);
@@ -276,14 +264,15 @@ async fn rst_during_relay_heals_room_and_conserves() {
         0,
         "a reset connection is a disconnect race, never a slow-consumer eviction"
     );
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[
-            expectation("Watcher", &[("Sender", total_sent)]),
-            expectation("Victim", &[("Sender", total_sent)]),
-        ],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[
+                expectation("Watcher", &[("Sender", total_sent)]),
+                expectation("Victim", &[("Sender", total_sent)]),
+            ],
+        )
+        .await;
 }
 
 /// A consumer drip-fed through a throttled link repeatedly fills the (small)
@@ -324,7 +313,7 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
         let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
         let _dripped_id = join_room(&mut dripped_sink, &mut dripped_rx, ROOM, "Dripped").await;
 
-        let ledger = Arc::new(DeliveryLedger::new());
+        let ledger = Arc::new(ConformanceAuditor::new());
         let (totals_tx, mut totals_rx) = tokio::sync::watch::channel::<Option<u64>>(None);
 
         // The dripped consumer drains as fast as the throttle feeds it.
@@ -404,11 +393,12 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
     // runner). The zero-loss intent is carried exactly by the three checks
     // around it: zero evictions, the ledger's gap-free completeness, and the
     // conservation law.
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[expectation("Dripped", &[("Sender", total_sent)])],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[expectation("Dripped", &[("Sender", total_sent)])],
+        )
+        .await;
 }
 
 /// Connect/relay/kill churn must leak nothing: after eight clients join
@@ -429,7 +419,7 @@ async fn reconnect_churn_leaks_nothing() {
     let metrics = server.metrics();
     let addr = start_server(server).await;
 
-    let ledger = Arc::new(DeliveryLedger::new());
+    let ledger = Arc::new(ConformanceAuditor::new());
 
     let chaos = async {
         let (mut persistent_sink, mut persistent_rx) = connect(addr).await;
@@ -490,10 +480,7 @@ async fn reconnect_churn_leaks_nothing() {
             // Kill the link and require the room to heal: PlayerLeft reaches
             // the persistent client, and the gauge returns to baseline.
             proxy.rst_all();
-            ledger.note_receiver_disconnected(
-                &churn_name,
-                DisconnectReason::InjectedFault("tcp-rst churn kill".to_string()),
-            );
+            ledger.note_injected_fault(&churn_name, "tcp-rst churn kill");
             let mut saw_churn_leave = false;
             while !saw_churn_leave {
                 let frame = tokio::time::timeout(EVENT_DEADLINE, persistent_rx.next())
@@ -544,8 +531,7 @@ async fn reconnect_churn_leaks_nothing() {
         .await
         .expect("reconnect-churn chaos test exceeded its deadline");
 
-    ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics).await;
+    ledger.assert_conformance(&metrics, &expectations).await;
 }
 
 /// Count this process's open file descriptors via `/proc/self/fd`. The

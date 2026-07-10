@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod chaos_proxy;
+pub mod conformance;
 pub mod delivery_ledger;
 pub mod prometheus_scrape;
 pub mod room16;
