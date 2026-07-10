@@ -33,7 +33,7 @@ test_tool = "cargo"
 # We also deliberately do NOT pass `--all-features`: the scoped modules below
 # contain ZERO `#[cfg(feature = ...)]` (default features = []), so enabling `tls`
 # (rustls/axum-server) and `legacy-fullmesh` (matchbox_signaling) changes neither
-# the generated mutant set (`cargo mutants --list` stays 227) nor the catch
+# the generated mutant set (`cargo mutants --list` stays 323) nor the catch
 # outcome — it only drags those heavy deps into every per-mutant build/relink.
 #
 # Standing rules (enforced by tests/ci_config_tests.rs::

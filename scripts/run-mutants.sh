@@ -2,7 +2,7 @@
 # run-mutants.sh - Single source of truth for running cargo-mutants fast.
 #
 # WHY THIS SCRIPT EXISTS
-#   Mutation testing rebuilds the crate once per mutant (~227 mutants). Naively,
+#   Mutation testing rebuilds the crate once per mutant (323 mutants). Naively,
 #   cargo-mutants also recompiles every dependency from scratch in a /tmp scratch
 #   dir (it excludes ./target from its copy), so each CI shard paid a full cold
 #   dependency build -> every shard blew the 20-min timeout and was cancelled.
@@ -35,7 +35,7 @@
 # Usage:
 #   bash scripts/run-mutants.sh --shard <k>/<N>       # run one shard (CI + local)
 #   bash scripts/run-mutants.sh --warm                # warm build + green-gate
-#   bash scripts/run-mutants.sh --shard 0/18 --print-cmd   # print, do not run
+#   bash scripts/run-mutants.sh --shard 0/25 --print-cmd   # print, do not run
 #
 # Env:
 #   MUTANTS_DRY_RUN   set to 1 for the same effect as --print-cmd
@@ -128,7 +128,7 @@ if [ "$MODE" = "warm" ]; then
 else
     # shard mode: validate the k/N form before doing anything expensive.
     if ! printf '%s' "$SHARD" | grep -Eq '^[0-9]+/[0-9]+$'; then
-        echo "ERROR: --shard must be <k>/<N> (e.g. 0/18), got: '${SHARD}'" >&2
+        echo "ERROR: --shard must be <k>/<N> (e.g. 0/25), got: '${SHARD}'" >&2
         exit 2
     fi
     # --in-place: build in ./target (warmed by rust-cache) so deps are reused, not
