@@ -1,25 +1,31 @@
 //! GOLDEN v3 WIRE SNAPSHOTS — these lock the protocol v3 delivery-reliability
 //! additions.
 //!
-//! v3 is additive over the frozen v2 floor: the server-stamped `GameData.seq` /
-//! `GameDataBinary.seq` relay sequence + incarnation `epoch`, the opt-in
-//! `RelayStats` frame, and the shutdown-drain `GoingAway` advisory. The pre-v3
-//! (v2) forms (`seq: None`, no RelayStats/GoingAway) are frozen byte-for-byte in
-//! `tests/v2_wire_golden.rs`, which MUST keep passing unchanged; this file
-//! freezes the v3-recipient forms with the same assertion strategy:
+//! v3 is additive over the frozen v2 floor: game-data delivery classes, the
+//! server-stamped `GameData.seq` / `GameDataBinary.seq` relay sequence +
+//! incarnation `epoch`, `PlayerLeft` terminal watermarks, exact
+//! `DeliveryReport` accountability, the opt-in `RelayStats` frame, and the
+//! shutdown-drain `GoingAway` advisory. The pre-v3
+//! (v2) forms are frozen byte-for-byte in `tests/v2_wire_golden.rs`, which MUST
+//! keep passing unchanged; this file freezes the v3 forms with the same
+//! assertion strategy:
 //!
 //! - JSON: structural equality against a `json!` value AND a raw-string
 //!   assertion to catch field-name / casing / ordering drift.
 //! - MessagePack via `rmp_serde::to_vec_named` (the production binary path):
 //!   exact bytes via a hex helper.
 //!
-//! The bare binary `BinaryGameDataFrame` (which is NOT this enum's envelope)
-//! is frozen separately by the unit tests in `src/websocket/sending.rs`.
+//! The physical v3 binary metadata envelope (which is NOT this enum's envelope)
+//! is frozen for every payload encoding by unit tests in
+//! `src/websocket/sending.rs`.
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use signal_fish_server::protocol::{
-    LobbyState, PlayerInfo, ReconnectedPayload, ReplayStatus, SenderWatermark, ServerMessage,
+    ClientMessage, DeliveryClass, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason,
+    DeliveryReportPayload, LatestDeliveryCounters, LobbyState, PlayerInfo, ReconnectedPayload,
+    ReliableDeliveryCounters, ReplayStatus, SenderWatermark, ServerMessage,
+    VolatileDeliveryCounters,
 };
 use uuid::Uuid;
 
@@ -62,6 +68,7 @@ fn player_info_a_with_epoch() -> PlayerInfo {
         connected_at: fixed_time(),
         connection_info: None,
         epoch: Some(4),
+        seq: Some(42),
         region_id: String::new(),
     }
 }
@@ -105,6 +112,78 @@ fn assert_msgpack<T: Serialize>(value: &T, expected_hex: &str) {
 }
 
 // ===========================================================================
+// Client delivery-class requests and classified server GameData (v3).
+// ===========================================================================
+
+#[test]
+fn golden_client_delivery_class_requests() {
+    let cases = [
+        (
+            ClientMessage::GameData {
+                data: json!({ "state": "newest" }),
+                class: Some(DeliveryClass::Latest),
+                key: Some(7),
+            },
+            json!({
+                "type": "GameData",
+                "data": { "data": { "state": "newest" }, "class": "latest", "key": 7 }
+            }),
+            r#"{"type":"GameData","data":{"data":{"state":"newest"},"class":"latest","key":7}}"#,
+            "82a474797065a847616d6544617461a46461746183a46461746181a57374617465a66e6577657374a5636c617373a66c6174657374a36b657907",
+        ),
+        (
+            ClientMessage::GameData {
+                data: json!({ "effect": "spark" }),
+                class: Some(DeliveryClass::Volatile),
+                key: None,
+            },
+            json!({
+                "type": "GameData",
+                "data": { "data": { "effect": "spark" }, "class": "volatile" }
+            }),
+            r#"{"type":"GameData","data":{"data":{"effect":"spark"},"class":"volatile"}}"#,
+            "82a474797065a847616d6544617461a46461746182a46461746181a6656666656374a5737061726ba5636c617373a8766f6c6174696c65",
+        ),
+    ];
+
+    for (message, expected_json, expected_raw, expected_msgpack) in cases {
+        assert_json(&message, expected_json, expected_raw);
+        assert_msgpack(&message, expected_msgpack);
+    }
+}
+
+#[test]
+fn golden_server_classified_game_data() {
+    let message = ServerMessage::GameData {
+        from_player: player_a(),
+        data: json!({ "state": "fresh" }),
+        seq: Some(9),
+        epoch: Some(2),
+        class: Some(DeliveryClass::Latest),
+        key: Some(17),
+    };
+
+    assert_json(
+        &message,
+        json!({
+            "type": "GameData",
+            "data": {
+                "from_player": PLAYER_A_STR,
+                "data": { "state": "fresh" },
+                "seq": 9,
+                "epoch": 2,
+                "class": "latest",
+                "key": 17
+            }
+        }),
+        &format!(
+            r#"{{"type":"GameData","data":{{"from_player":"{PLAYER_A_STR}","data":{{"state":"fresh"}},"seq":9,"epoch":2,"class":"latest","key":17}}}}"#
+        ),
+    );
+    assert_msgpack(&message, "82a474797065a847616d6544617461a46461746186ab66726f6d5f706c61796572c4100000000000000000000000000000000aa46461746181a57374617465a56672657368a373657109a565706f636802a5636c617373a66c6174657374a36b657911");
+}
+
+// ===========================================================================
 // GameData with the server-stamped seq (v3 recipients).
 // ===========================================================================
 
@@ -115,6 +194,8 @@ fn golden_server_game_data_with_seq() {
         data: json!({ "move": "up" }),
         seq: Some(42),
         epoch: Some(3),
+        class: None,
+        key: None,
     };
     assert_json(
         &msg,
@@ -139,6 +220,8 @@ fn golden_server_game_data_with_first_seq_and_epoch() {
         data: json!({ "move": "up" }),
         seq: Some(1),
         epoch: Some(1),
+        class: None,
+        key: None,
     };
     assert_json(
         &msg,
@@ -154,8 +237,8 @@ fn golden_server_game_data_with_first_seq_and_epoch() {
 }
 
 /// In-memory representation ONLY — NOT the wire form (mirrors the v2 golden's
-/// caveat: negotiated MessagePack clients receive the bare
-/// `BinaryGameDataFrame`, frozen in `src/websocket/sending.rs`).
+/// caveat: v3 binary clients receive the physical `V3BinaryGameDataFrame`,
+/// frozen in `src/websocket/sending.rs`).
 #[test]
 fn golden_server_game_data_binary_with_seq_in_memory_repr_not_wire() {
     let msg = ServerMessage::GameDataBinary {
@@ -184,8 +267,108 @@ fn golden_server_game_data_binary_with_seq_in_memory_repr_not_wire() {
 }
 
 // ===========================================================================
-// RelayStats (v3-only, config-gated).
+// DeliveryReport and RelayStats (v3-only accountability).
 // ===========================================================================
+
+#[test]
+fn golden_server_delivery_report_with_exact_gap() {
+    let message = ServerMessage::DeliveryReport(Box::new(DeliveryReportPayload {
+        per_class: DeliveryCountersByClass {
+            reliable: ReliableDeliveryCounters {
+                delivered: 1,
+                abandoned: 2,
+                unsupported_format: 3,
+            },
+            latest: LatestDeliveryCounters {
+                delivered: 4,
+                superseded: 5,
+                dropped_full: 6,
+                abandoned: 7,
+                unsupported_format: 8,
+            },
+            volatile: VolatileDeliveryCounters {
+                delivered: 9,
+                dropped: 10,
+                abandoned: 11,
+                unsupported_format: 12,
+            },
+        },
+        gaps: vec![DeliveryGap {
+            from_player: player_a(),
+            epoch: 3,
+            from_seq: 13,
+            to_seq: 15,
+            reason: DeliveryGapReason::LatestSuperseded,
+        }],
+    }));
+
+    assert_json(
+        &message,
+        json!({
+            "type": "DeliveryReport",
+            "data": {
+                "per_class": {
+                    "reliable": { "delivered": 1, "abandoned": 2, "unsupported_format": 3 },
+                    "latest": {
+                        "delivered": 4,
+                        "superseded": 5,
+                        "dropped_full": 6,
+                        "abandoned": 7,
+                        "unsupported_format": 8
+                    },
+                    "volatile": {
+                        "delivered": 9,
+                        "dropped": 10,
+                        "abandoned": 11,
+                        "unsupported_format": 12
+                    }
+                },
+                "gaps": [{
+                    "from_player": PLAYER_A_STR,
+                    "epoch": 3,
+                    "from_seq": 13,
+                    "to_seq": 15,
+                    "reason": "latest_superseded"
+                }]
+            }
+        }),
+        &format!(
+            r#"{{"type":"DeliveryReport","data":{{"per_class":{{"reliable":{{"delivered":1,"abandoned":2,"unsupported_format":3}},"latest":{{"delivered":4,"superseded":5,"dropped_full":6,"abandoned":7,"unsupported_format":8}},"volatile":{{"delivered":9,"dropped":10,"abandoned":11,"unsupported_format":12}}}},"gaps":[{{"from_player":"{PLAYER_A_STR}","epoch":3,"from_seq":13,"to_seq":15,"reason":"latest_superseded"}}]}}}}"#
+        ),
+    );
+    assert_msgpack(&message, "82a474797065ae44656c69766572795265706f7274a46461746182a97065725f636c61737383a872656c6961626c6583a964656c69766572656401a96162616e646f6e656402b2756e737570706f727465645f666f726d617403a66c617465737485a964656c69766572656404aa7375706572736564656405ac64726f707065645f66756c6c06a96162616e646f6e656407b2756e737570706f727465645f666f726d617408a8766f6c6174696c6584a964656c69766572656409a764726f707065640aa96162616e646f6e65640bb2756e737570706f727465645f666f726d61740ca4676170739185ab66726f6d5f706c61796572c4100000000000000000000000000000000aa565706f636803a866726f6d5f7365710da6746f5f7365710fa6726561736f6eb16c61746573745f73757065727365646564");
+}
+
+#[test]
+fn golden_server_delivery_report_omits_empty_gaps() {
+    let message = ServerMessage::DeliveryReport(Box::default());
+    assert_json(
+        &message,
+        json!({
+            "type": "DeliveryReport",
+            "data": {
+                "per_class": {
+                    "reliable": { "delivered": 0, "abandoned": 0, "unsupported_format": 0 },
+                    "latest": {
+                        "delivered": 0,
+                        "superseded": 0,
+                        "dropped_full": 0,
+                        "abandoned": 0,
+                        "unsupported_format": 0
+                    },
+                    "volatile": {
+                        "delivered": 0,
+                        "dropped": 0,
+                        "abandoned": 0,
+                        "unsupported_format": 0
+                    }
+                }
+            }
+        }),
+        r#"{"type":"DeliveryReport","data":{"per_class":{"reliable":{"delivered":0,"abandoned":0,"unsupported_format":0},"latest":{"delivered":0,"superseded":0,"dropped_full":0,"abandoned":0,"unsupported_format":0},"volatile":{"delivered":0,"dropped":0,"abandoned":0,"unsupported_format":0}}}}"#,
+    );
+    assert_msgpack(&message, "82a474797065ae44656c69766572795265706f7274a46461746181a97065725f636c61737383a872656c6961626c6583a964656c69766572656400a96162616e646f6e656400b2756e737570706f727465645f666f726d617400a66c617465737485a964656c69766572656400aa7375706572736564656400ac64726f707065645f66756c6c00a96162616e646f6e656400b2756e737570706f727465645f666f726d617400a8766f6c6174696c6584a964656c69766572656400a764726f7070656400a96162616e646f6e656400b2756e737570706f727465645f666f726d617400");
+}
 
 #[test]
 fn golden_server_relay_stats() {
@@ -250,6 +433,8 @@ fn v3_game_data_seq_and_epoch_round_trip_json_and_msgpack() {
             data: json!({ "k": "v" }),
             seq,
             epoch,
+            class: None,
+            key: None,
         };
 
         let json = serde_json::to_string(&msg).expect("json");
@@ -283,6 +468,26 @@ fn v3_game_data_seq_and_epoch_round_trip_json_and_msgpack() {
 // ===========================================================================
 // Epoch carriage on room snapshots (E1): PlayerReconnected + PlayerInfo.
 // ===========================================================================
+
+#[test]
+fn golden_player_left_with_terminal_watermark() {
+    let msg = ServerMessage::PlayerLeft {
+        player_id: player_a(),
+        epoch: Some(4),
+        final_seq: Some(42),
+    };
+    assert_json(
+        &msg,
+        json!({
+            "type": "PlayerLeft",
+            "data": { "player_id": PLAYER_A_STR, "epoch": 4, "final_seq": 42 }
+        }),
+        &format!(
+            r#"{{"type":"PlayerLeft","data":{{"player_id":"{PLAYER_A_STR}","epoch":4,"final_seq":42}}}}"#
+        ),
+    );
+    assert_msgpack(&msg, "82a474797065aa506c617965724c656674a46461746183a9706c617965725f6964c4100000000000000000000000000000000aa565706f636804a966696e616c5f7365712a");
+}
 
 /// `PlayerReconnected` gains the reconnector's new incarnation epoch (v3). The
 /// pre-v3 form (`epoch: None`) is frozen byte-identically in
@@ -359,7 +564,8 @@ fn golden_reconnected_with_sender_watermarks() {
                     "is_authority": true,
                     "is_ready": false,
                     "connected_at": FIXED_TIME_STR,
-                    "epoch": 4
+                    "epoch": 4,
+                    "seq": 42
                 }],
                 "is_authority": false,
                 "lobby_state": "lobby",
@@ -380,15 +586,14 @@ fn golden_reconnected_with_sender_watermarks() {
             }
         }),
         &format!(
-            r#"{{"type":"Reconnected","data":{{"room_id":"{ROOM_STR}","room_code":"ABC123","player_id":"{PLAYER_B_STR}","game_name":"test_game","max_players":4,"supports_authority":true,"current_players":[{{"id":"{PLAYER_A_STR}","name":"Alice","is_authority":true,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4}}],"is_authority":false,"lobby_state":"lobby","ready_players":["{PLAYER_A_STR}"],"relay_type":"matchbox","current_spectators":[],"missed_events":[],"replay":"complete","sender_watermarks":[{{"player_id":"{PLAYER_A_STR}","epoch":4,"seq":42}},{{"player_id":"{PLAYER_B_STR}","epoch":1,"seq":0}}]}}}}"#
+            r#"{{"type":"Reconnected","data":{{"room_id":"{ROOM_STR}","room_code":"ABC123","player_id":"{PLAYER_B_STR}","game_name":"test_game","max_players":4,"supports_authority":true,"current_players":[{{"id":"{PLAYER_A_STR}","name":"Alice","is_authority":true,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4,"seq":42}}],"is_authority":false,"lobby_state":"lobby","ready_players":["{PLAYER_A_STR}"],"relay_type":"matchbox","current_spectators":[],"missed_events":[],"replay":"complete","sender_watermarks":[{{"player_id":"{PLAYER_A_STR}","epoch":4,"seq":42}},{{"player_id":"{PLAYER_B_STR}","epoch":1,"seq":0}}]}}}}"#
         ),
     );
-    assert_msgpack(&msg, "82a474797065ab5265636f6e6e6563746564a4646174618fa7726f6f6d5f6964c41011111111111111111111111111111111a9726f6f6d5f636f6465a6414243313233a9706c617965725f6964c4100000000000000000000000000000000ba967616d655f6e616d65a9746573745f67616d65ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c3af63757272656e745f706c61796572739186a26964c4100000000000000000000000000000000aa46e616d65a5416c696365ac69735f617574686f72697479c3a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804ac69735f617574686f72697479c2ab6c6f6262795f7374617465a56c6f626279ad72656164795f706c617965727391c4100000000000000000000000000000000aaa72656c61795f74797065a86d61746368626f78b263757272656e745f737065637461746f727390ad6d69737365645f6576656e747390a67265706c6179a8636f6d706c657465b173656e6465725f77617465726d61726b739283a9706c617965725f6964c4100000000000000000000000000000000aa565706f636804a37365712a83a9706c617965725f6964c4100000000000000000000000000000000ba565706f636801a373657100");
+    assert_msgpack(&msg, "82a474797065ab5265636f6e6e6563746564a4646174618fa7726f6f6d5f6964c41011111111111111111111111111111111a9726f6f6d5f636f6465a6414243313233a9706c617965725f6964c4100000000000000000000000000000000ba967616d655f6e616d65a9746573745f67616d65ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c3af63757272656e745f706c61796572739187a26964c4100000000000000000000000000000000aa46e616d65a5416c696365ac69735f617574686f72697479c3a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804a37365712aac69735f617574686f72697479c2ab6c6f6262795f7374617465a56c6f626279ad72656164795f706c617965727391c4100000000000000000000000000000000aaa72656c61795f74797065a86d61746368626f78b263757272656e745f737065637461746f727390ad6d69737365645f6576656e747390a67265706c6179a8636f6d706c657465b173656e6465725f77617465726d61726b739283a9706c617965725f6964c4100000000000000000000000000000000aa565706f636804a37365712a83a9706c617965725f6964c4100000000000000000000000000000000ba565706f636801a373657100");
 }
 
-/// A `PlayerInfo` inside a `PlayerJoined` snapshot carries the joiner's epoch
-/// (v3). Freeze the exact placement (trailing `epoch` key, after
-/// `connection_info` which is omitted here) so the snapshot wire cannot drift.
+/// A `PlayerInfo` inside a `PlayerJoined` snapshot carries the joiner's exact
+/// `(epoch, seq)` baseline (v3).
 #[test]
 fn golden_player_joined_player_info_with_epoch() {
     let msg = ServerMessage::PlayerJoined {
@@ -400,6 +605,7 @@ fn golden_player_joined_player_info_with_epoch() {
             connected_at: fixed_time(),
             connection_info: None,
             epoch: Some(4),
+            seq: Some(0),
             region_id: String::new(),
         },
     };
@@ -413,17 +619,18 @@ fn golden_player_joined_player_info_with_epoch() {
                 "is_authority": false,
                 "is_ready": false,
                 "connected_at": FIXED_TIME_STR,
-                "epoch": 4
+                "epoch": 4,
+                "seq": 0
             } }
         }),
         &format!(
-            r#"{{"type":"PlayerJoined","data":{{"player":{{"id":"{PLAYER_A_STR}","name":"P","is_authority":false,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4}}}}}}"#
+            r#"{{"type":"PlayerJoined","data":{{"player":{{"id":"{PLAYER_A_STR}","name":"P","is_authority":false,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4,"seq":0}}}}}}"#
         ),
     );
     // Freeze the MessagePack encoding too (matching the other goldens here and
     // in `v2_wire_golden.rs`), so the production binary snapshot wire cannot
-    // drift the trailing `epoch` key silently.
-    assert_msgpack(&msg, "82a474797065ac506c617965724a6f696e6564a46461746181a6706c6179657286a26964c4100000000000000000000000000000000aa46e616d65a150ac69735f617574686f72697479c2a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804");
+    // drift the paired baseline keys silently.
+    assert_msgpack(&msg, "82a474797065ac506c617965724a6f696e6564a46461746181a6706c6179657287a26964c4100000000000000000000000000000000aa46e616d65a150ac69735f617574686f72697479c2a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804a373657100");
 }
 
 #[test]

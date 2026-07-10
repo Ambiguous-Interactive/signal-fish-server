@@ -48,7 +48,7 @@ use test_helpers::{create_test_server, create_test_server_with_config, test_serv
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
-use websocket_test_helpers::conformance::ConformanceAuditor;
+use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
 use websocket_test_helpers::delivery_ledger::{
     LedgerPayload, ReceiverExpectation, SenderExpectation,
 };
@@ -158,7 +158,7 @@ fn record_frame(auditor: &ConformanceAuditor, receiver_name: &str, text: &str) -
     let message = auditor.record_text_frame(receiver_name, text);
     match message {
         ServerMessage::GameData { .. } => None,
-        ServerMessage::PlayerLeft { player_id } => Some(player_id),
+        ServerMessage::PlayerLeft { player_id, .. } => Some(player_id),
         ServerMessage::Error {
             message,
             error_code,
@@ -173,6 +173,8 @@ fn record_frame(auditor: &ConformanceAuditor, receiver_name: &str, text: &str) -
 /// [`LedgerPayload`]'s fixed padding cannot express.
 async fn send_ledger_frame(sink: &mut WsSink, sender: &str, seq: u64, padding_bytes: usize) {
     let message = ClientMessage::GameData {
+        class: None,
+        key: None,
         data: serde_json::json!({
             "ledger_sender": sender,
             "seq": seq,
@@ -189,6 +191,8 @@ async fn send_ledger_frame(sink: &mut WsSink, sender: &str, seq: u64, padding_by
 async fn send_burst(sink: &mut WsSink, payload: &mut LedgerPayload, count: u64) {
     for _ in 0..count {
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.next(),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -310,16 +314,19 @@ async fn rollback_profile_short() {
     let server = create_test_server().await;
     let metrics = server.metrics();
     let addr = start_server(server).await;
-    let ledger = Arc::new(ConformanceAuditor::new());
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
     let total_per_sender = rollback_total_per_sender();
 
     let scenario = async {
         let names: Vec<String> = (0..CLIENTS).map(|index| format!("Roll{index}")).collect();
         let mut sinks = Vec::new();
         let mut receivers = Vec::new();
+        let mut joined_ids = Vec::new();
         for name in &names {
             let (mut sink, mut receiver) = connect(addr).await;
-            let _id = join_room(&mut sink, &mut receiver, ROOM, name).await;
+            let id = join_room(&mut sink, &mut receiver, ROOM, name).await;
+            joined_ids.push(id);
+            ledger.record_consumed_v2_room_snapshot(name, &joined_ids);
             sinks.push(sink);
             receivers.push(receiver);
         }
@@ -437,13 +444,14 @@ async fn wifi_jitter_profile() {
     let metrics = server.metrics();
     let addr = start_server(server).await;
     let proxy = ChaosProxy::spawn(addr).await;
-    let ledger = Arc::new(ConformanceAuditor::new());
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
     let scenario = async {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut jittery_sink, mut jittery_rx) = connect(proxy.addr()).await;
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _jittery_id = join_room(&mut jittery_sink, &mut jittery_rx, ROOM, "Jittery").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let jittery_id = join_room(&mut jittery_sink, &mut jittery_rx, ROOM, "Jittery").await;
+        ledger.record_consumed_v2_room_snapshot("Jittery", &[sender_id, jittery_id]);
 
         // 60Hz paced sender for ~8s (interval = the game loop's shape).
         let sender_task = tokio::spawn(async move {
@@ -546,15 +554,17 @@ async fn backgrounded_tab_profile() {
     let metrics = server.metrics();
     let addr = start_server(server).await;
     let proxy = ChaosProxy::spawn(addr).await;
-    let ledger = Arc::new(ConformanceAuditor::new());
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
     let scenario = async {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut watcher_sink, mut watcher_rx) = connect(addr).await;
         let (mut tab_sink, mut tab_rx) = connect(proxy.addr()).await;
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
-        let _tab_id = join_room(&mut tab_sink, &mut tab_rx, ROOM, "Tab").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
+        ledger.record_consumed_v2_room_snapshot("Watcher", &[sender_id, watcher_id]);
+        let tab_id = join_room(&mut tab_sink, &mut tab_rx, ROOM, "Tab").await;
+        ledger.record_consumed_v2_room_snapshot("Tab", &[sender_id, watcher_id, tab_id]);
 
         // The tab drains whenever its link allows, for the whole scenario;
         // when the server finally evicts it (phase 2), it records the
@@ -909,7 +919,7 @@ async fn reconnect_under_fire() {
 
     let (addr, game_server) = start_reconnect_server().await;
     let metrics = game_server.metrics();
-    let ledger = ConformanceAuditor::new();
+    let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V3);
 
     let scenario = async {
         let mut sender = connect_v3(addr).await;
@@ -934,6 +944,8 @@ async fn reconnect_under_fire() {
             send_on(
                 &mut sender,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: pre_payload.next(),
                 },
             )
@@ -971,6 +983,8 @@ async fn reconnect_under_fire() {
             send_on(
                 &mut sender,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: pre_payload.next(),
                 },
             )
@@ -1010,10 +1024,7 @@ async fn reconnect_under_fire() {
             },
         )
         .await;
-        ledger.record_message(
-            "VictimReborn",
-            &ServerMessage::Reconnected(reconnected.clone()),
-        );
+        ledger.record_reconnect("Victim", "VictimReborn", &reconnected);
 
         // v3 contract: the replay-completeness marker is PRESENT and one of
         // the two states a live replay ring can report (`unavailable` would
@@ -1047,6 +1058,8 @@ async fn reconnect_under_fire() {
             send_on(
                 &mut sender,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: post_payload.next(),
                 },
             )
@@ -1116,7 +1129,7 @@ async fn lobby_churn_during_relay() {
     let server = create_test_server().await;
     let metrics = server.metrics();
     let addr = start_server(server).await;
-    let ledger = ConformanceAuditor::new();
+    let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V2);
 
     let scenario = async {
         // Three persistent members in a 4-seat room: every churner's join
@@ -1125,9 +1138,11 @@ async fn lobby_churn_during_relay() {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut recv_a_sink, mut recv_a_rx) = connect(addr).await;
         let (mut recv_b_sink, mut recv_b_rx) = connect(addr).await;
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _recv_a_id = join_room(&mut recv_a_sink, &mut recv_a_rx, ROOM, "RecvA").await;
-        let _recv_b_id = join_room(&mut recv_b_sink, &mut recv_b_rx, ROOM, "RecvB").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let recv_a_id = join_room(&mut recv_a_sink, &mut recv_a_rx, ROOM, "RecvA").await;
+        ledger.record_consumed_v2_room_snapshot("RecvA", &[sender_id, recv_a_id]);
+        let recv_b_id = join_room(&mut recv_b_sink, &mut recv_b_rx, ROOM, "RecvB").await;
+        ledger.record_consumed_v2_room_snapshot("RecvB", &[sender_id, recv_a_id, recv_b_id]);
 
         for epoch in 0..CHURN_EPOCHS {
             let churn_name = format!("Churn{epoch}");
@@ -1144,6 +1159,12 @@ async fn lobby_churn_during_relay() {
             let churn_payload =
                 join_room_payload(&mut churn_sink, &mut churn_rx, ROOM, &churn_name).await;
             let churn_id = churn_payload.player_id;
+            let churn_players: Vec<_> = churn_payload
+                .current_players
+                .iter()
+                .map(|player| player.id)
+                .collect();
+            ledger.record_consumed_v2_room_snapshot(&churn_name, &churn_players);
             assert_eq!(
                 churn_payload.lobby_state,
                 signal_fish_server::protocol::LobbyState::Lobby,
@@ -1198,6 +1219,7 @@ async fn lobby_churn_during_relay() {
                 |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
             )
             .await;
+            ledger.record_message(&churn_name, &ServerMessage::RoomLeft);
             drain_until_player_left(&mut recv_a_rx, &ledger, "RecvA", churn_id).await;
             drain_until_player_left(&mut recv_b_rx, &ledger, "RecvB", churn_id).await;
         }

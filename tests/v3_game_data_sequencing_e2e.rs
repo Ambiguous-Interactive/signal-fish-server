@@ -6,22 +6,24 @@
 //! capability the reporter of issue #131 lacked (they had to keep manual
 //! sent-vs-received deficit counters). The contract under test:
 //!
-//! - `seq` starts at 1 per (sender, room) and is strictly contiguous per
-//!   sender for a recipient that stays connected;
+//! - `seq` starts at 1 per sender incarnation and is strictly increasing;
+//!   reliable delivery is contiguous, while every lossy-class hole requires
+//!   an exact causally prior `DeliveryReport`;
 //! - pre-v3 recipients never see the key (their bytes are byte-identical to
-//!   v3 and earlier — frozen separately by `tests/v2_wire_golden.rs`);
-//! - the counter RESTARTS at 1 when the sender leaves and rejoins a room
-//!   (recipients must treat `PlayerLeft`/`PlayerJoined` — and their own
-//!   reconnect — as a seq reset);
-//! - after a slow-consumer eviction + reconnect, the recipient can OBSERVE
-//!   the gap between its last-seen seq and the next received seq.
+//!   v2, frozen separately by `tests/v2_wire_golden.rs`);
+//! - `seq` restarts at 1 when the sender leaves/rejoins or reconnects, paired
+//!   with a higher `epoch` so the reset is self-describing;
+//! - a reconnecting recipient receives authoritative sender watermarks before
+//!   later data instead of inferring missed high-rate data from a wire gap.
 
 mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::ProtocolConfig;
-use signal_fish_server::protocol::{ClientMessage, PlayerId, RoomId, ServerMessage};
+use signal_fish_server::protocol::{
+    ClientMessage, DeliveryClass, DeliveryGapReason, ErrorCode, PlayerId, RoomId, ServerMessage,
+};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
 use std::sync::atomic::Ordering;
@@ -209,6 +211,7 @@ async fn collect_game_data(ws: &mut WsStream, expected: usize) -> Vec<ReceivedGa
                 data,
                 seq,
                 epoch,
+                ..
             } => received.push(ReceivedGameData {
                 from_player,
                 seq,
@@ -265,6 +268,8 @@ async fn v3_burst_is_seq_stamped_contiguously_from_one() {
     let writer = tokio::spawn(async move {
         for n in 0..BURST_MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "n": n }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -323,6 +328,8 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
     send(
         &mut sender,
         &ClientMessage::GameData {
+            class: Some(DeliveryClass::Latest),
+            key: Some(7),
             data: serde_json::json!({ "probe": true }),
         },
     )
@@ -348,6 +355,8 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
         Some(1),
         "v3 recipient must see the server-stamped epoch: {v3_raw}"
     );
+    assert_eq!(v3_data.get("class"), Some(&serde_json::json!("latest")));
+    assert_eq!(v3_data.get("key"), Some(&serde_json::json!(7)));
 
     let v2_value: serde_json::Value = serde_json::from_str(&v2_raw).expect("v2 frame JSON");
     let v2_data = v2_value
@@ -362,11 +371,138 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
         !v2_data.contains_key("epoch"),
         "v2 recipient's raw frame must not contain an epoch key: {v2_raw}"
     );
+    assert!(!v2_data.contains_key("class"));
+    assert!(!v2_data.contains_key("key"));
     // Everything else is identical between the two recipients' frames.
     assert_eq!(v2_data.get("from_player"), v3_data.get("from_player"));
     assert_eq!(v2_data.get("data"), v3_data.get("data"));
 
     assert_message_conservation(&metrics).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invalid_delivery_class_does_not_consume_a_relay_sequence() {
+    let (addr, _server) = start_test_server(test_server_config()).await;
+    let mut sender = connect(addr).await;
+    let mut recipient = connect(addr).await;
+    authenticate_v3(&mut sender).await;
+    authenticate_v3(&mut recipient).await;
+    join_room(&mut sender, "CLSINV", "ClassSender").await;
+    join_room(&mut recipient, "CLSINV", "ClassRecipient").await;
+
+    for (class, key) in [
+        (Some(DeliveryClass::Latest), None),
+        (Some(DeliveryClass::Reliable), Some(1)),
+        (Some(DeliveryClass::Volatile), Some(1)),
+        (None, Some(1)),
+    ] {
+        send(
+            &mut sender,
+            &ClientMessage::GameData {
+                data: serde_json::json!({ "invalid": true }),
+                class,
+                key,
+            },
+        )
+        .await;
+        let error_code = next_matching_server_message_within(
+            &mut sender,
+            SERVER_MESSAGE_TIMEOUT,
+            "invalid delivery-class error",
+            |message| match message {
+                ServerMessage::Error { error_code, .. } => error_code,
+                _ => None,
+            },
+        )
+        .await;
+        assert_eq!(error_code, ErrorCode::InvalidDeliveryClass);
+    }
+
+    send(
+        &mut sender,
+        &ClientMessage::GameData {
+            data: serde_json::json!({ "valid": true }),
+            class: None,
+            key: None,
+        },
+    )
+    .await;
+    let frame = collect_game_data(&mut recipient, 1).await.remove(0);
+    assert_eq!(frame.seq, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn latest_coalescing_reports_exact_gap_before_successor() {
+    let mut config = test_server_config();
+    config.websocket_config.enable_batching = true;
+    config.websocket_config.batch_size = 8;
+    config.websocket_config.batch_interval_ms = 250;
+    let (addr, server) = start_test_server(config).await;
+    let mut sender = connect(addr).await;
+    let mut recipient = connect(addr).await;
+    authenticate_v3(&mut sender).await;
+    authenticate_v3(&mut recipient).await;
+    let (sender_id, _) = join_room(&mut sender, "CLSCOA", "LatestSender").await;
+    join_room(&mut recipient, "CLSCOA", "LatestRecipient").await;
+
+    for n in [1, 2] {
+        send(
+            &mut sender,
+            &ClientMessage::GameData {
+                data: serde_json::json!({ "n": n }),
+                class: Some(DeliveryClass::Latest),
+                key: Some(99),
+            },
+        )
+        .await;
+    }
+
+    let report = next_matching_server_message_within(
+        &mut recipient,
+        SERVER_MESSAGE_TIMEOUT,
+        "DeliveryReport before latest successor",
+        |message| match message {
+            ServerMessage::DeliveryReport(report) => Some(*report),
+            ServerMessage::GameData { .. } => {
+                panic!("latest successor arrived before its causal DeliveryReport")
+            }
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(report.per_class.latest.superseded, 1);
+    assert_eq!(report.gaps.len(), 1);
+    assert_eq!(report.gaps[0].from_player, sender_id);
+    assert_eq!(report.gaps[0].epoch, 1);
+    assert_eq!(report.gaps[0].from_seq, 1);
+    assert_eq!(report.gaps[0].to_seq, 1);
+    assert_eq!(report.gaps[0].reason, DeliveryGapReason::LatestSuperseded);
+
+    let successor = next_matching_server_message_within(
+        &mut recipient,
+        SERVER_MESSAGE_TIMEOUT,
+        "coalesced latest successor",
+        |message| match message {
+            ServerMessage::GameData {
+                data,
+                seq,
+                class,
+                key,
+                ..
+            } => Some((data, seq, class, key)),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(successor.0, serde_json::json!({ "n": 2 }));
+    assert_eq!(successor.1, Some(2));
+    assert_eq!(successor.2, Some(DeliveryClass::Latest));
+    assert_eq!(successor.3, Some(99));
+
+    let class_metrics = server.metrics().delivery_metrics_by_class().latest;
+    assert_eq!(class_metrics.attempted, 2);
+    assert_eq!(class_metrics.delivered, 1);
+    assert_eq!(class_metrics.superseded, 1);
 }
 
 /// Read raw text frames until the next GameData frame, returning the raw JSON
@@ -419,6 +555,8 @@ async fn interleaved_senders_have_independent_contiguous_seqs() {
         send(
             &mut sender_a,
             &ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "sender": "a", "n": n }),
             },
         )
@@ -426,6 +564,8 @@ async fn interleaved_senders_have_independent_contiguous_seqs() {
         send(
             &mut sender_b,
             &ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "sender": "b", "n": n }),
             },
         )
@@ -486,6 +626,8 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
         send(
             &mut sender,
             &ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "phase": "before", "n": n }),
             },
         )
@@ -509,7 +651,7 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
         SERVER_MESSAGE_TIMEOUT,
         "sender departure",
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == sender_id => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == sender_id => Some(()),
             _ => None,
         },
     )
@@ -519,6 +661,8 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
     send(
         &mut sender,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "phase": "after" }),
         },
     )
@@ -565,6 +709,8 @@ async fn epoch_carries_across_a_room_switch_not_reset_to_one() {
     send(
         &mut sender,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "room": "a" }),
         },
     )
@@ -584,7 +730,7 @@ async fn epoch_carries_across_a_room_switch_not_reset_to_one() {
         SERVER_MESSAGE_TIMEOUT,
         "sender departure from A",
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == sender_id => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == sender_id => Some(()),
             _ => None,
         },
     )
@@ -597,6 +743,8 @@ async fn epoch_carries_across_a_room_switch_not_reset_to_one() {
     send(
         &mut sender,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "room": "b" }),
         },
     )
@@ -665,6 +813,8 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
         send(
             &mut sender,
             &ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "phase": "warmup", "n": n }),
             },
         )
@@ -681,6 +831,8 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
         let padding = "x".repeat(FLOOD_PADDING_BYTES);
         for n in 0..FLOOD {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "phase": "flood", "n": n, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -703,7 +855,7 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
             let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
             match message {
                 ServerMessage::GameData { .. } => game_data_seen += 1,
-                ServerMessage::PlayerLeft { player_id } if player_id == victim_id => {
+                ServerMessage::PlayerLeft { player_id, .. } if player_id == victim_id => {
                     victim_left = true;
                 }
                 ServerMessage::Error {
@@ -824,6 +976,8 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     send(
         &mut sender,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "phase": "marker" }),
         },
     )
@@ -952,6 +1106,56 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
         "a v2 member's PlayerJoined must omit epoch: {v2_sees_v3}"
     );
 
+    // SpectatorJoined is another full sender snapshot and obeys the same
+    // projection: live epochs for v3, byte-absent for v2.
+    let mut v2_spectator = connect(addr).await;
+    authenticate_v2(&mut v2_spectator).await;
+    send(
+        &mut v2_spectator,
+        &ClientMessage::JoinAsSpectator {
+            game_name: "v3_seq_game".to_string(),
+            room_code: "SNAPEP".to_string(),
+            spectator_name: "SnapSpecV2".to_string(),
+        },
+    )
+    .await;
+    let v2_spectator_joined =
+        next_message_value_of_type(&mut v2_spectator, "SpectatorJoined", "v2 SpectatorJoined")
+            .await;
+    for player in v2_spectator_joined["data"]["current_players"]
+        .as_array()
+        .expect("v2 spectator current_players")
+    {
+        assert!(
+            player.get("epoch").is_none(),
+            "a v2 spectator snapshot must omit epoch: {v2_spectator_joined}"
+        );
+    }
+
+    let mut v3_spectator = connect(addr).await;
+    authenticate_v3(&mut v3_spectator).await;
+    send(
+        &mut v3_spectator,
+        &ClientMessage::JoinAsSpectator {
+            game_name: "v3_seq_game".to_string(),
+            room_code: "SNAPEP".to_string(),
+            spectator_name: "SnapSpecV3".to_string(),
+        },
+    )
+    .await;
+    let v3_spectator_joined =
+        next_message_value_of_type(&mut v3_spectator, "SpectatorJoined", "v3 SpectatorJoined")
+            .await;
+    for player in v3_spectator_joined["data"]["current_players"]
+        .as_array()
+        .expect("v3 spectator current_players")
+    {
+        assert!(
+            player.get("epoch").is_some(),
+            "a v3 spectator snapshot must carry epoch: {v3_spectator_joined}"
+        );
+    }
+
     assert_message_conservation(&metrics).await;
 }
 
@@ -999,6 +1203,8 @@ async fn reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data() {
     send(
         &mut sender,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "phase": "before" }),
         },
     )
@@ -1064,6 +1270,8 @@ async fn reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data() {
     send(
         &mut reconnected,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "phase": "after" }),
         },
     )

@@ -1,10 +1,60 @@
-use crate::protocol::RoomId;
+use crate::protocol::{PlayerId, RoomId};
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::Arc;
 
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
 impl EnhancedGameServer {
+    /// Retry player-row removals that failed after a dead connection had to be
+    /// unrouted. The room mutation gate orders this check with reconnect/join,
+    /// preventing cleanup from deleting a newly restored live membership.
+    pub(crate) async fn cleanup_pending_durable_player_detaches(&self) -> usize {
+        let candidates: Vec<(RoomId, PlayerId)> = self
+            .pending_durable_player_detaches
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        let mut cleaned = 0_usize;
+
+        for (room_id, player_id) in candidates {
+            let _guard = self
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await;
+            if self
+                .connection_manager
+                .current_relay_stamp_in_room(&player_id, &room_id)
+                .is_some()
+            {
+                self.pending_durable_player_detaches
+                    .remove(&(room_id, player_id));
+                continue;
+            }
+
+            match self
+                .database
+                .remove_player_from_room(&room_id, &player_id)
+                .await
+            {
+                Ok(_) => {
+                    if self
+                        .pending_durable_player_detaches
+                        .remove(&(room_id, player_id))
+                        .is_some()
+                    {
+                        cleaned += 1;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %room_id, %error, "Failed pending durable player detach; retaining it for retry");
+                }
+            }
+        }
+
+        cleaned
+    }
+
     /// Log that a room has been closed during cleanup.
     pub(crate) fn publish_room_closed(&self, room_id: RoomId, reason: &str) {
         tracing::debug!(%room_id, %reason, "Room closed");
@@ -61,7 +111,26 @@ impl EnhancedGameServer {
             return 0;
         };
 
-        let count = reconnection_manager.cleanup_expired().await;
+        let mut count = 0_usize;
+        for (player_id, room_id) in reconnection_manager.expired_cleanup_candidates().await {
+            match self
+                .database
+                .remove_player_from_room(&room_id, &player_id)
+                .await
+            {
+                Ok(_) => {
+                    if reconnection_manager
+                        .remove_expired_reconnection(&player_id)
+                        .await
+                    {
+                        count += 1;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %room_id, %error, "Failed durable cleanup for expired reconnection; retaining it for retry");
+                }
+            }
+        }
         if count > 0 {
             tracing::info!(
                 count,
@@ -78,12 +147,12 @@ impl EnhancedGameServer {
     /// that post-cleanup operations (event publishing, relay session cleanup,
     /// application mapping cleanup) only happen once per room, even if multiple
     /// instances attempt cleanup simultaneously.
-    pub async fn cleanup_task(&self) {
+    pub async fn cleanup_task(self: &Arc<Self>) {
         self.cleanup_task_until(std::future::pending::<()>()).await;
     }
 
     /// Cleanup task variant that exits when `shutdown` resolves.
-    pub async fn cleanup_task_until(&self, shutdown: impl Future<Output = ()>) {
+    pub async fn cleanup_task_until(self: &Arc<Self>, shutdown: impl Future<Output = ()>) {
         // Clamp to a 1s floor: `room_cleanup_interval` is validated `> 0` at
         // startup (`validate_config_security`), but guard here too because the
         // server is constructible directly via the public API, and
@@ -200,6 +269,17 @@ impl EnhancedGameServer {
             if stop_for_drain {
                 break 'cleanup;
             }
+
+            let detached_spectators = self.spectator_service.retry_disconnected_detaches().await;
+            if detached_spectators > 0 {
+                tracing::info!(
+                    count = detached_spectators,
+                    instance_id = %self.instance_id,
+                    "Retried durable detach for disconnected spectators"
+                );
+            }
+
+            self.cleanup_pending_durable_player_detaches().await;
 
             // Rooms with an unexpired reconnection record must survive both
             // sweeps below: they are empty (their members disconnected) but a

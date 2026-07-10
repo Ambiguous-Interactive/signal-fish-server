@@ -17,7 +17,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::AppInfo;
-use crate::coordination::{ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator};
+use crate::coordination::{
+    ClientDeliveryHandle, ConnectionCloseSignal, DeliverySender, MessageCoordinator,
+};
 use crate::metrics::ServerMetrics;
 use crate::protocol::{GameDataEncoding, PlayerId, RoomId, ServerMessage, Topology, Transport};
 
@@ -49,12 +51,15 @@ impl Default for NegotiatedProtocol {
 #[derive(Debug, Clone)]
 pub(crate) struct ClientConnection {
     pub room_id: Option<RoomId>,
+    /// Serializes room-role and connection-lifecycle transitions for this
+    /// physical socket. The same gate survives reconnect identity swaps.
+    pub lifecycle: Arc<ClientLifecycle>,
     pub last_ping: Instant,
     /// Tracks when we last recorded `last_seen` for this client.
     /// Used to throttle heartbeat updates - we only record if this is older
     /// than the configured threshold (default 30 seconds).
     pub last_heartbeat_update: Option<Instant>,
-    pub sender: mpsc::Sender<Arc<ServerMessage>>,
+    pub sender: DeliverySender,
     /// Kill switch for this connection's socket tasks (slow-consumer
     /// disconnects, server-side eviction). Paired with `sender`: together they
     /// form the connection's [`ClientDeliveryHandle`].
@@ -106,6 +111,48 @@ pub(crate) struct ClientConnection {
     /// Paired with `game_data_seq` (which restarts at 1 per epoch) it makes a
     /// `seq` restart self-describing.
     pub game_data_epoch: u32,
+}
+
+/// Per-physical-connection lifecycle identity and serialization gate.
+///
+/// The player id is stored beside the gate so an unregister task that was
+/// queued under the transient pre-reconnect id follows the surviving socket to
+/// its restored id after it acquires the gate.
+#[derive(Debug)]
+pub(crate) struct ClientLifecycle {
+    gate: Arc<tokio::sync::Mutex<()>>,
+    player_id: std::sync::Mutex<PlayerId>,
+}
+
+impl ClientLifecycle {
+    fn new(player_id: PlayerId) -> Self {
+        Self {
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+            player_id: std::sync::Mutex::new(player_id),
+        }
+    }
+
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
+
+    pub(crate) async fn lock_owned(self: Arc<Self>) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.gate).lock_owned().await
+    }
+
+    pub(crate) fn player_id(&self) -> PlayerId {
+        *self
+            .player_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_player_id(&self, player_id: PlayerId) {
+        *self
+            .player_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = player_id;
+    }
 }
 
 /// One relay stamp read atomically from a sender's `ClientConnection`: the
@@ -176,6 +223,28 @@ impl ConnectionManager {
         client_addr: SocketAddr,
         instance_id: Uuid,
     ) -> Result<PlayerId, RegisterClientError> {
+        self.register_delivery(sender.into(), close, client_addr, instance_id)
+            .await
+    }
+
+    pub(crate) async fn register_classified_client(
+        &self,
+        sender: DeliverySender,
+        close: ConnectionCloseSignal,
+        client_addr: SocketAddr,
+        instance_id: Uuid,
+    ) -> Result<PlayerId, RegisterClientError> {
+        self.register_delivery(sender, close, client_addr, instance_id)
+            .await
+    }
+
+    async fn register_delivery(
+        &self,
+        sender: DeliverySender,
+        close: ConnectionCloseSignal,
+        client_addr: SocketAddr,
+        instance_id: Uuid,
+    ) -> Result<PlayerId, RegisterClientError> {
         let ip = client_addr.ip();
         if let Err(current) = self.try_reserve_ip_slot(ip) {
             warn!(
@@ -193,6 +262,7 @@ impl ConnectionManager {
         let player_id = Uuid::new_v4();
         let connection = ClientConnection {
             room_id: None,
+            lifecycle: Arc::new(ClientLifecycle::new(player_id)),
             last_ping: Instant::now(),
             last_heartbeat_update: None,
             sender: sender.clone(),
@@ -231,8 +301,10 @@ impl ConnectionManager {
         client_addr: SocketAddr,
     ) {
         let close = ConnectionCloseSignal::detached();
+        let sender: DeliverySender = sender.into();
         let connection = ClientConnection {
             room_id: None,
+            lifecycle: Arc::new(ClientLifecycle::new(player_id)),
             last_ping: Instant::now(),
             last_heartbeat_update: None,
             sender: sender.clone(),
@@ -263,22 +335,7 @@ impl ConnectionManager {
     }
 
     pub async fn assign_client_to_room(&self, player_id: &PlayerId, room_id: RoomId) {
-        if let Some(mut client) = self.clients.get_mut(player_id) {
-            client.room_id = Some(room_id);
-            // Fresh room membership => fresh per-(sender, room) relay stamp
-            // stream (restart-on-rejoin; see the `game_data_seq` field doc).
-            client.game_data_seq = 0;
-            // A new incarnation of the membership begins here (first join or a
-            // join-after-leave), so its epoch advances; recipients pair it with
-            // the reset `seq` to attribute the restart (see `game_data_epoch`).
-            // `saturating_add` is deliberate: the u32 epoch space (~4.3B
-            // incarnations on a single connection lineage) is unreachable in
-            // practice, and saturating is the only overflow behavior that never
-            // regresses to a LOWER value — unlike `wrapping_add`, which would
-            // reset to 0 and break the strictly-increasing `(epoch, seq)` view.
-            client.game_data_epoch = client.game_data_epoch.saturating_add(1);
-            let delivery = client.delivery_handle();
-            drop(client);
+        if let Some((delivery, _stamp)) = self.prepare_client_to_room(player_id, room_id) {
             if let Err(err) = self
                 .message_coordinator
                 .register_local_client(*player_id, Some(room_id), delivery)
@@ -294,8 +351,51 @@ impl ConnectionManager {
         }
     }
 
+    /// Prepare a fresh seated-room incarnation without publishing it to room
+    /// routing. Ordinary joins use the returned handle with the coordinator's
+    /// atomic initial-message registration so `RoomJoined` is queued before
+    /// any room control can target the new generation.
+    pub(crate) fn prepare_client_to_room(
+        &self,
+        player_id: &PlayerId,
+        room_id: RoomId,
+    ) -> Option<(ClientDeliveryHandle, RelayStamp)> {
+        let mut client = self.clients.get_mut(player_id)?;
+        client.room_id = Some(room_id);
+        // Fresh room membership => fresh per-(sender, room) relay stamp stream.
+        client.game_data_seq = 0;
+        // Saturation cannot regress an epoch, unlike wrapping at u32::MAX.
+        client.game_data_epoch = client.game_data_epoch.saturating_add(1);
+        client.sender = client.sender.next_generation();
+        let stamp = RelayStamp {
+            seq: client.game_data_seq,
+            epoch: client.game_data_epoch,
+        };
+        Some((client.delivery_handle(), stamp))
+    }
+
+    /// Undo [`Self::prepare_client_to_room`] when its transition frame never
+    /// committed. The queue still owns the previous generation, so restore the
+    /// wrapper instead of advancing again.
+    pub(crate) fn rollback_prepared_room_assignment(
+        &self,
+        player_id: &PlayerId,
+        expected_room: RoomId,
+        expected_epoch: u32,
+    ) -> Option<ClientDeliveryHandle> {
+        let mut client = self.clients.get_mut(player_id)?;
+        if client.room_id != Some(expected_room) || client.game_data_epoch != expected_epoch {
+            return None;
+        }
+        client.room_id = None;
+        client.game_data_seq = 0;
+        client.sender = client.sender.previous_generation();
+        Some(client.delivery_handle())
+    }
+
     pub fn set_game_data_format(&self, player_id: &PlayerId, format: GameDataEncoding) {
         if let Some(mut connection) = self.clients.get_mut(player_id) {
+            connection.sender.set_game_data_format(format);
             connection.game_data_format = format;
         }
     }
@@ -313,6 +413,7 @@ impl ConnectionManager {
 
     pub fn set_protocol(&self, player_id: &PlayerId, protocol: NegotiatedProtocol) {
         if let Some(mut connection) = self.clients.get_mut(player_id) {
+            connection.sender.set_protocol_version(protocol.version);
             connection.protocol = protocol;
         }
     }
@@ -405,48 +506,113 @@ impl ConnectionManager {
         self.app_info(player_id).map(|info| info.id)
     }
 
-    pub fn clear_room_assignment(&self, player_id: &PlayerId) -> Option<ClientDeliveryHandle> {
+    /// Capture the terminal relay watermark and clear membership under one
+    /// connection-entry lock. The coordinator calls this while holding its
+    /// room-routing write lock, making stamp allocation and terminal unroute
+    /// mutually exclusive.
+    pub fn clear_room_assignment_with_tail(
+        &self,
+        player_id: &PlayerId,
+    ) -> Option<(ClientDeliveryHandle, RelayStamp)> {
         self.clients.get_mut(player_id).map(|mut client| {
+            let tail = RelayStamp {
+                seq: client.game_data_seq,
+                epoch: client.game_data_epoch,
+            };
             client.room_id = None;
             // Membership ended: the next room (same or different) starts a
             // fresh stamp stream (see the `game_data_seq` field doc).
             client.game_data_seq = 0;
-            client.delivery_handle()
+            client.sender = client.sender.next_generation();
+            (client.delivery_handle(), tail)
         })
+    }
+
+    pub fn clear_room_assignment(&self, player_id: &PlayerId) -> Option<ClientDeliveryHandle> {
+        self.clear_room_assignment_with_tail(player_id)
+            .map(|(delivery, _)| delivery)
+    }
+
+    pub async fn advance_delivery_generation(&self, player_id: &PlayerId) {
+        let delivery = self.clients.get_mut(player_id).map(|mut client| {
+            client.sender = client.sender.next_generation();
+            client.delivery_handle()
+        });
+        if let Some(delivery) = delivery {
+            if let Err(err) = self
+                .message_coordinator
+                .register_local_client(*player_id, None, delivery)
+                .await
+            {
+                warn!(%player_id, %err, "Failed to advance delivery generation");
+            }
+        }
+    }
+
+    /// Undo an unpublished spectator transition and republish the prior queue
+    /// generation to the coordinator.
+    pub async fn rollback_delivery_generation(&self, player_id: &PlayerId) {
+        let delivery = self.clients.get_mut(player_id).map(|mut client| {
+            client.sender = client.sender.previous_generation();
+            client.delivery_handle()
+        });
+        if let Some(delivery) = delivery {
+            if let Err(err) = self
+                .message_coordinator
+                .register_local_client(*player_id, None, delivery)
+                .await
+            {
+                warn!(%player_id, %err, "Failed to roll back delivery generation");
+            }
+        }
     }
 
     /// Advance the relay sequence and return the full relay stamp — the next
     /// `seq` (protocol v3; first stamp is 1) together with the current
-    /// incarnation `epoch` — for `player_id`'s next relayed game-data message.
-    /// Both are read under one `get_mut` so the `(epoch, seq)` pair a recipient
-    /// observes is always internally consistent. `None` when the connection no
-    /// longer exists (a disconnect race — the relay then simply stamps nothing).
-    pub fn next_relay_stamp(&self, player_id: &PlayerId) -> Option<RelayStamp> {
-        self.clients.get_mut(player_id).map(|mut client| {
-            client.game_data_seq += 1;
-            RelayStamp {
-                seq: client.game_data_seq,
-                epoch: client.game_data_epoch,
-            }
-        })
-    }
-
-    /// Read the current relay stamp without advancing the sequence counter.
-    /// Used for v3 `Reconnected.sender_watermarks`: a reconnecting client needs
-    /// the sender's authoritative tail (`seq` may be 0 when that sender has not
-    /// relayed any game data in this incarnation), not a newly allocated stamp.
-    pub fn current_relay_stamp(&self, player_id: &PlayerId) -> Option<RelayStamp> {
-        self.clients.get(player_id).map(|client| RelayStamp {
+    /// incarnation `epoch` — for `player_id`'s next relayed game-data message
+    /// in `expected_room`. Room membership and the counter advance are checked
+    /// under one entry lock, so concurrent leave/unregister cannot reset `seq`
+    /// and then leak a duplicate stamp into the old room. `None` cancels that
+    /// stale relay without consuming a sequence number.
+    pub fn next_relay_stamp_in_room(
+        &self,
+        player_id: &PlayerId,
+        expected_room: &RoomId,
+    ) -> Option<RelayStamp> {
+        let mut client = self.clients.get_mut(player_id)?;
+        if client.room_id != Some(*expected_room) {
+            return None;
+        }
+        client.game_data_seq += 1;
+        Some(RelayStamp {
             seq: client.game_data_seq,
             epoch: client.game_data_epoch,
         })
     }
 
-    /// Read the current incarnation [`epoch`](ClientConnection::game_data_epoch)
-    /// for `player_id` without advancing anything. Used when building v3 room
-    /// snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a recipient
-    /// learns each member's epoch before that member's first relayed frame.
-    /// `None` when the connection no longer exists.
+    /// Read the current relay stamp without advancing, only while the player is
+    /// still assigned to `expected_room`. Snapshot projection uses this single
+    /// read for both `PlayerInfo.epoch` and reconnect watermarks, filtering the
+    /// leave/unregister window instead of emitting incomplete v3 metadata.
+    pub fn current_relay_stamp_in_room(
+        &self,
+        player_id: &PlayerId,
+        expected_room: &RoomId,
+    ) -> Option<RelayStamp> {
+        let client = self.clients.get(player_id)?;
+        if client.room_id != Some(*expected_room) {
+            return None;
+        }
+        Some(RelayStamp {
+            seq: client.game_data_seq,
+            epoch: client.game_data_epoch,
+        })
+    }
+
+    /// Read a connection's current epoch in unit tests without advancing it.
+    /// Production metadata reads must use [`Self::current_relay_stamp_in_room`]
+    /// so an epoch cannot be projected across a concurrent room transition.
+    #[cfg(test)]
     pub fn game_data_epoch(&self, player_id: &PlayerId) -> Option<u32> {
         self.clients
             .get(player_id)
@@ -507,6 +673,22 @@ impl ConnectionManager {
             .and_then(|client| client.room_id)
     }
 
+    pub(crate) fn client_lifecycle(&self, player_id: &PlayerId) -> Option<Arc<ClientLifecycle>> {
+        self.clients
+            .get(player_id)
+            .map(|client| Arc::clone(&client.lifecycle))
+    }
+
+    pub(crate) fn lifecycle_matches(
+        &self,
+        player_id: &PlayerId,
+        lifecycle: &Arc<ClientLifecycle>,
+    ) -> bool {
+        self.clients
+            .get(player_id)
+            .is_some_and(|client| Arc::ptr_eq(&client.lifecycle, lifecycle))
+    }
+
     pub fn has_client(&self, player_id: &PlayerId) -> bool {
         self.clients.contains_key(player_id)
     }
@@ -524,9 +706,11 @@ impl ConnectionManager {
     ) -> Option<ClientDeliveryHandle> {
         // Atomically remove the old entry (no separate get-then-remove race)
         if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
-            let delivery = old_connection.delivery_handle();
+            let mut delivery = old_connection.delivery_handle();
+            delivery.sender = delivery.sender.next_generation();
             let new_client = ClientConnection {
                 room_id: Some(room_id),
+                lifecycle: Arc::clone(&old_connection.lifecycle),
                 last_ping: Instant::now(),
                 last_heartbeat_update: None, // Reset on reconnection, will update immediately
                 sender: delivery.sender.clone(),
@@ -558,6 +742,7 @@ impl ConnectionManager {
             // IP slot is already reserved from the old entry -- no need to
             // release and re-reserve for the same IP address.
             self.clients.insert(*reconnect_player_id, new_client);
+            old_connection.lifecycle.set_player_id(*reconnect_player_id);
             // The RelayStats ledger follows the surviving connection so its
             // cumulative counters stay meaningful across the reassignment.
             self.metrics
@@ -586,9 +771,11 @@ impl ConnectionManager {
 
         let (_, reassigned_connection) = self.clients.remove(reconnect_player_id)?;
 
-        let delivery = reassigned_connection.delivery_handle();
+        let mut delivery = reassigned_connection.delivery_handle();
+        delivery.sender = delivery.sender.previous_generation();
         let restored_client = ClientConnection {
             room_id: None,
+            lifecycle: Arc::clone(&reassigned_connection.lifecycle),
             last_ping: Instant::now(),
             last_heartbeat_update: None,
             sender: delivery.sender.clone(),
@@ -603,6 +790,9 @@ impl ConnectionManager {
         };
 
         self.clients.insert(*current_player_id, restored_client);
+        reassigned_connection
+            .lifecycle
+            .set_player_id(*current_player_id);
         self.metrics
             .rekey_connection_delivery_stats(reconnect_player_id, *current_player_id);
         Some(delivery)
@@ -627,6 +817,10 @@ impl ConnectionManager {
 
     #[cfg(test)]
     pub fn remove_client(&self, player_id: &PlayerId) -> Option<ClientConnection> {
+        // Test fixtures use this convenience to simulate a complete departure;
+        // honor the production ordering invariant by clearing membership (and
+        // therefore capturing/resetting its tail) before physical removal.
+        let _ = self.clear_room_assignment_with_tail(player_id);
         self.remove_client_for_unregistration(player_id, || false)
             .map(|(connection, _)| connection)
     }
@@ -639,6 +833,18 @@ impl ConnectionManager {
     where
         F: FnOnce() -> bool,
     {
+        // A room-bound entry owns the only authoritative terminal relay tail.
+        // Normal unregister always calls `leave_room_locked` first; refusing an
+        // out-of-order removal encodes that ordering invariant and prevents a
+        // later PlayerLeft from being forced to guess its final sequence.
+        if self
+            .clients
+            .get(player_id)
+            .is_some_and(|connection| connection.room_id.is_some())
+        {
+            warn!(%player_id, "Refusing to remove room-bound connection before terminal unroute");
+            return None;
+        }
         self.clients.remove(player_id).map(|(_, connection)| {
             self.release_ip_slot(connection.client_addr.ip());
             self.metrics.unregister_connection_delivery_stats(player_id);
@@ -730,7 +936,10 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordination::{MembershipUpdate, MessageCoordinator};
+    use crate::coordination::{
+        MembershipUpdate, MessageCoordinator, RoomEventCompletion, RoomEventJob,
+        RoomEventMutationGuard, RoomEventSequencer,
+    };
     use crate::distributed::SequencedMessage;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -739,12 +948,25 @@ mod tests {
 
     #[derive(Default)]
     struct TestCoordinator {
+        room_events: Arc<RoomEventSequencer>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
         unregisters: Mutex<Vec<PlayerId>>,
     }
 
     #[async_trait]
     impl MessageCoordinator for TestCoordinator {
+        async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
+            self.room_events.lock(*room_id).await
+        }
+
+        fn enqueue_room_event(
+            &self,
+            mutation_guard: RoomEventMutationGuard,
+            job: RoomEventJob,
+        ) -> RoomEventCompletion {
+            self.room_events.enqueue(mutation_guard, job)
+        }
+
         async fn send_to_player(
             &self,
             _player_id: &PlayerId,
@@ -781,6 +1003,79 @@ mod tests {
             Ok(())
         }
 
+        async fn broadcast_to_room_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            before_send().await;
+            self.broadcast_to_room(room_id, message).await?;
+            Ok(true)
+        }
+
+        async fn broadcast_to_room_if_members_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            self.broadcast_to_room_with_hook(room_id, message, before_send)
+                .await
+        }
+
+        async fn broadcast_to_room_except_if_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            except_player: &PlayerId,
+            message: Arc<ServerMessage>,
+            should_send: &(dyn Fn() -> bool + Send + Sync),
+            drain: tokio::sync::watch::Receiver<bool>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            if *drain.borrow() || !should_send() {
+                return Ok(false);
+            }
+            before_send().await;
+            self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+            Ok(true)
+        }
+
+        async fn commit_room_messages_if_members_with_hook<'a>(
+            &'a self,
+            _room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            _recipient_messages: Vec<crate::coordination::RoomRecipientMessages>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,
+                    > + Send
+                    + 'a,
+            >,
+            after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+        ) -> Result<crate::coordination::RoomMessageTransactionOutcome> {
+            if before_send().await? {
+                let _ = after_first_phase(0);
+                Ok(crate::coordination::RoomMessageTransactionOutcome::Committed)
+            } else {
+                Ok(crate::coordination::RoomMessageTransactionOutcome::HookRejected)
+            }
+        }
+
         async fn register_local_client(
             &self,
             player_id: PlayerId,
@@ -789,6 +1084,23 @@ mod tests {
         ) -> Result<()> {
             self.registrations.lock().await.push((player_id, room_id));
             Ok(())
+        }
+
+        async fn unroute_local_client_with_tail<'a>(
+            &'a self,
+            player_id: PlayerId,
+            _room_id: RoomId,
+            clear_assignment: Box<
+                dyn FnOnce() -> Option<(crate::coordination::ClientDeliveryHandle, u32, u64)>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<Option<(u32, u64)>> {
+            let Some((_delivery, epoch, final_seq)) = clear_assignment() else {
+                return Ok(None);
+            };
+            self.registrations.lock().await.push((player_id, None));
+            Ok(Some((epoch, final_seq)))
         }
 
         async fn unregister_local_client(&self, player_id: &PlayerId) -> Result<()> {
@@ -881,6 +1193,41 @@ mod tests {
             listener.requested_reason(),
             Some(crate::coordination::CloseReason::Shutdown),
             "removal must request shutdown when the final drain predicate is true"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_removal_cannot_discard_a_room_members_terminal_tail() {
+        let manager = make_manager(1);
+        let addr: SocketAddr = "127.0.0.1:5002".parse().unwrap();
+        let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_00A0);
+        let (tx, _rx) = channel();
+        let player_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+        manager.assign_client_to_room(&player_id, room_id).await;
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&player_id, &room_id),
+            Some(RelayStamp { epoch: 1, seq: 1 })
+        );
+
+        assert!(
+            manager
+                .remove_client_for_unregistration(&player_id, || false)
+                .is_none(),
+            "generic teardown must leave a room-bound connection intact"
+        );
+        assert!(manager.has_client(&player_id));
+        let (_, terminal_tail) = manager
+            .clear_room_assignment_with_tail(&player_id)
+            .expect("terminal unroute retains the connection and tail");
+        assert_eq!(terminal_tail, RelayStamp { epoch: 1, seq: 1 });
+        assert!(
+            manager
+                .remove_client_for_unregistration(&player_id, || false)
+                .is_some(),
+            "connection removal becomes valid after terminal capture"
         );
     }
 
@@ -1003,6 +1350,52 @@ mod tests {
         assert_eq!(registrations.len(), 2);
         assert_eq!(registrations[0], (player_id, None));
         assert_eq!(registrations[1], (player_id, Some(room_id)));
+    }
+
+    #[tokio::test]
+    async fn relay_stamp_allocation_is_bound_to_the_expected_room() {
+        let manager = make_manager(4);
+        let (tx, _rx) = channel();
+        let addr: SocketAddr = "127.0.0.1:6001".parse().unwrap();
+        let player_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+        let room_a = RoomId::from_u128(0xAAAA);
+        let room_b = RoomId::from_u128(0xBBBB);
+
+        manager.assign_client_to_room(&player_id, room_a).await;
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&player_id, &room_a),
+            Some(RelayStamp { epoch: 1, seq: 1 })
+        );
+        assert_eq!(
+            manager.current_relay_stamp_in_room(&player_id, &room_a),
+            Some(RelayStamp { epoch: 1, seq: 1 })
+        );
+
+        manager.clear_room_assignment(&player_id);
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&player_id, &room_a),
+            None,
+            "roomless teardown window must cancel the old-room relay"
+        );
+        assert_eq!(
+            manager.current_relay_stamp_in_room(&player_id, &room_a),
+            None,
+            "roomless players must be filtered from live snapshots"
+        );
+
+        manager.assign_client_to_room(&player_id, room_b).await;
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&player_id, &room_a),
+            None,
+            "a room switch must not allocate against the stale room"
+        );
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&player_id, &room_b),
+            Some(RelayStamp { epoch: 2, seq: 1 })
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1159,6 +1552,43 @@ mod tests {
             result.is_ok(),
             "Registration should succeed after removing the reassigned client"
         );
+    }
+
+    #[tokio::test]
+    async fn reassign_and_restore_preserve_physical_lifecycle_identity() {
+        let manager = make_manager(5);
+        let addr: SocketAddr = "10.0.0.20:9000".parse().unwrap();
+        let (tx, _rx) = channel();
+        let transient_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration should succeed");
+        let restored_id = PlayerId::new_v4();
+        let lifecycle = manager
+            .client_lifecycle(&transient_id)
+            .expect("registered connection has lifecycle identity");
+
+        manager
+            .reassign_connection(&transient_id, &restored_id, RoomId::new_v4())
+            .expect("reassignment succeeds");
+        let reassigned_lifecycle = manager
+            .client_lifecycle(&restored_id)
+            .expect("restored id owns lifecycle identity");
+        assert!(Arc::ptr_eq(&lifecycle, &reassigned_lifecycle));
+        assert_eq!(lifecycle.player_id(), restored_id);
+        assert!(manager.lifecycle_matches(&restored_id, &lifecycle));
+        assert!(!manager.lifecycle_matches(&transient_id, &lifecycle));
+
+        manager
+            .restore_reassigned_connection(&transient_id, &restored_id)
+            .expect("rollback succeeds");
+        let rolled_back_lifecycle = manager
+            .client_lifecycle(&transient_id)
+            .expect("transient id regains lifecycle identity");
+        assert!(Arc::ptr_eq(&lifecycle, &rolled_back_lifecycle));
+        assert_eq!(lifecycle.player_id(), transient_id);
+        assert!(manager.lifecycle_matches(&transient_id, &lifecycle));
+        assert!(!manager.lifecycle_matches(&restored_id, &lifecycle));
     }
 
     // -----------------------------------------------------------------------

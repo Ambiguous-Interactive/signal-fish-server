@@ -1,54 +1,33 @@
 //! Targeted WebRTC signal relay (Protocol v3).
 //!
 //! Relays opaque WebRTC signals (offer/answer/trickle-ICE) to a specific peer in
-//! the same room ([`EnhancedGameServer::handle_signal`]) and brings a peer that
-//! joins or reconnects into an **already-active** session up to date
-//! ([`EnhancedGameServer::handle_active_session_late_join`]).
+//! the same room ([`EnhancedGameServer::handle_signal`]) and publishes a peer
+//! joining an already-finalized room as one authoritative membership event.
 //!
-//! Initial pairing for a freshly finalized lobby is delivered by the
-//! per-recipient `SessionPlan` (see `session_policy.rs`). The late-join path
-//! consults the room's **stored** `ActiveSessionPlan` — the session the room is
-//! actually running — instead of re-running the selection ladder, because the
-//! live membership can drift from the finalize-time membership and a recompute
-//! could contradict the running session. With a stored (non-relay) plan and a
-//! `Finalized` room:
-//!
-//! - the **joiner** receives a fresh tailored `SessionPlan` (current members,
-//!   sticky topology/transport/host, fresh per-recipient ICE for WebRTC) and is
-//!   deliberately **not** sent `NewPeer` — its pairing arrives in the plan's
-//!   `peers[].initiate` flags. Plan peer lists are capability-filtered on both
-//!   sides (`SessionPlanDecision::plan_for`): a joiner that cannot run the
-//!   session's sticky pair gets an empty `peers` list (the relay floor is its
-//!   data path);
-//! - **existing members** receive only the additive `NewPeer` delta, and only
-//!   when the stored transport is WebRTC (mesh announces the joiner to every
-//!   member; host announces along the star edge only). Both the relay floor
-//!   (which stores no plan) *and* a `Host + Direct` (LAN) session emit no
-//!   `NewPeer` — even though `Host + Direct` is a non-relay *topology* — PLAN
-//!   Appendix L decision #4, Appendix E. Per member, `NewPeer` applies the
-//!   SAME full session predicate the plan peer lists use
-//!   (`SessionPlanDecision::recipient_pairable`: v3 + the session's sticky
-//!   topology AND transport) in both directions, so the server never instructs
-//!   a pair its own plan contract excludes.
-//!
-//! A `host`-topology entry whose stored host is found invalid (missing, or
-//! seated but no longer capable of the session) is self-healed first
-//! (`replan_host_session` in `session_policy.rs`: capability-aware
-//! re-election + a full re-plan to every member, joiner included), replacing the
-//! per-joiner emission for that event.
+//! Finalized joins and reconnects consult the room's stored sticky decision,
+//! repair an invalid host when necessary, and publish a fresh tailored
+//! `SessionPlan` to every v3 member. The actor plan and incumbent lifecycle
+//! frames are phase zero; incumbent plans are phase one. A missing sticky plan
+//! produces an explicit Relay/Relay plan with no peers, making no-pairing an
+//! authoritative result. Pre-finalized membership changes remain lifecycle-only.
+//! `handle_signal` shares the same room gate, so no offer/answer/ICE frame can
+//! overtake any recipient's plan.
 //!
 //! Every code path is gated on negotiated v3 (plus the WebRTC transport for
-//! `Signal`, and the full session predicate above for `NewPeer` pairing) so v2
-//! clients never observe `Signal`/`NewPeer`/`SessionPlan` (Appendix K).
+//! `Signal`) so v2 clients never observe `Signal` or `SessionPlan` (Appendix K).
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::coordination::{
+    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
+};
 use crate::protocol::{
-    room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, ServerMessage, Topology,
-    Transport,
+    room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage, Transport,
 };
 
-use super::session_policy::SessionPlanDecision;
+use super::session_policy::membership_session_decision;
 use super::EnhancedGameServer;
 
 /// Glare-avoidance offerer designation (Appendix E mesh rule).
@@ -76,6 +55,16 @@ impl EnhancedGameServer {
     /// security invariants (payload size cap, same room, negotiated WebRTC,
     /// rate limit, v3 target).
     pub async fn handle_signal(&self, from: &PlayerId, to: PlayerId, signal: serde_json::Value) {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(from) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *from
+            || !self.connection_manager.lifecycle_matches(from, &lifecycle)
+        {
+            return;
+        }
+
         // 0. Payload size cap. Checked first because the cap
         //    is a property of the frame itself, independent of room/transport
         //    state, and rejecting before any lookup keeps oversized payloads
@@ -187,6 +176,80 @@ impl EnhancedGameServer {
             .await;
             return;
         }
+        let Some(target_epoch) = self
+            .connection_manager
+            .current_relay_stamp_in_room(&to, &from_room)
+            .map(|stamp| stamp.epoch)
+        else {
+            self.reject_signal(
+                from,
+                to,
+                "Signal target is not currently routed in the room",
+                ErrorCode::SignalTargetNotFound,
+                "target_not_routed",
+            )
+            .await;
+            return;
+        };
+
+        // SessionPlan publication is room-ordered, while socket writers run on
+        // independent tasks. Without sharing this gate, a peer whose plan was
+        // queued first could immediately offer to a later recipient and place
+        // `Signal` ahead of that recipient's plan. Holding the room mutation
+        // gate through dispatch makes plan-before-signal a server guarantee for
+        // finalize, re-plan, join, and reconnect publications alike.
+        let _signal_publication_guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&from_room)
+            .await;
+
+        // Either endpoint can be pruned as slow/closed while this signal waits
+        // behind a room publication, before its connection assignment is
+        // asynchronously cleared. Revalidate coordinator routing under the gate
+        // so neither a removed sender nor a replacement target can act on the
+        // stale pre-wait snapshot.
+        let routed_members = match self.message_coordinator.routed_player_ids(&from_room).await {
+            Ok(Some(players)) => Some(players.into_iter().collect::<HashSet<_>>()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%from_room, %from, %to, %error, "Failed to revalidate signal routing");
+                return;
+            }
+        };
+        let sender_is_routed = routed_members
+            .as_ref()
+            .is_none_or(|members| members.contains(from));
+        if !sender_is_routed {
+            self.reject_signal(
+                from,
+                to,
+                "Signal sender is no longer routed in the room",
+                ErrorCode::NotInRoom,
+                "sender_routing_changed",
+            )
+            .await;
+            return;
+        }
+        let target_is_routed = match &routed_members {
+            Some(members) => members.contains(&to),
+            None => self.get_client_room(&to).await == Some(from_room),
+        };
+        let target_incarnation_matches = self
+            .connection_manager
+            .current_relay_stamp_in_room(&to, &from_room)
+            .is_some_and(|stamp| stamp.epoch == target_epoch);
+        if !target_is_routed || !target_incarnation_matches || !self.supports_webrtc_signaling(&to)
+        {
+            self.reject_signal(
+                from,
+                to,
+                "Signal target changed while session routing was being published",
+                ErrorCode::SignalTargetNotFound,
+                "target_routing_changed",
+            )
+            .await;
+            return;
+        }
 
         // 6. Per-connection valid signal rate limit.
         if let Err(err) = self.rate_limiter.check_signal(from).await {
@@ -212,8 +275,9 @@ impl EnhancedGameServer {
         // fallback transport for its trickle-ICE).
         let _ = self
             .message_coordinator
-            .send_to_player(
+            .send_to_player_in_room(
                 &to,
+                &from_room,
                 Arc::new(ServerMessage::Signal {
                     from: *from,
                     signal,
@@ -222,160 +286,430 @@ impl EnhancedGameServer {
             .await;
     }
 
-    /// Bring a joiner/reconnector into an **already-active** session: send the
-    /// joiner its tailored `SessionPlan` for the session the room is running,
-    /// then announce it to existing members via the `NewPeer` delta (Appendix E
-    /// late-join rule).
-    ///
-    /// Initial pairing for a freshly finalized lobby is the `SessionPlan`'s job
-    /// at finalize (`session_policy.rs`); this path only fires once the room is
-    /// live, and it consults the **stored** `ActiveSessionPlan` rather than
-    /// re-running the selection ladder:
-    ///
-    /// 1. The room must be `Finalized` — premature lobby-fill pairing is
-    ///    suppressed (the `SessionPlan` delivers initial pairing at finalize).
-    /// 2. The room must have a stored non-relay decision. A relay-floor (or
-    ///    pre-v3) room stores none and emits nothing — even when a recompute
-    ///    over the *current* members would now fit a richer rung, because the
-    ///    running session is still relay (sticky for the session lifetime).
-    /// 3. **Self-heal:** a `host`-topology decision whose stored host is
-    ///    invalid — missing from the current members, or seated but no longer
-    ///    capable of the session (`ActiveSessionPlan::host_invalid`) — is
-    ///    repaired first, via the same capability-aware re-election + full
-    ///    re-plan a host departure triggers (`replan_host_session`, one
-    ///    `session_replans_emitted` event). The heal re-plan delivers EVERY
-    ///    current member — including the joiner, even one that cannot run the
-    ///    session itself (the heal is about the room; an incapable v3 joiner
-    ///    still gets its plan with empty `peers`) — a fresh plan that already
-    ///    lists any capable joiner with glare-correct `initiate` flags, so the
-    ///    per-joiner plan and `NewPeer` deltas below are skipped as duplicates
-    ///    (and the joiner is counted on the re-plan event, not
-    ///    `session_plans_late_join`). If no member qualifies, the entry is
-    ///    removed and nothing is emitted. A normal late join — stored host
-    ///    present and capable — never re-plans.
-    /// 4. The **joiner**, when v3, receives a fresh `SessionPlan` built from the
-    ///    sticky topology/transport/host over the current member list, with
-    ///    fresh per-recipient ICE when the transport is WebRTC (a reconnector's
-    ///    original TURN credentials may have expired; a seat-filling joiner
-    ///    never had any). Its pairing arrives in `peers[].initiate`, so the
-    ///    joiner is deliberately **not** sent `NewPeer`. This holds for every
-    ///    stored plan, including `Host + Direct` (which received plans at
-    ///    finalize too). The plan's peer list is capability-filtered on both
-    ///    sides (`SessionPlanDecision::plan_for`): a joiner that did not
-    ///    negotiate the session's sticky pair (v3 relay-only, or v3 + WebRTC
-    ///    transport without the session's topology) receives an empty `peers`
-    ///    list and participates via the relay floor.
-    /// 5. **Existing members** receive the additive `NewPeer` delta only when
-    ///    the stored transport is **WebRTC** (`NewPeer` is a WebRTC-signaling
-    ///    control message) and the joiner satisfies the full session predicate
-    ///    (`SessionPlanDecision::recipient_pairable`: v3 + the sticky topology
-    ///    AND transport — the same rule that shapes plan peer lists, so
-    ///    existing members are never told to connect to a peer the plan would
-    ///    not list): mesh announces the joiner to every session-capable member
-    ///    (UUID glare rule); host announces along the star edge only (host
-    ///    learns of a client joiner; clients learn of a host joiner; clients
-    ///    never of each other). Members that cannot run the session are
-    ///    skipped in BOTH directions — neither announced to nor announced.
-    ///
-    /// `members` is the room's current player list **including the joiner**,
-    /// already fetched by the caller (`handle_join_room` / reconnect), avoiding
-    /// a redundant `get_room_players` round-trip. `room` supplies `id`,
-    /// `lobby_state`, and `authority_player` (for the self-heal re-election).
-    pub async fn handle_active_session_late_join(
+    pub(crate) async fn publish_join_lifecycle_fallback(
         &self,
-        room: &Room,
-        joiner: &PlayerId,
-        members: &[PlayerInfo],
-    ) {
-        // 1. Only into an active (finalized) session; the SessionPlan owns
-        //    finalize-time initial pairing, so lobby-fill joins emit nothing.
-        if room.lobby_state != LobbyState::Finalized {
-            return;
+        room_id: RoomId,
+        joiner: PlayerId,
+        player_joined: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        let replay_committed = Arc::new(AtomicBool::new(false));
+        let replay_committed_in_hook = Arc::clone(&replay_committed);
+        let replay_message = Arc::clone(&player_joined);
+        let reconnection_manager = self.reconnection_manager.clone();
+        let (_drain_tx, drain) = tokio::sync::watch::channel(false);
+        let should_publish = || true;
+        let _ = self
+            .message_coordinator
+            .broadcast_to_room_except_if_with_hook(
+                &room_id,
+                &joiner,
+                player_joined,
+                &should_publish,
+                drain,
+                Box::new(move || {
+                    Box::pin(async move {
+                        if let Some(reconnection_manager) = reconnection_manager {
+                            reconnection_manager
+                                .record_room_event(&room_id, replay_message.as_ref())
+                                .await;
+                        }
+                        replay_committed_in_hook.store(true, Ordering::Release);
+                    })
+                }),
+            )
+            .await?;
+        Ok(replay_committed.load(Ordering::Acquire))
+    }
+
+    /// Fail a room publication closed without terminating a replacement
+    /// connection that reused the same player id.
+    ///
+    /// The terminal socket teardown runs after the owned room job releases its
+    /// mutation guard. Incumbents may briefly observe the opening lifecycle
+    /// event, but the ensuing `PlayerLeft` clears their authoritative-plan
+    /// obligation; the affected client cannot remain live waiting for a plan
+    /// that the server failed to publish.
+    ///
+    /// Callers must retain the actor's lifecycle lock until this method
+    /// returns. The generation checks are defensive; the held lifecycle lock
+    /// is what makes snapshot registration and close initiation one logical
+    /// transition with respect to connection replacement.
+    pub(crate) async fn terminate_room_generation_after_publication_failure(
+        self: &Arc<Self>,
+        player_id: PlayerId,
+        room_id: RoomId,
+        expected_epoch: u32,
+        player_info: PlayerInfo,
+        was_authority: bool,
+        publication: &'static str,
+    ) -> bool {
+        let generation_is_current = self
+            .connection_manager
+            .current_relay_stamp_in_room(&player_id, &room_id)
+            .is_some_and(|stamp| stamp.epoch == expected_epoch);
+        if !generation_is_current {
+            return false;
         }
 
-        // 2. The session the room is RUNNING, not a recompute. No stored entry
-        //    (relay floor / pre-v3) ⇒ emit nothing.
-        let Some(stored) = self.active_session_plan(&room.id) else {
-            return;
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(&player_id) else {
+            return false;
         };
-
-        // 3. Self-heal (host-failover recovery): a `host`-topology entry whose
-        //    stored host is invalid — no longer a member (an
-        //    insert-after-departure race at finalize, concurrent departures, or
-        //    a departure hook skipped by a transient storage error) or seated
-        //    but no longer capable of the session (a capability-downgrading
-        //    reconnect) — is repaired with the SAME capability-aware
-        //    re-election + full re-plan a host departure triggers — so the
-        //    joiner pairs against a live host, and can itself be elected if it
-        //    qualifies. The heal runs regardless of the JOINER's own
-        //    pairability (the heal is about the room, not the joiner: an
-        //    incapable v3 joiner still receives the healed plan with empty
-        //    `peers`, and is never `NewPeer`-announced). The heal re-plan
-        //    already delivered every current member — `members` includes the
-        //    joiner — a fresh plan listing any capable joiner with
-        //    glare-correct `initiate` flags, so the separate joiner plan and
-        //    the `NewPeer` deltas below would be duplicates: return instead.
-        //    (If no member qualifies, the entry was removed and nothing was
-        //    emitted — the session is over and the relay floor carries the
-        //    room.) A normal late join, with the stored host present and
-        //    capable, never re-plans.
-        let session_members = self.session_members_from(members);
-        if stored.host_invalid(&session_members) {
-            self.replan_host_session(&room.id, stored, room.authority_player, session_members)
-                .await;
-            return;
-        }
-
-        // 4. Joiner-directed SessionPlan (v3-gated inside `send_session_plan_to`),
-        //    sent BEFORE the NewPeer delta fires for existing members — and sent
-        //    even to a joiner that cannot run the session (it receives its
-        //    truthful empty-`peers` view; only the pairing below is gated on
-        //    the full session predicate).
-        let decision = stored.decision_with(session_members);
-        let now_unix = decision
-            .uses_webrtc_signaling()
-            .then(|| chrono::Utc::now().timestamp());
-        if let Some(minted) = self
-            .send_session_plan_to(&decision, *joiner, now_unix)
-            .await
+        if lifecycle.player_id() != player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(&player_id, &lifecycle)
         {
-            self.metrics.increment_session_plans_late_join();
-            self.metrics.add_turn_credentials_issued(minted);
+            return false;
         }
 
-        // 5. `NewPeer` is a WebRTC-signaling control message: only announce when
-        //    the active session actually uses the WebRTC transport (a relay or
-        //    `Host + Direct` (LAN) session must never push clients into WebRTC
-        //    negotiation) AND the joiner satisfies the full session predicate —
-        //    v3 + the sticky topology AND transport, the same rule that filters
-        //    plan peer lists (existing members must never be told to connect to
-        //    a peer the plan itself would not list, e.g. a v3 joiner with the
-        //    WebRTC transport but without the session's topology).
-        if !decision.uses_webrtc_signaling() || !decision.recipient_pairable(*joiner) {
-            return;
-        }
+        // Preserve a complete reconnect/expiry-cleanup record before the
+        // socket teardown can race a failing database read. The normal
+        // unregister path may register the same room again; that operation is
+        // idempotent and retains this complete snapshot.
+        self.register_disconnection_for_reconnect(&player_id, room_id, was_authority, player_info)
+            .await;
 
-        match decision.topology {
-            // Unreachable: a WebRTC transport never pairs with a relay topology
-            // (`is_valid_pair`). Kept for an exhaustive, future-proof match.
-            Topology::Relay => {}
-            // Mesh: announce the joiner to every other session-capable member.
-            Topology::Mesh => {
-                self.announce_webrtc_peer_to_members(&decision, joiner)
-                    .await
-            }
-            // Host: announce along the star edge around the STORED host (the
-            // host-failover re-election updates the stored entry, so an ex-host
-            // reconnecting after a failover is announced as a client).
-            Topology::Host => {
-                let Some(host) = decision.host else {
-                    // Defensive: unreachable after the self-heal gate above (a
-                    // hostless host plan re-planned or was removed). Announce
-                    // nothing rather than fabricate pairings.
-                    return;
-                };
-                self.announce_webrtc_peer_in_star(&decision, joiner, host)
-                    .await;
+        let initiated = self
+            .connection_manager
+            .request_close_for(&player_id, crate::coordination::CloseReason::Unregistered);
+        tracing::error!(
+            %player_id,
+            %room_id,
+            expected_epoch,
+            publication,
+            initiated,
+            "Authoritative room publication failed; closing the affected connection"
+        );
+
+        // Never await teardown while this job owns the room mutation gate.
+        // The captured lifecycle fences the task against a replacement
+        // connection; teardown resumes after the handler releases its
+        // lifecycle lock and this job releases the room gate.
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            server.unregister_client_with_lifecycle(lifecycle).await;
+        });
+        true
+    }
+
+    /// Publish a finalized-room join as one exact-membership, two-phase event.
+    ///
+    /// The joiner's `RoomJoined` baseline is already queued while the caller
+    /// owns `room_event_guard`. Phase zero queues the joiner's authoritative
+    /// plan and every incumbent's `PlayerJoined`; phase one then queues every
+    /// incumbent's authoritative plan. Consequently no incumbent can signal the
+    /// joiner before the joiner's plan is queued, and no client can satisfy a
+    /// membership-count gate in the gap between lifecycle and pairing state.
+    ///
+    /// Reservation failures happen before the replay/state hook. A slow or
+    /// closed incumbent is removed and the decision is rebuilt over the new
+    /// routed set. If the joiner itself disappears, the lifecycle boundary is
+    /// still replayed and broadcast tolerantly to incumbents so its later
+    /// terminal epoch cannot appear without a matching opening event.
+    pub(crate) async fn publish_finalized_join_membership(
+        self: &Arc<Self>,
+        room: &Room,
+        joiner: PlayerId,
+        joiner_snapshot: PlayerInfo,
+        room_event_guard: RoomEventMutationGuard,
+    ) -> bool {
+        let room_id = room.id;
+        let baseline_room = room.clone();
+        let expected_join_epoch = joiner_snapshot.epoch.or_else(|| {
+            self.connection_manager
+                .current_relay_stamp_in_room(&joiner, &room_id)
+                .map(|stamp| stamp.epoch)
+        });
+        let player_joined = Arc::new(ServerMessage::PlayerJoined {
+            player: joiner_snapshot.clone(),
+        });
+        let joiner_was_authority = baseline_room.authority_player == Some(joiner);
+        let server = Arc::clone(self);
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let completion = self.message_coordinator.enqueue_room_event(
+            room_event_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    let mut attempts_remaining = baseline_room.players.len().saturating_add(1);
+                    loop {
+                        let publication_room = match server.database.get_room_by_id(&room_id).await {
+                            Ok(Some(room))
+                                if room.lobby_state == LobbyState::Finalized
+                                    && room.players.contains_key(&joiner) =>
+                            {
+                                room
+                            }
+                            Ok(Some(_)) => {
+                                tracing::warn!(%room_id, %joiner, "Joined-room refresh no longer matched the already-delivered finalized baseline; using that baseline for publication");
+                                baseline_room.clone()
+                            }
+                            Ok(None) => {
+                                tracing::warn!(%room_id, %joiner, "Joined room disappeared during finalized publication refresh; using the already-delivered baseline");
+                                baseline_room.clone()
+                            }
+                            Err(error) => {
+                                tracing::warn!(%room_id, %joiner, %error, "Failed to refresh joined room before finalized publication; using the already-delivered baseline");
+                                baseline_room.clone()
+                            }
+                        };
+                        let routed = match server
+                            .message_coordinator
+                            .routed_player_ids(&room_id)
+                            .await
+                        {
+                            Ok(players) => {
+                                players.map(|players| players.into_iter().collect::<HashSet<_>>())
+                            }
+                            Err(error) => {
+                                tracing::warn!(%room_id, %joiner, %error, "Failed to refresh joined-room routing; deriving the local route from generation-fenced connections");
+                                None
+                            }
+                        };
+                        let live_players: Vec<PlayerInfo> = publication_room
+                            .players
+                            .values()
+                            .filter(|player| {
+                                routed.as_ref().map_or_else(
+                                    || {
+                                        server
+                                            .connection_manager
+                                            .current_relay_stamp_in_room(&player.id, &room_id)
+                                            .is_some()
+                                    },
+                                    |routed| routed.contains(&player.id),
+                                )
+                            })
+                            .cloned()
+                            .collect();
+
+                        if !live_players.iter().any(|player| player.id == joiner) {
+                            if let Some(expected_epoch) = expected_join_epoch {
+                                server
+                                    .terminate_room_generation_after_publication_failure(
+                                        joiner,
+                                        room_id,
+                                        expected_epoch,
+                                        joiner_snapshot.clone(),
+                                        joiner_was_authority,
+                                        "finalized_join_unrouted",
+                                    )
+                                    .await;
+                            }
+                            return server
+                                .publish_join_lifecycle_fallback(
+                                    room_id,
+                                    joiner,
+                                    Arc::clone(&player_joined),
+                                )
+                                .await;
+                        }
+
+                        let resolved = membership_session_decision(
+                            server.active_session_plan(&room_id),
+                            publication_room.authority_player,
+                            server.session_members_from(&live_players),
+                        );
+                        let now_unix = resolved
+                            .decision
+                            .uses_webrtc_signaling()
+                            .then(|| chrono::Utc::now().timestamp());
+                        let expected_members: Vec<PlayerId> = resolved
+                            .decision
+                            .members
+                            .iter()
+                            .map(|member| member.player_id)
+                            .collect();
+                        let mut turn_credentials_issued = 0_u64;
+                        let mut joiner_has_plan = false;
+                        let recipient_messages: Vec<RoomRecipientMessages> = resolved
+                            .decision
+                            .members
+                            .iter()
+                            .map(|member| {
+                                let plan = server
+                                    .build_session_plan_message(
+                                        &resolved.decision,
+                                        member.player_id,
+                                        now_unix,
+                                    )
+                                    .map(|(message, minted)| {
+                                        turn_credentials_issued += minted;
+                                        message
+                                    });
+                                if member.player_id == joiner {
+                                    joiner_has_plan = plan.is_some();
+                                    RoomRecipientMessages::in_order(
+                                        member.player_id,
+                                        plan.into_iter().collect(),
+                                    )
+                                } else {
+                                    let mut messages = vec![Arc::clone(&player_joined)];
+                                    messages.extend(plan);
+                                    RoomRecipientMessages::in_order(member.player_id, messages)
+                                }
+                            })
+                            .collect();
+
+                        let active_plan_update = resolved.active_plan_update;
+                        let is_replan = resolved.is_replan;
+                        let active_session_plans = Arc::clone(&server.active_session_plans);
+                        let metrics = Arc::clone(&server.metrics);
+                        let reconnection_manager = server.reconnection_manager.clone();
+                        let replay_message = Arc::clone(&player_joined);
+
+                        if recipient_messages
+                            .iter()
+                            .all(|batch| batch.messages.is_empty())
+                        {
+                            if let Some(update) = active_plan_update {
+                                if let Some(plan) = update {
+                                    active_session_plans.insert(room_id, plan);
+                                } else {
+                                    active_session_plans.remove(&room_id);
+                                }
+                            }
+                            if is_replan {
+                                metrics.increment_session_replans_emitted();
+                            }
+                            if let Some(reconnection_manager) = reconnection_manager {
+                                reconnection_manager
+                                    .record_room_event(&room_id, replay_message.as_ref())
+                                    .await;
+                            }
+                            return Ok(true);
+                        }
+
+                        let outcome = match coordinator
+                            .commit_room_messages_if_members_with_hook(
+                                &room_id,
+                                &expected_members,
+                                recipient_messages,
+                                Box::new(move || {
+                                    Box::pin(async move {
+                                        if let Some(update) = active_plan_update {
+                                            if let Some(plan) = update {
+                                                active_session_plans.insert(room_id, plan);
+                                            } else {
+                                                active_session_plans.remove(&room_id);
+                                            }
+                                        }
+                                        if is_replan {
+                                            metrics.increment_session_replans_emitted();
+                                        }
+                                        if joiner_has_plan && !is_replan {
+                                            metrics.increment_session_plans_late_join();
+                                            metrics.add_turn_credentials_issued(
+                                                turn_credentials_issued,
+                                            );
+                                        }
+                                        if let Some(reconnection_manager) = reconnection_manager {
+                                            reconnection_manager
+                                                .record_room_event(
+                                                    &room_id,
+                                                    replay_message.as_ref(),
+                                                )
+                                                .await;
+                                        }
+                                        Ok(true)
+                                    })
+                                }),
+                                // A failed actor plan must not suppress healthy
+                                // incumbents' definitive phase-one plans.
+                                Box::new(|_| true),
+                            )
+                            .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                tracing::error!(%room_id, %joiner, %error, "Finalized join transaction failed");
+                                if let Some(expected_epoch) = expected_join_epoch {
+                                    server
+                                        .terminate_room_generation_after_publication_failure(
+                                            joiner,
+                                            room_id,
+                                            expected_epoch,
+                                            joiner_snapshot.clone(),
+                                            joiner_was_authority,
+                                            "finalized_join",
+                                        )
+                                        .await;
+                                }
+                                return server
+                                    .publish_join_lifecycle_fallback(
+                                        room_id,
+                                        joiner,
+                                        Arc::clone(&player_joined),
+                                    )
+                                    .await;
+                            }
+                        };
+                        match outcome {
+                            RoomMessageTransactionOutcome::Committed => return Ok(true),
+                            RoomMessageTransactionOutcome::CommittedDegraded { failed_frames } => {
+                                tracing::debug!(
+                                    %room_id,
+                                    failed_frames,
+                                    "Finalized join committed with degraded frame delivery"
+                                );
+                                return Ok(true);
+                            }
+                            RoomMessageTransactionOutcome::RoutingChanged => {
+                                attempts_remaining = attempts_remaining.saturating_sub(1);
+                                if attempts_remaining == 0 {
+                                    if let Some(expected_epoch) = expected_join_epoch {
+                                        server
+                                            .terminate_room_generation_after_publication_failure(
+                                                joiner,
+                                                room_id,
+                                                expected_epoch,
+                                                joiner_snapshot.clone(),
+                                                joiner_was_authority,
+                                                "finalized_join_routing",
+                                            )
+                                            .await;
+                                    }
+                                    return server
+                                        .publish_join_lifecycle_fallback(
+                                            room_id,
+                                            joiner,
+                                            Arc::clone(&player_joined),
+                                        )
+                                        .await;
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                            RoomMessageTransactionOutcome::HookRejected => {
+                                if let Some(expected_epoch) = expected_join_epoch {
+                                    server
+                                        .terminate_room_generation_after_publication_failure(
+                                            joiner,
+                                            room_id,
+                                            expected_epoch,
+                                            joiner_snapshot.clone(),
+                                            joiner_was_authority,
+                                            "finalized_join_hook",
+                                        )
+                                        .await;
+                                }
+                                return server
+                                    .publish_join_lifecycle_fallback(
+                                        room_id,
+                                        joiner,
+                                        Arc::clone(&player_joined),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                })
+            }),
+        );
+
+        match completion.await {
+            Ok(committed) => committed,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Finalized join publication failed");
+                false
             }
         }
     }
@@ -384,111 +718,12 @@ impl EnhancedGameServer {
     /// (negotiated v3 + the WebRTC transport).
     ///
     /// This is `handle_signal`'s transport-level plumbing gate (Appendix K),
-    /// deliberately WEAKER than the full session predicate
-    /// (`SessionPlanDecision::recipient_pairable`: v3 + the session's sticky
-    /// topology AND transport) that gates `NewPeer` pairing and plan peer
-    /// lists — the relay forwards signals between any two transport-capable
-    /// endpoints without second-guessing which pairs the plan brokered.
+    /// deliberately weaker than the full sticky topology/transport predicate
+    /// that shapes plan peer lists: the relay forwards signals between any two
+    /// transport-capable endpoints without reinterpreting the plan.
     pub(crate) fn supports_webrtc_signaling(&self, player_id: &PlayerId) -> bool {
         self.client_supports_v3(player_id)
             && self.client_supports_transport(player_id, Transport::WebRtc)
-    }
-
-    /// Announce a (re)joined peer to every other session-capable member of an
-    /// active mesh session via `NewPeer`.
-    ///
-    /// One-directional by design: only the **existing** members are told about
-    /// the joiner (`you_initiate` per the UUID glare rule, so exactly one side
-    /// of each pair offers). The joiner itself is never sent `NewPeer` — its
-    /// pairing (the same peers with the mirrored `initiate` flags) arrives in
-    /// the tailored `SessionPlan` that
-    /// [`Self::handle_active_session_late_join`] sends first.
-    ///
-    /// Gating is the full session predicate on BOTH sides
-    /// (`SessionPlanDecision::pairable` / `recipient_pairable`: v3 + the
-    /// session's sticky topology and transport — one rule shared with plan
-    /// peer lists and host election), so a member the plan would never list
-    /// (v2, v3 relay-only, or v3 lacking the session's topology) is neither
-    /// announced nor announced to.
-    pub(crate) async fn announce_webrtc_peer_to_members(
-        &self,
-        decision: &SessionPlanDecision,
-        peer: &PlayerId,
-    ) {
-        if !decision.recipient_pairable(*peer) {
-            return;
-        }
-
-        for member in &decision.members {
-            let existing = member.player_id;
-            if existing == *peer {
-                continue;
-            }
-            // Members that cannot run this session never participate in
-            // pairing (the same filter `plan_for` applies to peer lists).
-            if !decision.pairable(member) {
-                continue;
-            }
-
-            self.send_new_peer(&existing, peer, local_initiates(existing, *peer))
-                .await;
-        }
-    }
-
-    /// Announce a (re)joined peer along the star edge of an active
-    /// `host`-topology session via `NewPeer`.
-    ///
-    /// One-directional by design (the joiner's own pairing arrives in its
-    /// `SessionPlan`), and gated on the full session predicate on BOTH sides
-    /// (see [`Self::announce_webrtc_peer_to_members`]):
-    ///
-    /// - joiner IS the host ⇒ every session-capable client is told to offer to
-    ///   it (`you_initiate: true` — the star rule: clients offer, the host
-    ///   answers);
-    /// - joiner is a client ⇒ only the host (when present and session-capable)
-    ///   is told to answer it (`you_initiate: false`). Clients are never
-    ///   announced to each other in a star.
-    pub(crate) async fn announce_webrtc_peer_in_star(
-        &self,
-        decision: &SessionPlanDecision,
-        joiner: &PlayerId,
-        host: PlayerId,
-    ) {
-        if !decision.recipient_pairable(*joiner) {
-            return;
-        }
-
-        if *joiner == host {
-            // The host (re)joined: every session-capable client offers to it.
-            for member in &decision.members {
-                let client = member.player_id;
-                if client == host || !decision.pairable(member) {
-                    continue;
-                }
-                self.send_new_peer(&client, &host, true).await;
-            }
-        } else {
-            // A client (re)joined: the host answers it (the joiner's own
-            // "offer to the host" instruction is in its SessionPlan).
-            // `recipient_pairable` covers both host membership and capability.
-            if decision.recipient_pairable(host) {
-                self.send_new_peer(&host, joiner, false).await;
-            }
-        }
-    }
-
-    /// Best-effort `NewPeer { peer_id, you_initiate }` to one recipient.
-    async fn send_new_peer(&self, to: &PlayerId, peer_id: &PlayerId, you_initiate: bool) {
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                to,
-                Arc::new(ServerMessage::NewPeer {
-                    peer_id: *peer_id,
-                    you_initiate,
-                }),
-            )
-            .await;
     }
 
     async fn reject_signal(

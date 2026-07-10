@@ -8,18 +8,254 @@
 
 // Public modules
 pub mod dedup;
+pub(crate) mod outbound_queue;
 pub mod room_coordinator;
 
 // Re-export public types
 pub use dedup::DedupCacheSettings;
 pub use room_coordinator::{
     FinalizedRoom, InMemoryRoomOperationCoordinator, PlayerReadyError,
-    RoomOperationCoordinatorTrait, StartGameOutcome,
+    RoomOperationCoordinatorTrait, StartGameOutcome, StartGamePublication,
+    StartGamePublicationBuilder,
 };
 
 // MessageCoordinator trait (defined in server.rs as InMemoryMessageCoordinator)
 use crate::protocol::{PlayerId, RoomId, ServerMessage};
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, Weak};
+
+use outbound_queue::{
+    DataDeliveryMetadata, EnqueueOutcome as QueueEnqueueOutcome, OutboundData, OutboundPermit,
+    OutboundSender, TryEnqueueError,
+};
+
+/// An owned room-event job. The closure is enqueued synchronously, and its
+/// returned future is run by the room's FIFO lane independently of the caller's
+/// lifetime. [`MessageCoordinator::enqueue_room_event`] separately
+/// requires and owns the matching [`RoomEventMutationGuard`], so queued work
+/// cannot be admitted without the mutation gate that bounds this queue.
+pub type RoomEventJob = Box<
+    dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'static>>
+        + Send
+        + 'static,
+>;
+
+/// Completion of one FIFO room event.
+pub type RoomEventCompletion = Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'static>>;
+
+/// Ordered control frames destined for one member of a room transaction.
+///
+/// All batches in a transaction are fully reserved before its commit hook is
+/// allowed to mutate durable state. Frames are committed by phase: every
+/// recipient's phase-zero frame, then every phase-one frame. `first_phase`
+/// permits a recipient to participate only in the later phase; an empty batch
+/// still participates in exact-membership validation without reserving a slot.
+/// Production validates a control-queue capacity of at least two, matching the
+/// hard two-frame limit enforced by the coordinator before reservations begin.
+#[derive(Debug, Clone)]
+pub struct RoomRecipientMessages {
+    pub player_id: PlayerId,
+    pub first_phase: usize,
+    pub messages: Vec<Arc<ServerMessage>>,
+}
+
+impl RoomRecipientMessages {
+    pub fn from_first_phase(
+        player_id: PlayerId,
+        first_phase: usize,
+        messages: Vec<Arc<ServerMessage>>,
+    ) -> Self {
+        Self {
+            player_id,
+            first_phase,
+            messages,
+        }
+    }
+
+    pub fn in_order(player_id: PlayerId, messages: Vec<Arc<ServerMessage>>) -> Self {
+        Self::from_first_phase(player_id, 0, messages)
+    }
+
+    pub(crate) fn phase_count(&self) -> usize {
+        self.first_phase.saturating_add(self.messages.len())
+    }
+
+    pub(crate) fn message_in_phase(&self, phase: usize) -> Option<&Arc<ServerMessage>> {
+        phase
+            .checked_sub(self.first_phase)
+            .and_then(|index| self.messages.get(index))
+    }
+}
+
+/// Result of an exact-membership room-message transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomMessageTransactionOutcome {
+    /// The fallible hook succeeded and every reserved frame was committed.
+    Committed,
+    /// Durable state committed, but one or more already-reserved frames could
+    /// not be enqueued because their recipient closed or changed generation
+    /// during the async commit hook, or the phase callback canceled dependent
+    /// later frames after phase zero degraded. Independent healthy phases are
+    /// still attempted, and transaction state callbacks run exactly once.
+    CommittedDegraded { failed_frames: usize },
+    /// Published membership or connection identity changed before commit.
+    RoutingChanged,
+    /// The hook declined the commit, for example because another StartGame won
+    /// the durable compare-and-set.
+    HookRejected,
+}
+
+/// Guard for the short mutation/enqueue portion of a room state transition.
+///
+/// Every coordinator implementation must share one lane across room,
+/// authority, ready-state, session, and spectator services.
+pub struct RoomEventMutationGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _lane: Arc<RoomEventLane>,
+}
+
+struct QueuedRoomEvent {
+    job: RoomEventJob,
+    completion: tokio::sync::oneshot::Sender<anyhow::Result<bool>>,
+}
+
+#[derive(Default)]
+struct RoomEventQueue {
+    running: bool,
+    jobs: VecDeque<QueuedRoomEvent>,
+}
+
+struct RoomEventLane {
+    room_id: RoomId,
+    owner: Weak<RoomEventSequencer>,
+    mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    queue: Mutex<RoomEventQueue>,
+}
+
+impl RoomEventLane {
+    fn enqueue(self: &Arc<Self>, job: RoomEventJob) -> RoomEventCompletion {
+        let (completion, receiver) = tokio::sync::oneshot::channel();
+        let should_start = {
+            let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
+            debug_assert!(
+                queue.jobs.is_empty(),
+                "guard-coupled room enqueue permits at most one pending job per lane"
+            );
+            queue.jobs.push_back(QueuedRoomEvent { job, completion });
+            if queue.running {
+                false
+            } else {
+                queue.running = true;
+                true
+            }
+        };
+
+        if should_start {
+            let lane = Arc::clone(self);
+            tokio::spawn(async move { lane.drain().await });
+        }
+
+        Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| anyhow::anyhow!("room event lane stopped before completion"))?
+        })
+    }
+
+    async fn drain(self: Arc<Self>) {
+        loop {
+            let next = {
+                let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
+                match queue.jobs.pop_front() {
+                    Some(next) => next,
+                    None => {
+                        queue.running = false;
+                        return;
+                    }
+                }
+            };
+
+            // Isolate each job so a panic cannot strand the lane or later
+            // events. Dropping the caller's completion future also cannot
+            // cancel the already-enqueued job.
+            let result = tokio::spawn(async move { (next.job)().await })
+                .await
+                .map_err(|error| anyhow::anyhow!("room event job failed: {error}"))
+                .and_then(std::convert::identity);
+            let _ = next.completion.send(result);
+        }
+    }
+}
+
+impl Drop for RoomEventLane {
+    fn drop(&mut self) {
+        let Some(owner) = self.owner.upgrade() else {
+            return;
+        };
+        let mut lanes = owner
+            .lanes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if lanes
+            .get(&self.room_id)
+            .is_some_and(|lane| std::ptr::eq(lane.as_ptr(), self))
+        {
+            lanes.remove(&self.room_id);
+        }
+    }
+}
+
+/// Shared, mutation-ordered room-event domain used by the production message
+/// coordinator. The registry stores only weak lanes; the last guard/job drops
+/// its lane and removes the matching registry entry, so idle rooms do not
+/// accumulate workers or map entries.
+#[derive(Default)]
+pub(crate) struct RoomEventSequencer {
+    lanes: Mutex<HashMap<RoomId, Weak<RoomEventLane>>>,
+}
+
+impl RoomEventSequencer {
+    fn lane(self: &Arc<Self>, room_id: RoomId) -> Arc<RoomEventLane> {
+        let mut lanes = self.lanes.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(lane) = lanes.get(&room_id).and_then(Weak::upgrade) {
+            return lane;
+        }
+
+        let lane = Arc::new(RoomEventLane {
+            room_id,
+            owner: Arc::downgrade(self),
+            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            queue: Mutex::new(RoomEventQueue::default()),
+        });
+        lanes.insert(room_id, Arc::downgrade(&lane));
+        lane
+    }
+
+    pub(crate) async fn lock(self: &Arc<Self>, room_id: RoomId) -> RoomEventMutationGuard {
+        let lane = self.lane(room_id);
+        let guard = Arc::clone(&lane.mutation_gate).lock_owned().await;
+        RoomEventMutationGuard {
+            _guard: guard,
+            _lane: lane,
+        }
+    }
+
+    pub(crate) fn enqueue(
+        self: &Arc<Self>,
+        mutation_guard: RoomEventMutationGuard,
+        job: RoomEventJob,
+    ) -> RoomEventCompletion {
+        let lane = Arc::clone(&mutation_guard._lane);
+        lane.enqueue(Box::new(move || {
+            Box::pin(async move {
+                let _mutation_guard = mutation_guard;
+                job().await
+            })
+        }))
+    }
+}
 
 /// Why the server requested a connection be closed.
 ///
@@ -185,9 +421,399 @@ impl ConnectionCloseListener {
 /// outbound message queue plus the kill switch used when that queue cannot
 /// absorb traffic.
 #[derive(Debug, Clone)]
+pub struct DeliverySender(DeliverySenderKind);
+
+#[derive(Debug, Clone)]
+enum DeliverySenderKind {
+    Legacy(tokio::sync::mpsc::Sender<Arc<ServerMessage>>),
+    Classified {
+        sender: OutboundSender,
+        generation: u64,
+    },
+}
+
+impl From<tokio::sync::mpsc::Sender<Arc<ServerMessage>>> for DeliverySender {
+    fn from(sender: tokio::sync::mpsc::Sender<Arc<ServerMessage>>) -> Self {
+        Self(DeliverySenderKind::Legacy(sender))
+    }
+}
+
+impl DeliverySender {
+    pub(crate) fn classified(sender: OutboundSender) -> Self {
+        Self(DeliverySenderKind::Classified {
+            sender,
+            generation: 0,
+        })
+    }
+
+    pub(crate) fn next_generation(&self) -> Self {
+        match &self.0 {
+            DeliverySenderKind::Legacy(sender) => Self(DeliverySenderKind::Legacy(sender.clone())),
+            DeliverySenderKind::Classified { sender, generation } => {
+                Self(DeliverySenderKind::Classified {
+                    sender: sender.clone(),
+                    generation: generation.saturating_add(1),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn previous_generation(&self) -> Self {
+        match &self.0 {
+            DeliverySenderKind::Legacy(sender) => Self(DeliverySenderKind::Legacy(sender.clone())),
+            DeliverySenderKind::Classified { sender, generation } => {
+                Self(DeliverySenderKind::Classified {
+                    sender: sender.clone(),
+                    generation: generation.saturating_sub(1),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn set_protocol_version(&self, version: u16) {
+        if let DeliverySenderKind::Classified { sender, .. } = &self.0 {
+            sender.set_protocol_version(version);
+        }
+    }
+
+    pub(crate) fn set_game_data_format(&self, format: crate::protocol::GameDataEncoding) {
+        if let DeliverySenderKind::Classified { sender, .. } = &self.0 {
+            sender.set_game_data_format(format);
+        }
+    }
+
+    /// Whether two handles address the same physical queue generation.
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (DeliverySenderKind::Legacy(left), DeliverySenderKind::Legacy(right)) => {
+                left.same_channel(right)
+            }
+            (
+                DeliverySenderKind::Classified {
+                    sender: left,
+                    generation: left_generation,
+                },
+                DeliverySenderKind::Classified {
+                    sender: right,
+                    generation: right_generation,
+                },
+            ) => left.same_channel(right) && left_generation == right_generation,
+            _ => false,
+        }
+    }
+
+    fn effective_data_class(
+        &self,
+        message: &ServerMessage,
+    ) -> Option<crate::protocol::DeliveryClass> {
+        let requested = match message {
+            ServerMessage::GameData { class, .. } => class.unwrap_or_default(),
+            ServerMessage::GameDataBinary { .. } => crate::protocol::DeliveryClass::Reliable,
+            _ => return None,
+        };
+        match &self.0 {
+            DeliverySenderKind::Legacy(_) => Some(crate::protocol::DeliveryClass::Reliable),
+            DeliverySenderKind::Classified { sender, .. } if !sender.delivery_classes_enabled() => {
+                Some(crate::protocol::DeliveryClass::Reliable)
+            }
+            DeliverySenderKind::Classified { .. } => Some(requested),
+        }
+    }
+
+    fn record_rejected_with_close(&self, class: crate::protocol::DeliveryClass) {
+        if let DeliverySenderKind::Classified { sender, .. } = &self.0 {
+            sender.record_rejected_with_close(class);
+        }
+    }
+
+    pub(crate) fn try_send(
+        &self,
+        message: Arc<ServerMessage>,
+        room_id: Option<RoomId>,
+    ) -> Result<QueueEnqueueOutcome, DeliveryTrySendError> {
+        match &self.0 {
+            DeliverySenderKind::Legacy(sender) => sender
+                .try_send(message)
+                .map(|()| QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 0,
+                })
+                .map_err(|error| match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(message) => {
+                        DeliveryTrySendError::Full(message)
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        DeliveryTrySendError::Closed
+                    }
+                }),
+            DeliverySenderKind::Classified { sender, generation } => {
+                if is_delivery_transition(message.as_ref()) {
+                    sender
+                        .try_enqueue_transition(message, *generation)
+                        .map_err(map_control_queue_error)
+                } else if matches!(
+                    message.as_ref(),
+                    ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+                ) {
+                    let data = classify_outbound_data(message, room_id)
+                        .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
+                    sender
+                        .try_enqueue_data_scoped(data, *generation)
+                        .map_err(map_data_queue_error)
+                } else {
+                    sender
+                        .try_enqueue_control_scoped(message, room_id, *generation)
+                        .map_err(map_control_queue_error)
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn send(
+        &self,
+        message: Arc<ServerMessage>,
+        room_id: Option<RoomId>,
+    ) -> Result<QueueEnqueueOutcome, DeliveryTrySendError> {
+        match &self.0 {
+            DeliverySenderKind::Legacy(sender) => sender
+                .send(message)
+                .await
+                .map(|()| QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 0,
+                })
+                .map_err(|_| DeliveryTrySendError::Closed),
+            DeliverySenderKind::Classified { sender, generation } => {
+                if is_delivery_transition(message.as_ref()) {
+                    sender
+                        .enqueue_transition(message, *generation)
+                        .await
+                        .map_err(map_control_queue_error)
+                } else if matches!(
+                    message.as_ref(),
+                    ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+                ) {
+                    let data = classify_outbound_data(message, room_id)
+                        .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
+                    sender
+                        .enqueue_data_scoped(data, *generation)
+                        .await
+                        .map_err(map_data_queue_error)
+                } else {
+                    sender
+                        .enqueue_control_scoped(message, room_id, *generation)
+                        .await
+                        .map_err(map_control_queue_error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn try_reserve_control(
+        &self,
+        room_id: Option<RoomId>,
+    ) -> Result<DeliveryPermit, DeliveryReserveError> {
+        match &self.0 {
+            DeliverySenderKind::Legacy(sender) => sender
+                .clone()
+                .try_reserve_owned()
+                .map(DeliveryPermit::Legacy)
+                .map_err(|error| match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => DeliveryReserveError::Full,
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        DeliveryReserveError::Closed
+                    }
+                }),
+            DeliverySenderKind::Classified { sender, generation } => sender
+                .try_reserve_control_scoped(*generation, room_id)
+                .map(|permit| DeliveryPermit::Classified {
+                    permit,
+                    generation: *generation,
+                    room_id,
+                })
+                .map_err(|error| match error {
+                    outbound_queue::ReserveError::Full => DeliveryReserveError::Full,
+                    outbound_queue::ReserveError::Closed => DeliveryReserveError::Closed,
+                    outbound_queue::ReserveError::Canceled => DeliveryReserveError::Canceled,
+                }),
+        }
+    }
+
+    pub(crate) async fn reserve_control(
+        &self,
+        room_id: Option<RoomId>,
+    ) -> Result<DeliveryPermit, DeliveryReserveError> {
+        match &self.0 {
+            DeliverySenderKind::Legacy(sender) => sender
+                .clone()
+                .reserve_owned()
+                .await
+                .map(DeliveryPermit::Legacy)
+                .map_err(|_| DeliveryReserveError::Closed),
+            DeliverySenderKind::Classified { sender, generation } => sender
+                .reserve_control_scoped(*generation, room_id)
+                .await
+                .map(|permit| DeliveryPermit::Classified {
+                    permit,
+                    generation: *generation,
+                    room_id,
+                })
+                .map_err(|error| match error {
+                    outbound_queue::ReserveError::Full => DeliveryReserveError::Full,
+                    outbound_queue::ReserveError::Closed => DeliveryReserveError::Closed,
+                    outbound_queue::ReserveError::Canceled => DeliveryReserveError::Canceled,
+                }),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum DeliveryPermit {
+    Legacy(tokio::sync::mpsc::OwnedPermit<Arc<ServerMessage>>),
+    Classified {
+        permit: OutboundPermit,
+        generation: u64,
+        room_id: Option<RoomId>,
+    },
+}
+
+impl DeliveryPermit {
+    pub(crate) fn send(
+        self,
+        message: Arc<ServerMessage>,
+    ) -> Result<QueueEnqueueOutcome, Arc<ServerMessage>> {
+        match self {
+            Self::Legacy(permit) => {
+                permit.send(message);
+                Ok(QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 0,
+                })
+            }
+            Self::Classified {
+                permit,
+                generation,
+                room_id,
+            } => permit.send_control_scoped(message, generation, room_id),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum DeliveryTrySendError {
+    Full(Arc<ServerMessage>),
+    Closed,
+    AccountabilityUnavailable,
+    InvalidMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryReserveError {
+    Full,
+    Closed,
+    Canceled,
+}
+
+#[derive(Debug, Clone)]
 pub struct ClientDeliveryHandle {
-    pub sender: tokio::sync::mpsc::Sender<Arc<ServerMessage>>,
+    pub sender: DeliverySender,
     pub close: ConnectionCloseSignal,
+}
+
+impl ClientDeliveryHandle {
+    pub fn new(
+        sender: tokio::sync::mpsc::Sender<Arc<ServerMessage>>,
+        close: ConnectionCloseSignal,
+    ) -> Self {
+        Self {
+            sender: sender.into(),
+            close,
+        }
+    }
+
+    pub(crate) fn classified(sender: OutboundSender, close: ConnectionCloseSignal) -> Self {
+        Self {
+            sender: DeliverySender::classified(sender),
+            close,
+        }
+    }
+}
+
+fn classify_outbound_data(
+    message: Arc<ServerMessage>,
+    room_id: Option<RoomId>,
+) -> Result<OutboundData, Arc<ServerMessage>> {
+    let fields = match message.as_ref() {
+        ServerMessage::GameData {
+            from_player,
+            seq,
+            epoch,
+            class,
+            key,
+            ..
+        } => (*from_player, *seq, *epoch, *class, *key),
+        ServerMessage::GameDataBinary {
+            from_player,
+            seq,
+            epoch,
+            ..
+        } => (*from_player, *seq, *epoch, None, None),
+        _ => return Err(message),
+    };
+    let (from_player, seq, epoch, class, key) = fields;
+    match (room_id, seq, epoch) {
+        (Some(room_id), Some(seq), Some(epoch)) => Ok(OutboundData::new(
+            message,
+            DataDeliveryMetadata {
+                class: class.unwrap_or_default(),
+                key,
+                from_player,
+                room_id,
+                epoch,
+                seq,
+            },
+        )),
+        (_, None, None)
+            if class.unwrap_or_default() == crate::protocol::DeliveryClass::Reliable
+                && key.is_none() =>
+        {
+            Ok(OutboundData::reliable_unstamped(message))
+        }
+        _ => Err(message),
+    }
+}
+
+fn is_delivery_transition(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::RoomJoined(_)
+            | ServerMessage::RoomLeft
+            | ServerMessage::Reconnected(_)
+            | ServerMessage::SpectatorJoined(_)
+            | ServerMessage::SpectatorLeft { .. }
+    )
+}
+
+fn map_data_queue_error(error: TryEnqueueError<OutboundData>) -> DeliveryTrySendError {
+    match error {
+        TryEnqueueError::Full(data) => DeliveryTrySendError::Full(data.message),
+        TryEnqueueError::Closed(_) => DeliveryTrySendError::Closed,
+        TryEnqueueError::AccountabilityUnavailable(_) => {
+            DeliveryTrySendError::AccountabilityUnavailable
+        }
+        TryEnqueueError::InvalidMetadata(_) => DeliveryTrySendError::InvalidMetadata,
+    }
+}
+
+fn map_control_queue_error(error: TryEnqueueError<Arc<ServerMessage>>) -> DeliveryTrySendError {
+    match error {
+        TryEnqueueError::Full(message) => DeliveryTrySendError::Full(message),
+        TryEnqueueError::Closed(_) => DeliveryTrySendError::Closed,
+        TryEnqueueError::AccountabilityUnavailable(_) => {
+            DeliveryTrySendError::AccountabilityUnavailable
+        }
+        TryEnqueueError::InvalidMetadata(_) => DeliveryTrySendError::InvalidMetadata,
+    }
 }
 
 /// Result of attempting to deliver one message to one connection.
@@ -195,12 +821,17 @@ pub struct ClientDeliveryHandle {
 pub enum DeliveryOutcome {
     /// The message was enqueued on the recipient's outbound queue.
     Delivered,
+    /// A v3 lossy delivery policy omitted the submitted message and queued an
+    /// exact causal `DeliveryReport`; the connection remains healthy.
+    AccountedDrop,
+    /// A stale room-routing snapshot attempted to commit after a room-context
+    /// transition fence. It is intentionally outside the new room's ledger.
+    Canceled,
     /// The recipient's connection is already tearing down (its queue receiver
     /// is gone). This is a normal disconnect race, not a delivery fault.
     ChannelClosed,
-    /// The recipient's queue stayed full past the slow-consumer timeout; the
-    /// message was abandoned and the recipient's connection was asked to
-    /// close.
+    /// Outbound delivery could not make accountable progress; the message was
+    /// abandoned and the recipient's connection was asked to close loudly.
     SlowConsumer,
 }
 
@@ -210,20 +841,39 @@ pub enum DeliveryOutcome {
 /// by the message coordinator (relay/broadcast paths) and by the WebSocket
 /// layer's direct control-message sends alike:
 ///
-/// - fast path: lock-free `try_send`;
-/// - full queue: wait (true backpressure) up to `slow_consumer_timeout`,
-///   counting a backpressure event;
-/// - still full after the timeout: count and log the failure, signal the
-///   recipient's connection to close ([`CloseReason::SlowConsumer`]), and
-///   report [`DeliveryOutcome::SlowConsumer`] so the caller can prune the
-///   recipient. The message is abandoned only together with the connection
-///   itself — never silently.
+/// - fast path: apply the negotiated queue policy immediately;
+/// - full reliable queue: wait (true backpressure) up to
+///   `slow_consumer_timeout`, counting a backpressure event;
+/// - lossy policy: atomically queue an exact prior report for every omission;
+/// - timeout or lost accountability: signal a loud
+///   [`CloseReason::SlowConsumer`] and report
+///   [`DeliveryOutcome::SlowConsumer`]. The message is abandoned only with
+///   the connection itself, never silently.
 pub async fn deliver_or_disconnect(
     metrics: &crate::metrics::ServerMetrics,
     slow_consumer_timeout: std::time::Duration,
     player_id: &PlayerId,
     handle: &ClientDeliveryHandle,
     message: Arc<ServerMessage>,
+) -> DeliveryOutcome {
+    deliver_or_disconnect_in_room(
+        metrics,
+        slow_consumer_timeout,
+        player_id,
+        handle,
+        message,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn deliver_or_disconnect_in_room(
+    metrics: &crate::metrics::ServerMetrics,
+    slow_consumer_timeout: std::time::Duration,
+    player_id: &PlayerId,
+    handle: &ClientDeliveryHandle,
+    message: Arc<ServerMessage>,
+    room_id: Option<RoomId>,
 ) -> DeliveryOutcome {
     // Conservation accounting: one attempt per call, resolved below as exactly
     // one of enqueued / channel-closed / slow-consumer drop, so the exported
@@ -234,17 +884,15 @@ pub async fn deliver_or_disconnect(
     // so the default deployment pays one cheap map miss here. Relaxed: these
     // are monotonic diagnostics, never synchronization.
     let connection_stats = metrics.connection_delivery_stats(player_id);
-    let message = match handle.sender.try_send(message) {
-        Ok(()) => {
-            metrics.increment_websocket_deliveries_enqueued();
-            if let Some(stats) = &connection_stats {
-                stats
-                    .sent_to_you
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            return DeliveryOutcome::Delivered;
+    let offered_class = handle.sender.effective_data_class(message.as_ref());
+    let message = match handle.sender.try_send(message, room_id) {
+        Ok(outcome) => {
+            return record_queue_outcome(metrics, connection_stats.as_ref(), outcome);
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+        Err(DeliveryTrySendError::Closed) => {
+            if let Some(class) = offered_class {
+                handle.sender.record_rejected_with_close(class);
+            }
             metrics.increment_websocket_deliveries_channel_closed();
             tracing::debug!(
                 %player_id,
@@ -252,7 +900,29 @@ pub async fn deliver_or_disconnect(
             );
             return DeliveryOutcome::ChannelClosed;
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Full(message)) => message,
+        Err(DeliveryTrySendError::Full(message)) => message,
+        Err(DeliveryTrySendError::AccountabilityUnavailable) => {
+            return fail_delivery_closed(
+                metrics,
+                connection_stats.as_ref(),
+                player_id,
+                handle,
+                "Delivery accountability queue exhausted; closing recipient",
+            );
+        }
+        Err(DeliveryTrySendError::InvalidMetadata) => {
+            if let Some(class) = offered_class {
+                handle.sender.record_rejected_with_close(class);
+            }
+            tracing::error!(%player_id, "Invalid internal outbound delivery metadata");
+            return fail_delivery_closed(
+                metrics,
+                connection_stats.as_ref(),
+                player_id,
+                handle,
+                "Invalid internal delivery metadata; closing recipient fail-closed",
+            );
+        }
     };
 
     metrics.increment_websocket_backpressure_events();
@@ -261,22 +931,54 @@ pub async fn deliver_or_disconnect(
             .backpressure_events
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    match tokio::time::timeout(slow_consumer_timeout, handle.sender.send(message)).await {
-        Ok(Ok(())) => {
-            metrics.increment_websocket_deliveries_enqueued();
-            if let Some(stats) = &connection_stats {
-                stats
-                    .sent_to_you
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pending_class = offered_class;
+    match tokio::time::timeout(slow_consumer_timeout, handle.sender.send(message, room_id)).await {
+        Ok(Ok(outcome)) => record_queue_outcome(metrics, connection_stats.as_ref(), outcome),
+        Ok(Err(DeliveryTrySendError::Closed)) => {
+            if let Some(class) = pending_class {
+                handle.sender.record_rejected_with_close(class);
             }
-            DeliveryOutcome::Delivered
-        }
-        Ok(Err(_receiver_gone)) => {
             metrics.increment_websocket_deliveries_channel_closed();
             tracing::debug!(%player_id, "Recipient connection closed while backpressured");
             DeliveryOutcome::ChannelClosed
         }
+        Ok(Err(DeliveryTrySendError::AccountabilityUnavailable)) => fail_delivery_closed(
+            metrics,
+            connection_stats.as_ref(),
+            player_id,
+            handle,
+            "Delivery accountability queue exhausted while waiting; closing recipient",
+        ),
+        Ok(Err(DeliveryTrySendError::InvalidMetadata)) => {
+            if let Some(class) = pending_class {
+                handle.sender.record_rejected_with_close(class);
+            }
+            tracing::error!(%player_id, "Invalid internal outbound delivery metadata after wait");
+            fail_delivery_closed(
+                metrics,
+                connection_stats.as_ref(),
+                player_id,
+                handle,
+                "Invalid internal delivery metadata; closing recipient fail-closed",
+            )
+        }
+        Ok(Err(DeliveryTrySendError::Full(_))) => {
+            if let Some(class) = pending_class {
+                handle.sender.record_rejected_with_close(class);
+            }
+            tracing::error!(%player_id, "Blocking outbound send returned Full unexpectedly");
+            fail_delivery_closed(
+                metrics,
+                connection_stats.as_ref(),
+                player_id,
+                handle,
+                "Outbound queue invariant failed; closing recipient fail-closed",
+            )
+        }
         Err(_elapsed) => {
+            if let Some(class) = pending_class {
+                handle.sender.record_rejected_with_close(class);
+            }
             // Several deliveries (e.g. concurrent broadcasts from different
             // senders) can time out against the same stuck recipient; only the
             // one that actually initiates the close counts a disconnect, so
@@ -304,13 +1006,121 @@ pub async fn deliver_or_disconnect(
     }
 }
 
+pub(crate) fn record_queue_outcome(
+    metrics: &crate::metrics::ServerMetrics,
+    connection_stats: Option<&Arc<crate::metrics::ConnectionDeliveryStats>>,
+    outcome: QueueEnqueueOutcome,
+) -> DeliveryOutcome {
+    if outcome.losses > 0 {
+        metrics.add_websocket_messages_dropped(outcome.losses);
+        if let Some(stats) = connection_stats {
+            stats
+                .dropped_for_you
+                .fetch_add(outcome.losses, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    if outcome.enqueued {
+        metrics.increment_websocket_deliveries_enqueued();
+        if let Some(stats) = connection_stats {
+            stats
+                .sent_to_you
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        DeliveryOutcome::Delivered
+    } else if outcome.losses > 0 {
+        DeliveryOutcome::AccountedDrop
+    } else {
+        metrics.increment_websocket_deliveries_canceled();
+        DeliveryOutcome::Canceled
+    }
+}
+
+pub(crate) fn fail_delivery_closed(
+    metrics: &crate::metrics::ServerMetrics,
+    connection_stats: Option<&Arc<crate::metrics::ConnectionDeliveryStats>>,
+    player_id: &PlayerId,
+    handle: &ClientDeliveryHandle,
+    log_message: &'static str,
+) -> DeliveryOutcome {
+    let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
+    if initiated_close {
+        metrics.increment_websocket_slow_consumer_disconnects();
+    }
+    metrics.increment_websocket_messages_dropped();
+    if let Some(stats) = connection_stats {
+        stats
+            .dropped_for_you
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    tracing::error!(%player_id, initiated_close, "{log_message}");
+    DeliveryOutcome::SlowConsumer
+}
+
 #[async_trait::async_trait]
 pub trait MessageCoordinator: Send + Sync {
+    /// Serialize the short mutation/enqueue portion of all room-derived state
+    /// transitions. Implementations must use the same per-room domain as
+    /// [`Self::enqueue_room_event`].
+    async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard;
+
+    /// Enqueue a committed room event into the shared per-room FIFO.
+    ///
+    /// Callers synchronously transfer the matching mutation guard with the
+    /// job, then await the returned completion only after bounded/distributed
+    /// locks have been released. Implementations must retain that guard for the
+    /// complete queued job and keep work independent of caller cancellation.
+    fn enqueue_room_event(
+        &self,
+        mutation_guard: RoomEventMutationGuard,
+        job: RoomEventJob,
+    ) -> RoomEventCompletion;
+
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
+
+    /// Deliver only while `player_id` is currently routed in `room_id`.
+    /// Production also generation-scopes the enqueue, so a leave/reconnect
+    /// after recipient lookup cancels the stale delivery at queue commit.
+    async fn send_to_player_in_room(
+        &self,
+        player_id: &PlayerId,
+        _room_id: &RoomId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        self.send_to_player(player_id, message).await?;
+        Ok(true)
+    }
+
+    /// Snapshot player ids currently published in room routing. `None` means a
+    /// lightweight test/distributed implementation does not model local
+    /// routing; production returns `Some` under its routing locks.
+    async fn routed_player_ids(&self, _room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
+        Ok(None)
+    }
+
+    /// Deliver a room-scoped control frame only if routing still contains the
+    /// exact member set used to build it.
+    async fn send_to_player_in_room_if_members(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        if let Some(mut routed) = self.routed_player_ids(room_id).await? {
+            let mut expected = expected_members.to_vec();
+            routed.sort_unstable();
+            expected.sort_unstable();
+            if routed != expected {
+                return Ok(false);
+            }
+        }
+        self.send_to_player_in_room(player_id, room_id, message)
+            .await
+    }
 
     async fn send_to_player_if(
         &self,
@@ -376,6 +1186,73 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Broadcast a room-uniform event after committing its replay hook.
+    ///
+    /// Production implementations should run `before_send` while holding the
+    /// same routing snapshot guard used to decide live recipients. This orders
+    /// reconnect registration against the pair as one operation: a reconnecting
+    /// socket observes the event through replay or live delivery, never both.
+    /// Hook implementations must not call back into `MessageCoordinator` or
+    /// await work that can depend on its routing locks.
+    async fn broadcast_to_room_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        message: Arc<ServerMessage>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool>;
+
+    /// Commit a room broadcast only if routing still contains the exact member
+    /// set used to build the payload.
+    async fn broadcast_to_room_if_members_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        message: Arc<ServerMessage>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool>;
+
+    /// Atomically publish an ordered set of per-recipient room control frames.
+    ///
+    /// Implementations must reserve capacity for every frame, revalidate the
+    /// exact routed member and connection-generation snapshot, and only then
+    /// run `before_send` under the final routing guard. An error or `false`
+    /// result from the hook must release every reservation without delivering a
+    /// frame. Once the hook succeeds, frames are committed phase-by-phase so no
+    /// tailored second frame can precede another member's uniform first frame.
+    /// A valid production configuration provides at least two control slots per
+    /// recipient; implementations must reject batches beyond these two phases.
+    /// `after_first_phase` runs exactly once between those phases under the same
+    /// routing guard and receives the number of phase-zero frames that failed.
+    /// Returning `false` cancels all reserved later-phase frames; returning
+    /// `true` commits them even when phase zero degraded. Neither callback may
+    /// call back into `MessageCoordinator` or wait on routing.
+    async fn commit_room_messages_if_members_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        recipient_messages: Vec<RoomRecipientMessages>,
+        before_send: Box<
+            dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+        after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+    ) -> anyhow::Result<RoomMessageTransactionOutcome>;
+
+    /// Inject persistent room-transaction failures in unit tests that verify
+    /// fail-closed publication recovery. Production implementations never
+    /// expose or consult this hook.
+    #[cfg(test)]
+    fn fail_room_transactions_for_test(&self, _fail: bool) {}
+
     /// Conditionally broadcast a committed room event after running a replay hook.
     ///
     /// Production implementations may run `before_send` while holding routing
@@ -395,18 +1272,7 @@ pub trait MessageCoordinator: Send + Sync {
                 + Send
                 + 'a,
         >,
-    ) -> anyhow::Result<bool> {
-        if *drain.borrow() || !should_send() {
-            return Ok(false);
-        }
-        // The hook records replayable state in real call sites. Once it runs,
-        // the live broadcast is committed too; a second guard here would allow
-        // replay-only records with no matching live delivery.
-        before_send().await;
-        self.broadcast_to_room_except(room_id, except_player, message)
-            .await?;
-        Ok(true)
-    }
+    ) -> anyhow::Result<bool>;
 
     /// Build and broadcast a room message while the implementation still holds
     /// the room-routing snapshot lock.
@@ -415,16 +1281,21 @@ pub trait MessageCoordinator: Send + Sync {
     /// sender's next `(epoch, seq)` must be allocated in the same critical
     /// section that snapshots recipients, so a reconnect baseline can never
     /// observe a stamp whose broadcast has not yet chosen whether the restored
-    /// socket is a recipient. Test coordinators that do not model concurrent
-    /// routing can use this fallback.
+    /// socket is a recipient. The builder returns `None` when the sender was
+    /// concurrently unregistered before stamp allocation; that relay is then
+    /// canceled instead of exposing unstamped data. Test coordinators that do
+    /// not model concurrent routing can use this fallback.
     async fn broadcast_to_room_except_with_message<'a>(
         &'a self,
         room_id: &RoomId,
         except_player: &PlayerId,
-        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+        build_message: Box<dyn FnOnce() -> Option<Arc<ServerMessage>> + Send + 'a>,
     ) -> anyhow::Result<()> {
-        self.broadcast_to_room_except(room_id, except_player, build_message())
-            .await
+        if let Some(message) = build_message() {
+            self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn register_local_client(
@@ -433,6 +1304,17 @@ pub trait MessageCoordinator: Send + Sync {
         room_id: Option<RoomId>,
         delivery: ClientDeliveryHandle,
     ) -> anyhow::Result<()>;
+
+    /// Capture a room member's terminal relay watermark and remove its route
+    /// as one operation relative to room-recipient snapshots and relay-stamp
+    /// allocation. `clear_assignment` must synchronously clear the matching
+    /// connection-manager membership and return `(delivery, epoch, seq)`.
+    async fn unroute_local_client_with_tail<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        clear_assignment: Box<dyn FnOnce() -> Option<(ClientDeliveryHandle, u32, u64)> + Send + 'a>,
+    ) -> anyhow::Result<Option<(u32, u64)>>;
 
     /// Queue an initial message on a room-bound connection before it becomes
     /// visible to room broadcasts.
@@ -449,12 +1331,16 @@ pub trait MessageCoordinator: Send + Sync {
         delivery: ClientDeliveryHandle,
         build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let outcome = match delivery.sender.try_send(build_message()) {
-            Ok(()) => DeliveryOutcome::Delivered,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                DeliveryOutcome::ChannelClosed
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+        let outcome = match delivery.sender.try_send(build_message(), Some(room_id)) {
+            Ok(outcome) if outcome.enqueued => DeliveryOutcome::Delivered,
+            Ok(outcome) if outcome.losses > 0 => DeliveryOutcome::AccountedDrop,
+            Ok(_) => DeliveryOutcome::Canceled,
+            Err(DeliveryTrySendError::Closed) => DeliveryOutcome::ChannelClosed,
+            Err(
+                DeliveryTrySendError::Full(_)
+                | DeliveryTrySendError::AccountabilityUnavailable
+                | DeliveryTrySendError::InvalidMetadata,
+            ) => {
                 delivery.close.request_close(CloseReason::SlowConsumer);
                 DeliveryOutcome::SlowConsumer
             }
@@ -481,13 +1367,19 @@ pub trait MessageCoordinator: Send + Sync {
         room_id: RoomId,
         delivery: ClientDeliveryHandle,
         build_message: Box<
-            dyn FnOnce() -> std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Arc<ServerMessage>> + Send + 'a>,
+            dyn FnOnce(
+                    Vec<PlayerId>,
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = anyhow::Result<Arc<ServerMessage>>>
+                            + Send
+                            + 'a,
+                    >,
                 > + Send
                 + 'a,
         >,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let message = build_message().await;
+        let message = build_message(vec![player_id]).await?;
         self.register_local_client_with_initial_message(
             player_id,
             room_id,
@@ -560,6 +1452,74 @@ mod tests {
         PlayerId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E57ED)
     }
 
+    #[tokio::test]
+    async fn guard_coupled_enqueue_bounds_lane_and_serializes_handoff() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5701);
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let first_guard = sequencer.lock(room_id).await;
+        let first_completion = {
+            let first_started = Arc::clone(&first_started);
+            let release_first = Arc::clone(&release_first);
+            let order = Arc::clone(&order);
+            sequencer.enqueue(
+                first_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        order.lock().await.push(1);
+                        first_started.notify_one();
+                        release_first.notified().await;
+                        Ok(true)
+                    })
+                }),
+            )
+        };
+        first_started.notified().await;
+
+        let second_attempted = Arc::new(AtomicBool::new(false));
+        let second_acquired = Arc::new(AtomicBool::new(false));
+        let second = {
+            let sequencer = Arc::clone(&sequencer);
+            let attempted = Arc::clone(&second_attempted);
+            let acquired = Arc::clone(&second_acquired);
+            let order = Arc::clone(&order);
+            tokio::spawn(async move {
+                attempted.store(true, Ordering::Release);
+                let guard = sequencer.lock(room_id).await;
+                acquired.store(true, Ordering::Release);
+                sequencer
+                    .enqueue(
+                        guard,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                order.lock().await.push(2);
+                                Ok(true)
+                            })
+                        }),
+                    )
+                    .await
+            })
+        };
+        while !second_attempted.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !second_acquired.load(Ordering::Acquire),
+            "a second producer cannot enqueue while the first job owns the room guard"
+        );
+
+        release_first.notify_one();
+        assert!(first_completion.await.expect("first job completes"));
+        assert!(second
+            .await
+            .expect("second task should not panic")
+            .expect("second job completes"));
+        assert_eq!(*order.lock().await, vec![1, 2]);
+    }
+
     /// Build one connection's delivery plumbing: a bounded queue plus the
     /// close signal/listener pair, exactly as the WebSocket layer wires it.
     fn delivery_handle(
@@ -571,10 +1531,18 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::mpsc::channel(capacity);
         let (close, listener) = ConnectionCloseSignal::channel();
-        (ClientDeliveryHandle { sender: tx, close }, rx, listener)
+        (
+            ClientDeliveryHandle {
+                sender: tx.into(),
+                close,
+            },
+            rx,
+            listener,
+        )
     }
 
     struct FallbackCoordinator {
+        room_events: Arc<RoomEventSequencer>,
         sends: Mutex<Vec<(PlayerId, ServerMessage)>>,
         broadcasts_except: Mutex<Vec<(RoomId, PlayerId, ServerMessage)>>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
@@ -585,6 +1553,7 @@ mod tests {
     impl Default for FallbackCoordinator {
         fn default() -> Self {
             Self {
+                room_events: Arc::new(RoomEventSequencer::default()),
                 sends: Mutex::default(),
                 broadcasts_except: Mutex::default(),
                 registrations: Mutex::default(),
@@ -596,6 +1565,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MessageCoordinator for FallbackCoordinator {
+        async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
+            self.room_events.lock(*room_id).await
+        }
+
+        fn enqueue_room_event(
+            &self,
+            mutation_guard: RoomEventMutationGuard,
+            job: RoomEventJob,
+        ) -> RoomEventCompletion {
+            self.room_events.enqueue(mutation_guard, job)
+        }
+
         async fn send_to_player(
             &self,
             player_id: &PlayerId,
@@ -639,6 +1620,91 @@ mod tests {
             Ok(())
         }
 
+        async fn broadcast_to_room_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send + 'a,
+            >,
+        ) -> anyhow::Result<bool> {
+            before_send().await;
+            self.broadcast_to_room(room_id, message).await?;
+            Ok(true)
+        }
+
+        async fn broadcast_to_room_if_members_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send + 'a,
+            >,
+        ) -> anyhow::Result<bool> {
+            self.broadcast_to_room_with_hook(room_id, message, before_send)
+                .await
+        }
+
+        async fn broadcast_to_room_except_if_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            except_player: &PlayerId,
+            message: Arc<ServerMessage>,
+            should_send: &(dyn Fn() -> bool + Send + Sync),
+            drain: tokio::sync::watch::Receiver<bool>,
+            before_send: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send + 'a,
+            >,
+        ) -> anyhow::Result<bool> {
+            if *drain.borrow() || !should_send() {
+                return Ok(false);
+            }
+            before_send().await;
+            self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+            Ok(true)
+        }
+
+        async fn commit_room_messages_if_members_with_hook<'a>(
+            &'a self,
+            _room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            recipient_messages: Vec<RoomRecipientMessages>,
+            before_send: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+            after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+        ) -> anyhow::Result<RoomMessageTransactionOutcome> {
+            if !before_send().await? {
+                return Ok(RoomMessageTransactionOutcome::HookRejected);
+            }
+            let mut sends = self.sends.lock().await;
+            let max_phases = recipient_messages
+                .iter()
+                .map(RoomRecipientMessages::phase_count)
+                .max()
+                .unwrap_or(0);
+            let mut after_first_phase = Some(after_first_phase);
+            for phase in 0..max_phases {
+                for batch in &recipient_messages {
+                    if let Some(message) = batch.message_in_phase(phase) {
+                        sends.push((batch.player_id, message.as_ref().clone()));
+                    }
+                }
+                if phase == 0
+                    && !after_first_phase
+                        .take()
+                        .expect("transaction state callback runs once")(0)
+                {
+                    break;
+                }
+            }
+            Ok(RoomMessageTransactionOutcome::Committed)
+        }
+
         async fn register_local_client(
             &self,
             player_id: PlayerId,
@@ -647,6 +1713,22 @@ mod tests {
         ) -> anyhow::Result<()> {
             self.registrations.lock().await.push((player_id, room_id));
             Ok(())
+        }
+
+        async fn unroute_local_client_with_tail<'a>(
+            &'a self,
+            player_id: PlayerId,
+            _room_id: RoomId,
+            clear_assignment: Box<
+                dyn FnOnce() -> Option<(ClientDeliveryHandle, u32, u64)> + Send + 'a,
+            >,
+        ) -> anyhow::Result<Option<(u32, u64)>> {
+            let Some((delivery, epoch, final_seq)) = clear_assignment() else {
+                return Ok(None);
+            };
+            self.register_local_client(player_id, None, delivery)
+                .await?;
+            Ok(Some((epoch, final_seq)))
         }
 
         async fn unregister_local_client(&self, _player_id: &PlayerId) -> anyhow::Result<()> {
@@ -739,43 +1821,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_broadcast_builder_delegates_to_except_broadcast_once() {
-        let coordinator = FallbackCoordinator::default();
+    async fn default_broadcast_builder_cancels_none_and_delegates_some_once() {
         let room_id = RoomId::from_u128(0x11111111111111111111111111111111);
         let sender = PlayerId::from_u128(0x22222222222222222222222222222222);
-        let build_calls = Arc::new(AtomicUsize::new(0));
-        let calls_for_builder = Arc::clone(&build_calls);
+        for (context, built, expected_broadcasts) in [
+            ("live sender", Some(test_message()), 1),
+            ("unregistered sender", None, 0),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let build_calls = Arc::new(AtomicUsize::new(0));
+            let calls_for_builder = Arc::clone(&build_calls);
 
-        coordinator
-            .broadcast_to_room_except_with_message(
-                &room_id,
-                &sender,
-                Box::new(move || {
-                    calls_for_builder.fetch_add(1, Ordering::Relaxed);
-                    test_message()
-                }),
-            )
-            .await
-            .expect("default fallback broadcast succeeds");
+            coordinator
+                .broadcast_to_room_except_with_message(
+                    &room_id,
+                    &sender,
+                    Box::new(move || {
+                        calls_for_builder.fetch_add(1, Ordering::Relaxed);
+                        built
+                    }),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: fallback broadcast failed: {err}"));
 
-        assert_eq!(
-            build_calls.load(Ordering::Relaxed),
-            1,
-            "the fallback must build exactly one message"
-        );
-        let broadcasts = coordinator.broadcasts_except.lock().await;
-        assert_eq!(
-            broadcasts.len(),
-            1,
-            "the fallback must delegate to broadcast_to_room_except"
-        );
-        let (broadcast_room, except_player, message) = &broadcasts[0];
-        assert_eq!(*broadcast_room, room_id);
-        assert_eq!(*except_player, sender);
-        assert!(
-            matches!(message, ServerMessage::Pong),
-            "unexpected fallback broadcast message: {message:?}"
-        );
+            assert_eq!(
+                build_calls.load(Ordering::Relaxed),
+                1,
+                "{context}: fallback must build exactly once"
+            );
+            let broadcasts = coordinator.broadcasts_except.lock().await;
+            assert_eq!(broadcasts.len(), expected_broadcasts, "{context}");
+            if let Some((broadcast_room, except_player, message)) = broadcasts.first() {
+                assert_eq!(*broadcast_room, room_id);
+                assert_eq!(*except_player, sender);
+                assert!(
+                    matches!(message, ServerMessage::Pong),
+                    "{context}: unexpected fallback message: {message:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classified_sender_identity_includes_delivery_generation() {
+        let (sender, _receiver) = outbound_queue::channel(1, 1);
+        let generation_zero = DeliverySender::classified(sender);
+        let same_generation = generation_zero.clone();
+        let generation_one = generation_zero.next_generation();
+
+        assert!(generation_zero.same_channel(&same_generation));
+        assert!(!generation_zero.same_channel(&generation_one));
+        assert!(generation_zero.same_channel(&generation_one.previous_generation()));
     }
 
     #[tokio::test]
@@ -991,7 +2087,7 @@ mod tests {
         let (blocked_handle, blocked_rx, blocked_listener) = delivery_handle(1);
         blocked_handle
             .sender
-            .try_send(test_message())
+            .try_send(test_message(), None)
             .expect("prefill the single-slot queue");
 
         let outcome = coordinator
@@ -1080,7 +2176,7 @@ mod tests {
         let (handle, mut rx, _listener) = delivery_handle(1);
         handle
             .sender
-            .try_send(test_message())
+            .try_send(test_message(), None)
             .expect("prefill the single-slot queue");
 
         let delivery = spawn_delivery(&metrics, &handle);
@@ -1148,7 +2244,7 @@ mod tests {
         let (handle, rx, mut listener) = delivery_handle(1);
         handle
             .sender
-            .try_send(test_message())
+            .try_send(test_message(), None)
             .expect("prefill the single-slot queue");
 
         // Four concurrent deliveries against the same stuck handle. With the
@@ -1247,6 +2343,45 @@ mod tests {
         assert_conservation(&metrics);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn classified_data_closed_race_is_abandoned_exactly_once() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (sender, receiver) = outbound_queue::channel_with_metrics(1, 1, Arc::clone(&metrics));
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        drop(receiver);
+
+        let outcome = deliver_or_disconnect(
+            &metrics,
+            TEST_TIMEOUT,
+            &test_player(),
+            &handle,
+            Arc::new(ServerMessage::GameData {
+                from_player: PlayerId::from_u128(7),
+                data: serde_json::json!({"state": 1}),
+                seq: None,
+                epoch: None,
+                class: None,
+                key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(outcome, DeliveryOutcome::ChannelClosed);
+        let reliable = metrics.delivery_metrics_by_class().reliable;
+        assert_eq!(reliable.attempted, 1);
+        assert_eq!(reliable.abandoned, 1);
+        assert_eq!(
+            reliable.delivered
+                + reliable.superseded
+                + reliable.dropped_full
+                + reliable.dropped
+                + reliable.abandoned
+                + reliable.unsupported_format,
+            reliable.attempted
+        );
+    }
+
     /// (e) Receiver dropped while the delivery is already backpressured: the
     /// parked send fails over to `ChannelClosed`, still not a drop.
     #[tokio::test(start_paused = true)]
@@ -1255,7 +2390,7 @@ mod tests {
         let (handle, rx, _listener) = delivery_handle(1);
         handle
             .sender
-            .try_send(test_message())
+            .try_send(test_message(), None)
             .expect("prefill the single-slot queue");
 
         let delivery = spawn_delivery(&metrics, &handle);

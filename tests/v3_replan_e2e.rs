@@ -10,13 +10,12 @@
 //!    topology/transport.
 //! 2. **Sticky relay floor.** A mixed v3+v2 room finalizes to the relay floor
 //!    (no plan is stored); the v2 member leaves and a v3+webrtc member fills
-//!    the seat. NOBODY may receive a `SessionPlan` or `NewPeer` — the running
-//!    session is relay, and the old recompute-on-late-join behavior (which
-//!    wrongly emitted `NewPeer` here) must stay dead.
+//!    the seat. Every v3 member receives an explicit relay reset without
+//!    rerunning the upgrade ladder; v2 remains plan-free.
 //!
 //! Plus the late-join contract for an active mesh session: the joiner gets a
-//! tailored `SessionPlan` (and NO `NewPeer`), the existing member gets the
-//! `NewPeer` delta.
+//! tailored `SessionPlan`, and the existing member gets a complete refreshed
+//! plan after `PlayerJoined`.
 //!
 //! Models the harness in `tests/v3_session_plan_e2e.rs` (chosen `SessionConfig`,
 //! real `TcpListener` on 127.0.0.1:0).
@@ -283,6 +282,18 @@ async fn await_ready_count(ws: &mut WsStream, count: usize) {
 
 type SessionPlan = Box<signal_fish_server::protocol::SessionPlanPayload>;
 
+fn assert_relay_floor_plan(plan: &signal_fish_server::protocol::SessionPlanPayload, who: &str) {
+    assert_eq!(plan.topology, Topology::Relay, "{who} topology");
+    assert_eq!(plan.transport, Transport::Relay, "{who} transport");
+    assert_eq!(plan.host, None, "{who} relay plan must not name a host");
+    assert!(plan.peers.is_empty(), "{who} relay plan must have no peers");
+    assert!(
+        plan.ice_servers.is_empty(),
+        "{who} relay plan must not carry ICE"
+    );
+    assert_eq!(plan.fallback, Transport::Relay, "{who} fallback");
+}
+
 /// Skip to `GameStarting`, then return the `SessionPlan` that must follow.
 async fn expect_finalize_plan(ws: &mut WsStream, who: &str) -> SessionPlan {
     next_matching_server_message_within(
@@ -308,7 +319,7 @@ async fn expect_finalize_plan(ws: &mut WsStream, who: &str) -> SessionPlan {
 async fn expect_player_left(ws: &mut WsStream, left: PlayerId, who: &str) {
     next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "PlayerLeft", |message| {
         match message {
-            ServerMessage::PlayerLeft { player_id } => {
+            ServerMessage::PlayerLeft { player_id, .. } => {
                 assert_eq!(player_id, left, "{who} saw the wrong player leave");
                 Some(())
             }
@@ -433,11 +444,11 @@ async fn host_disconnect_reelects_host_and_reissues_session_plans() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn relay_room_departure_then_v3_late_join_emits_no_plan_or_new_peer() {
+async fn relay_room_departure_then_v3_late_join_refreshes_explicit_floor_plan() {
     // Problem-2 regression over real sockets: A(v3)+B(v2) finalize on a
-    // mesh-preferring server => relay floor (no plans). B leaves; C(v3+webrtc)
-    // fills the seat in the still-Finalized room. The running session is relay
-    // and sticky: NOBODY receives a SessionPlan or NewPeer.
+    // mesh-preferring server => relay floor. B leaves; C(v3+webrtc) fills the
+    // seat in the still-Finalized room. The running session stays relay, and
+    // each v3 membership boundary carries an explicit floor plan.
     let addr = start_server_with_session(mesh_session_config()).await;
 
     let mut peer_a = connect(addr).await;
@@ -461,23 +472,27 @@ async fn relay_room_departure_then_v3_late_join_emits_no_plan_or_new_peer() {
     // StartGame to finalize the relay-floored room.
     send(&mut peer_a, &ClientMessage::StartGame).await;
 
-    // Both observe GameStarting; the relay floor emits no SessionPlan, so the
-    // next interesting event for peer_a is the departure below.
-    for (ws, who) in [(&mut peer_a, "peer_a"), (&mut legacy, "legacy")] {
+    // Both observe GameStarting; only the v3 member gets the relay reset.
+    for ws in [&mut peer_a, &mut legacy] {
         next_matching_server_message_within(
             ws,
             SERVER_MESSAGE_TIMEOUT,
             "finalization GameStarting",
-            |message| match message {
-                ServerMessage::GameStarting { .. } => Some(()),
-                ServerMessage::SessionPlan(_) => {
-                    panic!("{who} must not receive a SessionPlan in a relay-resolved room")
-                }
-                _ => None,
-            },
+            |message| matches!(message, ServerMessage::GameStarting { .. }).then_some(()),
         )
         .await;
     }
+    let initial_floor = next_matching_server_message_within(
+        &mut peer_a,
+        SERVER_MESSAGE_TIMEOUT,
+        "initial relay SessionPlan",
+        |message| match message {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            other => panic!("peer_a expected relay SessionPlan, got {other:?}"),
+        },
+    )
+    .await;
+    assert_relay_floor_plan(&initial_floor, "peer_a initial floor");
 
     // The v2 member's socket closes, reopening a seat in the Finalized room.
     legacy.close(None).await.expect("close legacy socket");
@@ -495,7 +510,7 @@ async fn relay_room_departure_then_v3_late_join_emits_no_plan_or_new_peer() {
         "a seat-filling joiner of a finalized room must see lobby_state: finalized"
     );
 
-    // peer_a sees the join, then NOTHING v3: no NewPeer, no SessionPlan.
+    // peer_a sees the join, then both v3 members receive the authoritative floor.
     next_matching_server_message_within(
         &mut peer_a,
         SERVER_MESSAGE_TIMEOUT,
@@ -509,27 +524,38 @@ async fn relay_room_departure_then_v3_late_join_emits_no_plan_or_new_peer() {
         },
     )
     .await;
-    expect_no_server_message_within(
+    let incumbent_floor = next_matching_server_message_within(
         &mut peer_a,
-        SILENCE_WINDOW,
-        "peer_a after a v3 joiner entered the relay-floor room",
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent relay refresh",
+        |message| match message {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            other => panic!("peer_a expected relay refresh, got {other:?}"),
+        },
     )
     .await;
-    // The joiner likewise gets nothing after RoomJoined.
-    expect_no_server_message_within(
+    let joiner_floor = next_matching_server_message_within(
         &mut joiner,
-        SILENCE_WINDOW,
-        "v3 joiner of a relay-floor room",
+        SERVER_MESSAGE_TIMEOUT,
+        "joiner relay plan",
+        |message| match message {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            other => panic!("joiner expected relay plan, got {other:?}"),
+        },
     )
     .await;
+    assert_relay_floor_plan(&incumbent_floor, "peer_a refresh");
+    assert_relay_floor_plan(&joiner_floor, "joiner floor");
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after refresh").await;
+    expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after plan").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mesh_late_join_sends_joiner_plan_and_existing_member_new_peer() {
+async fn mesh_late_join_refreshes_joiner_and_existing_member_plans() {
     // Late-join into an ACTIVE mesh session over real sockets: after a member
     // departs the finalized 2-seat mesh room, the seat-filling v3 joiner
-    // receives a tailored SessionPlan (and NO NewPeer); the existing member
-    // receives only the NewPeer delta (and no second plan). A mesh member
+    // receives a tailored SessionPlan; the existing member receives a complete
+    // refreshed plan after PlayerJoined. A mesh member
     // departure itself triggers no re-plan (sticky parameters unchanged).
     let addr = start_server_with_session(mesh_session_config()).await;
 
@@ -600,8 +626,7 @@ async fn mesh_late_join_sends_joiner_plan_and_existing_member_new_peer() {
     );
     assert_static_then_default_stun_ice(&joiner_plan.ice_servers);
 
-    // The existing member sees PlayerJoined then the antisymmetric NewPeer
-    // delta — and no second SessionPlan.
+    // The existing member sees PlayerJoined then its complete refreshed plan.
     next_matching_server_message_within(
         &mut peer_a,
         SERVER_MESSAGE_TIMEOUT,
@@ -615,31 +640,26 @@ async fn mesh_late_join_sends_joiner_plan_and_existing_member_new_peer() {
         },
     )
     .await;
-    next_matching_server_message_within(
+    let incumbent_plan = next_matching_server_message_within(
         &mut peer_a,
         SERVER_MESSAGE_TIMEOUT,
-        "peer_a NewPeer delta",
+        "peer_a SessionPlan refresh",
         |message| match message {
-            ServerMessage::NewPeer {
-                peer_id,
-                you_initiate,
-            } => {
-                assert_eq!(peer_id, joiner_id);
-                assert_eq!(
-                    you_initiate,
-                    peer_a_id < joiner_id,
-                    "exactly one side of the pair initiates"
-                );
-                Some(())
-            }
-            ServerMessage::SessionPlan(_) => {
-                panic!("the existing member must not receive a plan on a late join")
-            }
-            other => panic!("peer_a expected NewPeer, got {other:?}"),
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            other => panic!("peer_a expected SessionPlan refresh, got {other:?}"),
         },
     )
     .await;
+    assert_eq!(incumbent_plan.topology, Topology::Mesh);
+    assert_eq!(incumbent_plan.transport, Transport::WebRtc);
+    assert_eq!(incumbent_plan.peers.len(), 1);
+    assert_eq!(incumbent_plan.peers[0].player_id, joiner_id);
+    assert_eq!(incumbent_plan.peers[0].initiate, peer_a_id < joiner_id);
+    assert_ne!(
+        incumbent_plan.peers[0].initiate, joiner_plan.peers[0].initiate,
+        "exactly one side of the mesh pair initiates"
+    );
 
     expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after its plan").await;
-    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after the NewPeer").await;
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after its refresh").await;
 }

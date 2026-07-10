@@ -56,8 +56,9 @@ pub struct WebSocketConfig {
     /// notified through the normal disconnect flow.
     #[serde(default = "default_slow_consumer_timeout_ms")]
     pub slow_consumer_timeout_ms: u64,
-    /// Maximum time a data message may remain queued before the connection is
-    /// closed as stale, in milliseconds. Must be nonzero.
+    /// Maximum time any outbound item may remain unresolved, including queue
+    /// wait and socket write time, before the connection is closed as stale.
+    /// Expressed in milliseconds and must be nonzero.
     #[serde(default = "default_max_sojourn_ms")]
     pub max_sojourn_ms: u64,
     /// How often (seconds) each connection that negotiated protocol v3+ is
@@ -129,16 +130,21 @@ impl WebSocketConfig {
                  it bounds the per-connection outbound message queue"
             );
         }
-        if self.control_queue_capacity == 0 {
+        // A game-start transaction reserves `GameStarting` plus the optional
+        // tailored `SessionPlan` before finalizing durable room state. Two
+        // slots are therefore the minimum that can always make progress while
+        // the first reservation is intentionally held until atomic commit.
+        if self.control_queue_capacity < 2 {
             anyhow::bail!(
-                "websocket.control_queue_capacity must be at least 1 (configured: 0); \
-                 it bounds the per-connection control-plane queue"
+                "websocket.control_queue_capacity must be at least 2 (configured: {}); \
+                 atomic game-start publication reserves two control frames",
+                self.control_queue_capacity
             );
         }
         if self.max_sojourn_ms == 0 {
             anyhow::bail!(
                 "websocket.max_sojourn_ms must be greater than 0; \
-                 it bounds how long outbound data may remain unresolved"
+                 it bounds how long an outbound item may remain unresolved"
             );
         }
         // A sojourn ceiling at or below the normal batch-flush interval
@@ -252,11 +258,17 @@ mod tests {
                 name: "zero control queue capacity",
                 mutate: |config| config.control_queue_capacity = 0,
                 expect_ok: false,
-                expect_error_containing: "control_queue_capacity must be at least 1",
+                expect_error_containing: "control_queue_capacity must be at least 2",
             },
             Case {
-                name: "single-slot control queue is the floor",
+                name: "single-slot control queue cannot reserve a game-start transaction",
                 mutate: |config| config.control_queue_capacity = 1,
+                expect_ok: false,
+                expect_error_containing: "control_queue_capacity must be at least 2",
+            },
+            Case {
+                name: "two-slot control queue is the floor",
+                mutate: |config| config.control_queue_capacity = 2,
                 expect_ok: true,
                 expect_error_containing: "",
             },

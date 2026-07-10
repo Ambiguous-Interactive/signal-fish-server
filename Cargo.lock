@@ -2804,6 +2804,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rkyv",
+ "rmp",
  "rmp-serde",
  "rustls",
  "rustls-pki-types",

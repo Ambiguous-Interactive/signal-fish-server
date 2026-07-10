@@ -29,7 +29,7 @@ type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct BinaryGameDataFrame {
+struct LegacyBinaryGameDataFrame {
     from_player: PlayerId,
     encoding: GameDataEncoding,
     #[serde(with = "serde_bytes")]
@@ -226,13 +226,17 @@ async fn expect_authority_response(
     }
 }
 
-async fn authenticate_for_message_pack(sender: &mut WsSink, receiver: &mut WsReceiver) {
+async fn authenticate_for_message_pack(
+    sender: &mut WsSink,
+    receiver: &mut WsReceiver,
+    protocol_version: Option<u16>,
+) {
     let auth = ClientMessage::Authenticate {
         app_id: "binary-e2e-app".to_string(),
         sdk_version: Some("1.0.0".to_string()),
         platform: Some("test".to_string()),
         game_data_format: Some(GameDataEncoding::MessagePack),
-        protocol_version: None,
+        protocol_version,
         supported_transports: None,
         supported_topologies: None,
     };
@@ -247,11 +251,14 @@ async fn authenticate_for_message_pack(sender: &mut WsSink, receiver: &mut WsRec
     );
 
     match receive_server_message(receiver).await {
-        ServerMessage::ProtocolInfo(info) => assert!(
-            info.game_data_formats
-                .contains(&GameDataEncoding::MessagePack),
-            "server must advertise message_pack support: {info:?}"
-        ),
+        ServerMessage::ProtocolInfo(info) => {
+            assert!(
+                info.game_data_formats
+                    .contains(&GameDataEncoding::MessagePack),
+                "server must advertise message_pack support: {info:?}"
+            );
+            assert_eq!(info.protocol_version, protocol_version);
+        }
         other => panic!("expected ProtocolInfo after auth, got {other:?}"),
     }
 }
@@ -584,6 +591,8 @@ async fn test_game_data_broadcasting() {
     // Player 1 sends game data
     let game_data = serde_json::json!({"action": "move", "x": 100, "y": 200});
     let data_msg = ClientMessage::GameData {
+        class: None,
+        key: None,
         data: game_data.clone(),
     };
 
@@ -612,71 +621,82 @@ async fn test_game_data_broadcasting() {
 }
 
 #[tokio::test]
-async fn test_binary_game_data_broadcasting_uses_bare_message_pack_frame() {
-    // Keep the server handle's metrics so the relay's delivery-conservation
-    // law can be asserted once the broadcast has been observed.
-    let game_server =
-        create_test_server_with_config(test_server_config(), test_protocol_config()).await;
-    let metrics = game_server.metrics();
-    let addr = start_server_with_instance(game_server).await;
+async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
+    for protocol_version in [None, Some(3)] {
+        // Keep the server handle's metrics so the relay's delivery-conservation
+        // law can be asserted once the broadcast has been observed.
+        let game_server =
+            create_test_server_with_config(test_server_config(), test_protocol_config()).await;
+        let metrics = game_server.metrics();
+        let addr = start_server_with_instance(game_server).await;
 
-    let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
-    let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
+        let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
+        let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
 
-    authenticate_for_message_pack(&mut sender1, &mut receiver1).await;
-    authenticate_for_message_pack(&mut sender2, &mut receiver2).await;
+        authenticate_for_message_pack(&mut sender1, &mut receiver1, protocol_version).await;
+        authenticate_for_message_pack(&mut sender2, &mut receiver2, protocol_version).await;
 
-    let join_msg = ClientMessage::JoinRoom {
-        game_name: "binary_data_test".to_string(),
-        room_code: Some("BIN1".to_string()),
-        player_name: "Player1".to_string(),
-        max_players: Some(2),
-        supports_authority: Some(true),
-        relay_transport: None,
-    };
-    let player1_id = match send_and_receive(&mut sender1, &mut receiver1, join_msg)
-        .await
-        .unwrap()
-    {
-        ServerMessage::RoomJoined(payload) => payload.player_id,
-        other => panic!("Expected RoomJoined for player 1, got {other:?}"),
-    };
+        let join_msg = ClientMessage::JoinRoom {
+            game_name: "binary_data_test".to_string(),
+            room_code: Some("BIN1".to_string()),
+            player_name: "Player1".to_string(),
+            max_players: Some(2),
+            supports_authority: Some(true),
+            relay_transport: None,
+        };
+        let player1_id = match send_and_receive(&mut sender1, &mut receiver1, join_msg)
+            .await
+            .unwrap()
+        {
+            ServerMessage::RoomJoined(payload) => payload.player_id,
+            other => panic!("Expected RoomJoined for player 1, got {other:?}"),
+        };
 
-    let join_msg2 = ClientMessage::JoinRoom {
-        game_name: "binary_data_test".to_string(),
-        room_code: Some("BIN1".to_string()),
-        player_name: "Player2".to_string(),
-        max_players: Some(2),
-        supports_authority: Some(true),
-        relay_transport: None,
-    };
-    let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
-        .await
-        .unwrap();
+        let join_msg2 = ClientMessage::JoinRoom {
+            game_name: "binary_data_test".to_string(),
+            room_code: Some("BIN1".to_string()),
+            player_name: "Player2".to_string(),
+            max_players: Some(2),
+            supports_authority: Some(true),
+            relay_transport: None,
+        };
+        let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
+            .await
+            .unwrap();
 
-    let payload = vec![0x01, 0x02, 0x03, 0x04];
-    sender1
-        .send(Message::Binary(payload.clone().into()))
-        .await
-        .unwrap();
+        let payload = vec![0x01, 0x02, 0x03, 0x04];
+        sender1
+            .send(Message::Binary(payload.clone().into()))
+            .await
+            .unwrap();
 
-    let wire = receive_binary_game_data_wire_frame(&mut receiver2).await;
-    let frame: BinaryGameDataFrame =
-        rmp_serde::from_slice(&wire).expect("bare MessagePack game-data frame");
-
-    assert_eq!(
-        frame,
-        BinaryGameDataFrame {
-            from_player: player1_id,
-            encoding: GameDataEncoding::MessagePack,
-            payload,
+        let wire = receive_binary_game_data_wire_frame(&mut receiver2).await;
+        if protocol_version == Some(3) {
+            assert_eq!(
+                decode_v3_binary_game_data(&wire).expect("strict v3 MessagePack game-data frame"),
+                V3BinaryGameDataFrame {
+                    from_player: player1_id,
+                    encoding: GameDataEncoding::MessagePack,
+                    payload,
+                    seq: 1,
+                    epoch: 1,
+                }
+            );
+        } else {
+            let frame: LegacyBinaryGameDataFrame =
+                rmp_serde::from_slice(&wire).expect("legacy MessagePack game-data frame");
+            assert_eq!(
+                frame,
+                LegacyBinaryGameDataFrame {
+                    from_player: player1_id,
+                    encoding: GameDataEncoding::MessagePack,
+                    payload,
+                }
+            );
         }
-    );
 
-    // The relayed binary payload has been observed end to end, so every
-    // delivery in this test has resolved: the conservation counters must
-    // balance.
-    websocket_test_helpers::assert_message_conservation(&metrics).await;
+        websocket_test_helpers::assert_message_conservation(&metrics).await;
+    }
 }
 
 #[tokio::test]
@@ -1075,20 +1095,14 @@ async fn test_e2e_authority_protocol_enforcement() {
     let json = serde_json::to_string(&authority_request).unwrap();
     sender2.send(Message::Text(json.into())).await.unwrap();
 
-    // The coordinator and server wrapper currently both emit the request result.
-    for context in [
-        "player 2 denied authority response from coordinator",
-        "player 2 denied authority response from server",
-    ] {
-        expect_authority_response(
-            &mut receiver2,
-            AUTHORITY_NOTIFICATION_TIMEOUT,
-            context,
-            false,
-            Some("Another player already has authority"),
-        )
-        .await;
-    }
+    expect_authority_response(
+        &mut receiver2,
+        AUTHORITY_NOTIFICATION_TIMEOUT,
+        "player 2 denied authority response",
+        false,
+        Some("Another player already has authority"),
+    )
+    .await;
     expect_no_server_message_within(
         &mut receiver1,
         NO_NOTIFICATION_TIMEOUT,
@@ -1131,14 +1145,6 @@ async fn test_e2e_authority_protocol_enforcement() {
         "player 1 authority release state change",
         None,
         false,
-    )
-    .await;
-    expect_authority_response(
-        &mut receiver1,
-        AUTHORITY_RELEASE_RESPONSE_TIMEOUT,
-        "player 1 authority release server response",
-        true,
-        None,
     )
     .await;
     expect_authority_changed_notification(
@@ -1197,14 +1203,6 @@ async fn test_e2e_authority_protocol_enforcement() {
         "player 2 sees self become authority",
         Some(player2_id),
         true,
-    )
-    .await;
-    expect_authority_response(
-        &mut receiver2,
-        AUTHORITY_SUCCESS_TIMEOUT,
-        "player 2 successful authority response from server",
-        true,
-        None,
     )
     .await;
     expect_no_server_message_within(
@@ -1273,14 +1271,6 @@ async fn test_simple_authority_release() {
         "single-player authority release state change",
         None,
         false,
-    )
-    .await;
-    expect_authority_response(
-        &mut receiver,
-        AUTHORITY_SUCCESS_TIMEOUT,
-        "single-player authority release server response",
-        true,
-        None,
     )
     .await;
     expect_no_server_message_within(
@@ -1371,14 +1361,6 @@ async fn test_two_player_authority_release() {
         "player 1 two-player authority release state change",
         None,
         false,
-    )
-    .await;
-    expect_authority_response(
-        &mut receiver1,
-        TWO_PLAYER_AUTHORITY_RELEASE_TIMEOUT,
-        "two-player authority release server response",
-        true,
-        None,
     )
     .await;
     expect_authority_changed_notification(

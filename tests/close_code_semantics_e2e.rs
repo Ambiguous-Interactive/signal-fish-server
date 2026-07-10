@@ -182,6 +182,8 @@ async fn slow_consumer_eviction_closes_with_4002() {
             "slow-consumer eviction never happened"
         );
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "padding": padding.as_str() }),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");

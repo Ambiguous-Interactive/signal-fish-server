@@ -704,7 +704,7 @@ async fn turn_disabled_with_stun_urls_yields_stun_only_pregather() {
 
 // ---------------------------------------------------------------------------
 // 9. Late join into an ACTIVE session: pre-gather is OFF (Finalized); the
-//    late-join SessionPlan is the single issuance site for that event.
+//    authoritative plan refresh issues one credential per v3 recipient.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -778,11 +778,37 @@ async fn late_join_into_active_session_mints_only_via_the_session_plan() {
         "the SessionPlan credential embeds the joiner's id: {turn_username}"
     );
 
-    // One logical join event => exactly ONE minted credential (the
-    // SessionPlan's) and NO pre-gather emission.
+    // Finalized membership changes refresh every v3 member, so the incumbent
+    // also receives a plan with a recipient-bound credential.
+    let incumbent_plan = next_matching_server_message_within(
+        &mut peer1,
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent late-join SessionPlan refresh",
+        |message| match message {
+            ServerMessage::SessionPlan(plan)
+                if plan.peers.iter().any(|peer| peer.player_id == joiner_id) =>
+            {
+                Some(plan)
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let incumbent_username = incumbent_plan
+        .ice_servers
+        .iter()
+        .find_map(|server| server.username.as_deref())
+        .expect("incumbent refresh carries a minted TURN credential");
+    assert!(
+        incumbent_username.ends_with(&format!(":{peer1_id}")),
+        "the incumbent SessionPlan credential embeds its recipient id: {incumbent_username}"
+    );
+
+    // One logical join event => one fresh credential per v3 plan recipient and
+    // no pre-gather emission.
     assert_counter_eventually(
         || metrics.turn_credentials_issued.load(Ordering::Relaxed),
-        creds_before + 1,
+        creds_before + 2,
         "late-join TURN issuance",
     )
     .await;
@@ -862,7 +888,7 @@ async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice()
     authenticate_v3_mesh(&mut peer1).await;
     let mut peer2 = connect(addr).await;
     authenticate_v3_mesh(&mut peer2).await;
-    let (room_id, _room_code, _peer1_id, peer2_id) =
+    let (room_id, _room_code, peer1_id, peer2_id) =
         finalize_two_player_room(&mut peer1, &mut peer2, "mesh-game").await;
 
     let token = register_reconnect_token(&game_server, peer2_id, room_id).await;
@@ -914,11 +940,37 @@ async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice()
         "fresh credential embeds the reconnector's id: {username}"
     );
 
-    // One logical reconnect event => one minted credential (the SessionPlan's),
+    // The incumbent receives the same authoritative membership refresh with a
+    // credential bound to its own player id.
+    let incumbent_plan = next_matching_server_message_within(
+        &mut peer1,
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent reconnect SessionPlan refresh",
+        |message| match message {
+            ServerMessage::SessionPlan(plan)
+                if plan.peers.iter().any(|peer| peer.player_id == peer2_id) =>
+            {
+                Some(plan)
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let incumbent_username = incumbent_plan
+        .ice_servers
+        .iter()
+        .find_map(|server| server.username.as_deref())
+        .expect("incumbent reconnect refresh carries fresh TURN credentials");
+    assert!(
+        incumbent_username.ends_with(&format!(":{peer1_id}")),
+        "incumbent credentials must be bound to the incumbent: {incumbent_username}"
+    );
+
+    // One logical reconnect event => one credential per v3 plan recipient and
     // zero pre-gather emissions.
     assert_counter_eventually(
         || metrics.turn_credentials_issued.load(Ordering::Relaxed),
-        creds_before + 1,
+        creds_before + 2,
         "reconnect TURN issuance",
     )
     .await;

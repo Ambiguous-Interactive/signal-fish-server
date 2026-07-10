@@ -1,10 +1,13 @@
-use super::InMemoryMessageCoordinator;
-use crate::coordination::{ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator};
+use super::{ConnectionManager, InMemoryMessageCoordinator};
+use crate::coordination::{
+    ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator, RoomMessageTransactionOutcome,
+    RoomRecipientMessages,
+};
 use crate::metrics::ServerMetrics;
-use crate::protocol::{PlayerId, RoomId, ServerMessage};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use crate::protocol::{LobbyState, PlayerId, RoomId, ServerMessage, SpectatorJoinedPayload};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::Duration;
 
 async fn wait_for_counter(context: &str, max_yields: usize, mut condition: impl FnMut() -> bool) {
@@ -15,6 +18,400 @@ async fn wait_for_counter(context: &str, max_yields: usize, mut condition: impl 
         tokio::task::yield_now().await;
     }
     panic!("{context}: counter condition never held");
+}
+
+#[tokio::test]
+async fn missing_sender_stamp_cancels_broadcast_before_any_delivery_attempt() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    );
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0010);
+    let sender_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0011);
+    let recipient_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0012);
+    let (sender, mut receiver) = mpsc::channel(1);
+
+    coordinator
+        .register_local_client(
+            recipient_id,
+            Some(room_id),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register recipient");
+
+    coordinator
+        .broadcast_to_room_except_with_message(&room_id, &sender_id, Box::new(|| None))
+        .await
+        .expect("missing stamp cancels cleanly");
+
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "an unregistered sender must not emit unstamped data"
+    );
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        0,
+        "cancellation happens before recipient delivery accounting"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_unroute_captures_every_stamp_allocated_before_player_left() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let connection_manager = Arc::new(ConnectionManager::new(
+        8,
+        metrics,
+        coordinator.clone(),
+        false,
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0013);
+    let sender_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0014);
+    let recipient_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0015);
+    let addr = "127.0.0.1:41000".parse().expect("test address");
+    let (sender_tx, _sender_rx) = mpsc::channel(4);
+    connection_manager
+        .connect_test_client(sender_id, sender_tx, addr)
+        .await;
+    connection_manager
+        .assign_client_to_room(&sender_id, room_id)
+        .await;
+    let (recipient_tx, mut recipient_rx) = mpsc::channel(4);
+    connection_manager
+        .connect_test_client(recipient_id, recipient_tx, addr)
+        .await;
+    connection_manager
+        .assign_client_to_room(&recipient_id, room_id)
+        .await;
+
+    let (stamp_allocated_tx, stamp_allocated_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let relay_task = {
+        let coordinator = Arc::clone(&coordinator);
+        let connection_manager = Arc::clone(&connection_manager);
+        let release = Arc::clone(&release);
+        tokio::spawn(async move {
+            coordinator
+                .broadcast_to_room_except_with_message(
+                    &room_id,
+                    &sender_id,
+                    Box::new(move || {
+                        let stamp = connection_manager
+                            .next_relay_stamp_in_room(&sender_id, &room_id)
+                            .expect("sender remains routed during allocation");
+                        stamp_allocated_tx
+                            .send(())
+                            .expect("test waits for stamp allocation");
+                        let (released, wake) = &*release;
+                        let mut released = released.lock().expect("release lock");
+                        while !*released {
+                            released = wake.wait(released).expect("release wait");
+                        }
+                        Some(Arc::new(ServerMessage::GameData {
+                            from_player: sender_id,
+                            data: serde_json::json!({"n": stamp.seq}),
+                            seq: Some(stamp.seq),
+                            epoch: Some(stamp.epoch),
+                            class: None,
+                            key: None,
+                        }))
+                    }),
+                )
+                .await
+        })
+    };
+    stamp_allocated_rx
+        .await
+        .expect("relay reaches allocation boundary");
+
+    let mut unroute_task = {
+        let coordinator = Arc::clone(&coordinator);
+        let connection_manager = Arc::clone(&connection_manager);
+        tokio::spawn(async move {
+            coordinator
+                .unroute_local_client_with_tail(
+                    sender_id,
+                    room_id,
+                    Box::new(move || {
+                        connection_manager
+                            .clear_room_assignment_with_tail(&sender_id)
+                            .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
+                    }),
+                )
+                .await
+        })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut unroute_task)
+            .await
+            .is_err(),
+        "terminal unroute must wait for a relay that already owns the routing snapshot"
+    );
+
+    {
+        let (released, wake) = &*release;
+        *released.lock().expect("release lock") = true;
+        wake.notify_all();
+    }
+    relay_task
+        .await
+        .expect("relay task should not panic")
+        .expect("relay should commit");
+    assert_eq!(
+        unroute_task
+            .await
+            .expect("unroute task should not panic")
+            .expect("unroute should succeed"),
+        Some((1, 1)),
+        "PlayerLeft tail covers the last relay allocated before unroute"
+    );
+    assert!(matches!(
+        recipient_rx.recv().await.as_deref(),
+        Some(ServerMessage::GameData {
+            seq: Some(1),
+            epoch: Some(1),
+            ..
+        })
+    ));
+    assert_eq!(
+        connection_manager.next_relay_stamp_in_room(&sender_id, &room_id),
+        None,
+        "no old-room stamp can be allocated after terminal unroute"
+    );
+}
+
+#[tokio::test]
+async fn registration_replaces_the_players_room_routing_scope() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0020);
+    let room_a = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0021);
+    let room_b = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0022);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+
+    coordinator
+        .register_local_client(player_id, Some(room_a), delivery.clone())
+        .await
+        .expect("register player in first room");
+    coordinator
+        .register_local_client(player_id, None, delivery.clone())
+        .await
+        .expect("clear player room routing");
+    coordinator
+        .broadcast_to_room(&room_a, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("broadcast to former room");
+
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "clearing room routing must remove the player from the former room"
+    );
+
+    coordinator
+        .register_local_client(player_id, Some(room_b), delivery)
+        .await
+        .expect("register player in replacement room");
+    coordinator
+        .broadcast_to_room(&room_a, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("broadcast to stale room after replacement");
+    coordinator
+        .broadcast_to_room(&room_b, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("broadcast to replacement room");
+
+    let delivered = receiver.recv().await.expect("replacement room delivery");
+    assert!(matches!(*delivered, ServerMessage::Pong));
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "the stale room must not contribute a second delivery"
+    );
+}
+
+#[tokio::test]
+async fn initial_room_transitions_wait_for_capacity_before_taking_routing_locks() {
+    for async_builder in [false, true] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let room_id = RoomId::new_v4();
+        let stable_id = PlayerId::new_v4();
+        let joining_id = PlayerId::new_v4();
+        let (stable_sender, mut stable_receiver) = mpsc::channel(4);
+        coordinator
+            .register_local_client(
+                stable_id,
+                Some(room_id),
+                ClientDeliveryHandle::new(stable_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register stable room member");
+
+        let (joining_sender, mut joining_receiver) = mpsc::channel(1);
+        joining_sender
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("fill the one-slot transition queue");
+        let joining_delivery =
+            ClientDeliveryHandle::new(joining_sender, ConnectionCloseSignal::detached());
+        let mut registration = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move {
+                if async_builder {
+                    coordinator
+                        .register_local_client_with_initial_message_async(
+                            joining_id,
+                            room_id,
+                            joining_delivery,
+                            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+                        )
+                        .await
+                } else {
+                    coordinator
+                        .register_local_client_with_initial_message(
+                            joining_id,
+                            room_id,
+                            joining_delivery,
+                            Box::new(|| Arc::new(ServerMessage::Pong)),
+                        )
+                        .await
+                }
+            })
+        };
+        wait_for_counter(
+            "initial transition reached queue backpressure",
+            10_000,
+            || {
+                metrics
+                    .websocket_backpressure_events
+                    .load(Ordering::Relaxed)
+                    == 1
+            },
+        )
+        .await;
+
+        coordinator
+            .broadcast_to_room(&room_id, Arc::new(ServerMessage::Pong))
+            .await
+            .expect("existing member broadcast is not blocked by baseline capacity");
+        assert!(matches!(
+            stable_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut registration)
+                .await
+                .is_err(),
+            "registration still waits for its reserved initial-frame capacity"
+        );
+
+        assert!(matches!(
+            joining_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+        assert_eq!(
+            registration
+                .await
+                .expect("registration task should not panic")
+                .expect("registration should succeed"),
+            crate::coordination::DeliveryOutcome::Delivered
+        );
+        assert!(matches!(
+            joining_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+
+        coordinator
+            .broadcast_to_room(&room_id, Arc::new(ServerMessage::Pong))
+            .await
+            .expect("new member becomes routable after its baseline commits");
+        assert!(matches!(
+            stable_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+        assert!(matches!(
+            joining_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_consumer_timeout_does_not_remove_a_replacement_connection() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(5),
+        Arc::clone(&metrics),
+    ));
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0023);
+
+    let (old_sender, _old_receiver) = mpsc::channel(1);
+    old_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("pre-fill replaced connection");
+    let (old_close, mut old_close_listener) = ConnectionCloseSignal::channel();
+    coordinator
+        .register_local_client(
+            player_id,
+            None,
+            ClientDeliveryHandle::new(old_sender, old_close),
+        )
+        .await
+        .expect("register old connection");
+
+    let timed_out_send = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+                .await
+        })
+    };
+    wait_for_counter("old connection reached backpressure", 10_000, || {
+        metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 1
+    })
+    .await;
+
+    let (replacement_sender, mut replacement_receiver) = mpsc::channel(2);
+    coordinator
+        .register_local_client(
+            player_id,
+            None,
+            ClientDeliveryHandle::new(replacement_sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register replacement connection");
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    timed_out_send
+        .await
+        .expect("timed-out send task should not panic")
+        .expect("timed-out send should finish cleanly");
+    assert_eq!(
+        old_close_listener.closed().await,
+        Some(crate::coordination::CloseReason::SlowConsumer)
+    );
+
+    coordinator
+        .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("send through replacement connection");
+    assert!(matches!(
+        replacement_receiver.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
 }
 
 #[tokio::test]
@@ -34,7 +431,14 @@ async fn drain_canceled_conditional_delivery_is_not_a_drop_or_relay_stat_loss() 
     let (close, _close_listener) = ConnectionCloseSignal::channel();
 
     coordinator
-        .register_local_client(player_id, None, ClientDeliveryHandle { sender, close })
+        .register_local_client(
+            player_id,
+            None,
+            ClientDeliveryHandle {
+                sender: sender.into(),
+                close,
+            },
+        )
         .await
         .expect("register test client");
 
@@ -126,7 +530,7 @@ async fn slow_consumer_retry_cancels_already_reserved_broadcast_permits() {
             healthy_id,
             Some(room_id),
             ClientDeliveryHandle {
-                sender: healthy_sender,
+                sender: healthy_sender.into(),
                 close: healthy_close,
             },
         )
@@ -143,7 +547,7 @@ async fn slow_consumer_retry_cancels_already_reserved_broadcast_permits() {
             slow_id,
             Some(room_id),
             ClientDeliveryHandle {
-                sender: slow_sender,
+                sender: slow_sender.into(),
                 close: slow_close,
             },
         )
@@ -238,4 +642,796 @@ async fn slow_consumer_retry_cancels_already_reserved_broadcast_permits() {
 
     drop(drain_tx);
     drop(slow_receiver);
+}
+
+#[tokio::test]
+async fn rerouted_recipient_retries_broadcast_for_stable_peer_before_replay_hook() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_a = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0200);
+    let room_b = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0201);
+    let source = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0202);
+    let stable = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0203);
+    let rerouted = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0204);
+
+    let (stable_sender, mut stable_receiver) = mpsc::channel(2);
+    coordinator
+        .register_local_client(
+            stable,
+            Some(room_a),
+            ClientDeliveryHandle::new(stable_sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register stable recipient");
+
+    let (queue_sender, _queue_receiver) = crate::coordination::outbound_queue::channel(1, 2);
+    let stale_delivery =
+        ClientDeliveryHandle::classified(queue_sender, ConnectionCloseSignal::detached());
+    let mut current_delivery = stale_delivery.clone();
+    current_delivery.sender = current_delivery.sender.next_generation();
+    current_delivery
+        .sender
+        .try_send(Arc::new(ServerMessage::RoomLeft), None)
+        .expect("advance the physical queue to the replacement generation");
+    coordinator
+        .register_local_client(rerouted, Some(room_a), stale_delivery)
+        .await
+        .expect("register stale routing snapshot");
+
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let broadcast_task = {
+        let coordinator = Arc::clone(&coordinator);
+        let hook_calls = Arc::clone(&hook_calls);
+        tokio::spawn(async move {
+            let (_drain_tx, drain_rx) = watch::channel(false);
+            let should_send = || true;
+            coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_a,
+                    &source,
+                    Arc::new(ServerMessage::Pong),
+                    &should_send,
+                    drain_rx,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_calls.fetch_add(1, Ordering::Relaxed);
+                        })
+                    }),
+                )
+                .await
+        })
+    };
+
+    wait_for_counter(
+        "stale recipient canceled the first snapshot",
+        10_000,
+        || {
+            metrics
+                .websocket_deliveries_canceled
+                .load(Ordering::Relaxed)
+                >= 2
+        },
+    )
+    .await;
+    coordinator
+        .register_local_client(rerouted, Some(room_b), current_delivery)
+        .await
+        .expect("reroute replacement generation");
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), broadcast_task)
+            .await
+            .expect("broadcast retry should finish")
+            .expect("broadcast task should not panic")
+            .expect("broadcast retry should not error"),
+        "the stable peer must receive the retried room event"
+    );
+    assert_eq!(
+        hook_calls.load(Ordering::Relaxed),
+        1,
+        "replay records only the committed recipient snapshot"
+    );
+    assert!(matches!(
+        stable_receiver.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let unexpected = stable_receiver.try_recv();
+    assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_hook_and_live_broadcast_are_atomic_against_reconnect_registration() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0300);
+    let existing = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0301);
+    let reconnecting = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0302);
+    let departed = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0303);
+
+    let (existing_sender, mut existing_receiver) = mpsc::channel(4);
+    coordinator
+        .register_local_client(
+            existing,
+            Some(room_id),
+            ClientDeliveryHandle::new(existing_sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register existing room member");
+
+    let replay_recorded = Arc::new(AtomicBool::new(false));
+    let hook_entered = Arc::new(Notify::new());
+    let release_hook = Arc::new(Notify::new());
+    let broadcast_task = {
+        let coordinator = Arc::clone(&coordinator);
+        let replay_recorded = Arc::clone(&replay_recorded);
+        let hook_entered = Arc::clone(&hook_entered);
+        let release_hook = Arc::clone(&release_hook);
+        tokio::spawn(async move {
+            coordinator
+                .broadcast_to_room_with_hook(
+                    &room_id,
+                    Arc::new(ServerMessage::PlayerLeft {
+                        player_id: departed,
+                        epoch: None,
+                        final_seq: None,
+                    }),
+                    Box::new(move || {
+                        Box::pin(async move {
+                            replay_recorded.store(true, Ordering::Release);
+                            hook_entered.notify_one();
+                            release_hook.notified().await;
+                        })
+                    }),
+                )
+                .await
+        })
+    };
+    hook_entered.notified().await;
+
+    let (reconnecting_sender, mut reconnecting_receiver) = mpsc::channel(4);
+    let mut registration_task = {
+        let coordinator = Arc::clone(&coordinator);
+        let replay_recorded = Arc::clone(&replay_recorded);
+        tokio::spawn(async move {
+            coordinator
+                .register_local_client_with_initial_message_async(
+                    reconnecting,
+                    room_id,
+                    ClientDeliveryHandle::new(
+                        reconnecting_sender,
+                        ConnectionCloseSignal::detached(),
+                    ),
+                    Box::new(move |_| {
+                        Box::pin(async move {
+                            Ok(Arc::new(ServerMessage::Error {
+                                message: if replay_recorded.load(Ordering::Acquire) {
+                                    "replay contains PlayerLeft".to_string()
+                                } else {
+                                    "replay missed PlayerLeft".to_string()
+                                },
+                                error_code: None,
+                            }))
+                        })
+                    }),
+                )
+                .await
+        })
+    };
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut registration_task)
+            .await
+            .is_err(),
+        "reconnect registration must wait while replay and live delivery share the routing snapshot"
+    );
+    release_hook.notify_one();
+
+    assert!(broadcast_task
+        .await
+        .expect("broadcast task should not panic")
+        .expect("broadcast should succeed"));
+    assert_eq!(
+        registration_task
+            .await
+            .expect("registration task should not panic")
+            .expect("registration should succeed"),
+        crate::coordination::DeliveryOutcome::Delivered
+    );
+
+    assert!(matches!(
+        existing_receiver.recv().await.as_deref(),
+        Some(ServerMessage::PlayerLeft { player_id, .. }) if *player_id == departed
+    ));
+    match reconnecting_receiver
+        .recv()
+        .await
+        .expect("reconnector receives its baseline")
+        .as_ref()
+    {
+        ServerMessage::Error { message, .. } => {
+            assert_eq!(message, "replay contains PlayerLeft");
+        }
+        other => panic!("unexpected reconnect baseline marker: {other:?}"),
+    }
+    let unexpected = reconnecting_receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "the reconnector must not receive PlayerLeft live as well as through replay"
+    );
+}
+
+fn two_frame_batch(player_id: PlayerId) -> RoomRecipientMessages {
+    RoomRecipientMessages {
+        player_id,
+        first_phase: 0,
+        messages: vec![
+            Arc::new(ServerMessage::Pong),
+            Arc::new(ServerMessage::Error {
+                message: "tailored plan marker".to_string(),
+                error_code: None,
+            }),
+        ],
+    }
+}
+
+#[tokio::test]
+async fn two_frame_transaction_progresses_at_minimum_control_capacity() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0428);
+    let player = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0429);
+    let (sender, mut receiver) = mpsc::channel(2);
+    sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("occupy one of the minimum two control slots");
+    coordinator
+        .register_local_client(
+            player,
+            Some(room_id),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register minimum-capacity recipient");
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[player],
+                    vec![two_frame_batch(player)],
+                    Box::new(|| Box::pin(async { Ok(true) })),
+                    Box::new(|_| true),
+                )
+                .await
+        })
+    };
+    wait_for_counter("second reservation reached backpressure", 10_000, || {
+        metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 1
+    })
+    .await;
+    assert!(matches!(
+        receiver.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    assert_eq!(
+        transaction
+            .await
+            .expect("transaction task must not panic")
+            .expect("minimum-capacity transaction succeeds"),
+        RoomMessageTransactionOutcome::Committed
+    );
+    assert!(matches!(
+        receiver.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    assert!(matches!(
+        receiver.recv().await.as_deref(),
+        Some(ServerMessage::Error { message, .. }) if message == "tailored plan marker"
+    ));
+}
+
+#[tokio::test]
+async fn room_transaction_commits_every_phase_zero_frame_before_phase_one() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0430);
+    let joiner = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0431);
+    let incumbent = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0432);
+    let (joiner_tx, mut joiner_rx) = mpsc::channel(1);
+    let (incumbent_tx, mut incumbent_rx) = mpsc::channel(1);
+    for (player, sender) in [(joiner, joiner_tx), (incumbent, incumbent_tx)] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register phased transaction member");
+    }
+
+    let outcome = coordinator
+        .commit_room_messages_if_members_with_hook(
+            &room_id,
+            &[joiner, incumbent],
+            vec![
+                RoomRecipientMessages::in_order(joiner, vec![Arc::new(ServerMessage::Pong)]),
+                RoomRecipientMessages::from_first_phase(
+                    incumbent,
+                    1,
+                    vec![Arc::new(ServerMessage::Error {
+                        message: "phase one".to_string(),
+                        error_code: None,
+                    })],
+                ),
+            ],
+            Box::new(|| Box::pin(async { Ok(true) })),
+            Box::new(|failed_phase_zero| {
+                assert_eq!(failed_phase_zero, 0);
+                let joiner_phase = joiner_rx.try_recv();
+                assert!(matches!(joiner_phase.as_deref(), Ok(ServerMessage::Pong)));
+                let incumbent_phase = incumbent_rx.try_recv();
+                assert!(matches!(
+                    incumbent_phase,
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                true
+            }),
+        )
+        .await
+        .expect("phased transaction succeeds");
+
+    assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);
+    assert!(matches!(
+        incumbent_rx.recv().await.as_deref(),
+        Some(ServerMessage::Error { message, .. }) if message == "phase one"
+    ));
+}
+
+#[tokio::test]
+async fn failed_phase_zero_can_cancel_every_dependent_phase_one_frame() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    );
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0440);
+    let joiner = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0441);
+    let incumbent = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0442);
+    let (joiner_tx, mut joiner_rx) = crate::coordination::outbound_queue::channel(1, 1);
+    joiner_tx.set_protocol_version(3);
+    joiner_tx
+        .try_enqueue_transition(
+            Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                SpectatorJoinedPayload {
+                    room_id,
+                    room_code: "phase-zero-close".to_string(),
+                    spectator_id: joiner,
+                    game_name: "phase-zero-close".to_string(),
+                    current_players: Vec::new(),
+                    current_spectators: Vec::new(),
+                    lobby_state: LobbyState::Lobby,
+                    reason: None,
+                },
+            ))),
+            1,
+        )
+        .expect("initialize classified actor generation");
+    joiner_rx
+        .recv()
+        .await
+        .expect("classified actor receiver remains open")
+        .expect("classified actor transition is queued");
+    let mut joiner_delivery =
+        ClientDeliveryHandle::classified(joiner_tx, ConnectionCloseSignal::detached());
+    joiner_delivery.sender = joiner_delivery.sender.next_generation();
+    coordinator
+        .register_local_client(joiner, Some(room_id), joiner_delivery)
+        .await
+        .expect("register classified actor");
+    let (incumbent_tx, mut incumbent_rx) = mpsc::channel(1);
+    coordinator
+        .register_local_client(
+            incumbent,
+            Some(room_id),
+            ClientDeliveryHandle::new(incumbent_tx, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register dependent incumbent");
+    let observed_failures = Arc::new(AtomicUsize::new(0));
+    let callback_observation = Arc::clone(&observed_failures);
+
+    let outcome = coordinator
+        .commit_room_messages_if_members_with_hook(
+            &room_id,
+            &[joiner, incumbent],
+            vec![
+                RoomRecipientMessages::in_order(joiner, vec![Arc::new(ServerMessage::Pong)]),
+                RoomRecipientMessages::from_first_phase(
+                    incumbent,
+                    1,
+                    vec![Arc::new(ServerMessage::Pong)],
+                ),
+            ],
+            Box::new(move || {
+                Box::pin(async move {
+                    joiner_rx.close();
+                    Ok(true)
+                })
+            }),
+            Box::new(move |failed_phase_zero| {
+                callback_observation.store(failed_phase_zero, Ordering::Release);
+                false
+            }),
+        )
+        .await
+        .expect("post-commit closure is reported as degraded delivery");
+
+    assert_eq!(
+        outcome,
+        RoomMessageTransactionOutcome::CommittedDegraded { failed_frames: 2 }
+    );
+    assert_eq!(observed_failures.load(Ordering::Acquire), 1);
+    let unexpected = incumbent_rx.try_recv();
+    assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
+    assert_eq!(
+        metrics
+            .websocket_deliveries_channel_closed
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn room_transaction_reserves_slow_recipients_in_one_timeout_window() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let timeout_window = Duration::from_secs(5);
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        timeout_window,
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0450);
+    let alice = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0451);
+    let bob = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0452);
+    let (alice_tx, _alice_rx) = mpsc::channel(1);
+    let (bob_tx, _bob_rx) = mpsc::channel(1);
+    for (player, sender) in [(alice, alice_tx), (bob, bob_tx)] {
+        sender
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("fill recipient queue");
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register slow transaction member");
+    }
+
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[alice, bob],
+                    vec![
+                        RoomRecipientMessages::in_order(alice, vec![Arc::new(ServerMessage::Pong)]),
+                        RoomRecipientMessages::in_order(bob, vec![Arc::new(ServerMessage::Pong)]),
+                    ],
+                    Box::new(|| Box::pin(async { Ok(true) })),
+                    Box::new(|_| true),
+                )
+                .await
+        })
+    };
+    wait_for_counter(
+        "both recipient reservations reached backpressure",
+        10_000,
+        || {
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 2
+        },
+    )
+    .await;
+
+    tokio::time::advance(timeout_window - Duration::from_millis(1)).await;
+    assert_eq!(
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    wait_for_counter("both slow recipients expired together", 10_000, || {
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed)
+            == 2
+    })
+    .await;
+
+    assert_eq!(
+        transaction
+            .await
+            .expect("transaction task must not panic")
+            .expect("backpressure is a routing outcome"),
+        RoomMessageTransactionOutcome::RoutingChanged
+    );
+}
+
+#[tokio::test]
+async fn room_transaction_hook_error_delivers_no_partial_frames() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0400);
+    let alice = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0401);
+    let bob = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0402);
+    let (alice_tx, mut alice_rx) = mpsc::channel(2);
+    let (bob_tx, mut bob_rx) = mpsc::channel(2);
+    for (player, sender) in [(alice, alice_tx), (bob, bob_tx)] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register transaction member");
+    }
+
+    let result = coordinator
+        .commit_room_messages_if_members_with_hook(
+            &room_id,
+            &[alice, bob],
+            vec![two_frame_batch(alice), two_frame_batch(bob)],
+            Box::new(|| Box::pin(async { anyhow::bail!("injected finalize failure") })),
+            Box::new(|_| true),
+        )
+        .await;
+
+    assert!(result.is_err(), "fallible commit hook error must propagate");
+    for receiver in [&mut alice_rx, &mut bob_rx] {
+        let unexpected = receiver.try_recv();
+        assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
+    }
+}
+
+#[tokio::test]
+async fn receiver_close_during_commit_hook_degrades_without_suppressing_healthy_phases() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    );
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0403);
+    let healthy = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0404);
+    let closing = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0405);
+    let (healthy_tx, mut healthy_rx) = mpsc::channel(2);
+    coordinator
+        .register_local_client(
+            healthy,
+            Some(room_id),
+            ClientDeliveryHandle::new(healthy_tx, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register healthy member");
+    let (closing_tx, mut closing_rx) = crate::coordination::outbound_queue::channel(1, 2);
+    closing_tx.set_protocol_version(3);
+    closing_tx
+        .try_enqueue_transition(
+            Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                SpectatorJoinedPayload {
+                    room_id,
+                    room_code: "transaction-close".to_string(),
+                    spectator_id: closing,
+                    game_name: "transaction-close".to_string(),
+                    current_players: Vec::new(),
+                    current_spectators: Vec::new(),
+                    lobby_state: LobbyState::Lobby,
+                    reason: None,
+                },
+            ))),
+            1,
+        )
+        .expect("advance the classified queue into the transaction room");
+    closing_rx
+        .recv()
+        .await
+        .expect("transition queue remains accountable")
+        .expect("room transition is queued");
+    let mut closing_delivery =
+        ClientDeliveryHandle::classified(closing_tx, ConnectionCloseSignal::detached());
+    closing_delivery.sender = closing_delivery.sender.next_generation();
+    coordinator
+        .register_local_client(closing, Some(room_id), closing_delivery)
+        .await
+        .expect("register closing member");
+    let after_first_phase_calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&after_first_phase_calls);
+
+    let outcome = coordinator
+        .commit_room_messages_if_members_with_hook(
+            &room_id,
+            &[healthy, closing],
+            vec![two_frame_batch(healthy), two_frame_batch(closing)],
+            Box::new(move || {
+                Box::pin(async move {
+                    closing_rx.close();
+                    Ok(true)
+                })
+            }),
+            Box::new(move |_| {
+                callback_calls.fetch_add(1, Ordering::AcqRel);
+                true
+            }),
+        )
+        .await
+        .expect("post-commit close is a degraded outcome, not an infrastructure error");
+
+    assert_eq!(
+        outcome,
+        RoomMessageTransactionOutcome::CommittedDegraded { failed_frames: 2 }
+    );
+    assert_eq!(after_first_phase_calls.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        healthy_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    assert!(matches!(
+        healthy_rx.recv().await.as_deref(),
+        Some(ServerMessage::Error { message, .. }) if message == "tailored plan marker"
+    ));
+    assert_eq!(
+        metrics
+            .websocket_deliveries_channel_closed
+            .load(Ordering::Relaxed),
+        2,
+        "every failed reserved frame is accounted after the durable commit"
+    );
+}
+
+#[tokio::test]
+async fn member_leave_while_second_frame_waits_aborts_whole_room_transaction() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0410);
+    let stable = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0411);
+    let leaving = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0412);
+    let (stable_tx, mut stable_rx) = mpsc::channel(2);
+    let (leaving_tx, mut leaving_rx) = mpsc::channel(2);
+    leaving_tx
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("occupy one slot so the second transaction frame waits");
+    for (player, sender) in [(stable, stable_tx), (leaving, leaving_tx)] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register transaction member");
+    }
+
+    let hook_called = Arc::new(AtomicBool::new(false));
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        let hook_called = Arc::clone(&hook_called);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[stable, leaving],
+                    vec![two_frame_batch(stable), two_frame_batch(leaving)],
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_called.store(true, Ordering::Release);
+                            Ok(true)
+                        })
+                    }),
+                    Box::new(|_| true),
+                )
+                .await
+        })
+    };
+
+    wait_for_counter("every frame reservation was attempted", 10_000, || {
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed) >= 4
+    })
+    .await;
+    coordinator
+        .unregister_local_client(&leaving)
+        .await
+        .expect("publish the member leave");
+    assert!(matches!(
+        leaving_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+
+    assert_eq!(
+        transaction
+            .await
+            .expect("transaction task must not panic")
+            .expect("routing cancellation is not an infrastructure error"),
+        RoomMessageTransactionOutcome::RoutingChanged
+    );
+    assert!(!hook_called.load(Ordering::Acquire));
+    let unexpected_stable = stable_rx.try_recv();
+    assert!(matches!(
+        unexpected_stable,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let unexpected_leaving = leaving_rx.try_recv();
+    assert!(matches!(
+        unexpected_leaving,
+        Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[tokio::test]
+async fn full_recipient_queue_aborts_room_transaction_before_commit_hook() {
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_millis(10),
+        Arc::new(ServerMetrics::new()),
+    );
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0420);
+    let stable = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0421);
+    let blocked = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0422);
+    let (stable_tx, mut stable_rx) = mpsc::channel(2);
+    let (blocked_tx, _blocked_rx) = mpsc::channel(2);
+    blocked_tx.try_send(Arc::new(ServerMessage::Pong)).unwrap();
+    blocked_tx.try_send(Arc::new(ServerMessage::Pong)).unwrap();
+    for (player, sender) in [(stable, stable_tx), (blocked, blocked_tx)] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register transaction member");
+    }
+    let hook_called = Arc::new(AtomicBool::new(false));
+    let hook_marker = Arc::clone(&hook_called);
+
+    let outcome = coordinator
+        .commit_room_messages_if_members_with_hook(
+            &room_id,
+            &[stable, blocked],
+            vec![two_frame_batch(stable), two_frame_batch(blocked)],
+            Box::new(move || {
+                Box::pin(async move {
+                    hook_marker.store(true, Ordering::Release);
+                    Ok(true)
+                })
+            }),
+            Box::new(|_| true),
+        )
+        .await
+        .expect("backpressure cancellation is not an infrastructure error");
+
+    assert_eq!(outcome, RoomMessageTransactionOutcome::RoutingChanged);
+    assert!(!hook_called.load(Ordering::Acquire));
+    let unexpected = stable_rx.try_recv();
+    assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
 }

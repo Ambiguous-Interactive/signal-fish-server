@@ -3,7 +3,8 @@
 //! each v3 client must receive `GameStarting` THEN a per-recipient `SessionPlan`
 //! (mesh + webrtc, fallback relay, naming the other peer with the single-offerer
 //! `initiate`). A mixed room (one v3 + one relay-only client) resolves to the
-//! relay floor and neither member receives a `SessionPlan` (Appendix K).
+//! relay floor: the v3 member receives an explicit no-peer `relay` plan while
+//! the v2 member receives no v3-only frame.
 //!
 //! Models the harness in `tests/v3_signaling_e2e.rs` but injects a chosen
 //! `SessionConfig` so finalization can pick a non-relay plan.
@@ -381,7 +382,7 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
 }
 
 #[tokio::test]
-async fn mixed_v2_v3_room_finalization_sends_no_session_plan() {
+async fn mixed_v2_v3_room_finalization_sends_relay_plan_only_to_v3() {
     let addr = start_server_with_session(mesh_session_config()).await;
 
     // Peer 1 is v3 mesh; peer 2 authenticates as pure v2 (relay-only) on /v3/ws.
@@ -405,14 +406,16 @@ async fn mixed_v2_v3_room_finalization_sends_no_session_plan() {
     send(&mut peer1, &ClientMessage::StartGame).await;
 
     // Both receive GameStarting (reaching past read_finalization proves it,
-    // in order), exactly like v2. The room resolved to the relay floor, so
-    // NEITHER receives a SessionPlan.
+    // in order). The room resolved to the relay floor, so the v3 member gets
+    // an explicit authoritative reset while the v2 member remains plan-free.
     let (plan1, plan2) = tokio::join!(read_finalization(&mut peer1), read_finalization(&mut peer2));
-    assert!(
-        plan1.session_plan.is_none(),
-        "v3 peer must not receive a SessionPlan in a relay-resolved room; skipped after GameStarting: {}",
-        plan1.skipped_after_game_starting
-    );
+    let plan1 = plan1.expect_session_plan("v3 peer in relay-resolved room");
+    assert_eq!(plan1.topology, Topology::Relay);
+    assert_eq!(plan1.transport, Transport::Relay);
+    assert_eq!(plan1.host, None);
+    assert!(plan1.peers.is_empty());
+    assert!(plan1.ice_servers.is_empty());
+    assert_eq!(plan1.fallback, Transport::Relay);
     assert!(
         plan2.session_plan.is_none(),
         "v2 peer must never receive a SessionPlan; skipped after GameStarting: {}",

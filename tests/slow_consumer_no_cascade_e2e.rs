@@ -187,7 +187,7 @@ async fn drain_healthy_peer(mut receiver: WsReceiver, index: usize, stalled_id: 
                 );
                 received += 1;
             }
-            ServerMessage::PlayerLeft { player_id } => {
+            ServerMessage::PlayerLeft { player_id, .. } => {
                 assert_eq!(
                     player_id, stalled_id,
                     "healthy peer {index} observed a PlayerLeft for a NON-stalled member \
@@ -256,6 +256,8 @@ async fn slow_consumer_eviction_does_not_cascade_to_healthy_peers() {
         let padding = "x".repeat(STALL_PADDING_BYTES);
         for seq in 0..MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": seq, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");

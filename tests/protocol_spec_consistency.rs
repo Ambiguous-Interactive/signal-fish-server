@@ -11,12 +11,13 @@
 //!
 //! The spec is parsed as YAML 1.2 with `saphyr` (already a dev-dependency, used
 //! by `tests/ci_config_tests.rs`). Rather than scan the raw text, we collect the
-//! spec's *declared wire tokens* — every `const:` value and every `enum:` member,
-//! at any depth — and assert each Rust variant/code appears among them by EXACT
-//! whole-token match. Anchoring to the JSON-Schema declaration sites is what
+//! spec's *declared wire tokens* — every `const:` value, every `enum:` member,
+//! and the explicit physical-frame `x-rust-server-variant` marker — and asserts
+//! each Rust variant/code appears among them by EXACT whole-token match.
+//! Anchoring to the declaration sites is what
 //! makes this a real drift guard: a token that only appears as a mapping KEY
 //! (e.g. a `host:` field), inside prose, or in an example does NOT satisfy the
-//! check — only a genuine `const`/`enum` declaration does. This is strictly more
+//! check — only a genuine declaration or physical-frame marker does. This is strictly more
 //! precise than the substring `doc.contains` scan `docs_site_consistency` uses,
 //! and parsing makes a malformed spec fail loudly rather than silently passing.
 
@@ -108,7 +109,8 @@ fn spec_text() -> String {
 }
 
 /// Parse the spec as YAML 1.2 and collect its *declared wire tokens*: every
-/// `const:` value and every scalar inside an `enum:` sequence, at any depth.
+/// `const:` value, every scalar inside an `enum:` sequence, and the explicit
+/// `x-rust-server-variant` marker for a non-JSON physical frame.
 ///
 /// Anchoring to the JSON-Schema declaration sites — rather than every scalar in
 /// the document — is what makes membership a real drift guard: a token that
@@ -146,6 +148,7 @@ fn collect_declared_tokens(node: &Yaml, out: &mut BTreeSet<String>) {
                             }
                         }
                     }
+                    Some("x-rust-server-variant") => out.extend(scalar_token(value)),
                     _ => {}
                 }
                 // Recurse into the value to reach nested schemas (oneOf, arrays
@@ -164,15 +167,349 @@ fn collect_declared_tokens(node: &Yaml, out: &mut BTreeSet<String>) {
 
 /// Render a scalar `const`/`enum` value as its token string.
 ///
-/// Every wire token this guard checks — message `type` discriminators, error
-/// codes, the Transport / Topology / GameDataEncoding / RelayTransport /
-/// SpectatorStateChangeReason / LobbyState / ReplayStatus values, and the
-/// `ConnectionInfo` `type` discriminators — is a STRING in the spec, so
+/// Every wire token this guard checks — message `type` discriminators, the
+/// physical `GameDataBinary` variant marker, error
+/// codes, the Transport / Topology / GameDataEncoding / DeliveryClass /
+/// DeliveryGapReason / RelayTransport / SpectatorStateChangeReason /
+/// LobbyState / ReplayStatus values, and the `ConnectionInfo` `type`
+/// discriminators — is a STRING in the spec, so
 /// `as_str()` is exact and complete; a non-string scalar there would be a spec
 /// authoring error, not a token to match. (Returns `None` for non-string
 /// scalars, which simply means they are not counted as tokens.)
 fn scalar_token(node: &Yaml) -> Option<String> {
     node.as_str().map(str::to_string)
+}
+
+fn mapping_path<'doc, 'input>(
+    mut node: &'doc Yaml<'input>,
+    path: &[&str],
+) -> Option<&'doc Yaml<'input>> {
+    for key in path {
+        node = node.as_mapping_get(key)?;
+    }
+    Some(node)
+}
+
+fn collect_local_references(node: &Yaml, references: &mut Vec<String>) {
+    match node {
+        Yaml::Mapping(mapping) => {
+            for (key, value) in mapping.iter() {
+                if key.as_str() == Some("$ref") {
+                    let reference = value
+                        .as_str()
+                        .expect("protocol spec $ref values must be strings");
+                    assert!(
+                        reference.starts_with("#/"),
+                        "protocol spec must use resolvable local references, got {reference}"
+                    );
+                    references.push(reference.to_string());
+                }
+                collect_local_references(value, references);
+            }
+        }
+        Yaml::Sequence(items) => {
+            for item in items.iter() {
+                collect_local_references(item, references);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_local_reference<'doc, 'input>(
+    mut node: &'doc Yaml<'input>,
+    reference: &str,
+) -> Option<&'doc Yaml<'input>> {
+    for raw_segment in reference.strip_prefix("#/")?.split('/') {
+        let segment = raw_segment.replace("~1", "/").replace("~0", "~");
+        node = node.as_mapping_get(segment.as_str())?;
+    }
+    Some(node)
+}
+
+#[test]
+fn spec_has_no_dangling_local_references() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let mut references = Vec::new();
+    collect_local_references(root, &mut references);
+    assert!(
+        !references.is_empty(),
+        "protocol spec must contain references"
+    );
+
+    let dangling: Vec<_> = references
+        .iter()
+        .filter(|reference| resolve_local_reference(root, reference).is_none())
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "protocol spec contains dangling local references: {dangling:?}"
+    );
+}
+
+#[test]
+fn spec_delivery_report_gap_bound_matches_protocol_constant() {
+    use signal_fish_server::protocol::DELIVERY_REPORT_MAX_GAPS;
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let gaps = mapping_path(
+        root,
+        &[
+            "components",
+            "schemas",
+            "DeliveryReport",
+            "properties",
+            "data",
+            "properties",
+            "gaps",
+        ],
+    )
+    .expect("protocol spec must define DeliveryReport.data.gaps");
+
+    assert_eq!(
+        gaps.as_mapping_get("minItems").and_then(Yaml::as_integer),
+        Some(1),
+        "a present DeliveryReport.gaps array must be non-empty"
+    );
+    assert_eq!(
+        gaps.as_mapping_get("maxItems").and_then(Yaml::as_integer),
+        Some(DELIVERY_REPORT_MAX_GAPS as i64),
+        "AsyncAPI DeliveryReport.gaps maxItems must match DELIVERY_REPORT_MAX_GAPS"
+    );
+}
+
+#[test]
+fn spec_models_disjoint_v2_and_v3_physical_binary_envelopes() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    assert!(
+        mapping_path(root, &["components", "schemas", "GameDataBinary"]).is_none(),
+        "physical GameDataBinary must not retain an unreferenced JSON-envelope schema"
+    );
+    let message = mapping_path(root, &["components", "messages", "GameDataBinary"])
+        .expect("spec must define the physical GameDataBinary message");
+    let alternatives = mapping_path(message, &["payload", "oneOf"])
+        .and_then(Yaml::as_sequence)
+        .expect("physical GameDataBinary payload must use oneOf");
+    let references: Vec<_> = alternatives
+        .iter()
+        .map(|alternative| {
+            alternative
+                .as_mapping_get("$ref")
+                .and_then(Yaml::as_str)
+                .expect("physical binary alternative must be a schema reference")
+        })
+        .collect();
+    assert_eq!(
+        references,
+        [
+            "#/components/schemas/V2BinaryGameDataEnvelope",
+            "#/components/schemas/V3BinaryGameDataEnvelope",
+        ]
+    );
+    assert_eq!(
+        message
+            .as_mapping_get("x-rust-server-variant")
+            .and_then(Yaml::as_str),
+        Some("GameDataBinary")
+    );
+
+    let binary_id = mapping_path(root, &["components", "schemas", "BinaryPlayerId"])
+        .expect("spec must define the binary UUID representation");
+    for constraint in ["minLength", "maxLength"] {
+        assert_eq!(
+            binary_id
+                .as_mapping_get(constraint)
+                .and_then(Yaml::as_integer),
+            Some(16),
+            "BinaryPlayerId {constraint} must be 16 bytes"
+        );
+    }
+    assert_eq!(
+        binary_id
+            .as_mapping_get("x-messagepack-type")
+            .and_then(Yaml::as_str),
+        Some("bin")
+    );
+
+    for (name, version, required) in [
+        (
+            "V2BinaryGameDataEnvelope",
+            2,
+            &["from_player", "encoding", "payload"][..],
+        ),
+        (
+            "V3BinaryGameDataEnvelope",
+            3,
+            &["from_player", "encoding", "payload", "seq", "epoch"][..],
+        ),
+    ] {
+        let envelope = mapping_path(root, &["components", "schemas", name])
+            .unwrap_or_else(|| panic!("spec must define {name}"));
+        assert_eq!(
+            envelope
+                .as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{name} must reject fields from the other physical version"
+        );
+        assert_eq!(
+            envelope
+                .as_mapping_get("x-protocol-version")
+                .and_then(Yaml::as_integer),
+            Some(version)
+        );
+        let actual_required: Vec<_> = envelope
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .expect("binary envelope must list required fields")
+            .iter()
+            .map(|field| field.as_str().expect("required field must be a string"))
+            .collect();
+        assert_eq!(actual_required, required);
+        assert_eq!(
+            mapping_path(envelope, &["properties", "from_player", "$ref"]).and_then(Yaml::as_str),
+            Some("#/components/schemas/BinaryPlayerId")
+        );
+    }
+
+    let v2 = mapping_path(root, &["components", "schemas", "V2BinaryGameDataEnvelope"])
+        .expect("spec must define V2BinaryGameDataEnvelope");
+    assert_eq!(
+        mapping_path(v2, &["properties", "encoding", "const"]).and_then(Yaml::as_str),
+        Some("message_pack")
+    );
+    let v3 = mapping_path(root, &["components", "schemas", "V3BinaryGameDataEnvelope"])
+        .expect("spec must define V3BinaryGameDataEnvelope");
+    assert_eq!(
+        mapping_path(v3, &["properties", "epoch", "maximum"]).and_then(Yaml::as_integer),
+        Some(u32::MAX.into())
+    );
+}
+
+#[test]
+fn spec_relay_stats_bounds_match_client_validation() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let fields = mapping_path(
+        root,
+        &[
+            "components",
+            "schemas",
+            "RelayStats",
+            "properties",
+            "data",
+            "properties",
+        ],
+    )
+    .expect("spec must define RelayStats.data properties");
+    for (field, minimum) in [
+        ("interval_ms", 1),
+        ("sent_to_you", 0),
+        ("dropped_for_you", 0),
+        ("backpressure_events", 0),
+    ] {
+        assert_eq!(
+            mapping_path(fields, &[field, "minimum"]).and_then(Yaml::as_integer),
+            Some(minimum),
+            "RelayStats.{field} minimum drifted from client validation"
+        );
+    }
+}
+
+#[test]
+fn spec_player_snapshots_have_disjoint_versioned_relay_baselines() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let player_info = mapping_path(root, &["components", "schemas", "PlayerInfo"])
+        .expect("spec must define PlayerInfo");
+    let refs: Vec<_> = player_info
+        .as_mapping_get("oneOf")
+        .and_then(Yaml::as_sequence)
+        .expect("PlayerInfo must distinguish protocol versions")
+        .iter()
+        .map(|branch| {
+            branch
+                .as_mapping_get("$ref")
+                .and_then(Yaml::as_str)
+                .expect("PlayerInfo branches must be local refs")
+        })
+        .collect();
+    assert_eq!(
+        refs,
+        [
+            "#/components/schemas/V2PlayerInfo",
+            "#/components/schemas/V3PlayerInfo"
+        ]
+    );
+
+    for (name, version_fields) in [
+        ("V2PlayerInfo", &[][..]),
+        ("V3PlayerInfo", &["epoch", "seq"][..]),
+    ] {
+        let schema = mapping_path(root, &["components", "schemas", name])
+            .unwrap_or_else(|| panic!("spec must define {name}"));
+        assert_eq!(
+            schema
+                .as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{name} must not accept the other version's fields"
+        );
+        let required: BTreeSet<_> = schema
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .expect("PlayerInfo variant must list required fields")
+            .iter()
+            .map(|field| field.as_str().expect("required field must be a string"))
+            .collect();
+        for field in ["epoch", "seq"] {
+            assert_eq!(
+                required.contains(field),
+                version_fields.contains(&field),
+                "{name}.{field} requiredness drifted"
+            );
+            assert_eq!(
+                mapping_path(schema, &["properties", field]).is_some(),
+                version_fields.contains(&field),
+                "{name}.{field} property shape drifted"
+            );
+        }
+    }
+
+    let v3 = mapping_path(root, &["components", "schemas", "V3PlayerInfo"])
+        .expect("spec must define V3PlayerInfo");
+    assert_eq!(
+        mapping_path(v3, &["properties", "epoch", "minimum"]).and_then(Yaml::as_integer),
+        Some(1)
+    );
+    assert_eq!(
+        mapping_path(v3, &["properties", "seq", "minimum"]).and_then(Yaml::as_integer),
+        Some(0)
+    );
 }
 
 #[test]
@@ -256,14 +593,15 @@ fn spec_documents_every_error_code_variant() {
 /// exhaustiveness `match`: adding a variant fails to compile until it is listed
 /// here, and is then checked against the spec. This closes the gap a
 /// hand-maintained token list left — a new `Transport` / `Topology` /
-/// `GameDataEncoding` / `RelayTransport` / `SpectatorStateChangeReason` /
-/// `LobbyState` / `ReplayStatus` value, or a new internally-tagged
+/// `GameDataEncoding` / `DeliveryClass` / `DeliveryGapReason` /
+/// `RelayTransport` / `SpectatorStateChangeReason` / `LobbyState` /
+/// `ReplayStatus` value, or a new internally-tagged
 /// `ConnectionInfo` `type` discriminator, can no longer ship undocumented.
 #[test]
 fn spec_documents_every_wire_token_enum_variant() {
     use signal_fish_server::protocol::{
-        ConnectionInfo, GameDataEncoding, LobbyState, RelayTransport, ReplayStatus,
-        SpectatorStateChangeReason, Topology, Transport,
+        ConnectionInfo, DeliveryClass, DeliveryGapReason, GameDataEncoding, LobbyState,
+        RelayTransport, ReplayStatus, SpectatorStateChangeReason, Topology, Transport,
     };
 
     let declared = spec_declared_tokens();
@@ -297,6 +635,29 @@ fn spec_documents_every_wire_token_enum_variant() {
         }
         let _exhaustive = |value: GameDataEncoding| match value {
             Json | MessagePack | Rkyv => {}
+        };
+    }
+    {
+        use DeliveryClass::*;
+        for value in [Reliable, Latest, Volatile] {
+            assert_wire_token(&declared, value, "DeliveryClass");
+        }
+        let _exhaustive = |value: DeliveryClass| match value {
+            Reliable | Latest | Volatile => {}
+        };
+    }
+    {
+        use DeliveryGapReason::*;
+        for value in [
+            LatestSuperseded,
+            LatestDroppedFull,
+            VolatileDropped,
+            UnsupportedFormat,
+        ] {
+            assert_wire_token(&declared, value, "DeliveryGapReason");
+        }
+        let _exhaustive = |value: DeliveryGapReason| match value {
+            LatestSuperseded | LatestDroppedFull | VolatileDropped | UnsupportedFormat => {}
         };
     }
     {

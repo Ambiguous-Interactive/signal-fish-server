@@ -207,6 +207,8 @@ async fn game_data_burst_is_relayed_completely_and_in_order() {
         let padding = "x".repeat(PAYLOAD_PADDING_BYTES);
         for seq in 0..BURST_MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": seq as u64, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -288,6 +290,8 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
         let padding = "x".repeat(STALL_PADDING_BYTES);
         for seq in 0..MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": seq as u64, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -322,7 +326,7 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
                         .expect("GameData payload carries a numeric seq");
                     seqs.push(seq);
                 }
-                ServerMessage::PlayerLeft { player_id } => left_players.push(player_id),
+                ServerMessage::PlayerLeft { player_id, .. } => left_players.push(player_id),
                 ServerMessage::Error {
                     message,
                     error_code,
@@ -481,6 +485,8 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
             && sent < FLOOD_MESSAGE_CAP
         {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": sent, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -508,7 +514,7 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
             let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
             match message {
                 ServerMessage::GameData { .. } => game_data_received += 1,
-                ServerMessage::PlayerLeft { player_id } if player_id == stalled_player_id => {
+                ServerMessage::PlayerLeft { player_id, .. } if player_id == stalled_player_id => {
                     return (game_data_received, healthy_rx);
                 }
                 ServerMessage::Error {
@@ -665,6 +671,8 @@ async fn backpressure_delivers_every_message_in_order_without_disconnecting() {
                 .handle_client_message(
                     &sender_id,
                     ClientMessage::GameData {
+                        class: None,
+                        key: None,
                         data: serde_json::json!({ "seq": seq as u64 }),
                     },
                 )
@@ -773,6 +781,8 @@ async fn unresponsive_recipient_is_pruned_without_blocking_senders() {
                 .handle_client_message(
                     &sender_id,
                     ClientMessage::GameData {
+                        class: None,
+                        key: None,
                         data: serde_json::json!({ "seq": seq }),
                     },
                 )

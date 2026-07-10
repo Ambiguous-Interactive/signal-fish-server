@@ -366,5 +366,6 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
         ServerMessage::RelayStats { .. } => "RelayStats",
         ServerMessage::GoingAway { .. } => "GoingAway",
+        ServerMessage::DeliveryReport(_) => "DeliveryReport",
     }
 }

@@ -7,7 +7,7 @@
 mod test_helpers;
 mod websocket_test_helpers;
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::AppAuthEntry;
 use signal_fish_server::protocol::{
     ClientMessage, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
@@ -35,36 +35,20 @@ fn app_entry() -> AppAuthEntry {
 }
 
 async fn start_auth_server() -> std::net::SocketAddr {
-    let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = true;
-
-    // Disable SDK platform/version enforcement so an `Authenticate` that omits
-    // `platform` (the focus here is protocol-version negotiation) still succeeds.
-    let mut protocol_config = test_protocol_config();
-    protocol_config.sdk_compatibility.enforce = false;
-
-    let game_server = EnhancedGameServer::new(
-        server_config,
-        protocol_config,
-        signal_fish_server::config::RelayTypeConfig::default(),
-        signal_fish_server::config::SessionConfig::default(),
-        signal_fish_server::config::TurnConfig::default(),
-        signal_fish_server::database::DatabaseConfig::InMemory,
-        signal_fish_server::config::MetricsConfig::default(),
-        signal_fish_server::config::AuthMaintenanceConfig::default(),
-        signal_fish_server::config::CoordinationConfig::default(),
-        signal_fish_server::config::TransportSecurityConfig::default(),
-        vec![app_entry()],
-    )
-    .await
-    .expect("server builds");
-
-    start_server(game_server).await
+    start_server_with_auth_and_stats(true, 0).await
 }
 
 async fn start_auth_disabled_server() -> std::net::SocketAddr {
+    start_server_with_auth_and_stats(false, 0).await
+}
+
+async fn start_server_with_auth_and_stats(
+    auth_enabled: bool,
+    delivery_stats_interval_secs: u64,
+) -> std::net::SocketAddr {
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = false;
+    server_config.auth_enabled = auth_enabled;
+    server_config.websocket_config.delivery_stats_interval_secs = delivery_stats_interval_secs;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -80,7 +64,7 @@ async fn start_auth_disabled_server() -> std::net::SocketAddr {
         signal_fish_server::config::AuthMaintenanceConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
-        Vec::new(),
+        auth_enabled.then(app_entry).into_iter().collect(),
     )
     .await
     .expect("server builds");
@@ -176,6 +160,91 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
             );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delivery_advisories_wait_for_authenticated_protocol_info() {
+    for auth_enabled in [true, false] {
+        let addr = start_server_with_auth_and_stats(auth_enabled, 1).await;
+        let mut ws = connect(addr, "/v3/ws").await;
+
+        let early_message =
+            tokio::time::timeout(tokio::time::Duration::from_millis(1_200), ws.next()).await;
+        assert!(
+            early_message.is_err(),
+            "auth_enabled={auth_enabled}: delivery advisory arrived before optional Authenticate"
+        );
+
+        match authenticate(&mut ws, version_only_auth(Some(3))).await {
+            ServerMessage::ProtocolInfo(info) => assert_eq!(info.protocol_version, Some(3)),
+            other => panic!("expected ProtocolInfo, got {other:?}"),
+        }
+
+        assert!(
+            matches!(
+                next_server_message(&mut ws).await,
+                ServerMessage::RelayStats { .. }
+            ),
+            "auth_enabled={auth_enabled}: expected RelayStats after ProtocolInfo"
+        );
+        match next_server_message(&mut ws).await {
+            ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
+            other => panic!(
+                "auth_enabled={auth_enabled}: expected trailing counter snapshot, got {other:?}"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn auth_disabled_endpoint_default_starts_advisories_after_first_application_baseline() {
+    let addr = start_server_with_auth_and_stats(false, 1).await;
+    let mut ws = connect(addr, "/v3/ws").await;
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::Pong
+    ));
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::RelayStats { .. }
+    ));
+    match next_server_message(&mut ws).await {
+        ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
+        other => panic!("expected trailing counter snapshot, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn auth_disabled_binary_rejection_starts_endpoint_default_advisories() {
+    let addr = start_server_with_auth_and_stats(false, 1).await;
+    let mut ws = connect(addr, "/v3/ws").await;
+    ws.send(Message::Binary(vec![1, 2, 3].into()))
+        .await
+        .unwrap();
+
+    match next_server_message(&mut ws).await {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(
+                error_code,
+                Some(signal_fish_server::protocol::ErrorCode::InvalidInput)
+            );
+        }
+        other => panic!("expected binary-format rejection, got {other:?}"),
+    }
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::RelayStats { .. }
+    ));
+    match next_server_message(&mut ws).await {
+        ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
+        other => panic!("expected trailing counter snapshot, got {other:?}"),
     }
 }
 

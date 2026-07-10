@@ -334,7 +334,7 @@ async fn solo_room_max_players_1_starts_via_explicit_start_game() {
 #[tokio::test(flavor = "multi_thread")]
 async fn max_players_2_room_finalizes_when_both_ready() {
     // Mesh-preferring server so the finalized v3+webrtc room yields a mesh
-    // SessionPlan (the default relay floor emits only GameStarting).
+    // SessionPlan rather than the default explicit relay-floor plan.
     let (addr, _server) = start_server_with_session(mesh_session_config()).await;
     let game = "edge-boundary2";
 

@@ -83,16 +83,15 @@ async fn run_iteration(iteration: u64) {
     let metrics = Arc::new(ServerMetrics::new());
     let (sender, receiver) = tokio::sync::mpsc::channel::<Arc<ServerMessage>>(1);
     let (close, mut listener) = ConnectionCloseSignal::channel();
-    let handle = ClientDeliveryHandle { sender, close };
 
     // Alternate between an empty and an already-full queue so both the
     // try_send fast path and the backpressured send race the close/drop.
     if iteration % 2 == 0 {
-        handle
-            .sender
+        sender
             .try_send(test_message())
             .expect("prefill the empty single-slot queue");
     }
+    let handle = ClientDeliveryHandle::new(sender, close);
 
     let deliveries: Vec<_> = (0..DELIVERY_TASKS)
         .map(|task_index| {

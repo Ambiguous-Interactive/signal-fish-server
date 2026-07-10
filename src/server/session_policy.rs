@@ -5,19 +5,20 @@
 //! intersection of every member's negotiated capabilities (Appendix D), then
 //! hands each v3 member a *per-recipient* [`SessionPlanPayload`] whose peer list
 //! and `initiate` flags are tailored to that recipient (Appendix E). A room that
-//! resolves to the relay floor emits no plan and behaves byte-identically to v2.
+//! resolves to the relay floor stores no sticky plan but still emits an explicit
+//! Relay/Relay plan to v3 members so finalization has one authoritative pairing
+//! result. Finalized-room joins and reconnects use the same reset; v2 bytes
+//! remain frozen.
 //!
 //! A non-relay decision is also recorded as the room's sticky
 //! [`ActiveSessionPlan`], the single source of truth for the session the room is
-//! actually running. Late-join/reconnect pairing consults it instead of
+//! actually running. Finalized join/reconnect refreshes consult it instead of
 //! re-running the ladder, and whenever a membership-touching event (a departure
 //! via [`EnhancedGameServer::handle_session_member_departure`], or a late join /
 //! reconnect) finds a `host`-topology entry whose stored host is invalid — no
 //! longer a member, or seated but no longer capable of the session
-//! ([`ActiveSessionPlan::host_invalid`]) — the shared
-//! [`EnhancedGameServer::replan_host_session`] re-elects a
-//! host (capability-aware: v3 + the sticky pair) and re-emits fresh
-//! per-recipient `SessionPlan`s (host failover / self-heal). Topology and
+//! ([`ActiveSessionPlan::host_invalid`]) — capability-aware repair re-elects a
+//! host and re-emits fresh per-recipient `SessionPlan`s. Topology and
 //! transport are **sticky for the session lifetime**: the ladder runs once at
 //! finalize and is never re-run mid-session, even though the capability
 //! intersection can only widen when members depart — a mid-game data-path
@@ -37,10 +38,16 @@
 //! `RoomJoined` / `Reconnected` so v3 WebRTC-capable clients can gather
 //! candidates during the lobby wait. The `SessionPlan` ICE list supersedes it.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::SessionConfig;
+#[cfg(test)]
 use crate::coordination::FinalizedRoom;
+use crate::coordination::{
+    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
+    StartGamePublication, StartGamePublicationBuilder,
+};
 use crate::protocol::{
     IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SessionPeer,
     SessionPlanPayload, Topology, Transport,
@@ -50,8 +57,8 @@ use super::signaling::local_initiates;
 use super::{EnhancedGameServer, NegotiatedProtocol};
 
 /// The sticky per-room session decision recorded when a room finalizes to a
-/// non-relay plan (relay-floor rooms record nothing — they behave exactly like
-/// v2 and `PlayerLeft` alone suffices on departures).
+/// non-relay plan. Relay-floor rooms record nothing; a later reconnect derives
+/// its explicit Relay/Relay refresh from that absence rather than sticky state.
 ///
 /// This is what the room is *actually running*: late-join / reconnect pairing
 /// and departure re-planning consult it rather than re-running
@@ -72,8 +79,8 @@ pub(crate) struct ActiveSessionPlan {
 impl ActiveSessionPlan {
     /// Rehydrate a full [`SessionPlanDecision`] from this sticky decision plus
     /// the room's *current* member list. The ladder is **not** re-run — the
-    /// stored topology/transport/host shape per-recipient plans and pairing for
-    /// late join, reconnect, and departure re-planning.
+    /// stored topology/transport/host shape per-recipient plans for finalized
+    /// joins, reconnects, and departure re-planning.
     pub(crate) fn decision_with(self, members: Vec<SessionMember>) -> SessionPlanDecision {
         SessionPlanDecision {
             topology: self.topology,
@@ -90,9 +97,8 @@ impl ActiveSessionPlan {
     /// reconnect-with-downgraded-capabilities race — departure re-planning
     /// never fires for a member that stays seated, so without this arm such a
     /// host would wedge the room forever). This is the wedge state both
-    /// membership-touching events (departure and late join / reconnect) repair
-    /// via [`EnhancedGameServer::replan_host_session`]: left alone, every plan
-    /// the room hands out would point at a host that cannot answer.
+    /// membership-touching events repair before publication: left alone, every
+    /// plan the room hands out would point at a host that cannot answer.
     pub(crate) fn host_invalid(&self, members: &[SessionMember]) -> bool {
         self.topology == Topology::Host
             && !self.host.is_some_and(|host| {
@@ -169,6 +175,74 @@ pub(crate) struct SessionPlanDecision {
     pub members: Vec<SessionMember>,
 }
 
+/// Pure resolution of the session plan every member must observe after a
+/// membership publication. State and metrics are deliberately deferred to the
+/// caller's exact-routing transaction hook.
+pub(crate) struct MembershipSessionDecision {
+    pub decision: SessionPlanDecision,
+    /// `None`: keep stored state; `Some(Some(_))`: replace it;
+    /// `Some(None)`: remove an unrecoverable host plan.
+    pub active_plan_update: Option<Option<ActiveSessionPlan>>,
+    pub is_replan: bool,
+}
+
+pub(crate) fn membership_session_decision(
+    stored: Option<ActiveSessionPlan>,
+    authority: Option<PlayerId>,
+    members: Vec<SessionMember>,
+) -> MembershipSessionDecision {
+    let Some(stored) = stored else {
+        return MembershipSessionDecision {
+            decision: SessionPlanDecision {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                host: None,
+                members,
+            },
+            active_plan_update: None,
+            is_replan: false,
+        };
+    };
+
+    if !stored.host_invalid(&members) {
+        return MembershipSessionDecision {
+            decision: stored.decision_with(members),
+            active_plan_update: None,
+            is_replan: false,
+        };
+    }
+
+    let electable: Vec<_> = members
+        .iter()
+        .filter(|member| stored.supported_by(member))
+        .cloned()
+        .collect();
+    let electable_authority =
+        authority.filter(|id| electable.iter().any(|member| member.player_id == *id));
+    if let Some(host) = elect_host(electable_authority, &electable) {
+        let updated = ActiveSessionPlan {
+            host: Some(host),
+            ..stored
+        };
+        MembershipSessionDecision {
+            decision: updated.decision_with(members),
+            active_plan_update: Some(Some(updated)),
+            is_replan: true,
+        }
+    } else {
+        MembershipSessionDecision {
+            decision: SessionPlanDecision {
+                topology: Topology::Relay,
+                transport: Transport::Relay,
+                host: None,
+                members,
+            },
+            active_plan_update: Some(None),
+            is_replan: false,
+        }
+    }
+}
+
 /// Whether *every* member supports v3 and the given (topology, transport) pair.
 ///
 /// An empty room never supports an upgrade (there is nothing to connect).
@@ -195,8 +269,8 @@ pub(crate) const UPGRADE_LADDER: [(Topology, Transport); 3] = [
 
 /// The universal floor: server WebSocket relay, always available (ADR-0001 §3).
 ///
-/// Selected only when no [`UPGRADE_LADDER`] rung fits. A relay-floor room emits no
-/// `SessionPlan`, so v3 clients relay byte-identically to v2.
+/// Selected only when no [`UPGRADE_LADDER`] rung fits. Each v3 member receives an
+/// explicit no-peer `SessionPlan` for this pair; v2 members remain plan-free.
 pub(crate) const RELAY_FLOOR: (Topology, Transport) = (Topology::Relay, Transport::Relay);
 
 /// Richness rank of a topology ceiling: `Relay < Host < Mesh` (ADR-0001 §1).
@@ -390,13 +464,15 @@ pub(crate) fn elect_host(
 impl SessionPlanDecision {
     /// Whether the room resolved to the universal relay floor.
     ///
-    /// A relay-floor room emits no `SessionPlan` (v3 clients relay exactly like
-    /// v2). Equivalent to the transport being [`Transport::Relay`]: the floor is
-    /// the only legal relay pairing ([`is_valid_pair`]).
+    /// Whether this decision is the relay floor. Finalization, Finalized-room
+    /// joins, and reconnects serialize it as an explicit authoritative reset
+    /// for v3 members. Equivalent to the
+    /// transport being [`Transport::Relay`]: the floor is the only legal relay
+    /// pairing ([`is_valid_pair`]).
     ///
     /// This is **not** the same gate as [`Self::uses_webrtc_signaling`]: a
     /// `Host + Direct` plan is non-relay (so it *does* receive a `SessionPlan`)
-    /// yet is non-WebRTC (so it emits no `NewPeer`/`Signal`). The two gates'
+    /// yet is non-WebRTC (so it permits no `Signal`). The two gates'
     /// truth table over the four legal pairs is pinned by the
     /// `emission_gates_track_relay_topology_and_webrtc_transport` test.
     #[must_use]
@@ -406,12 +482,10 @@ impl SessionPlanDecision {
 
     /// Whether this plan uses server-mediated WebRTC signaling.
     ///
-    /// This is the gate for emitting `Signal` / `NewPeer` control messages: it is
-    /// true **iff** the chosen transport is [`Transport::WebRtc`]. A `Host + Direct`
-    /// (LAN) plan is non-relay yet is *not* WebRTC, so it must never trigger WebRTC
-    /// pairing — keying off topology (or [`Self::is_relay`]) alone would misfire
-    /// (see [`EnhancedGameServer::handle_active_session_late_join`]). The truth
-    /// table versus [`Self::is_relay`] is pinned by the
+    /// This is the gate for server-mediated `Signal` control traffic: it is true
+    /// **iff** the chosen transport is [`Transport::WebRtc`]. A `Host + Direct`
+    /// (LAN) plan is non-relay yet is not WebRTC. The truth table versus
+    /// [`Self::is_relay`] is pinned by the
     /// `emission_gates_track_relay_topology_and_webrtc_transport` test.
     #[must_use]
     pub(crate) fn uses_webrtc_signaling(&self) -> bool {
@@ -428,17 +502,13 @@ impl SessionPlanDecision {
     /// room). A WebRTC pair is doomed unless BOTH sides negotiated the
     /// transport — `handle_signal` rejects either direction and the wasted
     /// offers burn signal rate-limit budget — so [`Self::plan_for`] filters the
-    /// peer list on both sides, and the `NewPeer` announce helpers in
-    /// `signaling.rs` apply this same predicate (via [`Self::pairable`] /
-    /// [`Self::recipient_pairable`]) to both sides of every announcement:
-    /// "who can run this session" is one rule everywhere.
+    /// peer list on both sides: "who can run this session" is one rule everywhere.
     pub(crate) fn pairable(&self, member: &SessionMember) -> bool {
         member.supports_session(self.topology, self.transport)
     }
 
     /// Whether the recipient (looked up by id in `members`) is [`Self::pairable`].
-    /// An id absent from `members` is defensively non-pairable (the late-join
-    /// member lists always include the joiner, so no caller passes one today).
+    /// An id absent from `members` is defensively non-pairable.
     pub(crate) fn recipient_pairable(&self, recipient: PlayerId) -> bool {
         self.members
             .iter()
@@ -465,12 +535,12 @@ impl SessionPlanDecision {
     /// - **Host:** the host receives every pairable client (each
     ///   `initiate = false`); each pairable client receives only the host
     ///   (`initiate = true`). Clients never signal each other in a star topology.
-    /// - **Relay:** never emitted (the relay floor sends no plan), but returns an
-    ///   empty peer list defensively.
+    /// - **Relay:** an empty peer list. This is serialized for authoritative
+    ///   Finalized-room join/reconnect refreshes and otherwise remains defensive.
     ///
     /// This is the single peer-list seam every emission path shares (finalize,
-    /// host-failover/heal re-plan, late join / reconnect — all via
-    /// `send_session_plan_to`), so the filter holds uniformly. At FINALIZE it is
+    /// host-failover re-plan, finalized join, and reconnect), so the filter
+    /// holds uniformly. At FINALIZE it is
     /// provably a no-op: [`choose_session_plan`] selects a non-relay pair only
     /// when [`all_support`] holds, i.e. every member already satisfies the
     /// predicate.
@@ -572,11 +642,10 @@ impl EnhancedGameServer {
     /// Build the [`SessionMember`] input list for session selection from a room's
     /// player list, attaching each player's negotiated capabilities.
     ///
-    /// Shared by [`Self::emit_session_plan`] (finalize, which runs the ladder),
-    /// [`Self::handle_active_session_late_join`] (late join / reconnect into an
-    /// active session), and [`Self::handle_session_member_departure`] (host
-    /// failover) — the latter two rehydrate the *stored* decision over the
-    /// current members instead of re-running the ladder.
+    /// Shared by finalize (which runs the ladder), finalized membership
+    /// refreshes, and [`Self::handle_session_member_departure`] (host failover).
+    /// Membership refreshes rehydrate the stored decision over current members
+    /// instead of re-running the ladder.
     ///
     /// Capability resolution is **local-node only**: [`Self::client_protocol`]
     /// returns the v2 / relay-only default for any id absent from this node's
@@ -603,13 +672,120 @@ impl EnhancedGameServer {
             .collect()
     }
 
-    /// Compute and emit the per-recipient v3 SessionPlan for a finalized room.
+    /// Build the complete, one-shot publication for an explicit game start.
     ///
-    /// Called from the `handle_player_ready` wrapper AFTER the coordinator
-    /// broadcasts the unchanged `GameStarting`, preserving the per-recipient
-    /// ordering GameStarting → SessionPlan. A room that resolves to the relay
-    /// floor emits no plan, so v2 (and v3-relay-only) members observe exactly the
-    /// v2 finalization flow.
+    /// The room coordinator invokes this only after capturing its exact routed
+    /// member snapshot. Every recipient gets `GameStarting` as phase zero; each
+    /// v3 recipient gets its tailored `SessionPlan` as phase one, including an
+    /// explicit Relay/Relay no-peer result. Sticky state and metrics are deferred until the database
+    /// finalization compare-and-set wins under the final routing guard.
+    pub(crate) fn start_game_publication_builder(
+        &self,
+        room_id: RoomId,
+    ) -> StartGamePublicationBuilder {
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let session_config = self.session_config.clone();
+        let turn_config = self.turn_config.clone();
+        let active_session_plans = Arc::clone(&self.active_session_plans);
+        let metrics = Arc::clone(&self.metrics);
+
+        Box::new(move |finalized, game_starting| {
+            let members: Vec<SessionMember> = finalized
+                .members
+                .iter()
+                .map(|player| {
+                    let protocol = connection_manager.protocol(&player.id);
+                    SessionMember {
+                        player_id: player.id,
+                        player_name: player.name.clone(),
+                        is_authority: player.is_authority,
+                        joined_at: player.connected_at,
+                        version: protocol.version,
+                        transports: protocol.transports,
+                        topologies: protocol.topologies,
+                    }
+                })
+                .collect();
+            let decision = choose_session_plan(
+                &finalized.game_name,
+                finalized.authority_player,
+                members,
+                &session_config,
+            );
+            let relay_floor = decision.is_relay();
+            let emits_v3_plan = decision.members.iter().any(SessionMember::supports_v3);
+            let now_unix = decision
+                .uses_webrtc_signaling()
+                .then(|| chrono::Utc::now().timestamp());
+            let mut turn_credentials_issued = 0;
+            let recipient_messages = finalized
+                .members
+                .iter()
+                .map(|member| {
+                    let mut messages = vec![Arc::clone(&game_starting)];
+                    let supports_v3 = decision.members.iter().any(|candidate| {
+                        candidate.player_id == member.id && candidate.supports_v3()
+                    });
+                    if supports_v3 {
+                        let (ice_servers, minted) = now_unix.map_or_else(
+                            || (Vec::new(), 0),
+                            |now| {
+                                compose_ice_servers_for(
+                                    &session_config,
+                                    &turn_config,
+                                    member.id,
+                                    now,
+                                )
+                            },
+                        );
+                        turn_credentials_issued += minted;
+                        messages.push(Arc::new(ServerMessage::SessionPlan(Box::new(
+                            decision.plan_for(member.id, ice_servers),
+                        ))));
+                    }
+                    RoomRecipientMessages {
+                        player_id: member.id,
+                        first_phase: 0,
+                        messages,
+                    }
+                })
+                .collect();
+
+            let active = ActiveSessionPlan {
+                topology: decision.topology,
+                transport: decision.transport,
+                host: decision.host,
+            };
+            StartGamePublication {
+                recipient_messages,
+                after_game_starting: Box::new(move || {
+                    metrics.record_topology_selected(active.topology);
+                    metrics.record_transport_selected(active.transport);
+                    if relay_floor {
+                        active_session_plans.remove(&room_id);
+                        tracing::debug!(%room_id, "Room finalized to an explicit v3 relay-floor plan");
+                    } else {
+                        active_session_plans.insert(room_id, active);
+                    }
+                    if emits_v3_plan {
+                        metrics.increment_session_plans_emitted();
+                        metrics.add_turn_credentials_issued(turn_credentials_issued);
+                        tracing::info!(
+                            %room_id,
+                            topology = ?active.topology,
+                            transport = ?active.transport,
+                            "Computed v3 session plan"
+                        );
+                    }
+                }),
+            }
+        })
+    }
+
+    /// Isolated session-plan emission harness retained for policy unit tests.
+    /// Production finalization uses [`Self::start_game_publication_builder`] so
+    /// plan state and delivery cannot split from `GameStarting`.
+    #[cfg(test)]
     pub(crate) async fn emit_session_plan(&self, room_id: &RoomId, finalized: &FinalizedRoom) {
         let members = self.session_members_from(&finalized.members);
 
@@ -620,39 +796,31 @@ impl EnhancedGameServer {
             &self.session_config,
         );
 
-        // Record the per-finalized-room topology/transport selection here — once
-        // per finalize, and *before* the relay-floor early-return so a
-        // relay-resolved room is counted too (it picks Relay/Relay). This is the
+        // Record the per-finalized-room topology/transport selection here once;
+        // relay-resolved rooms pick Relay/Relay. This is the
         // sole counting site for selection: late join/reconnect and departure
         // re-planning rehydrate the STORED decision instead of re-running
         // `choose_session_plan`, so they can never double-count a room.
         self.metrics.record_topology_selected(decision.topology);
         self.metrics.record_transport_selected(decision.transport);
 
-        // Relay floor: no SessionPlan is sent. v3 clients fall back to relaying
-        // game data exactly like v2 (the floor never closes). Remove any stale
-        // stored decision so the map cannot describe a session the room is no
-        // longer running (a room may re-finalize after future definalization
-        // flows).
+        // Relay is an explicit v3 no-peer plan but has no sticky entry. Remove
+        // any stale stored decision so the map cannot describe a session the
+        // room is no longer running.
         if decision.is_relay() {
             self.active_session_plans.remove(room_id);
-            tracing::debug!(
-                %room_id,
-                "Room finalized to the relay floor; no v3 SessionPlan emitted"
+        } else {
+            // Record the sticky decision the room now runs: consulted instead
+            // of recomputing on later membership changes.
+            self.active_session_plans.insert(
+                *room_id,
+                ActiveSessionPlan {
+                    topology: decision.topology,
+                    transport: decision.transport,
+                    host: decision.host,
+                },
             );
-            return;
         }
-
-        // Record the sticky decision the room now runs: consulted (instead of a
-        // recompute) by late-join/reconnect pairing and departure re-planning.
-        self.active_session_plans.insert(
-            *room_id,
-            ActiveSessionPlan {
-                topology: decision.topology,
-                transport: decision.transport,
-                host: decision.host,
-            },
-        );
 
         tracing::info!(
             %room_id,
@@ -661,16 +829,13 @@ impl EnhancedGameServer {
             "Computed v3 session plan"
         );
 
-        // One non-relay SessionPlan finalize event: count once per finalized
-        // non-relay room (the relay floor returned above and is never counted
-        // here). The per-recipient sends below are the delivery of this single
-        // logical event, not separate plans. Mid-session re-plans and late-join
-        // plans are deliberately NOT counted here — they have their own
-        // counters (`session_replans_emitted` / `session_plans_late_join`) so
-        // this one keeps meaning "finalized non-relay rooms".
-        self.metrics.increment_session_plans_emitted();
+        // Count one finalization plan event when at least one v3 recipient sees
+        // it. Per-recipient frames remain one logical plan publication.
+        if decision.members.iter().any(SessionMember::supports_v3) {
+            self.metrics.increment_session_plans_emitted();
+        }
 
-        let turn_credentials_issued = self.send_session_plans_to_members(&decision).await;
+        let turn_credentials_issued = self.send_session_plans_to_members(room_id, &decision).await;
         self.metrics
             .add_turn_credentials_issued(turn_credentials_issued);
     }
@@ -754,15 +919,26 @@ impl EnhancedGameServer {
     /// departure changes no plan parameter, so nothing is re-emitted —
     /// `PlayerLeft` already tells peers to prune the departed member.
     ///
-    /// Concurrency: the room membership is re-read from storage at call time;
-    /// concurrent departures may each trigger a re-plan, but each emission is
-    /// internally consistent (computed from one membership snapshot) and
-    /// clients adopt the latest plan. No locks are held across `.await`s.
+    /// Concurrency: one shared room-mutation guard is intentionally held across
+    /// the awaited storage refresh, host election, sticky-plan replacement, and
+    /// exact-membership deliveries. Same-node departures and membership
+    /// publication therefore serialize; each emitted plan is computed from the
+    /// refreshed routed-member snapshot. No `DashMap` entry guard is held across
+    /// an `.await`.
     pub(crate) async fn handle_session_member_departure(
         &self,
         room_id: &RoomId,
         departed: &PlayerId,
     ) {
+        // Membership publishers use this same local gate. Keep the routed
+        // snapshot stable through host election, stored-plan replacement, and
+        // all exact-membership deliveries so a pending join/reconnect cannot
+        // wedge the plan on a host that nobody was told about.
+        let room_event_guard = self
+            .message_coordinator
+            .lock_room_event_mutation(room_id)
+            .await;
+
         // No stored decision ⇒ the room runs the relay floor (or pre-dates v3):
         // pure v2 semantics, `PlayerLeft` suffices.
         let Some(stored) = self.active_session_plan(room_id) else {
@@ -793,9 +969,32 @@ impl EnhancedGameServer {
             return;
         }
 
-        // Last member left: the session is over; the cleanup task will reap the
-        // room itself.
-        if room.players.is_empty() {
+        let routed_player_ids = match self.message_coordinator.routed_player_ids(room_id).await {
+            Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
+            Err(error) => {
+                tracing::warn!(
+                    %room_id,
+                    %departed,
+                    %error,
+                    "Failed to resolve published room membership for departure re-planning"
+                );
+                return;
+            }
+        };
+        let remaining: Vec<PlayerInfo> = room
+            .players
+            .values()
+            .filter(|member| {
+                routed_player_ids
+                    .as_ref()
+                    .is_none_or(|routed| routed.contains(&member.id))
+            })
+            .cloned()
+            .collect();
+
+        // Last published member left: the session is over; DB membership may
+        // still contain a join/reconnect whose route has not committed yet.
+        if remaining.is_empty() {
             self.active_session_plans.remove(room_id);
             return;
         }
@@ -803,7 +1002,6 @@ impl EnhancedGameServer {
         // Sticky topology/transport: only an invalid *host* invalidates a plan
         // parameter. Mesh departures, and host-topology departures that leave
         // a still-capable stored host in place, re-emit nothing.
-        let remaining: Vec<PlayerInfo> = room.players.values().cloned().collect();
         let members = self.session_members_from(&remaining);
         if !stored.host_invalid(&members) {
             return;
@@ -816,19 +1014,23 @@ impl EnhancedGameServer {
             "Active session host is missing or incapable after a departure; re-electing"
         );
 
-        self.replan_host_session(room_id, stored, room.authority_player, members)
-            .await;
+        self.replan_host_session(
+            room_id,
+            stored,
+            room.authority_player,
+            members,
+            room_event_guard,
+        )
+        .await;
     }
 
     /// Re-elect the host of a stored `host`-topology session over `members`
     /// (the room's current members with their negotiated capabilities, from
     /// [`Self::session_members_from`]) and re-emit a fresh per-recipient
     /// `SessionPlan` to every member — same sticky topology/transport, new
-    /// `host`, fresh per-recipient ICE for WebRTC. This is the single shared
-    /// host-failover seam for the two membership-touching events that can find
-    /// the stored host invalid ([`ActiveSessionPlan::host_invalid`]): departures
-    /// ([`Self::handle_session_member_departure`]) and late joins / reconnects
-    /// (`handle_active_session_late_join` in `signaling.rs`).
+    /// `host`, fresh per-recipient ICE for WebRTC. Departures use this owned
+    /// transaction; finalized additions use [`membership_session_decision`] to
+    /// fold the same repair into their lifecycle publication.
     ///
     /// Election is **capability-aware**: only members that negotiated v3 AND
     /// the stored sticky (topology, transport) pair are electable. A weaker
@@ -847,8 +1049,8 @@ impl EnhancedGameServer {
     /// removed, nothing is emitted, and `session_replans_emitted` does NOT
     /// move (no re-plan happened) — the relay floor carries the room.
     ///
-    /// Otherwise the stored entry is rewritten *before* emitting (so a
-    /// concurrent late-join pairs against the re-elected host), one
+    /// Otherwise the stored entry is rewritten in the exact publication hook,
+    /// one
     /// `session_replans_emitted` event is counted, and every current member is
     /// best-effort delivered its tailored plan — v3-gated per recipient, so a
     /// v3 relay-only member still receives the plan describing the session
@@ -856,8 +1058,7 @@ impl EnhancedGameServer {
     /// both sides in [`SessionPlanDecision::plan_for`]: a member that did not
     /// negotiate the sticky pair gets an **empty** `peers` list (`fallback:
     /// relay` is its data path) and is never listed in capable members' plans
-    /// — the same predicate the `NewPeer` late-join gating applies on both
-    /// sides. A re-elected host of a 1-member room is fine (a star of one with
+    /// on both sides. A re-elected host of a 1-member room is fine (a star of one with
     /// an empty peer list; a future late-join re-pairs).
     pub(super) async fn replan_host_session(
         &self,
@@ -865,6 +1066,7 @@ impl EnhancedGameServer {
         stored: ActiveSessionPlan,
         authority: Option<PlayerId>,
         members: Vec<SessionMember>,
+        room_event_guard: RoomEventMutationGuard,
     ) {
         // Capability gate (see doc comment): electable ⊆ members.
         let electable: Vec<SessionMember> = members
@@ -893,13 +1095,10 @@ impl EnhancedGameServer {
             return;
         };
 
-        // Update the stored entry before emitting so a concurrent late-join
-        // pairs against the re-elected host, not the invalidated one.
         let updated = ActiveSessionPlan {
             host: Some(new_host),
             ..stored
         };
-        self.active_session_plans.insert(*room_id, updated);
 
         tracing::info!(
             %room_id,
@@ -909,13 +1108,81 @@ impl EnhancedGameServer {
             "Re-elected active session host; re-emitting session plans"
         );
 
-        // One host re-plan event (NOT one per recipient).
-        self.metrics.increment_session_replans_emitted();
-
         let decision = updated.decision_with(members);
-        let turn_credentials_issued = self.send_session_plans_to_members(&decision).await;
-        self.metrics
-            .add_turn_credentials_issued(turn_credentials_issued);
+        let now_unix = decision
+            .uses_webrtc_signaling()
+            .then(|| chrono::Utc::now().timestamp());
+        let mut turn_credentials_issued = 0_u64;
+        let recipient_messages: Vec<_> = decision
+            .members
+            .iter()
+            .map(|member| {
+                let messages = self
+                    .build_session_plan_message(&decision, member.player_id, now_unix)
+                    .map(|(message, minted)| {
+                        turn_credentials_issued = turn_credentials_issued.saturating_add(minted);
+                        vec![message]
+                    })
+                    .unwrap_or_default();
+                RoomRecipientMessages::in_order(member.player_id, messages)
+            })
+            .collect();
+        let expected_members: Vec<_> = decision
+            .members
+            .iter()
+            .map(|member| member.player_id)
+            .collect();
+
+        let room_id = *room_id;
+        let coordinator_for_job = Arc::clone(&self.message_coordinator);
+        let active_session_plans = Arc::clone(&self.active_session_plans);
+        let metrics_for_commit = Arc::clone(&self.metrics);
+        let metrics_after_phase = Arc::clone(&self.metrics);
+        let completion = self.message_coordinator.enqueue_room_event(
+            room_event_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    let outcome = coordinator_for_job
+                        .commit_room_messages_if_members_with_hook(
+                            &room_id,
+                            &expected_members,
+                            recipient_messages,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    active_session_plans.insert(room_id, updated);
+                                    metrics_for_commit.increment_session_replans_emitted();
+                                    Ok(true)
+                                })
+                            }),
+                            Box::new(move |_failed_phase_zero| {
+                                metrics_after_phase
+                                    .add_turn_credentials_issued(turn_credentials_issued);
+                                true
+                            }),
+                        )
+                        .await?;
+                    match outcome {
+                        RoomMessageTransactionOutcome::Committed => Ok(true),
+                        RoomMessageTransactionOutcome::CommittedDegraded { failed_frames } => {
+                            tracing::warn!(
+                                %room_id,
+                                failed_frames,
+                                "Host re-plan committed with degraded frame delivery"
+                            );
+                            Ok(true)
+                        }
+                        RoomMessageTransactionOutcome::RoutingChanged => {
+                            tracing::debug!(%room_id, "Host re-plan canceled after routing changed");
+                            Ok(false)
+                        }
+                        RoomMessageTransactionOutcome::HookRejected => Ok(false),
+                    }
+                })
+            }),
+        );
+        if let Err(error) = completion.await {
+            tracing::warn!(%room_id, %error, "Host re-plan publication failed");
+        }
     }
 
     /// Deliver `decision` to every member as per-recipient `SessionPlan`s,
@@ -926,14 +1193,16 @@ impl EnhancedGameServer {
     /// Shared by finalize emission ([`Self::emit_session_plan`]) and host
     /// re-planning ([`Self::replan_host_session`]); the normal late-join path
     /// delivers to a single recipient via [`Self::send_session_plan_to`].
+    #[cfg(test)]
     pub(super) async fn send_session_plans_to_members(
         &self,
+        room_id: &RoomId,
         decision: &SessionPlanDecision,
     ) -> u64 {
         // Capture `now` once so every member of one emission event shares one
         // TURN credential expiry (deterministic and testable). Evaluated only
-        // for WebRTC plans, where ICE is built per recipient; Host+Direct (and
-        // the never-emitted Relay) carry an empty list and never read it.
+        // for WebRTC plans, where ICE is built per recipient; Host+Direct and
+        // explicit Relay/Relay plans carry an empty list and never read it.
         let now_unix = decision
             .uses_webrtc_signaling()
             .then(|| chrono::Utc::now().timestamp());
@@ -941,7 +1210,7 @@ impl EnhancedGameServer {
         let mut turn_credentials_issued: u64 = 0;
         for member in &decision.members {
             turn_credentials_issued += self
-                .send_session_plan_to(decision, member.player_id, now_unix)
+                .send_session_plan_to(room_id, decision, member.player_id, now_unix)
                 .await
                 .unwrap_or(0);
         }
@@ -959,12 +1228,40 @@ impl EnhancedGameServer {
     /// because `add_player_to_room` gates only on fullness. Returns `None` when
     /// gated off (nothing sent), otherwise `Some(minted)` — the number of TURN
     /// credentials minted into the delivered plan.
+    #[cfg(test)]
     pub(super) async fn send_session_plan_to(
         &self,
+        room_id: &RoomId,
         decision: &SessionPlanDecision,
         recipient: PlayerId,
         now_unix: Option<i64>,
     ) -> Option<u64> {
+        let (message, minted) = self.build_session_plan_message(decision, recipient, now_unix)?;
+        let expected_members: Vec<PlayerId> = decision
+            .members
+            .iter()
+            .map(|member| member.player_id)
+            .collect();
+        // Best-effort but room-scoped delivery: a peer that moved after the
+        // decision was built must not receive this plan in its replacement
+        // session. The relay floor remains the fallback when delivery fails.
+        let delivered = self
+            .message_coordinator
+            .send_to_player_in_room_if_members(&recipient, room_id, &expected_members, message)
+            .await
+            .unwrap_or(false);
+        delivered.then_some(minted)
+    }
+
+    /// Build one v3-gated tailored plan without performing delivery. Reserved
+    /// room publications use this to prepare every recipient before atomically
+    /// reserving the complete phase set.
+    pub(super) fn build_session_plan_message(
+        &self,
+        decision: &SessionPlanDecision,
+        recipient: PlayerId,
+        now_unix: Option<i64>,
+    ) -> Option<(Arc<ServerMessage>, u64)> {
         if !self.client_supports_v3(&recipient) {
             return None;
         }
@@ -973,21 +1270,8 @@ impl EnhancedGameServer {
             Some(now_unix) => self.composed_ice_servers_for(recipient, now_unix),
             None => (Vec::new(), 0),
         };
-
         let plan = decision.plan_for(recipient, ice_servers);
-        // Best-effort delivery: `send_to_player` returns `Ok(())` even when a
-        // peer's channel is full/closed, so a backpressured client may miss
-        // the plan. That is acceptable — the relay floor remains the fallback
-        // transport — so the result is deliberately ignored (mirrors
-        // `handle_signal`).
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                &recipient,
-                Arc::new(ServerMessage::SessionPlan(Box::new(plan))),
-            )
-            .await;
-        Some(minted)
+        Some((Arc::new(ServerMessage::SessionPlan(Box::new(plan))), minted))
     }
 
     /// Compose `recipient`'s full ICE list — the operator's static
@@ -1008,17 +1292,7 @@ impl EnhancedGameServer {
         recipient: PlayerId,
         now_unix: i64,
     ) -> (Vec<IceServer>, u64) {
-        let mut ice = self.session_config.ice_servers.clone();
-        let turn_derived =
-            crate::security::build_ice_servers(&self.turn_config, recipient, now_unix);
-        // A minted TURN entry is the one carrying credentials (a `username`);
-        // credential-less STUN entries are not counted.
-        let minted = turn_derived
-            .iter()
-            .filter(|server| server.username.is_some())
-            .count() as u64;
-        ice.extend(turn_derived);
-        (ice, minted)
+        compose_ice_servers_for(&self.session_config, &self.turn_config, recipient, now_unix)
     }
 
     /// Build the ICE pre-gather list for a `RoomJoined` / `Reconnected` payload
@@ -1065,4 +1339,20 @@ impl EnhancedGameServer {
         self.metrics.add_turn_credentials_issued(minted);
         ice_servers
     }
+}
+
+fn compose_ice_servers_for(
+    session_config: &SessionConfig,
+    turn_config: &crate::config::TurnConfig,
+    recipient: PlayerId,
+    now_unix: i64,
+) -> (Vec<IceServer>, u64) {
+    let mut ice = session_config.ice_servers.clone();
+    let turn_derived = crate::security::build_ice_servers(turn_config, recipient, now_unix);
+    let minted = turn_derived
+        .iter()
+        .filter(|server| server.username.is_some())
+        .count() as u64;
+    ice.extend(turn_derived);
+    (ice, minted)
 }

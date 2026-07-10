@@ -528,7 +528,7 @@ async fn signal_after_target_leaves_is_rejected() {
     send(&mut peer2, &ClientMessage::LeaveRoom).await;
     next_matching_server_message_within(&mut peer1, SERVER_MESSAGE_TIMEOUT, "PlayerLeft", |msg| {
         match msg {
-            ServerMessage::PlayerLeft { player_id } if player_id == peer2_id => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == peer2_id => Some(()),
             _ => None,
         }
     })

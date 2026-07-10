@@ -322,7 +322,7 @@ async fn await_join_leave_cycle(ws: &mut WsStream, expected: PlayerId, context: 
         SERVER_MESSAGE_TIMEOUT,
         context,
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == expected => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == expected => Some(()),
             _ => None,
         },
     )
@@ -431,7 +431,7 @@ async fn missed_control_events_are_replayed_completely() {
     assert!(
         matches!(
             &reconnected.missed_events[1],
-            ServerMessage::PlayerLeft { player_id } if *player_id == churner_id
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == churner_id
         ),
         "second missed event must be the churner's PlayerLeft: {:?}",
         reconnected.missed_events
@@ -571,7 +571,7 @@ async fn overflowed_replay_ring_reports_truncated() {
     assert!(
         matches!(
             &reconnected.missed_events[0],
-            ServerMessage::PlayerLeft { player_id } if *player_id == churner_ids[1]
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == churner_ids[1]
         ),
         "oldest surviving event must be the second churner's PlayerLeft: {:?}",
         reconnected.missed_events
@@ -582,7 +582,7 @@ async fn overflowed_replay_ring_reports_truncated() {
             ServerMessage::PlayerJoined { player } if player.id == churner_ids[2]
         ) && matches!(
             &reconnected.missed_events[2],
-            ServerMessage::PlayerLeft { player_id } if *player_id == churner_ids[2]
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == churner_ids[2]
         ),
         "the newest churn cycle must survive intact: {:?}",
         reconnected.missed_events
@@ -672,7 +672,17 @@ async fn truncated_replay_still_carries_full_room_snapshot() {
         SERVER_MESSAGE_TIMEOUT,
         "SpectatorJoined ack",
         |message| match message {
-            ServerMessage::SpectatorJoined(payload) => Some(payload.spectator_id),
+            ServerMessage::SpectatorJoined(payload) => {
+                assert!(
+                    !payload.current_players.is_empty()
+                        && payload
+                            .current_players
+                            .iter()
+                            .all(|player| player.epoch.is_some()),
+                    "a v3 spectator snapshot must baseline every current sender epoch"
+                );
+                Some(payload.spectator_id)
+            }
             ServerMessage::SpectatorJoinFailed { reason, error_code } => {
                 panic!("spectator join failed: {reason} ({error_code:?})")
             }
@@ -856,6 +866,8 @@ async fn game_data_is_never_replayed() {
         send(
             &mut peer_a,
             &ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "tick": 1 }),
             },
         )
@@ -963,6 +975,8 @@ async fn reconnected_baseline_precedes_room_data_during_reconnect() {
             send(
                 &mut peer_a,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: serde_json::json!({ "phase": "during-reconnect", "n": n }),
                 },
             )
@@ -1004,6 +1018,8 @@ async fn reconnected_baseline_precedes_room_data_during_reconnect() {
     send(
         &mut peer_a,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "phase": "post-baseline-marker" }),
         },
     )
@@ -1177,7 +1193,7 @@ async fn await_player_left(ws: &mut WsStream, expected: PlayerId, context: &str)
         SERVER_MESSAGE_TIMEOUT,
         context,
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == expected => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == expected => Some(()),
             _ => None,
         },
     )

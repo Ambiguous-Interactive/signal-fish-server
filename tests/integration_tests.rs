@@ -171,6 +171,8 @@ async fn test_game_data_exchange() {
         .handle_client_message(
             &player1_id,
             ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: test_data.clone(),
             },
         )
@@ -354,7 +356,6 @@ async fn test_authority_transfer() {
 
     expect_authority_response(&mut rx1, true, "player 1 release coordinator response");
     expect_authority_changed(&mut rx1, None, false, "player 1 release authority update");
-    expect_authority_response(&mut rx1, true, "player 1 release server response");
     expect_authority_changed(&mut rx2, None, false, "player 2 sees authority release");
     assert_no_pending_message(&mut rx1, "player 1 post-release drain");
     assert_no_pending_message(&mut rx2, "player 2 post-release drain");
@@ -390,7 +391,6 @@ async fn test_authority_transfer() {
         true,
         "player 2 sees own authority",
     );
-    expect_authority_response(&mut rx2, true, "player 2 authority request server response");
     assert_no_pending_message(&mut rx1, "player 1 post-authority-transfer drain");
     assert_no_pending_message(&mut rx2, "player 2 post-authority-transfer drain");
 
@@ -560,7 +560,7 @@ async fn test_player_disconnection() {
                 println!("Received message: {msg:?}");
 
                 // Check if it's the PlayerLeft notification
-                if let ServerMessage::PlayerLeft { player_id } = *msg {
+                if let ServerMessage::PlayerLeft { player_id, .. } = *msg {
                     println!("Found PlayerLeft notification");
                     assert_eq!(player_id, player1_id);
                     found_player_left = true;
@@ -586,7 +586,7 @@ async fn test_player_disconnection() {
         match rx2.try_recv() {
             Ok(msg) => {
                 println!("Received additional message: {msg:?}");
-                if let ServerMessage::PlayerLeft { player_id } = *msg {
+                if let ServerMessage::PlayerLeft { player_id, .. } = *msg {
                     assert_eq!(player_id, player1_id);
                     found_player_left = true;
                 }

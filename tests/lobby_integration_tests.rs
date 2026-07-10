@@ -175,7 +175,7 @@ async fn test_lobby_player_leaves_during_ready_phase() {
     // Player 1 should receive PlayerLeft notification
     let msg = rx1.try_recv().unwrap();
     match msg.as_ref() {
-        ServerMessage::PlayerLeft { player_id } => {
+        ServerMessage::PlayerLeft { player_id, .. } => {
             assert_eq!(*player_id, player2_id);
         }
         _ => panic!("Expected PlayerLeft message"),

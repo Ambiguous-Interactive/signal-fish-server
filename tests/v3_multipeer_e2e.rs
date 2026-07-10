@@ -15,18 +15,18 @@
 //! 3. `host_n4_star_property` — a 4-peer host room is a strict star: the host
 //!    answers all 3 clients, each client offers only to the host, clients never
 //!    appear in each other's plans.
-//! 4. `mixed_v2_v3_n3_relay_floor_no_v3_leakage` — one v2 member floors the
-//!    room to relay: everyone gets `GameStarting`, NOBODY gets
-//!    `SessionPlan`/`NewPeer`, and the v2 client sees only known v2 variants.
+//! 4. `mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3` — one v2 member
+//!    floors the room to relay: everyone gets `GameStarting`, each v3 member
+//!    gets an explicit no-peer relay plan, and v2 sees no v3 variant.
 //! 5. `host_n4_failover_full_matrix` — the host socket dying re-elects the
 //!    earliest-joined remaining member and re-issues exactly one fresh
 //!    star-correct plan to each survivor.
 //! 6. `mesh_n3_seat_fill_late_join` — a seat-filling joiner of a live mesh
-//!    session gets `RoomJoined(finalized)` + a tailored plan (never `NewPeer`),
-//!    existing members get `PlayerJoined` + exactly one glare-correct `NewPeer`.
+//!    session gets `RoomJoined(finalized)` + a tailored plan, and existing
+//!    members get `PlayerJoined` + complete glare-correct plan refreshes.
 //! 7. `mesh_n3_reconnect_full_flow` — a dropped member reconnects over a fresh
 //!    socket (wire `Reconnect` flow): `Reconnected` + fresh plan for the
-//!    reconnector, `PlayerReconnected` + `NewPeer` for the survivors, and
+//!    reconnector, `PlayerReconnected` + refreshed plans for the survivors, and
 //!    post-reconnect signals run under the restored player id.
 //! 8. `host_n4_cascade_failover` — two consecutive host deaths: each wave
 //!    re-elects the earliest-joined survivor and re-issues exactly one fresh
@@ -313,7 +313,7 @@ async fn finalize_room(sockets: &mut [WsStream]) {
 async fn expect_player_left(ws: &mut WsStream, left: PlayerId, who: &str) {
     next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "PlayerLeft", |message| {
         match message {
-            ServerMessage::PlayerLeft { player_id } => {
+            ServerMessage::PlayerLeft { player_id, .. } => {
                 assert_eq!(player_id, left, "{who} saw the wrong player leave");
                 Some(())
             }
@@ -410,6 +410,18 @@ fn assert_host_star_plans(
             "the host peer is the session authority in a star"
         );
     }
+}
+
+fn assert_relay_floor_plan(plan: &SessionPlanPayload, who: &str) {
+    assert_eq!(plan.topology, Topology::Relay, "{who} topology");
+    assert_eq!(plan.transport, Transport::Relay, "{who} transport");
+    assert_eq!(plan.host, None, "{who} relay plan must not name a host");
+    assert!(plan.peers.is_empty(), "{who} relay plan must have no peers");
+    assert!(
+        plan.ice_servers.is_empty(),
+        "{who} relay plan must not carry ICE"
+    );
+    assert_eq!(plan.fallback, Transport::Relay, "{who} fallback");
 }
 
 /// Panic if a message a v2 client received is a v3-only variant.
@@ -584,7 +596,7 @@ async fn host_n4_star_property() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mixed_v2_v3_n3_relay_floor_no_v3_leakage() {
+async fn mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3() {
     // A mesh-preferring server, but one pure-v2 member floors the whole room
     // to relay: everyone receives GameStarting and NOBODY receives a
     // SessionPlan or NewPeer (Appendix K).
@@ -685,7 +697,8 @@ async fn mixed_v2_v3_n3_relay_floor_no_v3_leakage() {
     // Readiness no longer auto-starts: the creator explicitly starts the game.
     send(&mut peer_a, &ClientMessage::StartGame).await;
 
-    // Everyone gets GameStarting; the v3 members must see no plan/pairing.
+    // Everyone gets GameStarting; each v3 member then gets the authoritative
+    // relay reset, while v2 remains plan-free.
     for (ws, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
         next_matching_server_message_within(
             ws,
@@ -693,9 +706,6 @@ async fn mixed_v2_v3_n3_relay_floor_no_v3_leakage() {
             "relay-floor GameStarting",
             |message| match message {
                 ServerMessage::GameStarting { .. } => Some(()),
-                ServerMessage::SessionPlan(_) => {
-                    panic!("{who} must not receive a SessionPlan in a relay-floor room")
-                }
                 ServerMessage::NewPeer { .. } => {
                     panic!("{who} must not receive NewPeer in a relay-floor room")
                 }
@@ -703,14 +713,15 @@ async fn mixed_v2_v3_n3_relay_floor_no_v3_leakage() {
             },
         )
         .await;
+        let plan = expect_session_plan_strict(ws, who).await;
+        assert_relay_floor_plan(&plan, who);
     }
     next_matching_v2_only(&mut legacy, "v2 GameStarting", legacy_who, |message| {
         matches!(message, ServerMessage::GameStarting { .. }).then_some(())
     })
     .await;
 
-    // Strict no-message windows: no SessionPlan/NewPeer (nor anything else)
-    // for anyone after finalization.
+    // Exactly one plan per v3 member and none for v2.
     expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after relay floor").await;
     expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after relay floor").await;
     expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 client after relay floor")
@@ -1002,40 +1013,25 @@ async fn mesh_n3_seat_fill_late_join() {
         );
     }
 
-    // Each existing member receives PlayerJoined AND exactly one NewPeer with
-    // the antisymmetric glare flag.
+    // Each incumbent receives PlayerJoined followed by its complete refreshed
+    // plan. Validate the global glare matrix across all three views.
+    let mut incumbent_plans = Vec::new();
     for (socket, member_id, who) in [(&mut peer_a, id_a, "peer_a"), (&mut peer_b, id_b, "peer_b")] {
         expect_player_joined(socket, joiner_id, who).await;
-        next_matching_server_message_within(
-            socket,
-            SERVER_MESSAGE_TIMEOUT,
-            "NewPeer delta",
-            |message| match message {
-                ServerMessage::NewPeer {
-                    peer_id,
-                    you_initiate,
-                } => {
-                    assert_eq!(peer_id, joiner_id, "{who} must be paired with the joiner");
-                    assert_eq!(
-                        you_initiate,
-                        member_id < joiner_id,
-                        "{who} initiate flag must follow the UUID glare rule"
-                    );
-                    Some(())
-                }
-                ServerMessage::SessionPlan(_) => {
-                    panic!("{who} must not receive a plan on a late join")
-                }
-                other => panic!("{who} expected NewPeer, got {other:?}"),
-            },
-        )
-        .await;
+        let plan = expect_session_plan_strict(socket, who).await;
+        incumbent_plans.push((member_id, plan));
     }
+    let refreshed = [
+        (joiner_id, &*joiner_plan),
+        (incumbent_plans[0].0, &*incumbent_plans[0].1),
+        (incumbent_plans[1].0, &*incumbent_plans[1].1),
+    ];
+    assert_full_mesh_glare_matrix(&refreshed);
 
-    // Exactly one plan / one NewPeer each: strict silence windows.
+    // Exactly one authoritative plan each: strict silence windows.
     expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after its plan").await;
-    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after the NewPeer").await;
-    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after the NewPeer").await;
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after its refresh").await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after its refresh").await;
 
     // Prove the new pairing is live: signal joiner <-> one existing member.
     let signal_to_a = json!({ "Offer": "v=0\r\no=- seatfill joiner->a\r\n" });
@@ -1192,8 +1188,9 @@ async fn mesh_n3_reconnect_full_flow() {
     }
     assert_static_then_default_stun_ice(&reconnect_plan.ice_servers);
 
-    // Each remaining member receives PlayerReconnected then the NewPeer delta
-    // for the reconnector.
+    // Each incumbent receives PlayerReconnected followed by a complete plan
+    // refresh. Validate all three views as one mesh matrix.
+    let mut incumbent_plans = Vec::new();
     for (socket, member_id, who) in [(&mut peer_a, id_a, "peer_a"), (&mut peer_b, id_b, "peer_b")] {
         next_matching_server_message_within(
             socket,
@@ -1208,38 +1205,25 @@ async fn mesh_n3_reconnect_full_flow() {
             },
         )
         .await;
-        next_matching_server_message_within(
-            socket,
-            SERVER_MESSAGE_TIMEOUT,
-            "post-reconnect NewPeer",
-            |message| match message {
-                ServerMessage::NewPeer {
-                    peer_id,
-                    you_initiate,
-                } => {
-                    assert_eq!(peer_id, dropper_id);
-                    assert_eq!(
-                        you_initiate,
-                        member_id < dropper_id,
-                        "{who} initiate flag must follow the UUID glare rule"
-                    );
-                    Some(())
-                }
-                other => panic!("{who} expected NewPeer, got {other:?}"),
-            },
-        )
-        .await;
+        let plan = expect_session_plan_strict(socket, who).await;
+        incumbent_plans.push((member_id, plan));
     }
+    let refreshed = [
+        (dropper_id, &*reconnect_plan),
+        (incumbent_plans[0].0, &*incumbent_plans[0].1),
+        (incumbent_plans[1].0, &*incumbent_plans[1].1),
+    ];
+    assert_full_mesh_glare_matrix(&refreshed);
 
-    // Exactly one plan / one NewPeer each.
+    // Exactly one authoritative plan each.
     expect_no_server_message_within(
         &mut reconnector,
         SILENCE_WINDOW,
         "reconnector after its plan",
     )
     .await;
-    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after the NewPeer").await;
-    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after the NewPeer").await;
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after its refresh").await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after its refresh").await;
 
     // Post-reconnect signaling runs under the RESTORED player id, both ways.
     let offer = json!({ "Offer": "v=0\r\no=- post-reconnect\r\n" });

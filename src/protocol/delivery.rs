@@ -1,13 +1,15 @@
 //! Protocol-v3 delivery classes and delivery-accountability payloads.
 //!
-//! These value types are intentionally not wired into `ClientMessage` or
-//! `ServerMessage` yet. Defining and testing the wire-neutral contract first
-//! lets the queue implementation build against stable class, counter, and gap
-//! shapes without changing the frozen v2 message variants.
+//! Game-data metadata is projected away for older recipients, and
+//! `DeliveryReport` emission is v3-gated, preserving the frozen v2 wire.
 
 use serde::{Deserialize, Serialize};
 
 use super::PlayerId;
+
+/// Maximum exact ranges carried by one `DeliveryReport` frame. Additional
+/// ranges roll into another bounded control-lane frame.
+pub const DELIVERY_REPORT_MAX_GAPS: usize = 256;
 
 /// Delivery policy requested for one relayed game-data message.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

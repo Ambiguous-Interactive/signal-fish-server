@@ -294,6 +294,8 @@ async fn paced_sender(mut sink: WsSink, mut payload: LedgerPayload, count: u64) 
     for _ in 0..count {
         ticker.tick().await;
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.next(),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -610,6 +612,8 @@ async fn soak_stalled_drain_is_evicted_loudly() {
                 loop {
                     ticker.tick().await;
                     let message = ClientMessage::GameData {
+                        class: None,
+                        key: None,
                         data: payload.next(),
                     };
                     let json = serde_json::to_string(&message).expect("serialize GameData");

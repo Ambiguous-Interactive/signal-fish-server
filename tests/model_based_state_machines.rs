@@ -99,13 +99,15 @@ impl ReferenceRing {
 fn tagged_event(seq: u64) -> ServerMessage {
     ServerMessage::PlayerLeft {
         player_id: Uuid::from_u128(u128::from(seq)),
+        epoch: None,
+        final_seq: None,
     }
 }
 
 /// Extract the tag from a replayed event.
 fn event_tag(message: &ServerMessage) -> u64 {
     match message {
-        ServerMessage::PlayerLeft { player_id } => player_id.as_u128() as u64,
+        ServerMessage::PlayerLeft { player_id, .. } => player_id.as_u128() as u64,
         other => panic!("replay returned a message the test never recorded: {other:?}"),
     }
 }
@@ -359,7 +361,10 @@ proptest! {
             let player_id = Uuid::from_u128(0xDE11);
             let (tx, rx) = mpsc::channel::<Arc<ServerMessage>>(capacity);
             let (close, mut listener) = ConnectionCloseSignal::channel();
-            let handle = ClientDeliveryHandle { sender: tx, close };
+            let handle = ClientDeliveryHandle {
+                sender: tx.into(),
+                close,
+            };
             let mut rx = Some(rx);
             let mut model = DeliveryModel {
                 receiver_alive: true,
@@ -391,6 +396,12 @@ proptest! {
                                     model.expected_reason = Some(CloseReason::SlowConsumer);
                                     model.slow_consumer_disconnects += 1;
                                 }
+                            }
+                            DeliveryOutcome::AccountedDrop => {
+                                unreachable!("legacy reliable model cannot accountably drop")
+                            }
+                            DeliveryOutcome::Canceled => {
+                                unreachable!("legacy reliable model has no routing generations")
                             }
                         }
 

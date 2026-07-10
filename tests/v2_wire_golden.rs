@@ -68,6 +68,7 @@ fn player_info_a() -> PlayerInfo {
         // v3-only incarnation epoch: `None` is skipped, so the v2 snapshot
         // goldens below stay byte-identical.
         epoch: None,
+        seq: None,
         region_id: String::new(),
     }
 }
@@ -84,6 +85,7 @@ fn player_info_b() -> PlayerInfo {
             port: 7777,
         }),
         epoch: None,
+        seq: None,
         region_id: String::new(),
     }
 }
@@ -269,6 +271,8 @@ fn golden_client_leave_room() {
 #[test]
 fn golden_client_game_data() {
     let msg = ClientMessage::GameData {
+        class: None,
+        key: None,
         data: json!({ "x": 1, "y": 2 }),
     };
     assert_json(
@@ -598,6 +602,8 @@ fn golden_server_player_joined() {
 fn golden_server_player_left() {
     let msg = ServerMessage::PlayerLeft {
         player_id: player_a(),
+        epoch: None,
+        final_seq: None,
     };
     assert_json(
         &msg,
@@ -616,6 +622,8 @@ fn golden_server_game_data() {
         // bytes below stay byte-identical.
         seq: None,
         epoch: None,
+        class: None,
+        key: None,
     };
     assert_json(
         &msg,
@@ -644,6 +652,8 @@ fn golden_server_game_data_binary_json_fallback() {
         // fallback frame stays byte-identical.
         seq: None,
         epoch: None,
+        class: None,
+        key: None,
     };
     assert_json(
         &fallback,
@@ -660,7 +670,8 @@ fn golden_server_game_data_binary_json_fallback() {
 /// In-memory representation ONLY — NOT the wire form. The `ServerMessage::
 /// GameDataBinary` enum variant is never serialized to the wire as-is. The
 /// production binary frame is frozen in `src/websocket/sending.rs` unit tests
-/// and covered end-to-end by `test_binary_game_data_broadcasting_uses_bare_message_pack_frame`.
+/// and covered end-to-end by
+/// `test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3`.
 /// This snapshot only detects accidental changes to the in-memory enum's serde
 /// shape, e.g. if someone removes the interception in `send_single_message`.
 #[test]

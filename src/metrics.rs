@@ -26,6 +26,43 @@ pub struct ConnectionDeliveryStats {
     pub backpressure_events: AtomicU64,
 }
 
+#[derive(Debug)]
+struct DeliveryClassAtomicCounters {
+    attempted: AtomicU64,
+    delivered: AtomicU64,
+    superseded: AtomicU64,
+    dropped_full: AtomicU64,
+    dropped: AtomicU64,
+    abandoned: AtomicU64,
+    unsupported_format: AtomicU64,
+}
+
+impl DeliveryClassAtomicCounters {
+    fn new() -> Self {
+        Self {
+            attempted: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
+            superseded: AtomicU64::new(0),
+            dropped_full: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            abandoned: AtomicU64::new(0),
+            unsupported_format: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> DeliveryClassMetrics {
+        DeliveryClassMetrics {
+            attempted: self.attempted.load(Ordering::Relaxed),
+            delivered: self.delivered.load(Ordering::Relaxed),
+            superseded: self.superseded.load(Ordering::Relaxed),
+            dropped_full: self.dropped_full.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            abandoned: self.abandoned.load(Ordering::Relaxed),
+            unsupported_format: self.unsupported_format.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Comprehensive metrics collection for in-memory signaling server
 #[derive(Debug)]
 pub struct ServerMetrics {
@@ -37,6 +74,7 @@ pub struct ServerMetrics {
     /// emission is enabled.
     connection_delivery_stats:
         dashmap::DashMap<crate::protocol::PlayerId, Arc<ConnectionDeliveryStats>>,
+    delivery_class_counters: [DeliveryClassAtomicCounters; 3],
 
     // Connection metrics
     pub total_connections: AtomicU64,
@@ -183,10 +221,10 @@ pub struct ServerMetrics {
     pub relay_session_timeouts: AtomicU64,
 
     // Transport / session-plan metrics (Protocol v3)
-    /// Non-relay `SessionPlan`s actually emitted (one per finalized non-relay
-    /// room). Mid-session re-plans and late-join plans are counted separately
-    /// (`session_replans_emitted` / `session_plans_late_join`) so this keeps
-    /// meaning "finalized non-relay rooms".
+    /// Finalization-time v3 `SessionPlan` publication events. Counted once per
+    /// finalized room that has at least one v3 recipient, including an explicit
+    /// relay-floor plan; this is not a per-recipient frame count. Mid-session
+    /// re-plans and finalized-room joins/reconnects are counted separately.
     pub session_plans_emitted: AtomicU64,
     /// Mid-session host re-plan events (host failover / self-heal): one per
     /// re-plan **event**, NOT per recipient. Counted whenever an invalid
@@ -196,10 +234,11 @@ pub struct ServerMetrics {
     /// counted when no remaining member can host the session (the stored plan
     /// is dropped and nothing is emitted — no re-plan happened).
     pub session_replans_emitted: AtomicU64,
-    /// Late-join / reconnect `SessionPlan`s delivered: one per joiner that
-    /// received a tailored plan for an already-active session. A joiner served
-    /// by a self-heal re-plan instead (invalid stored host) is part of that
-    /// single `session_replans_emitted` event and is NOT counted here.
+    /// Late-join / reconnect plan publications: one per joining actor that
+    /// received a plan for an already-active session. A reconnect refreshes all
+    /// v3 incumbents in the same publication but still counts once. An actor
+    /// served by a self-heal re-plan instead is part of that single
+    /// `session_replans_emitted` event and is NOT counted here.
     pub session_plans_late_join: AtomicU64,
     /// Finalized rooms whose chosen topology was `mesh`.
     pub topology_mesh_selected: AtomicU64,
@@ -301,6 +340,25 @@ pub struct ConnectionMetrics {
     pub websocket_deliveries_enqueued: u64,
     pub websocket_deliveries_channel_closed: u64,
     pub websocket_deliveries_canceled: u64,
+    pub delivery_by_class: DeliveryMetricsByClass,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryClassMetrics {
+    pub attempted: u64,
+    pub delivered: u64,
+    pub superseded: u64,
+    pub dropped_full: u64,
+    pub dropped: u64,
+    pub abandoned: u64,
+    pub unsupported_format: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryMetricsByClass {
+    pub reliable: DeliveryClassMetrics,
+    pub latest: DeliveryClassMetrics,
+    pub volatile: DeliveryClassMetrics,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -475,6 +533,7 @@ impl ServerMetrics {
     pub fn new() -> Self {
         Self {
             connection_delivery_stats: dashmap::DashMap::new(),
+            delivery_class_counters: std::array::from_fn(|_| DeliveryClassAtomicCounters::new()),
             total_connections: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
             disconnections: AtomicU64::new(0),
@@ -651,6 +710,75 @@ impl ServerMetrics {
     pub fn increment_websocket_deliveries_canceled(&self) {
         self.websocket_deliveries_canceled
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn delivery_class_counter(
+        &self,
+        class: crate::protocol::DeliveryClass,
+    ) -> &DeliveryClassAtomicCounters {
+        let [reliable, latest, volatile] = &self.delivery_class_counters;
+        match class {
+            crate::protocol::DeliveryClass::Reliable => reliable,
+            crate::protocol::DeliveryClass::Latest => latest,
+            crate::protocol::DeliveryClass::Volatile => volatile,
+        }
+    }
+
+    pub(crate) fn increment_delivery_class_attempted(&self, class: crate::protocol::DeliveryClass) {
+        self.delivery_class_counter(class)
+            .attempted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn increment_delivery_class_delivered(&self, class: crate::protocol::DeliveryClass) {
+        self.delivery_class_counter(class)
+            .delivered
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn increment_delivery_class_superseded(&self) {
+        self.delivery_class_counter(crate::protocol::DeliveryClass::Latest)
+            .superseded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn increment_delivery_class_dropped_full(&self) {
+        self.delivery_class_counter(crate::protocol::DeliveryClass::Latest)
+            .dropped_full
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn increment_delivery_class_dropped(&self, class: crate::protocol::DeliveryClass) {
+        self.delivery_class_counter(class)
+            .dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn add_delivery_class_abandoned(
+        &self,
+        class: crate::protocol::DeliveryClass,
+        count: u64,
+    ) {
+        self.delivery_class_counter(class)
+            .abandoned
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn increment_delivery_class_unsupported_format(
+        &self,
+        class: crate::protocol::DeliveryClass,
+    ) {
+        self.delivery_class_counter(class)
+            .unsupported_format
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn delivery_metrics_by_class(&self) -> DeliveryMetricsByClass {
+        DeliveryMetricsByClass {
+            reliable: self.delivery_class_counters[0].snapshot(),
+            latest: self.delivery_class_counters[1].snapshot(),
+            volatile: self.delivery_class_counters[2].snapshot(),
+        }
     }
 
     // Per-connection delivery statistics (protocol v3 RelayStats)
@@ -1112,9 +1240,10 @@ impl ServerMetrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record one non-relay `SessionPlan` actually emitted (one per finalized
-    /// non-relay room). Mid-session re-plans and late-join plans must NOT move
-    /// this counter — they have their own
+    /// Record one finalization-time v3 `SessionPlan` publication, including an
+    /// explicit relay-floor result. Count once per finalized room with at least
+    /// one v3 recipient, not once per frame. Mid-session re-plans and finalized
+    /// joins/reconnects must NOT move this counter -- they have their own
     /// ([`Self::increment_session_replans_emitted`] /
     /// [`Self::increment_session_plans_late_join`]) so the three emission kinds
     /// stay independently observable.
@@ -1133,11 +1262,10 @@ impl ServerMetrics {
         self.session_replans_emitted.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record one late-join / reconnect `SessionPlan` delivered to a joiner of
-    /// an already-active session (once per joiner that received a plan). A
-    /// joiner served by a self-heal re-plan instead is covered by
-    /// [`Self::increment_session_replans_emitted`] and must not be counted
-    /// here.
+    /// Record one late-join / reconnect plan publication for the joining actor.
+    /// Reconnect may refresh every v3 incumbent in that same publication but
+    /// still counts once. An actor served by a self-heal re-plan instead is
+    /// covered by [`Self::increment_session_replans_emitted`].
     pub fn increment_session_plans_late_join(&self) {
         self.session_plans_late_join.fetch_add(1, Ordering::Relaxed);
     }
@@ -1238,6 +1366,7 @@ impl ServerMetrics {
                 websocket_deliveries_canceled: self
                     .websocket_deliveries_canceled
                     .load(Ordering::Relaxed),
+                delivery_by_class: self.delivery_metrics_by_class(),
             },
             rooms: RoomMetrics {
                 rooms_created: self.rooms_created.load(Ordering::Relaxed),

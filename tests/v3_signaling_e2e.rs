@@ -4,12 +4,12 @@
 //! byte-preserved, exercising axum's WebSocket framing on the unchanged
 //! `handle_signal` path.
 //!
-//! Initial pairing is no longer emitted as `NewPeer` during lobby fill (it is
-//! delivered by `SessionPlan` at finalize, and `NewPeer` is reserved for joins
-//! into an already-active session — PLAN §P3, Appendix L). Over-the-wire pairing
-//! is therefore covered by `tests/v3_session_plan_e2e.rs` (SessionPlan) and the
-//! handler-level unit tests in `src/server/signaling_tests.rs`; this file does
-//! not depend on `NewPeer`.
+//! Initial pairing is delivered by `SessionPlan` at finalize. Finalized-room
+//! membership changes also publish complete authoritative plans; `NewPeer`
+//! remains a compatibility wire shape. Over-the-wire pairing is therefore
+//! covered by `tests/v3_session_plan_e2e.rs` (SessionPlan) and the handler-level
+//! unit tests in `src/server/signaling_tests.rs`; this file does not depend on
+//! additive peer directives.
 
 mod test_helpers;
 mod websocket_test_helpers;

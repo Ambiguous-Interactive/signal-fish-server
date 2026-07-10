@@ -12,12 +12,12 @@
 //! 1. `v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage` — a v2
 //!    (relay-only) member joins a FINALIZED `mesh + webrtc` room: it receives
 //!    `RoomJoined` but never a `SessionPlan`/`NewPeer`/`Signal`, existing v3
-//!    members receive NO `NewPeer` naming it, and its `GameData` still relays to
-//!    the v3 members (the relay floor is the shared data path for it).
+//!    members receive complete plans that omit it, and its `GameData` still
+//!    relays to the v3 members (the relay floor is its shared data path).
 //! 2. `sticky_relay_floor_survives_v2_leave_then_v3_full_join` — a room that
 //!    finalized to the relay floor (a v2 member at finalize) stays relay after
 //!    the v2 member leaves and a fresh v3-full member fills the seat: the ladder
-//!    is NOT re-run, and no `SessionPlan` reaches anyone.
+//!    is NOT re-run, and every v3 member receives an explicit relay refresh.
 //! 3. `host_downgrade_reconnect_reelects_and_empties_downgraded_plan` — the
 //!    elected host of a `host + webrtc` session reconnects advertising
 //!    relay-only capabilities (protocol 3, no webrtc): the server detects the
@@ -25,13 +25,13 @@
 //!    members, emits fresh `SessionPlan`s, and the downgraded client receives a
 //!    plan with an EMPTY peers list.
 //! 4. `v2_member_leaves_relay_floored_session_no_replan` — a v2 member leaves a
-//!    mixed (relay-floored) finalized session: no `SessionPlan`/`NewPeer` is
-//!    emitted and the remaining members keep relaying.
+//!    mixed (relay-floored) finalized session: no departure replan is emitted
+//!    and the remaining members keep relaying.
 //! 5. `non_mesh_v3_member_floors_room_to_relay` — a v3 member that negotiated
 //!    `webrtc` but only `topologies: ["relay"]` is in a mesh-preferring room:
 //!    the ladder requires ALL members to support the rung, so the room floors to
-//!    relay (no `SessionPlan` for anyone), which is the TRUE contract verified
-//!    from `src/server/session_policy.rs::all_support`.
+//!    relay (an explicit no-peer plan for every v3 member), which is the TRUE
+//!    contract verified from `src/server/session_policy.rs::all_support`.
 
 mod test_helpers;
 mod v3_conformance_helpers;
@@ -308,6 +308,18 @@ async fn expect_finalize_plan(ws: &mut WsStream, who: &str) -> Box<SessionPlanPa
     expect_session_plan_strict(ws, who).await
 }
 
+fn assert_relay_floor_plan(plan: &SessionPlanPayload, who: &str) {
+    assert_eq!(plan.topology, Topology::Relay, "{who} topology");
+    assert_eq!(plan.transport, Transport::Relay, "{who} transport");
+    assert_eq!(plan.host, None, "{who} relay plan must not name a host");
+    assert!(plan.peers.is_empty(), "{who} relay plan must have no peers");
+    assert!(
+        plan.ice_servers.is_empty(),
+        "{who} relay plan must not carry ICE"
+    );
+    assert_eq!(plan.fallback, Transport::Relay, "{who} fallback");
+}
+
 /// Drive the paced all-ready handshake: every ready is observed by every member
 /// before the next fires. Readiness no longer auto-starts, so once every member
 /// is ready an explicit `StartGame` from the creator (sockets[0]) finalizes the
@@ -332,7 +344,7 @@ async fn finalize_room(sockets: &mut [WsStream]) {
 async fn expect_player_left(ws: &mut WsStream, left: PlayerId, who: &str) {
     next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "PlayerLeft", |message| {
         match message {
-            ServerMessage::PlayerLeft { player_id } => {
+            ServerMessage::PlayerLeft { player_id, .. } => {
                 assert_eq!(player_id, left, "{who} saw the wrong player leave");
                 Some(())
             }
@@ -391,6 +403,8 @@ async fn relay_one_game_data(from: &mut WsStream, to: &mut WsStream, from_id: Pl
     send(
         from,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.clone(),
         },
     )
@@ -507,17 +521,24 @@ async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
     expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 joiner after RoomJoined")
         .await;
 
-    // Existing v3 members see PlayerJoined(legacy) but NEVER a NewPeer naming
-    // the v2 joiner (the v2 member is not session-capable, so the mesh announce
-    // is gated off on both sides).
-    for (socket, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
+    // Existing v3 members see PlayerJoined(legacy), then complete refreshed
+    // mesh plans that omit the v2 joiner from both peer lists.
+    for (socket, member_id, other_id, who) in [
+        (&mut peer_a, id_a, id_b, "peer_a"),
+        (&mut peer_b, id_b, id_a, "peer_b"),
+    ] {
         expect_player_joined(socket, legacy_id, who).await;
-        // RED: suspected bug — any NewPeer here would mean a v3 member was told
-        // to pair with a relay-only v2 peer the SessionPlan would never list.
+        let plan = expect_session_plan_strict(socket, who).await;
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.peers.len(), 1, "{who} sees only the capable v3 peer");
+        assert_eq!(plan.peers[0].player_id, other_id);
+        assert_eq!(plan.peers[0].initiate, member_id < other_id);
+        assert!(plan.peers.iter().all(|peer| peer.player_id != legacy_id));
         expect_no_server_message_within(
             socket,
             SILENCE_WINDOW,
-            &format!("{who} after a v2 joiner entered the finalized mesh room"),
+            &format!("{who} after its v2-join membership refresh"),
         )
         .await;
     }
@@ -607,20 +628,19 @@ async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
     // finalize the relay-floored room.
     send(&mut peer_a, &ClientMessage::StartGame).await;
 
-    // Both observe GameStarting; the relay floor emits no SessionPlan.
+    // Both observe GameStarting; only the v3 member gets the explicit floor plan.
     next_matching_server_message_within(
         &mut peer_a,
         SERVER_MESSAGE_TIMEOUT,
         "relay-floor GameStarting",
         |message| match message {
             ServerMessage::GameStarting { .. } => Some(()),
-            ServerMessage::SessionPlan(_) => {
-                panic!("peer_a must not receive a SessionPlan in a relay-floor room")
-            }
             _ => None,
         },
     )
     .await;
+    let initial_floor = expect_session_plan_strict(&mut peer_a, "peer_a").await;
+    assert_relay_floor_plan(&initial_floor, "peer_a");
     next_matching_v2_only(&mut legacy, "v2 GameStarting", legacy_who, |message| {
         matches!(message, ServerMessage::GameStarting { .. }).then_some(())
     })
@@ -642,22 +662,16 @@ async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
         "a seat-filling joiner of a finalized room must see lobby_state: finalized"
     );
 
-    // RED: suspected bug — if the implementation re-runs the ladder over the
-    // now-all-v3 membership it would emit a SessionPlan/NewPeer here, breaking
-    // the sticky contract.
+    // The now-all-v3 membership must not rerun the ladder. Both v3 members get
+    // the authoritative relay reset derived from the absent sticky plan.
     expect_player_joined(&mut peer_a, joiner_id, "peer_a").await;
-    expect_no_server_message_within(
-        &mut peer_a,
-        SILENCE_WINDOW,
-        "peer_a after a v3-full joiner entered the sticky relay-floor room",
-    )
-    .await;
-    expect_no_server_message_within(
-        &mut joiner,
-        SILENCE_WINDOW,
-        "v3-full joiner of a sticky relay-floor room",
-    )
-    .await;
+    let incumbent_floor = expect_session_plan_strict(&mut peer_a, "peer_a refresh").await;
+    let joiner_floor = expect_session_plan_strict(&mut joiner, "joiner floor").await;
+    assert_relay_floor_plan(&incumbent_floor, "peer_a refresh");
+    assert_relay_floor_plan(&joiner_floor, "joiner floor");
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after floor refresh")
+        .await;
+    expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after floor plan").await;
 
     // The room still relays: GameData round-trips both ways over the floor.
     relay_one_game_data(&mut joiner, &mut peer_a, joiner_id, "peer_a").await;
@@ -839,13 +853,12 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
         downgraded_plan.peers
     );
 
-    // Each survivor first receives the additive `PlayerReconnected` notice (the
-    // reconnect broadcasts it to every other room member). The downgraded member
-    // is relay-only, so NO `NewPeer` naming it follows — it is omitted from the
-    // capable survivors' pairing in both directions.
-    // RED: suspected bug — a NewPeer after PlayerReconnected would push a
-    // survivor into a doomed webrtc offer to a relay-only peer.
-    for (socket, who) in [(&mut peer_a, "host (peer_a)"), (&mut peer_b, "peer_b")] {
+    // Each survivor receives PlayerReconnected followed by a complete plan
+    // refresh. The downgraded member is omitted from both capable peer lists.
+    for (socket, member_id, who) in [
+        (&mut peer_a, id_a, "host (peer_a)"),
+        (&mut peer_b, id_b, "peer_b"),
+    ] {
         next_matching_server_message_within(
             socket,
             SERVER_MESSAGE_TIMEOUT,
@@ -855,24 +868,35 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
                     assert_eq!(player_id, host_id, "{who} saw the wrong reconnector");
                     Some(())
                 }
-                ServerMessage::NewPeer { .. } => {
-                    panic!("{who} must not be paired with the relay-only reconnector")
-                }
                 other => panic!("{who} expected PlayerReconnected, got {other:?}"),
             },
         )
         .await;
+        let plan = expect_session_plan_strict(socket, who).await;
+        assert_eq!(plan.topology, Topology::Host);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.host, Some(new_host_id));
+        assert!(plan.peers.iter().all(|peer| peer.player_id != host_id));
+        if member_id == new_host_id {
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].player_id, id_b);
+            assert!(!plan.peers[0].initiate);
+        } else {
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].player_id, new_host_id);
+            assert!(plan.peers[0].initiate);
+        }
     }
     expect_no_server_message_within(
         &mut peer_a,
         SILENCE_WINDOW,
-        "host (peer_a) after a relay-only member reconnected",
+        "host (peer_a) after its reconnect refresh",
     )
     .await;
     expect_no_server_message_within(
         &mut peer_b,
         SILENCE_WINDOW,
-        "peer_b after a relay-only member reconnected",
+        "peer_b after its reconnect refresh",
     )
     .await;
     expect_no_server_message_within(
@@ -986,7 +1010,8 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
     // finalize the relay-floored session.
     send(&mut peer_a, &ClientMessage::StartGame).await;
 
-    // Everyone gets GameStarting; the relay floor emits no plan.
+    // Everyone gets GameStarting; each v3 member gets an explicit floor plan,
+    // while the v2 member remains plan-free.
     for (ws, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
         next_matching_server_message_within(
             ws,
@@ -994,13 +1019,12 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
             "relay-floor GameStarting",
             |message| match message {
                 ServerMessage::GameStarting { .. } => Some(()),
-                ServerMessage::SessionPlan(_) => {
-                    panic!("{who} must not receive a SessionPlan in a relay-floor room")
-                }
                 _ => None,
             },
         )
         .await;
+        let plan = expect_session_plan_strict(ws, who).await;
+        assert_relay_floor_plan(&plan, who);
     }
     next_matching_v2_only(&mut legacy, "v2 GameStarting", legacy_who, |message| {
         matches!(message, ServerMessage::GameStarting { .. }).then_some(())
@@ -1010,10 +1034,8 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
     // The v2 member leaves the live relay-floored session.
     legacy.close(None).await.expect("close legacy socket");
 
-    // Each surviving v3 member sees PlayerLeft(legacy) and then NOTHING — a
-    // relay-floor departure stores no plan, so no host-failover re-plan fires.
-    // RED: suspected bug — any SessionPlan/NewPeer here would mean a relay-floor
-    // departure wrongly triggered a re-plan.
+    // Each surviving v3 member sees PlayerLeft(legacy) and then nothing: relay
+    // has no sticky host state, so a departure does not trigger another plan.
     for (socket, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
         expect_player_left(socket, legacy_id, who).await;
         expect_no_server_message_within(
@@ -1042,7 +1064,7 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
     // Two mesh-capable v3 clients plus one v3 client that negotiated webrtc but
     // only the relay TOPOLOGY. `all_support(mesh, webrtc)` fails (the relay-only
     // member lacks the mesh topology), and `all_support(host, *)` fails too, so
-    // the room floors to relay — NO SessionPlan for anyone.
+    // the room floors to relay with an explicit v3 reset for everyone.
     let mut peer_a = connect(addr).await;
     authenticate_v3_full(&mut peer_a).await;
     let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
@@ -1063,12 +1085,9 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
     let mut sockets = [peer_a, peer_b, relay_only];
     finalize_room(&mut sockets).await;
 
-    // Everyone gets GameStarting and NOBODY gets a SessionPlan/NewPeer: a single
-    // member lacking the rung's topology floors the whole room to relay (this is
-    // the real `all_support` contract, not a per-member-gated mesh).
-    // RED: suspected bug — if the room instead selected mesh among the two
-    // capable members and merely gated the relay-only one out, a SessionPlan
-    // would arrive here.
+    // Everyone gets GameStarting and then the same no-peer relay plan. A single
+    // member lacking the rung's topology floors the whole room (the real
+    // `all_support` contract, not a per-member-gated mesh).
     for (socket, who) in sockets.iter_mut().zip(["peer_a", "peer_b", "relay_only"]) {
         next_matching_server_message_within(
             socket,
@@ -1076,9 +1095,6 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
             "relay-floor GameStarting",
             |message| match message {
                 ServerMessage::GameStarting { .. } => Some(()),
-                ServerMessage::SessionPlan(_) => {
-                    panic!("{who} must not receive a SessionPlan: one non-mesh member floors the room to relay")
-                }
                 ServerMessage::NewPeer { .. } => {
                     panic!("{who} must not receive a NewPeer in a relay-floored room")
                 }
@@ -1086,9 +1102,11 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
             },
         )
         .await;
+        let plan = expect_session_plan_strict(socket, who).await;
+        assert_relay_floor_plan(&plan, who);
     }
 
-    // Strict silence: no plan/pairing for anyone after finalization.
+    // Exactly one authoritative plan per v3 member.
     for (socket, who) in sockets.iter_mut().zip(["peer_a", "peer_b", "relay_only"]) {
         expect_no_server_message_within(
             socket,
@@ -1108,6 +1126,8 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
     send(
         relay_only,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.clone(),
         },
     )

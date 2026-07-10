@@ -91,6 +91,7 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
         connected_at: chrono::Utc::now(),
         connection_info: None,
         epoch: None,
+        seq: None,
         region_id: "region-a".to_string(),
     }
 }
