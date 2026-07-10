@@ -44,8 +44,9 @@ Two esbuild bundles from one strict-TypeScript source tree:
 
 - **`dist/page.js`** (IIFE) runs INSIDE headless Chromium: WebSocket wire + v3 protocol state machine +
   `RTCPeerConnection` engine. A faithful port of the native client's orchestrator — same ready-barrier
-  gating, server-owned initiator roles, trickle-ICE buffering, Appendix G one-shot transport status, success
-  criteria, and causal event ordering (every input is serialized through one promise chain).
+  gating, authoritative full-plan replacement (including Relay/Relay empty plans), server-owned initiator
+  roles, trickle-ICE buffering, Appendix G transport-state transitions, success criteria, and causal event
+  ordering (every input is serialized through one promise chain).
 - **`dist/cli.js`** (Node ESM) is the process entrypoint: parses argv, launches Chromium, injects the page
   bundle, bridges page events to stdout via `page.exposeFunction` (delivered in call order), enforces the
   watchdog, and maps outcomes to the native client's exit codes.
@@ -57,6 +58,30 @@ does NOT exit on its own when its parent dies). The reaper re-checks `/proc/<pid
 killing, so a recycled pid is never signalled. Both halves are pinned by the automated
 `browser_cli_signal_teardown_reaps_chromium` interop cell (SIGTERM → graceful teardown + exit 143;
 SIGKILL → the reaper clears every Chromium descendant within a bounded window).
+
+### Delivery accountability
+
+The page's v3 receive loop validates exact `DeliveryReport` ranges, cumulative
+counters, and equality between each loss-counter delta and current range units
+before applying relayed data. It retains ranges across bounded rollover reports
+(at most 256 ranges each) and accepts a sequence hole
+only when their non-overlapping, causally prior union covers every missing
+sequence. `RelayStats`, totals, and supplemental errors are diagnostics only.
+RelayStats snapshots are checked for a positive stable interval and monotonic
+cumulative counters. V2 mode remains reliable FIFO, and raw binary data is
+always reliable. This runtime negotiates `game_data_format: "json"`, so an
+incoming binary frame or text `GameDataBinary` is a protocol error. The strict
+MessagePack decoder is kept as a tested protocol utility for binary-capable
+client implementations.
+
+Priority peer lifecycle control can overtake queued data from the old epoch.
+The page continues to account for that tail but does not emit/apply it after
+`PlayerLeft` or a newer incarnation announcement. Future epochs must match a
+prior `PlayerJoined`/`PlayerReconnected` announcement; older epochs are invalid
+after data advances. Room/spectator transitions reset room cursors while
+connection counters survive; a recipient reconnect starts a new connection
+accounting lifetime from `sender_watermarks`. Thus the shared
+`game_data_received` event contract exposes only application-current payloads.
 
 ## CLI reference
 
@@ -113,7 +138,7 @@ The browser cells live in
 | Host star N=3 with the browser as a non-host client (star edges only) | `host_star_n3_browser_client` |
 | Crippled-ICE browser → `{webrtc,false}` + `fallback_engaged`, zero pairs, served by the relay floor | `mesh_n3_browser_crippled_ice_fallback` |
 | mDNS `.local` obfuscation trap (see above) | `mesh_n3_browser_mdns_obfuscation` |
-| Pure-v2 browser on `/v2/ws` floors a mesh-preferring room (zero session traffic, full relay matrix) | `mixed_v2_browser_v3_native_relay_floor` |
+| Pure-v2 browser on `/v2/ws` floors a mesh-preferring room (v3 natives get relay plans; full relay matrix) | `mixed_v2_browser_v3_native_relay_floor` |
 | Mid-handshake server close → exactly one `error` (real close reason) + prompt exit `3` | `browser_cli_mid_handshake_close_single_error_exit_3` |
 | SIGTERM (graceful teardown, exit 143) and SIGKILL (detached reaper) leave zero Chromium survivors | `browser_cli_signal_teardown_reaps_chromium` |
 

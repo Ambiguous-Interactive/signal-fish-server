@@ -15,17 +15,17 @@
 //!    reports every current member ready (`LobbyStateChanged.all_ready`), the
 //!    room creator sends that `StartGame`; joiners just await the broadcast it
 //!    produces.
-//! 4. **Finalize** — `GameStarting` (note our own `is_authority`), then, for
-//!    non-relay rooms, the per-recipient `SessionPlan`.
-//! 5. **P2P** — pair per `peers[].initiate` (and `NewPeer.you_initiate` for
-//!    late joiners), trickling ICE through `Signal`. The overall WebRTC
-//!    transport status resolves once (Appendix G): when all expected pairs are
+//! 4. **Finalize** — `GameStarting` (note our own `is_authority`), then every
+//!    v3 recipient's authoritative `SessionPlan` (including explicit
+//!    Relay/Relay plans with no peers).
+//! 5. **P2P** — pair per `peers[].initiate` (`NewPeer` remains accepted for
+//!    compatible servers), trickling ICE through `Signal`. The overall WebRTC
+//!    transport status resolves (Appendix G) when all expected pairs are
 //!    connected (a departure that removes the last unconnected expected pair
 //!    counts), or at `--p2p-timeout-secs` — `connected: true` iff at least
 //!    one pair is connected at that moment; a zero-pair resolution also emits
-//!    `fallback_engaged`. Pairs that connect later (late-join `NewPeer`) do
-//!    not re-send the report: the state did not change, and the server
-//!    deduplicates repeat states anyway.
+//!    `fallback_engaged`. Membership churn reports later real state changes;
+//!    unchanged states remain suppressed.
 //! 6. **Relay floor** — `GameData` keeps flowing over the WebSocket before,
 //!    during, and after P2P; `--relay-payload` exercises it explicitly.
 //!
@@ -39,13 +39,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId, ServerMessage,
-    Transport,
+    ClientMessage, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId, PlayerInfo,
+    ServerMessage, Transport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
+use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
 use crate::engine::{Engine, EngineEvent, RELIABLE_LABEL, UNRELIABLE_LABEL};
 use crate::events::{emit, Event, PlanPeer, SignalKind};
@@ -148,8 +150,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         tick_stall_ms: cli.tick_stall_ms,
     });
 
-    authenticate(&mut ws, cli).await?;
-    let (my_id, mut present, lobby_state) = join_room(&mut ws, cli).await?;
+    let negotiated_version = authenticate(&mut ws, cli).await?;
+    let (my_id, mut present, lobby_state, accountability) =
+        join_room(&mut ws, cli, negotiated_version >= 3).await?;
 
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
     let engine = Engine::new(cli.cripple_ice, engine_tx)
@@ -163,8 +166,11 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         engine,
         engine_rx,
         my_id,
+        negotiated_version,
+        accountability,
         present,
         members_seen,
+        lobby_state: Some(lobby_state.clone()),
         // Joining an already-Lobby room (seat fill) means readiness is
         // immediately possible; a Finalized room means the session is already
         // running — GameStarting was broadcast before we joined and will
@@ -175,6 +181,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         start_game_sent: false,
         game_started: lobby_state == LobbyState::Finalized,
         late_joined: lobby_state == LobbyState::Finalized,
+        initial_session_plan_pending: negotiated_version >= 3
+            && lobby_state == LobbyState::Finalized,
+        pending_membership_plans: BTreeMap::new(),
         webrtc_plan_seen: false,
         expected_peers: BTreeSet::new(),
         connected_pairs: BTreeSet::new(),
@@ -202,7 +211,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
 }
 
 /// Send `Authenticate` and consume `Authenticated` + `ProtocolInfo`.
-async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<(), FatalError> {
+async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<u16, FatalError> {
     let message = ClientMessage::Authenticate {
         app_id: cli.app_id.clone(),
         sdk_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -231,19 +240,31 @@ async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<(), FatalError> {
         }
     }
 
-    match next_handshake_message(ws).await? {
-        ServerMessage::ProtocolInfo(info) => {
-            // v2 connections omit the field; the effective version is 2.
-            let negotiated_version = info.protocol_version.unwrap_or(2);
-            emit(&Event::ProtocolInfo { negotiated_version });
-        }
-        other => {
-            return Err(FatalError::protocol(format!(
-                "expected ProtocolInfo, got {other:?}"
-            )));
-        }
+    let negotiated_version =
+        negotiated_version_from(next_handshake_message(ws).await?, cli.protocol_version)?;
+    emit(&Event::ProtocolInfo { negotiated_version });
+    Ok(negotiated_version)
+}
+
+fn negotiated_version_from(
+    message: ServerMessage,
+    offered_version: u16,
+) -> Result<u16, FatalError> {
+    match message {
+        // Negotiated v2 omits the additive field by wire contract.
+        ServerMessage::ProtocolInfo(info) => match info.protocol_version {
+            None => Ok(2),
+            Some(version) if (2..=3).contains(&version) && version <= offered_version => {
+                Ok(version)
+            }
+            Some(version) => Err(FatalError::protocol(format!(
+                "ProtocolInfo.protocol_version {version} is outside 2..=3 or exceeds offered version {offered_version}"
+            ))),
+        },
+        other => Err(FatalError::protocol(format!(
+            "expected ProtocolInfo, got {other:?}"
+        ))),
     }
-    Ok(())
 }
 
 /// Create or join the room; returns our player id, the seated member ids, and
@@ -251,7 +272,16 @@ async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<(), FatalError> {
 async fn join_room(
     ws: &mut WsStream,
     cli: &Cli,
-) -> Result<(PlayerId, BTreeSet<PlayerId>, LobbyState), FatalError> {
+    protocol_v3: bool,
+) -> Result<
+    (
+        PlayerId,
+        BTreeSet<PlayerId>,
+        LobbyState,
+        DeliveryAccountability,
+    ),
+    FatalError,
+> {
     let max_players = u8::try_from(cli.peers)
         .map_err(|_overflow| FatalError::protocol(format!("--peers {} exceeds u8", cli.peers)))?;
     let message = ClientMessage::JoinRoom {
@@ -266,25 +296,34 @@ async fn join_room(
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
 
-    // Read until `RoomJoined`, tolerating interleaved lobby MEMBERSHIP deltas.
-    //
-    // The server registers a joiner as a room-broadcast recipient before it
-    // finishes assembling and enqueuing that joiner's own `RoomJoined`, so a
-    // second player joining the same room in the same instant can have its
-    // `PlayerJoined` delivered ahead of our `RoomJoined`. That interleaving is
-    // benign: `present` is a set, and `RoomJoined.current_players` is the
-    // authoritative baseline, so a delta seen just before it is idempotent
-    // (a `PlayerJoined` for someone already in the baseline is a no-op; a
-    // `PlayerLeft` removes them). We fold such deltas in and keep waiting.
-    //
-    // ANY OTHER message before `RoomJoined` is still a genuine protocol
-    // violation and fails loudly — this only tolerates the one benign,
-    // documented race, it does not blanket-skip unexpected frames.
-    let mut early_joined: Vec<PlayerId> = Vec::new();
-    let mut early_left: Vec<PlayerId> = Vec::new();
+    // Read until the atomic `RoomJoined` membership baseline. Connection-level
+    // accountability frames can legitimately precede it. Membership deltas
+    // remain accepted for compatibility and deterministic test channels.
+    let mut accountability = DeliveryAccountability::new(protocol_v3);
+    let mut early_joined: Vec<PlayerInfo> = Vec::new();
+    let mut early_left: Vec<(PlayerId, Option<u32>, Option<u64>)> = Vec::new();
     loop {
-        match next_handshake_message(ws).await? {
+        let message = next_handshake_message(ws).await?;
+        if consume_join_accountability_preface(&mut accountability, &message)
+            .map_err(FatalError::protocol)?
+        {
+            continue;
+        }
+        match message {
             ServerMessage::RoomJoined(payload) => {
+                accountability
+                    .rebaseline_snapshot(&payload.current_players)
+                    .map_err(FatalError::protocol)?;
+                for player in &early_joined {
+                    accountability
+                        .note_player_joined(player)
+                        .map_err(FatalError::protocol)?;
+                }
+                for &(player_id, epoch, final_seq) in &early_left {
+                    accountability
+                        .note_player_left(player_id, epoch, final_seq)
+                        .map_err(FatalError::protocol)?;
+                }
                 if cli.create_room {
                     emit(&Event::RoomCreated {
                         room_code: payload.room_code.clone(),
@@ -302,16 +341,25 @@ async fn join_room(
                     .collect();
                 // Apply the deltas observed ahead of the baseline (set
                 // semantics make this order-independent and idempotent).
-                for id in early_joined {
-                    present.insert(id);
+                for player in early_joined {
+                    present.insert(player.id);
                 }
-                for id in early_left {
+                for (id, _, _) in early_left {
                     present.remove(&id);
                 }
-                return Ok((payload.player_id, present, payload.lobby_state));
+                return Ok((
+                    payload.player_id,
+                    present,
+                    payload.lobby_state,
+                    accountability,
+                ));
             }
-            ServerMessage::PlayerJoined { player } => early_joined.push(player.id),
-            ServerMessage::PlayerLeft { player_id } => early_left.push(player_id),
+            ServerMessage::PlayerJoined { player } => early_joined.push(player),
+            ServerMessage::PlayerLeft {
+                player_id,
+                epoch,
+                final_seq,
+            } => early_left.push((player_id, epoch, final_seq)),
             ServerMessage::RoomJoinFailed { reason, error_code } => {
                 return Err(FatalError::protocol(format!(
                     "room join failed: {reason} ({error_code:?})"
@@ -326,10 +374,160 @@ async fn join_room(
     }
 }
 
-async fn next_handshake_message(ws: &mut WsStream) -> Result<ServerMessage, FatalError> {
-    wire::next_server_message(ws, HANDSHAKE_TIMEOUT)
-        .await
-        .map_err(|error| FatalError::connection(format!("{error:#}")))
+fn consume_join_accountability_preface(
+    accountability: &mut DeliveryAccountability,
+    message: &ServerMessage,
+) -> Result<bool, String> {
+    let is_unsupported_format_error = matches!(
+        message,
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+            ..
+        }
+    );
+    accountability.observe_server_message(is_unsupported_format_error)?;
+    match message {
+        ServerMessage::DeliveryReport(report) => {
+            accountability.record_report(report)?;
+            Ok(true)
+        }
+        ServerMessage::RelayStats {
+            interval_ms,
+            sent_to_you,
+            dropped_for_you,
+            backpressure_events,
+        } => {
+            accountability.record_relay_stats(
+                *interval_ms,
+                *sent_to_you,
+                *dropped_for_you,
+                *backpressure_events,
+            )?;
+            Ok(true)
+        }
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+            ..
+        } => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn restore_reconnected_member(
+    present: &mut BTreeSet<PlayerId>,
+    members_seen: &mut BTreeSet<PlayerId>,
+    player_id: PlayerId,
+) {
+    present.insert(player_id);
+    members_seen.insert(player_id);
+}
+
+fn changed_transport_status(previous: Option<bool>, connected_pair_count: usize) -> Option<bool> {
+    let current = connected_pair_count > 0;
+    (previous != Some(current)).then_some(current)
+}
+
+fn should_resolve_connected_pair(
+    previous: Option<bool>,
+    all_expected_pairs_connected: bool,
+) -> bool {
+    previous.is_some() || all_expected_pairs_connected
+}
+
+fn is_terminal_peer_connection_state(state: &RTCPeerConnectionState) -> bool {
+    matches!(
+        state,
+        RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+    )
+}
+
+fn should_buffer_signal_for_unpaired_peer(
+    expected_peers: &BTreeSet<PlayerId>,
+    peer: PlayerId,
+) -> bool {
+    !expected_peers.contains(&peer)
+}
+
+fn requires_authoritative_finalization_plan(negotiated_version: u16) -> bool {
+    negotiated_version >= 3
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AuthoritativePeerDelta {
+    removed: BTreeSet<PlayerId>,
+    added: BTreeSet<PlayerId>,
+    retained: BTreeSet<PlayerId>,
+}
+
+fn authoritative_peer_delta(
+    current: &BTreeSet<PlayerId>,
+    planned: &BTreeSet<PlayerId>,
+) -> AuthoritativePeerDelta {
+    AuthoritativePeerDelta {
+        removed: current.difference(planned).copied().collect(),
+        added: planned.difference(current).copied().collect(),
+        retained: current.intersection(planned).copied().collect(),
+    }
+}
+
+fn connection_targets_for_plan(
+    delta: &AuthoritativePeerDelta,
+    mut is_paired: impl FnMut(PlayerId) -> bool,
+) -> BTreeSet<PlayerId> {
+    let mut targets = delta.added.clone();
+    targets.extend(
+        delta
+            .retained
+            .iter()
+            .copied()
+            .filter(|peer| !is_paired(*peer)),
+    );
+    targets
+}
+
+fn require_finalized_membership_plan(
+    pending: &mut BTreeMap<PlayerId, u32>,
+    negotiated_version: u16,
+    lobby_state: Option<&LobbyState>,
+    player_id: PlayerId,
+    epoch: Option<u32>,
+) -> bool {
+    if negotiated_version < 3 || lobby_state != Some(&LobbyState::Finalized) {
+        return false;
+    }
+    let Some(epoch) = epoch.filter(|epoch| *epoch > 0) else {
+        return false;
+    };
+    pending.insert(player_id, epoch);
+    true
+}
+
+fn clear_departed_membership_plan(
+    pending: &mut BTreeMap<PlayerId, u32>,
+    player_id: PlayerId,
+    epoch: Option<u32>,
+) {
+    if pending.get(&player_id).copied() == epoch {
+        pending.remove(&player_id);
+    }
+}
+
+async fn next_handshake_message<S>(ws: &mut S) -> Result<ServerMessage, FatalError>
+where
+    S: futures_util::Stream<
+            Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
+{
+    match wire::next_server_message(ws, HANDSHAKE_TIMEOUT).await {
+        Ok(message) => {
+            validate_json_negotiated_server_message(&message)?;
+            Ok(message)
+        }
+        Err(wire::ServerMessageReadError::Protocol(message)) => Err(FatalError::protocol(message)),
+        Err(wire::ServerMessageReadError::Connection(message)) => {
+            Err(FatalError::connection(message))
+        }
+    }
 }
 
 /// Input multiplexed by the main loop.
@@ -339,6 +537,15 @@ enum LoopInput {
     Tick,
 }
 
+fn validate_json_negotiated_server_message(message: &ServerMessage) -> Result<(), FatalError> {
+    if matches!(message, ServerMessage::GameDataBinary { .. }) {
+        return Err(FatalError::protocol(
+            "received text GameDataBinary while game_data_format=json was negotiated",
+        ));
+    }
+    Ok(())
+}
+
 /// Single-task state machine driving the session after the room is joined.
 struct Orchestrator<'a> {
     cli: &'a Cli,
@@ -346,12 +553,17 @@ struct Orchestrator<'a> {
     engine: Engine,
     engine_rx: mpsc::UnboundedReceiver<EngineEvent>,
     my_id: PlayerId,
+    negotiated_version: u16,
+    /// Per-sender delivery sequence, exact-gap, and cumulative-counter state.
+    accountability: DeliveryAccountability,
     /// Members currently seated in the room (self included).
     present: BTreeSet<PlayerId>,
     /// Every distinct member EVER observed in the room (self included);
     /// cumulative, never shrinks on departures. Drives the
     /// `--expect-total-peers` exit gate.
     members_seen: BTreeSet<PlayerId>,
+    /// Most recent authoritative room lifecycle state; absent outside a room.
+    lobby_state: Option<LobbyState>,
     /// The room has entered the Lobby state. `PlayerReady` is gated on this:
     /// the server rejects readiness while the room is still `Waiting`, and the
     /// transition happens slightly AFTER the final `PlayerJoined` broadcast,
@@ -366,16 +578,20 @@ struct Orchestrator<'a> {
     /// fill). Late joiners waive the peer-status wait: siblings' reports may
     /// legitimately pre-date the join and are never replayed by the server.
     late_joined: bool,
+    /// A finalized-room entry/finalization is awaiting its full v3 plan.
+    initial_session_plan_pending: bool,
+    /// Finalized membership epochs awaiting the full plan triggered by them.
+    pending_membership_plans: BTreeMap<PlayerId, u32>,
     /// A WebRTC `SessionPlan` was received (gates the transport-status criterion).
     webrtc_plan_seen: bool,
-    /// Peers the server told us to pair with (plan peers + late-join `NewPeer`s).
+    /// Peers the authoritative plan names (plus compatible `NewPeer` deltas).
     expected_peers: BTreeSet<PlayerId>,
     /// Peers whose pair fully connected (both channels open) at some point.
     /// Drives the `--exchange` obligations and the Appendix G resolution.
     connected_pairs: BTreeSet<PlayerId>,
-    /// ICE servers from the most recent plan (reused for `NewPeer` pairings).
+    /// ICE servers from the most recent plan (also used for compatible `NewPeer`).
     last_ice_servers: Vec<IceServer>,
-    /// The single resolved overall WebRTC status, once sent (Appendix G).
+    /// Last reported overall WebRTC state, retained to suppress duplicates.
     transport_status: Option<bool>,
     /// When the P2P establishment window expires (set at first pairing).
     p2p_deadline: Option<Instant>,
@@ -437,15 +653,42 @@ impl Orchestrator<'_> {
                     })?;
                     self.handle_server_message(message).await?;
                 }
-                LoopInput::Server(Some(Ok(other))) => {
+                LoopInput::Server(Some(Ok(Message::Close(frame)))) => {
+                    self.accountability.observe_terminal();
+                    return Err(FatalError::connection(format!(
+                        "websocket closed by server before success criteria were met: {frame:?}"
+                    )));
+                }
+                LoopInput::Server(Some(Ok(Message::Binary(wire)))) => {
+                    self.pong_deadline = None;
+                    self.pong_grace_applied = false;
+                    self.accountability
+                        .observe_server_message(false)
+                        .map_err(FatalError::protocol)?;
+                    return Err(FatalError::protocol(format!(
+                        "received {}-byte binary WebSocket frame while game_data_format=json was negotiated",
+                        wire.len()
+                    )));
+                }
+                LoopInput::Server(Some(Ok(other)))
+                    if wire::is_transparent_transport_control(&other) =>
+                {
                     tracing::debug!(frame = ?other, "ignoring non-text frame");
                 }
+                LoopInput::Server(Some(Ok(other))) => {
+                    self.accountability
+                        .observe_server_message(false)
+                        .map_err(FatalError::protocol)?;
+                    tracing::debug!(frame = ?other, "ignoring non-text application frame");
+                }
                 LoopInput::Server(Some(Err(error))) => {
+                    self.accountability.observe_terminal();
                     return Err(FatalError::connection(format!(
                         "websocket transport error: {error}"
                     )));
                 }
                 LoopInput::Server(None) => {
+                    self.accountability.observe_terminal();
                     return Err(FatalError::connection(
                         "websocket closed by server before success criteria were met",
                     ));
@@ -483,10 +726,8 @@ impl Orchestrator<'_> {
                 wake = wake.min(at);
             }
         }
-        if self.transport_status.is_none() {
-            if let Some(at) = self.p2p_deadline {
-                wake = wake.min(at);
-            }
+        if let Some(at) = self.p2p_deadline {
+            wake = wake.min(at);
         }
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
@@ -536,17 +777,16 @@ impl Orchestrator<'_> {
             self.send_relay_payload().await?;
         }
 
-        if self.transport_status.is_none() && self.p2p_deadline.is_some_and(|at| now >= at) {
-            // The P2P window expired: resolve with whatever is connected now.
+        if self.p2p_deadline.is_some_and(|at| now >= at) {
+            // The current P2P window expired: report any real state change.
             self.resolve_transport_status().await?;
+            self.p2p_deadline = None;
         }
 
-        if self.linger_until.is_none() && self.criteria_met() {
-            self.linger_until = Some(now + EXIT_LINGER);
-        }
+        self.arm_success_linger(now);
         if self.linger_until.is_some_and(|at| now >= at) {
-            // Criteria can regress during the linger: a late `NewPeer` or a
-            // freshly connected pair adds new obligations (exchange,
+            // Criteria can regress during the linger: an authoritative plan or
+            // a freshly connected pair adds new obligations (exchange,
             // peer-status). Re-validate at expiry; on regression clear the
             // linger and keep running — it is re-armed when criteria hold
             // again.
@@ -575,18 +815,70 @@ impl Orchestrator<'_> {
         Ok(None)
     }
 
+    fn arm_success_linger(&mut self, now: Instant) {
+        if self.linger_until.is_none() && self.criteria_met() {
+            self.linger_until = Some(now + EXIT_LINGER);
+        }
+    }
+
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {
+        validate_json_negotiated_server_message(&message)?;
+        let is_unsupported_format_error = matches!(
+            &message,
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+                ..
+            }
+        );
+        self.accountability
+            .observe_server_message(is_unsupported_format_error)
+            .map_err(FatalError::protocol)?;
         match message {
+            ServerMessage::RoomJoined(payload) => {
+                self.accountability
+                    .rebaseline_snapshot(&payload.current_players)
+                    .map_err(FatalError::protocol)?;
+            }
+            ServerMessage::RoomLeft => {
+                self.accountability.reset_room();
+                self.initial_session_plan_pending = false;
+                self.pending_membership_plans.clear();
+                self.lobby_state = None;
+            }
             ServerMessage::PlayerJoined { player } => {
+                self.accountability
+                    .note_player_joined(&player)
+                    .map_err(FatalError::protocol)?;
                 self.present.insert(player.id);
                 self.members_seen.insert(player.id);
+                if require_finalized_membership_plan(
+                    &mut self.pending_membership_plans,
+                    self.negotiated_version,
+                    self.lobby_state.as_ref(),
+                    player.id,
+                    player.epoch,
+                ) {
+                    self.linger_until = None;
+                }
                 emit(&Event::PeerJoined {
                     player_id: player.id,
                 });
                 self.maybe_send_ready().await?;
             }
-            ServerMessage::PlayerLeft { player_id } => {
+            ServerMessage::PlayerLeft {
+                player_id,
+                epoch,
+                final_seq,
+            } => {
+                self.accountability
+                    .note_player_left(player_id, epoch, final_seq)
+                    .map_err(FatalError::protocol)?;
                 self.present.remove(&player_id);
+                clear_departed_membership_plan(
+                    &mut self.pending_membership_plans,
+                    player_id,
+                    epoch,
+                );
                 // A departed peer can no longer satisfy any pairing-derived
                 // criterion: drop it from the expected set (and drop any
                 // buffered signals from it). This matters during staggered
@@ -594,19 +886,26 @@ impl Orchestrator<'_> {
                 // the server's host-failover replan, which transiently names
                 // soon-to-exit members as new pairs — without this removal a
                 // client could wait on a peer that is already gone.
-                self.expected_peers.remove(&player_id);
-                self.pending_signals.remove(&player_id);
-                // The departure can complete the Appendix G all-pairs
-                // condition (the departed peer was the only unconnected pair,
-                // e.g. a seat-holder that left without ever pairing): resolve
-                // now instead of waiting out the full P2P window.
-                if self.transport_status.is_none() && self.all_expected_pairs_connected() {
+                self.remove_pair_obligation(player_id).await;
+                // Departure can either complete the remaining set or remove
+                // the last live P2P path. Report real state transitions while
+                // suppressing duplicate snapshots.
+                if self.webrtc_plan_seen
+                    && (self.transport_status.is_some()
+                        || self.expected_peers.is_empty()
+                        || self.all_expected_pairs_connected())
+                {
                     self.resolve_transport_status().await?;
                 }
                 emit(&Event::PlayerLeft { player_id });
             }
             ServerMessage::GameStarting { peer_connections } => {
                 self.game_started = true;
+                self.lobby_state = Some(LobbyState::Finalized);
+                if requires_authoritative_finalization_plan(self.negotiated_version) {
+                    self.initial_session_plan_pending = true;
+                    self.linger_until = None;
+                }
                 let is_authority = peer_connections
                     .iter()
                     .find(|peer| peer.player_id == self.my_id)
@@ -618,6 +917,8 @@ impl Orchestrator<'_> {
                 }
             }
             ServerMessage::SessionPlan(plan) => {
+                self.initial_session_plan_pending = false;
+                self.pending_membership_plans.clear();
                 emit(&Event::SessionPlan {
                     topology: plan.topology,
                     transport: plan.transport,
@@ -633,12 +934,41 @@ impl Orchestrator<'_> {
                     ice_servers_count: plan.ice_servers.len(),
                     fallback: plan.fallback,
                 });
+                if self.cli.leave_on_game_start {
+                    return Ok(());
+                }
                 if plan.transport == Transport::WebRtc {
                     self.webrtc_plan_seen = true;
                     self.last_ice_servers = plan.ice_servers.clone();
-                    for peer in &plan.peers {
+                }
+                let planned_peers: BTreeSet<_> = if plan.transport == Transport::WebRtc {
+                    plan.peers
+                        .iter()
+                        .map(|peer| peer.player_id)
+                        .filter(|peer| *peer != self.my_id)
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+                let delta = authoritative_peer_delta(&self.expected_peers, &planned_peers);
+                let mut added =
+                    connection_targets_for_plan(&delta, |peer| self.engine.is_paired(peer));
+                for peer in delta.removed {
+                    self.remove_pair_obligation(peer).await;
+                }
+                for peer in &plan.peers {
+                    if plan.transport == Transport::WebRtc && added.remove(&peer.player_id) {
                         self.establish_pair(peer.player_id, peer.initiate).await?;
                     }
+                }
+                if self.expected_peers.is_empty() || self.all_expected_pairs_connected() {
+                    self.p2p_deadline = None;
+                }
+                if self.transport_status.is_some()
+                    || (plan.transport == Transport::WebRtc
+                        && (self.expected_peers.is_empty() || self.all_expected_pairs_connected()))
+                {
+                    self.resolve_transport_status().await?;
                 }
             }
             ServerMessage::NewPeer {
@@ -655,12 +985,22 @@ impl Orchestrator<'_> {
             ServerMessage::Signal { from, signal } => {
                 self.handle_signal(from, signal).await?;
             }
-            // `..`: newer protocol revisions may stamp extra relay metadata
-            // (e.g. a per-connection delivery sequence) on GameData; this
-            // driver's contract only concerns the payload and its sender.
             ServerMessage::GameData {
-                from_player, data, ..
+                from_player,
+                data,
+                seq,
+                epoch,
+                class,
+                key,
             } => {
+                let disposition = self
+                    .accountability
+                    .record_game_data(from_player, seq, epoch, class, key)
+                    .map_err(FatalError::protocol)?;
+                if disposition == GameDataDisposition::Stale {
+                    tracing::debug!(%from_player, ?epoch, ?seq, "discarding stale trailing GameData");
+                    return Ok(());
+                }
                 if data.get("relay_msg").is_some() {
                     self.relay_received_from.insert(from_player);
                 }
@@ -668,6 +1008,63 @@ impl Orchestrator<'_> {
                     from: from_player,
                     payload: data,
                 });
+            }
+            ServerMessage::DeliveryReport(report) => {
+                self.accountability
+                    .record_report(&report)
+                    .map_err(FatalError::protocol)?;
+            }
+            ServerMessage::RelayStats {
+                interval_ms,
+                sent_to_you,
+                dropped_for_you,
+                backpressure_events,
+            } => {
+                self.accountability
+                    .record_relay_stats(
+                        interval_ms,
+                        sent_to_you,
+                        dropped_for_you,
+                        backpressure_events,
+                    )
+                    .map_err(FatalError::protocol)?;
+            }
+            ServerMessage::Reconnected(payload) => {
+                self.accountability
+                    .rebaseline_reconnected(&payload.current_players, &payload.sender_watermarks)
+                    .map_err(FatalError::protocol)?;
+                self.lobby_state = Some(payload.lobby_state.clone());
+                self.in_lobby = payload.lobby_state == LobbyState::Lobby;
+                self.game_started = payload.lobby_state == LobbyState::Finalized;
+                if self.negotiated_version >= 3 && payload.lobby_state == LobbyState::Finalized {
+                    self.initial_session_plan_pending = true;
+                    self.linger_until = None;
+                }
+            }
+            ServerMessage::PlayerReconnected { player_id, epoch } => {
+                self.accountability
+                    .note_player_reconnected(player_id, epoch)
+                    .map_err(FatalError::protocol)?;
+                restore_reconnected_member(&mut self.present, &mut self.members_seen, player_id);
+                if require_finalized_membership_plan(
+                    &mut self.pending_membership_plans,
+                    self.negotiated_version,
+                    self.lobby_state.as_ref(),
+                    player_id,
+                    epoch,
+                ) {
+                    self.linger_until = None;
+                }
+                emit(&Event::PeerJoined { player_id });
+                self.maybe_send_ready().await?;
+            }
+            ServerMessage::SpectatorJoined(payload) => {
+                self.accountability
+                    .rebaseline_snapshot(&payload.current_players)
+                    .map_err(FatalError::protocol)?;
+            }
+            ServerMessage::SpectatorLeft { .. } => {
+                self.accountability.reset_room();
             }
             ServerMessage::PeerTransportStatus {
                 peer_id,
@@ -710,6 +1107,7 @@ impl Orchestrator<'_> {
                 ready_players,
                 all_ready,
             } => {
+                self.lobby_state = Some(lobby_state.clone());
                 // Info-level so the harness's stderr capture records the lobby
                 // progression (state, ready count, all_ready) for any later
                 // "GameStarting not received" diagnosis.
@@ -741,10 +1139,16 @@ impl Orchestrator<'_> {
     }
 
     async fn handle_engine_event(&mut self, event: EngineEvent) -> Result<(), FatalError> {
+        let (event_peer, generation) = event.peer_generation();
+        if !self.engine.is_current_event(&event) {
+            tracing::debug!(%event_peer, generation, "discarding stale peer-link callback");
+            return Ok(());
+        }
         match event {
             EngineEvent::LocalCandidate {
                 peer,
                 candidate_json,
+                ..
             } => {
                 // Crippled mode never reaches here (the engine drops gathered
                 // candidates), so this is always a real trickle-ICE relay.
@@ -755,16 +1159,30 @@ impl Orchestrator<'_> {
                 )
                 .await?;
             }
-            EngineEvent::PcState { peer, state } => {
+            EngineEvent::PcState { peer, state, .. } => {
                 emit(&Event::PcState {
                     peer,
                     state: state.to_string(),
                 });
+                if is_terminal_peer_connection_state(&state) {
+                    self.connected_pairs.remove(&peer);
+                    self.sent_labels.remove(&peer);
+                    self.received_labels.remove(&peer);
+                    self.pending_signals.remove(&peer);
+                    self.engine.remove_peer(peer).await.map_err(|error| {
+                        FatalError::connection(format!(
+                            "close terminal peer connection {peer}: {error:#}"
+                        ))
+                    })?;
+                    if self.webrtc_plan_seen {
+                        self.resolve_transport_status().await?;
+                    }
+                }
             }
-            EngineEvent::RemoteChannel { peer, channel } => {
+            EngineEvent::RemoteChannel { peer, channel, .. } => {
                 self.engine.store_remote_channel(peer, channel);
             }
-            EngineEvent::ChannelOpen { peer, label } => {
+            EngineEvent::ChannelOpen { peer, label, .. } => {
                 emit(&Event::ChannelOpen {
                     peer,
                     label: label.clone(),
@@ -773,7 +1191,9 @@ impl Orchestrator<'_> {
                     self.on_pair_connected(peer).await?;
                 }
             }
-            EngineEvent::ChannelMessage { peer, label, text } => {
+            EngineEvent::ChannelMessage {
+                peer, label, text, ..
+            } => {
                 self.received_labels
                     .entry(peer)
                     .or_default()
@@ -792,14 +1212,15 @@ impl Orchestrator<'_> {
             return Ok(());
         }
         if self.cli.leave_on_game_start {
-            // A seat-vacating client never pairs: the plan/NewPeer is logged
-            // (events were already emitted by the caller) but not acted on,
+            // A seat-vacating client logs directives (events were already
+            // emitted by the caller) but does not act on them,
             // so it produces zero signaling traffic before departing.
             tracing::debug!(%peer, "leave-on-game-start: skipping pairing directive");
             return Ok(());
         }
-        self.expected_peers.insert(peer);
-        if self.p2p_deadline.is_none() {
+        let newly_expected = self.expected_peers.insert(peer);
+        let needs_connection = !self.engine.is_paired(peer);
+        if (newly_expected || needs_connection) && !self.connected_pairs.contains(&peer) {
             self.p2p_deadline =
                 Some(Instant::now() + Duration::from_secs(self.cli.p2p_timeout_secs));
         }
@@ -826,6 +1247,18 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    async fn remove_pair_obligation(&mut self, peer: PlayerId) {
+        self.expected_peers.remove(&peer);
+        self.connected_pairs.remove(&peer);
+        self.peer_status_from.remove(&peer);
+        self.sent_labels.remove(&peer);
+        self.received_labels.remove(&peer);
+        self.pending_signals.remove(&peer);
+        if let Err(error) = self.engine.remove_peer(peer).await {
+            tracing::debug!(%peer, %error, "failed to close removed peer connection");
+        }
+    }
+
     /// Emit `signal_received` and route an inbound signal (buffering it when
     /// the peer is not paired yet).
     async fn handle_signal(
@@ -836,10 +1269,14 @@ impl Orchestrator<'_> {
         let kind = SignalKind::classify(&signal);
         emit(&Event::SignalReceived { from, kind });
         if !self.engine.is_paired(from) {
-            self.pending_signals
-                .entry(from)
-                .or_default()
-                .push_back(signal);
+            if should_buffer_signal_for_unpaired_peer(&self.expected_peers, from) {
+                self.pending_signals
+                    .entry(from)
+                    .or_default()
+                    .push_back(signal);
+            } else {
+                tracing::debug!(%from, "discarding stale signal from terminal expected peer");
+            }
             return Ok(());
         }
         self.apply_signal(from, signal).await
@@ -902,10 +1339,9 @@ impl Orchestrator<'_> {
         if self.cli.exchange {
             for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
                 let Some(channel) = self.engine.channel(peer, label) else {
-                    emit(&Event::Error {
-                        message: format!("open pair with {peer} is missing channel {label}"),
-                    });
-                    continue;
+                    return Err(FatalError::connection(format!(
+                        "open pair with {peer} is missing channel {label}"
+                    )));
                 };
                 // The exact documented exchange payload (stable field order).
                 let text = format!(
@@ -925,15 +1361,17 @@ impl Orchestrator<'_> {
                         });
                     }
                     Err(error) => {
-                        emit(&Event::Error {
-                            message: format!("send on {label} to {peer} failed: {error}"),
-                        });
+                        return Err(FatalError::connection(format!(
+                            "send on {label} to {peer} failed: {error}"
+                        )));
                     }
                 }
             }
         }
-        // All expected pairs connected resolves the overall status early.
-        if self.transport_status.is_none() && self.all_expected_pairs_connected() {
+        // Initial resolution waits for all pairs; after any prior resolution,
+        // one late pair is enough to change the overall any-pair state.
+        if should_resolve_connected_pair(self.transport_status, self.all_expected_pairs_connected())
+        {
             self.resolve_transport_status().await?;
         }
         Ok(())
@@ -950,11 +1388,13 @@ impl Orchestrator<'_> {
                 .all(|peer| self.connected_pairs.contains(peer))
     }
 
-    /// Resolve and report the single overall WebRTC transport status
-    /// (Appendix G): `connected: true` iff at least one pair is connected at
-    /// resolution time; a zero-pair resolution engages the relay fallback.
+    /// Report a changed overall WebRTC state; suppress duplicate snapshots.
     async fn resolve_transport_status(&mut self) -> Result<(), FatalError> {
-        let connected = !self.connected_pairs.is_empty();
+        let Some(connected) =
+            changed_transport_status(self.transport_status, self.connected_pairs.len())
+        else {
+            return Ok(());
+        };
         self.send_message(&ClientMessage::TransportStatus {
             transport: Transport::WebRtc,
             connected,
@@ -1021,10 +1461,9 @@ impl Orchestrator<'_> {
             self.relay_sent = true;
             return Ok(());
         };
-        self.send_message(&ClientMessage::GameData {
-            data: json!({ "relay_msg": text }),
-        })
-        .await?;
+        wire::send_game_data(&mut self.ws, json!({ "relay_msg": text }))
+            .await
+            .map_err(|error| FatalError::connection(format!("{error:#}")))?;
         self.relay_sent = true;
         self.relay_send_at = None;
         emit(&Event::GameDataSent);
@@ -1069,6 +1508,13 @@ impl Orchestrator<'_> {
                 "observed {} of {} expected distinct members",
                 self.members_seen.len(),
                 self.cli.effective_total_peers()
+            ));
+        }
+        if self.initial_session_plan_pending || !self.pending_membership_plans.is_empty() {
+            unmet.push(format!(
+                "awaiting authoritative SessionPlan (session_pending={}, membership_epochs={})",
+                self.initial_session_plan_pending,
+                self.pending_membership_plans.len()
             ));
         }
         if self.webrtc_session_expected() {
@@ -1144,5 +1590,292 @@ impl Orchestrator<'_> {
     /// status report is owed before this client may exit successfully.
     fn webrtc_session_expected(&self) -> bool {
         self.webrtc_plan_seen && !self.expected_peers.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use serde_json::json;
+    use signal_fish_server::protocol::{
+        DeliveryCountersByClass, DeliveryReportPayload, GameDataEncoding, LobbyState, PlayerId,
+        ServerMessage,
+    };
+
+    use crate::accountability::DeliveryAccountability;
+    use crate::wire;
+
+    use super::{
+        authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
+        connection_targets_for_plan, consume_join_accountability_preface,
+        is_terminal_peer_connection_state, negotiated_version_from, next_handshake_message,
+        require_finalized_membership_plan, requires_authoritative_finalization_plan,
+        restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
+        should_resolve_connected_pair, validate_json_negotiated_server_message,
+        EXIT_PROTOCOL_ERROR,
+    };
+    use tokio_tungstenite::tungstenite::{Bytes, Message};
+    use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+
+    #[test]
+    fn only_websocket_ping_pong_are_transparent_to_application_ordering() {
+        assert!(wire::is_transparent_transport_control(&Message::Ping(
+            Bytes::new()
+        )));
+        assert!(wire::is_transparent_transport_control(&Message::Pong(
+            Bytes::new()
+        )));
+        assert!(!wire::is_transparent_transport_control(&Message::Binary(
+            Bytes::new()
+        )));
+    }
+
+    #[test]
+    fn player_reconnected_restores_lobby_and_active_session_membership() {
+        let self_id = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        for in_lobby in [true, false] {
+            let mut present = BTreeSet::from([self_id, peer]);
+            let mut members_seen = present.clone();
+            present.remove(&peer);
+
+            restore_reconnected_member(&mut present, &mut members_seen, peer);
+
+            assert!(present.contains(&peer));
+            assert!(members_seen.contains(&peer));
+            assert_eq!(in_lobby && present.len() >= 2, in_lobby);
+
+            let delta = authoritative_peer_delta(&BTreeSet::new(), &BTreeSet::from([peer]));
+            assert_eq!(delta.added, BTreeSet::from([peer]));
+            assert!(delta.removed.is_empty());
+        }
+        assert_eq!(changed_transport_status(Some(true), 0), Some(false));
+        assert_eq!(changed_transport_status(Some(false), 0), None);
+        assert_eq!(changed_transport_status(Some(false), 1), Some(true));
+        assert!(should_resolve_connected_pair(Some(false), false));
+        assert_eq!(changed_transport_status(Some(true), 2), None);
+        for _scenario in ["solo finalization", "incapable late join"] {
+            assert_eq!(changed_transport_status(None, 0), Some(false));
+        }
+    }
+
+    #[test]
+    fn authoritative_plan_replaces_topology_and_supports_empty_no_pair_plan() {
+        let old = PlayerId::from_u128(2);
+        let retained = PlayerId::from_u128(3);
+        let added = PlayerId::from_u128(4);
+        let current = BTreeSet::from([old, retained]);
+        let replacement = BTreeSet::from([retained, added]);
+
+        let delta = authoritative_peer_delta(&current, &replacement);
+        assert_eq!(delta.removed, BTreeSet::from([old]));
+        assert_eq!(delta.retained, BTreeSet::from([retained]));
+        assert_eq!(delta.added, BTreeSet::from([added]));
+
+        let empty = authoritative_peer_delta(&replacement, &BTreeSet::new());
+        assert_eq!(empty.removed, replacement);
+        assert!(empty.retained.is_empty());
+        assert!(empty.added.is_empty());
+    }
+
+    #[test]
+    fn retained_peer_without_an_engine_link_is_retried_by_a_fresh_plan() {
+        let peer = PlayerId::from_u128(2);
+        let peers = BTreeSet::from([peer]);
+        let retained = authoritative_peer_delta(&peers, &peers);
+        assert_eq!(
+            connection_targets_for_plan(&retained, |_| false),
+            BTreeSet::from([peer]),
+            "failed setup left no link, so a fresh plan must retry"
+        );
+        assert!(
+            connection_targets_for_plan(&retained, |_| true).is_empty(),
+            "a healthy retained link must not be rebuilt"
+        );
+    }
+
+    #[test]
+    fn only_failed_and_closed_peer_connection_states_are_terminal() {
+        let cases = [
+            (RTCPeerConnectionState::New, false),
+            (RTCPeerConnectionState::Connecting, false),
+            (RTCPeerConnectionState::Connected, false),
+            (RTCPeerConnectionState::Disconnected, false),
+            (RTCPeerConnectionState::Failed, true),
+            (RTCPeerConnectionState::Closed, true),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(is_terminal_peer_connection_state(&state), expected);
+        }
+        assert_eq!(changed_transport_status(Some(true), 0), Some(false));
+        let peer = PlayerId::from_u128(2);
+        assert!(should_buffer_signal_for_unpaired_peer(
+            &BTreeSet::new(),
+            peer
+        ));
+        assert!(!should_buffer_signal_for_unpaired_peer(
+            &BTreeSet::from([peer]),
+            peer
+        ));
+    }
+
+    #[test]
+    fn authoritative_plan_obligations_are_finalized_v3_and_epoch_scoped() {
+        for (_scenario, version, expected) in [
+            ("v2 relay finalization", 2, false),
+            ("v3 WebRTC finalization", 3, true),
+            ("v3 relay finalization", 3, true),
+        ] {
+            let mut plan_pending = requires_authoritative_finalization_plan(version);
+            assert_eq!(plan_pending, expected);
+            let simulated_plan_delay = super::EXIT_LINGER + std::time::Duration::from_millis(1);
+            if expected {
+                assert!(simulated_plan_delay > super::EXIT_LINGER && plan_pending);
+            }
+            plan_pending = false;
+            assert!(!plan_pending);
+        }
+
+        let peer = PlayerId::from_u128(2);
+        let mut pending = BTreeMap::new();
+        assert!(!require_finalized_membership_plan(
+            &mut pending,
+            3,
+            Some(&LobbyState::Lobby),
+            peer,
+            Some(1)
+        ));
+        assert!(!require_finalized_membership_plan(
+            &mut pending,
+            2,
+            Some(&LobbyState::Finalized),
+            peer,
+            Some(1)
+        ));
+        assert!(require_finalized_membership_plan(
+            &mut pending,
+            3,
+            Some(&LobbyState::Finalized),
+            peer,
+            Some(1)
+        ));
+        require_finalized_membership_plan(
+            &mut pending,
+            3,
+            Some(&LobbyState::Finalized),
+            peer,
+            Some(2),
+        );
+        clear_departed_membership_plan(&mut pending, peer, Some(1));
+        assert_eq!(pending.get(&peer), Some(&2));
+        clear_departed_membership_plan(&mut pending, peer, Some(2));
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_negotiation_application_frames_are_protocol_errors() {
+        let frames = [
+            Message::Binary(Bytes::new()),
+            Message::Text("{".to_string().into()),
+        ];
+        for frame in frames {
+            let mut input = futures_util::stream::iter([Ok::<
+                Message,
+                tokio_tungstenite::tungstenite::Error,
+            >(frame)]);
+            let error = next_handshake_message(&mut input).await.unwrap_err();
+            assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
+        }
+    }
+
+    #[test]
+    fn accountability_mode_follows_protocol_info_not_advertised_max() {
+        let cases = [
+            (3u16, json!({}), 2u16, false),
+            (3u16, json!({ "protocol_version": 2 }), 2u16, false),
+            (3u16, json!({ "protocol_version": 3 }), 3u16, true),
+        ];
+        for (offered, payload, expected, expected_v3) in cases {
+            let frame: ServerMessage = serde_json::from_value(json!({
+                "type": "ProtocolInfo",
+                "data": payload,
+            }))
+            .unwrap();
+            let negotiated = negotiated_version_from(frame, offered).unwrap();
+            assert_eq!(negotiated, expected, "offered max {offered}");
+            assert_eq!(
+                negotiated >= 3,
+                expected_v3,
+                "offered max {offered} must not select accountability mode"
+            );
+        }
+
+        for (offered, negotiated) in [(2, 3), (3, 1), (3, 4)] {
+            let frame: ServerMessage = serde_json::from_value(json!({
+                "type": "ProtocolInfo",
+                "data": { "protocol_version": negotiated },
+            }))
+            .unwrap();
+            assert!(
+                negotiated_version_from(frame, offered).is_err(),
+                "offered {offered} must reject negotiated {negotiated}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ServerMessage>(json!({
+                "type": "ProtocolInfo",
+                "data": { "protocol_version": null },
+            }))
+            .is_err(),
+            "explicit null must not collapse into the absent-v2 sentinel"
+        );
+
+        let application_frame = ServerMessage::GameData {
+            from_player: signal_fish_server::protocol::PlayerId::nil(),
+            data: json!(null),
+            seq: None,
+            epoch: None,
+            class: None,
+            key: None,
+        };
+        assert!(negotiated_version_from(application_frame, 3).is_err());
+    }
+
+    #[test]
+    fn json_negotiation_rejects_the_in_memory_binary_variant_on_text_wire() {
+        let message = ServerMessage::GameDataBinary {
+            from_player: PlayerId::nil(),
+            encoding: GameDataEncoding::Json,
+            payload: Bytes::new(),
+            seq: Some(1),
+            epoch: Some(1),
+        };
+        let error = validate_json_negotiated_server_message(&message).unwrap_err();
+        assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
+        assert!(error.message.contains("text GameDataBinary"));
+    }
+
+    #[test]
+    fn join_handshake_consumes_connection_accountability_prefaces_statefully() {
+        let mut state = DeliveryAccountability::new(true);
+        let frames = [
+            ServerMessage::DeliveryReport(Box::new(DeliveryReportPayload {
+                per_class: DeliveryCountersByClass::default(),
+                gaps: Vec::new(),
+            })),
+            ServerMessage::RelayStats {
+                interval_ms: 1_000,
+                sent_to_you: 0,
+                dropped_for_you: 0,
+                backpressure_events: 0,
+            },
+        ];
+        for frame in &frames {
+            assert!(consume_join_accountability_preface(&mut state, frame).unwrap());
+        }
+
+        let mut v2 = DeliveryAccountability::new(false);
+        assert!(consume_join_accountability_preface(&mut v2, &frames[1]).is_err());
     }
 }

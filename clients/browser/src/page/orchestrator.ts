@@ -12,10 +12,11 @@
 //    on a full ready set: when the server reports every current member ready
 //    (`LobbyStateChanged.all_ready`), the room creator sends an explicit
 //    `StartGame`; joiners just await the `GameStarting` it produces.
-// 4. Finalize: `GameStarting`, then (non-relay rooms) the per-recipient
-//    `SessionPlan`.
-// 5. P2P per `peers[].initiate` / `NewPeer.you_initiate`; the overall WebRTC
-//    transport status resolves exactly once (Appendix G).
+// 4. Finalize: `GameStarting`, then every v3 recipient's authoritative
+//    `SessionPlan` (including explicit relay/empty plans).
+// 5. P2P per `peers[].initiate` (with `NewPeer` retained for compatible
+//    servers); the overall WebRTC transport status reports initial resolution
+//    and later real state changes.
 // 6. Relay floor: `GameData` over the WebSocket, exercised by
 //    `--relay-payload`.
 //
@@ -36,11 +37,15 @@ import {
 } from '../shared/types.js';
 import { classifySignal, emit, type SignalKind } from './events.js';
 import { Engine, RELIABLE_LABEL, UNRELIABLE_LABEL, type PlanIceServer } from './engine.js';
+import { DeliveryAccountability, DeliveryAccountabilityViolation } from './accountability.js';
 import {
   HANDSHAKE_TIMEOUT_MS,
+  NON_TEXT_APPLICATION_FRAME,
+  classifyJsonNegotiatedServerInput,
   clientFrame,
   connect,
-  parseServerFrame,
+  negotiatedProtocolVersion,
+  sendGameData,
   type ServerFrame,
 } from './wire.js';
 
@@ -91,7 +96,6 @@ const PONG_DRAIN_GRACE_MS = 1_000;
  * drop instead; the recipe lives in the building-a-client guide.)
  */
 const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
-
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -113,6 +117,127 @@ class FatalError extends Error {
 /** Stringify an unknown thrown value for error events. */
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Validate and apply the room baseline before any observable join success. */
+export function applyJoinAccountabilityBaseline(
+  accountability: DeliveryAccountability,
+  currentPlayers: unknown,
+  earlyJoined: readonly Record<string, unknown>[],
+  earlyLeft: readonly Record<string, unknown>[],
+): void {
+  accountability.rebaselineSnapshot(currentPlayers);
+  for (const player of earlyJoined) {
+    accountability.notePlayerJoined(player);
+  }
+  for (const event of earlyLeft) {
+    accountability.notePlayerLeft(event['player_id'], event['epoch'], event['final_seq']);
+  }
+}
+
+/** Consume connection-level accountability frames that may precede RoomJoined. */
+export function observeJoinHandshakeFrame(
+  accountability: DeliveryAccountability,
+  frame: ServerFrame,
+): boolean {
+  const isUnsupportedFormatError =
+    frame.type === 'Error' && frame.data['error_code'] === 'UNSUPPORTED_GAME_DATA_FORMAT';
+  accountability.observeServerMessage(isUnsupportedFormatError);
+  switch (frame.type) {
+    case 'DeliveryReport':
+      accountability.recordReport(frame.data);
+      return true;
+    case 'RelayStats':
+      accountability.recordRelayStats(frame.data);
+      return true;
+    case 'Error':
+      return isUnsupportedFormatError;
+    default:
+      return false;
+  }
+}
+
+/** Restore application membership after a retained seat reconnects. */
+export function restoreReconnectedMember(
+  present: Set<string>,
+  membersSeen: Set<string>,
+  playerId: string,
+): void {
+  present.add(playerId);
+  membersSeen.add(playerId);
+}
+
+/** Return a changed overall WebRTC state, or null for a duplicate report. */
+export function changedTransportStatus(
+  previous: boolean | null,
+  connectedPairCount: number,
+): boolean | null {
+  const current = connectedPairCount > 0;
+  return previous === current ? null : current;
+}
+
+export function shouldResolveConnectedPair(
+  previous: boolean | null,
+  allExpectedPairsConnected: boolean,
+): boolean {
+  return previous !== null || allExpectedPairsConnected;
+}
+
+export function isTerminalPeerConnectionState(state: string): boolean {
+  return state === 'failed' || state === 'closed';
+}
+
+export function shouldBufferSignalForUnpairedPeer(
+  expectedPeers: ReadonlySet<string>,
+  peer: string,
+): boolean {
+  return !expectedPeers.has(peer);
+}
+
+export function requiresAuthoritativeFinalizationPlan(negotiatedVersion: number): boolean {
+  return negotiatedVersion >= 3;
+}
+
+export function authoritativePeerDelta(
+  current: ReadonlySet<string>,
+  plannedPeers: readonly string[],
+): { removed: string[]; added: string[]; retained: string[] } {
+  const planned = new Set(plannedPeers);
+  return {
+    removed: [...current].filter((peer) => !planned.has(peer)),
+    added: [...planned].filter((peer) => !current.has(peer)),
+    retained: [...planned].filter((peer) => current.has(peer)),
+  };
+}
+
+export function requireFinalizedMembershipPlan(
+  pending: Map<string, number>,
+  negotiatedVersion: number,
+  lobbyState: string | null,
+  playerId: string,
+  epoch: unknown,
+): boolean {
+  if (
+    negotiatedVersion < 3 ||
+    lobbyState !== 'finalized' ||
+    typeof epoch !== 'number' ||
+    !Number.isSafeInteger(epoch) ||
+    epoch <= 0
+  ) {
+    return false;
+  }
+  pending.set(playerId, epoch);
+  return true;
+}
+
+export function clearDepartedMembershipPlan(
+  pending: Map<string, number>,
+  playerId: string,
+  epoch: unknown,
+): void {
+  if (pending.get(playerId) === epoch) {
+    pending.delete(playerId);
+  }
 }
 
 /**
@@ -155,6 +280,9 @@ class Orchestrator {
   // --- Session state (field-for-field mirror of the native Orchestrator) ---
   private readonly present = new Set<string>();
   private readonly membersSeen = new Set<string>();
+  private accountability: DeliveryAccountability | null = null;
+  private negotiatedVersion: number | null = null;
+  private lobbyState: string | null = null;
   private inLobby = false;
   private readySent = false;
   /**
@@ -164,6 +292,8 @@ class Orchestrator {
   private startGameSent = false;
   private gameStarted = false;
   private lateJoined = false;
+  private initialSessionPlanPending = false;
+  private readonly pendingMembershipPlans = new Map<string, number>();
   private webrtcPlanSeen = false;
   private readonly expectedPeers = new Set<string>();
   private readonly connectedPairs = new Set<string>();
@@ -199,28 +329,52 @@ class Orchestrator {
   constructor(config: RunConfig) {
     this.config = config;
     this.engine = new Engine(config.crippleIce, {
-      onLocalCandidate: (peer, candidateJson) => {
+      onLocalCandidate: (peer, generation, candidateJson) => {
         // Crippled mode never reaches here (the engine drops gathered
         // candidates), so this is always a real trickle-ICE relay.
         this.enqueue(async () => {
+          if (!this.engine.isCurrentGeneration(peer, generation)) {
+            return;
+          }
           this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidateJson });
         });
       },
-      onPcState: (peer, state) => {
+      onPcState: (peer, generation, state) => {
         this.enqueue(async () => {
+          if (!this.engine.isCurrentGeneration(peer, generation)) {
+            return;
+          }
           emit({ event: 'pc_state', peer, state });
+          if (isTerminalPeerConnectionState(state)) {
+            this.connectedPairs.delete(peer);
+            this.sentLabels.delete(peer);
+            this.receivedLabels.delete(peer);
+            this.pendingExchangePeers.delete(peer);
+            this.reportedExchangeDiagnostics.delete(peer);
+            this.pendingSignals.delete(peer);
+            this.engine.removePeer(peer);
+            if (this.webrtcPlanSeen) {
+              this.resolveTransportStatus();
+            }
+          }
         });
       },
-      onChannelOpen: (peer, label) => {
+      onChannelOpen: (peer, generation, label) => {
         this.enqueue(async () => {
+          if (!this.engine.isCurrentGeneration(peer, generation)) {
+            return;
+          }
           emit({ event: 'channel_open', peer, label });
           if (this.engine.noteChannelOpen(peer, label)) {
             this.onPairConnected(peer);
           }
         });
       },
-      onChannelMessage: (peer, label, text) => {
+      onChannelMessage: (peer, generation, label, text) => {
         this.enqueue(async () => {
+          if (!this.engine.isCurrentGeneration(peer, generation)) {
+            return;
+          }
           let labels = this.receivedLabels.get(peer);
           if (labels === undefined) {
             labels = new Set();
@@ -231,6 +385,13 @@ class Orchestrator {
         });
       },
     });
+  }
+
+  private accountabilityState(): DeliveryAccountability {
+    if (this.accountability === null || this.negotiatedVersion === null) {
+      throw FatalError.protocol('application frame arrived before ProtocolInfo negotiation');
+    }
+    return this.accountability;
   }
 
   async run(): Promise<number> {
@@ -250,17 +411,15 @@ class Orchestrator {
     this.ws = ws;
     emit({ event: 'connected' });
     ws.onmessage = (event: MessageEvent<unknown>) => {
-      if (typeof event.data !== 'string') {
-        console.error('ignoring non-text websocket frame');
-        return;
-      }
-      this.onFrameText(event.data);
+      this.onServerInput(event.data);
     };
     ws.onclose = () => {
       this.onSocketClosed();
     };
 
-    await this.authenticate();
+    const negotiatedVersion = await this.authenticate();
+    this.negotiatedVersion = negotiatedVersion;
+    this.accountability = new DeliveryAccountability(negotiatedVersion >= 3);
     const lobbyState = await this.joinRoom();
 
     // Joining an already-Lobby room (seat fill) means readiness is
@@ -268,8 +427,10 @@ class Orchestrator {
     // running — GameStarting was broadcast before we joined and will never
     // be re-sent, so the criterion is satisfied on entry.
     this.inLobby = lobbyState === 'lobby';
+    this.lobbyState = lobbyState;
     this.gameStarted = lobbyState === 'finalized';
     this.lateJoined = lobbyState === 'finalized';
+    this.initialSessionPlanPending = negotiatedVersion >= 3 && lobbyState === 'finalized';
     // Late joiners arm the relay probe on entry (see RELAY_SEND_SETTLE_MS):
     // the GameStarting trigger pre-dates the join and never re-fires.
     if (this.config.relayPayload !== null && lobbyState === 'finalized') {
@@ -291,7 +452,7 @@ class Orchestrator {
   // -------------------------------------------------------------------------
 
   /** Send `Authenticate` and consume `Authenticated` + `ProtocolInfo`. */
-  private async authenticate(): Promise<void> {
+  private async authenticate(): Promise<number> {
     const v3 = isV3(this.config);
     const data: Record<string, unknown> = {
       app_id: this.config.appId,
@@ -320,15 +481,17 @@ class Orchestrator {
     }
 
     const infoResponse = await this.nextHandshakeFrame();
-    if (infoResponse.type !== 'ProtocolInfo') {
-      throw FatalError.protocol(`expected ProtocolInfo, got ${infoResponse.type}`);
+    let negotiated: number;
+    try {
+      negotiated = negotiatedProtocolVersion(infoResponse, this.config.protocolVersion);
+    } catch (error) {
+      throw FatalError.protocol(describe(error));
     }
-    // v2 connections omit the field; the effective version is 2.
-    const negotiated = infoResponse.data['protocol_version'];
     emit({
       event: 'protocol_info',
-      negotiated_version: typeof negotiated === 'number' ? negotiated : 2,
+      negotiated_version: negotiated,
     });
+    return negotiated;
   }
 
   /** Create or join the room; returns the room's lobby state at join time. */
@@ -343,21 +506,17 @@ class Orchestrator {
       }),
     );
 
-    // Read until `RoomJoined`, tolerating interleaved lobby MEMBERSHIP deltas.
-    //
-    // The server registers a joiner as a room-broadcast recipient before it
-    // finishes assembling and enqueuing that joiner's own `RoomJoined`, so a
-    // second player joining the same room in the same instant can have its
-    // `PlayerJoined` delivered ahead of our `RoomJoined`. That interleaving is
-    // benign: `present` is a set and `RoomJoined.current_players` is the
-    // authoritative baseline, so a delta seen just before it is idempotent.
-    // We fold such deltas in and keep waiting. Any OTHER pre-`RoomJoined`
-    // frame is still a genuine protocol violation and fails loudly. (Mirror
-    // of the native client's join handshake.)
-    const earlyJoined: string[] = [];
-    const earlyLeft: string[] = [];
+    // Read until the atomic `RoomJoined` membership baseline. Connection-level
+    // accountability frames can legitimately precede it. Membership deltas
+    // remain accepted for compatibility and deterministic test channels.
+    const earlyJoined: Record<string, unknown>[] = [];
+    const earlyLeft: Record<string, unknown>[] = [];
     let response = await this.nextHandshakeFrame();
     while (response.type !== 'RoomJoined') {
+      if (observeJoinHandshakeFrame(this.accountabilityState(), response)) {
+        response = await this.nextHandshakeFrame();
+        continue;
+      }
       if (response.type === 'RoomJoinFailed') {
         throw FatalError.protocol(
           `room join failed: ${String(response.data['reason'])} ` +
@@ -366,14 +525,13 @@ class Orchestrator {
       }
       if (response.type === 'PlayerJoined') {
         const player = response.data['player'] as Record<string, unknown> | undefined;
-        const id = player?.['id'];
-        if (typeof id === 'string') {
-          earlyJoined.push(id);
+        if (player !== undefined) {
+          earlyJoined.push(player);
         }
       } else if (response.type === 'PlayerLeft') {
         const id = response.data['player_id'];
         if (typeof id === 'string') {
-          earlyLeft.push(id);
+          earlyLeft.push(response.data);
         }
       } else {
         throw FatalError.protocol(`expected RoomJoined, got ${response.type}`);
@@ -381,6 +539,13 @@ class Orchestrator {
       response = await this.nextHandshakeFrame();
     }
     const payload = response.data;
+    const currentPlayers = payload['current_players'];
+    applyJoinAccountabilityBaseline(
+      this.accountabilityState(),
+      currentPlayers,
+      earlyJoined,
+      earlyLeft,
+    );
     if (this.config.createRoom) {
       emit({ event: 'room_created', room_code: String(payload['room_code']) });
     }
@@ -392,7 +557,6 @@ class Orchestrator {
       player_id: this.myId,
       lobby_state: lobbyState,
     });
-    const currentPlayers = payload['current_players'];
     if (Array.isArray(currentPlayers)) {
       for (const player of currentPlayers as Array<Record<string, unknown>>) {
         const id = player['id'];
@@ -402,11 +566,14 @@ class Orchestrator {
       }
     }
     // Fold in deltas observed ahead of the baseline (set-idempotent).
-    for (const id of earlyJoined) {
-      this.present.add(id);
+    for (const player of earlyJoined) {
+      const id = player['id'];
+      if (typeof id === 'string') {
+        this.present.add(id);
+      }
     }
-    for (const id of earlyLeft) {
-      this.present.delete(id);
+    for (const event of earlyLeft) {
+      this.present.delete(String(event['player_id']));
     }
     this.present.add(this.myId);
     for (const id of this.present) {
@@ -458,14 +625,18 @@ class Orchestrator {
     }
   }
 
-  private onFrameText(text: string): void {
+  private onServerInput(data: unknown): void {
     let frame: ServerFrame;
     try {
-      frame = parseServerFrame(text);
+      frame = classifyJsonNegotiatedServerInput(data);
     } catch (error) {
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
       return;
     }
+    this.routeServerFrame(frame);
+  }
+
+  private routeServerFrame(frame: ServerFrame): void {
     if (this.streaming) {
       this.enqueue(() => this.handleServerMessage(frame));
     } else if (this.frameWaiter !== null) {
@@ -476,6 +647,7 @@ class Orchestrator {
   }
 
   private onSocketClosed(): void {
+    this.accountability?.observeTerminal();
     if (this.finished) {
       return;
     }
@@ -527,7 +699,9 @@ class Orchestrator {
         this.fail(
           error instanceof FatalError
             ? error
-            : FatalError.protocol(`unexpected failure: ${describe(error)}`),
+            : error instanceof DeliveryAccountabilityViolation
+              ? FatalError.protocol(error.message)
+              : FatalError.protocol(`unexpected failure: ${describe(error)}`),
         );
       });
   }
@@ -563,7 +737,7 @@ class Orchestrator {
     if (this.exchangeRetryAt !== null) {
       wake = Math.min(wake, this.exchangeRetryAt);
     }
-    if (this.transportStatus === null && this.p2pDeadline !== null) {
+    if (this.p2pDeadline !== null) {
       wake = Math.min(wake, this.p2pDeadline);
     }
     if (this.lingerUntil !== null) {
@@ -634,17 +808,16 @@ class Orchestrator {
       this.flushPendingExchangeSends();
     }
 
-    if (this.transportStatus === null && this.p2pDeadline !== null && now >= this.p2pDeadline) {
-      // The P2P window expired: resolve with whatever is connected now.
+    if (this.p2pDeadline !== null && now >= this.p2pDeadline) {
+      // The current P2P window expired: report any real state change.
       this.resolveTransportStatus();
+      this.p2pDeadline = null;
     }
 
-    if (this.lingerUntil === null && this.criteriaMet()) {
-      this.lingerUntil = now + EXIT_LINGER_MS;
-    }
+    this.armSuccessLinger(now);
     if (this.lingerUntil !== null && now >= this.lingerUntil) {
-      // Criteria can regress during the linger (a late NewPeer or a freshly
-      // connected pair adds new obligations); re-validate at expiry.
+      // Criteria can regress during the linger (an authoritative plan or a
+      // freshly connected pair adds new obligations); re-validate at expiry.
       if (this.criteriaMet()) {
         this.finish(EXIT_SUCCESS);
         return;
@@ -666,6 +839,12 @@ class Orchestrator {
     }
   }
 
+  private armSuccessLinger(now: number): void {
+    if (this.lingerUntil === null && this.criteriaMet()) {
+      this.lingerUntil = now + EXIT_LINGER_MS;
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Server message handling (mirrors the native handle_server_message)
   // -------------------------------------------------------------------------
@@ -679,25 +858,59 @@ class Orchestrator {
     this.pongDeadline = null;
     this.pongGraceApplied = false;
     const data = frame.data;
+    const accountability = this.accountabilityState();
+    accountability.observeServerMessage(
+      frame.type === 'Error' && data['error_code'] === 'UNSUPPORTED_GAME_DATA_FORMAT',
+    );
     switch (frame.type) {
+      case 'RoomJoined':
+        accountability.rebaselineSnapshot(data['current_players']);
+        break;
+      case 'RoomLeft':
+        accountability.resetRoom();
+        this.initialSessionPlanPending = false;
+        this.pendingMembershipPlans.clear();
+        this.lobbyState = null;
+        break;
       case 'PlayerJoined': {
         const player = data['player'] as Record<string, unknown>;
+        accountability.notePlayerJoined(player);
         const id = String(player['id']);
         this.present.add(id);
         this.membersSeen.add(id);
+        if (
+          requireFinalizedMembershipPlan(
+            this.pendingMembershipPlans,
+            this.negotiatedVersion ?? 2,
+            this.lobbyState,
+            id,
+            player['epoch'],
+          )
+        ) {
+          this.lingerUntil = null;
+        }
         emit({ event: 'peer_joined', player_id: id });
         this.maybeSendReady();
         break;
       }
       case 'PlayerLeft': {
-        const id = String(data['player_id']);
+        const rawId = data['player_id'];
+        accountability.notePlayerLeft(rawId, data['epoch'], data['final_seq']);
+        const id = String(rawId);
         this.present.delete(id);
+        clearDepartedMembershipPlan(this.pendingMembershipPlans, id, data['epoch']);
         // A departed peer can no longer satisfy any pairing-derived
         // criterion (see the native client for the full rationale).
-        this.expectedPeers.delete(id);
-        this.pendingSignals.delete(id);
-        // The departure can complete the Appendix G all-pairs condition.
-        if (this.transportStatus === null && this.allExpectedPairsConnected()) {
+        this.removePairObligation(id);
+        // Departure can either complete the remaining set or remove the last
+        // live P2P path. Real state transitions are reported; duplicates are
+        // suppressed by resolveTransportStatus.
+        if (
+          this.webrtcPlanSeen &&
+          (this.transportStatus !== null ||
+            this.expectedPeers.size === 0 ||
+            this.allExpectedPairsConnected())
+        ) {
           this.resolveTransportStatus();
         }
         emit({ event: 'player_left', player_id: id });
@@ -705,6 +918,11 @@ class Orchestrator {
       }
       case 'GameStarting': {
         this.gameStarted = true;
+        this.lobbyState = 'finalized';
+        if (requiresAuthoritativeFinalizationPlan(this.negotiatedVersion ?? 2)) {
+          this.initialSessionPlanPending = true;
+          this.lingerUntil = null;
+        }
         const connections = (data['peer_connections'] ?? []) as Array<Record<string, unknown>>;
         const mine = connections.find((peer) => peer['player_id'] === this.myId);
         emit({ event: 'game_starting', is_authority: mine?.['is_authority'] === true });
@@ -714,6 +932,8 @@ class Orchestrator {
         break;
       }
       case 'SessionPlan': {
+        this.initialSessionPlanPending = false;
+        this.pendingMembershipPlans.clear();
         const peers = (data['peers'] ?? []) as Array<Record<string, unknown>>;
         const iceServers = (data['ice_servers'] ?? []) as PlanIceServer[];
         const transport = String(data['transport']);
@@ -729,12 +949,44 @@ class Orchestrator {
           ice_servers_count: iceServers.length,
           fallback: String(data['fallback']),
         });
+        if (this.config.leaveOnGameStart) {
+          break;
+        }
         if (transport === 'webrtc') {
           this.webrtcPlanSeen = true;
           this.lastIceServers = iceServers;
-          for (const peer of peers) {
-            await this.establishPair(String(peer['player_id']), peer['initiate'] === true);
+        }
+        const plannedPeers =
+          transport === 'webrtc'
+            ? peers
+                .map((peer) => String(peer['player_id']))
+                .filter((peer) => peer !== this.myId)
+            : [];
+        const delta = authoritativePeerDelta(this.expectedPeers, plannedPeers);
+        for (const peer of delta.removed) {
+          this.removePairObligation(peer);
+        }
+        const added = new Set(delta.added);
+        for (const peer of delta.retained) {
+          if (!this.engine.isPaired(peer)) {
+            added.add(peer);
           }
+        }
+        for (const peer of peers) {
+          const peerId = String(peer['player_id']);
+          if (transport === 'webrtc' && added.delete(peerId)) {
+            await this.establishPair(peerId, peer['initiate'] === true);
+          }
+        }
+        if (this.expectedPeers.size === 0 || this.allExpectedPairsConnected()) {
+          this.p2pDeadline = null;
+        }
+        if (
+          this.transportStatus !== null ||
+          (transport === 'webrtc' &&
+            (this.expectedPeers.size === 0 || this.allExpectedPairsConnected()))
+        ) {
+          this.resolveTransportStatus();
         }
         break;
       }
@@ -751,6 +1003,13 @@ class Orchestrator {
         break;
       }
       case 'GameData': {
+        const disposition = accountability.recordGameData(data);
+        if (disposition === 'stale') {
+          console.error(
+            `discarding stale trailing GameData from ${String(data['from_player'])}`,
+          );
+          break;
+        }
         const from = String(data['from_player']);
         const payload = data['data'];
         if (
@@ -763,6 +1022,70 @@ class Orchestrator {
         emit({ event: 'game_data_received', from, payload });
         break;
       }
+      case 'GameDataBinary': {
+        const disposition = accountability.recordGameData(data);
+        const from = String(data['from_player']);
+        if (disposition === 'stale') {
+          console.error(`discarding stale trailing binary GameData from ${from}`);
+          break;
+        }
+        const payload = data['payload'];
+        console.debug(
+          `received accountable opaque binary GameData from ${from} ` +
+            `(${String(data['encoding'])}, ${payload instanceof Uint8Array ? payload.byteLength : 0} bytes)`,
+        );
+        break;
+      }
+      case NON_TEXT_APPLICATION_FRAME:
+        throw FatalError.protocol(
+          `unexpected non-text application frame: ${String(data['error'] ?? 'unsupported browser payload')}`,
+        );
+      case 'DeliveryReport':
+        accountability.recordReport(data);
+        break;
+      case 'RelayStats':
+        accountability.recordRelayStats(data);
+        break;
+      case 'Reconnected': {
+        accountability.rebaselineReconnected(
+          data['current_players'],
+          data['sender_watermarks'],
+        );
+        this.lobbyState = String(data['lobby_state']);
+        this.inLobby = this.lobbyState === 'lobby';
+        this.gameStarted = this.lobbyState === 'finalized';
+        if ((this.negotiatedVersion ?? 2) >= 3 && this.lobbyState === 'finalized') {
+          this.initialSessionPlanPending = true;
+          this.lingerUntil = null;
+        }
+        break;
+      }
+      case 'PlayerReconnected': {
+        const rawId = data['player_id'];
+        accountability.notePlayerReconnected(rawId, data['epoch']);
+        const id = String(rawId);
+        restoreReconnectedMember(this.present, this.membersSeen, id);
+        if (
+          requireFinalizedMembershipPlan(
+            this.pendingMembershipPlans,
+            this.negotiatedVersion ?? 2,
+            this.lobbyState,
+            id,
+            data['epoch'],
+          )
+        ) {
+          this.lingerUntil = null;
+        }
+        emit({ event: 'peer_joined', player_id: id });
+        this.maybeSendReady();
+        break;
+      }
+      case 'SpectatorJoined':
+        accountability.rebaselineSnapshot(data['current_players']);
+        break;
+      case 'SpectatorLeft':
+        accountability.resetRoom();
+        break;
       case 'PeerTransportStatus': {
         const peer = String(data['peer_id']);
         this.peerStatusFrom.add(peer);
@@ -799,7 +1122,8 @@ class Orchestrator {
         break;
       }
       case 'LobbyStateChanged': {
-        if (data['lobby_state'] === 'lobby') {
+        this.lobbyState = String(data['lobby_state']);
+        if (this.lobbyState === 'lobby') {
           this.inLobby = true;
           this.maybeSendReady();
           // The lobby no longer auto-starts: the room creator issues the
@@ -815,7 +1139,11 @@ class Orchestrator {
         this.pongGraceApplied = false;
         break;
       default:
-        console.error(`ignoring server message ${frame.type}`);
+        console.error(
+          frame.type === NON_TEXT_APPLICATION_FRAME
+            ? 'ignoring non-text websocket application frame'
+            : `ignoring server message ${frame.type}`,
+        );
         break;
     }
   }
@@ -834,12 +1162,14 @@ class Orchestrator {
       return;
     }
     if (this.config.leaveOnGameStart) {
-      // A seat-vacating client never pairs: the plan/NewPeer is logged but
-      // not acted on, so it produces zero signaling traffic.
+      // A seat-vacating client logs pairing directives but never acts on them,
+      // so it produces zero signaling traffic.
       return;
     }
+    const newlyExpected = !this.expectedPeers.has(peer);
+    const needsConnection = !this.engine.isPaired(peer);
     this.expectedPeers.add(peer);
-    if (this.p2pDeadline === null) {
+    if ((newlyExpected || needsConnection) && !this.connectedPairs.has(peer)) {
       this.p2pDeadline = Date.now() + this.config.p2pTimeoutSecs * 1000;
     }
     try {
@@ -861,6 +1191,18 @@ class Orchestrator {
     }
   }
 
+  private removePairObligation(peer: string): void {
+    this.expectedPeers.delete(peer);
+    this.connectedPairs.delete(peer);
+    this.peerStatusFrom.delete(peer);
+    this.sentLabels.delete(peer);
+    this.receivedLabels.delete(peer);
+    this.pendingExchangePeers.delete(peer);
+    this.reportedExchangeDiagnostics.delete(peer);
+    this.pendingSignals.delete(peer);
+    this.engine.removePeer(peer);
+  }
+
   /**
    * Emit `signal_received` and route an inbound signal (buffering it when the
    * peer is not paired yet).
@@ -868,12 +1210,16 @@ class Orchestrator {
   private async handleSignal(from: string, signal: unknown): Promise<void> {
     emit({ event: 'signal_received', from, kind: classifySignal(signal) });
     if (!this.engine.isPaired(from)) {
-      let buffered = this.pendingSignals.get(from);
-      if (buffered === undefined) {
-        buffered = [];
-        this.pendingSignals.set(from, buffered);
+      if (shouldBufferSignalForUnpairedPeer(this.expectedPeers, from)) {
+        let buffered = this.pendingSignals.get(from);
+        if (buffered === undefined) {
+          buffered = [];
+          this.pendingSignals.set(from, buffered);
+        }
+        buffered.push(signal);
+      } else {
+        console.error(`discarding stale signal from terminal expected peer ${from}`);
       }
-      buffered.push(signal);
       return;
     }
     await this.applySignal(from, signal);
@@ -938,7 +1284,7 @@ class Orchestrator {
       this.flushPendingExchangeSends();
     }
     // All expected pairs connected resolves the overall status early.
-    if (this.transportStatus === null && this.allExpectedPairsConnected()) {
+    if (shouldResolveConnectedPair(this.transportStatus, this.allExpectedPairsConnected())) {
       this.resolveTransportStatus();
     }
   }
@@ -1028,13 +1374,12 @@ class Orchestrator {
     return true;
   }
 
-  /**
-   * Resolve and report the single overall WebRTC transport status
-   * (Appendix G): `connected: true` iff at least one pair is connected at
-   * resolution time; a zero-pair resolution engages the relay fallback.
-   */
+  /** Report a changed overall WebRTC state; suppress duplicate snapshots. */
   private resolveTransportStatus(): void {
-    const connected = this.connectedPairs.size > 0;
+    const connected = changedTransportStatus(this.transportStatus, this.connectedPairs.size);
+    if (connected === null) {
+      return;
+    }
     this.sendFrame(clientFrame('TransportStatus', { transport: 'webrtc', connected }));
     this.transportStatus = connected;
     emit({ event: 'transport_status_sent', transport: 'webrtc', connected });
@@ -1093,7 +1438,9 @@ class Orchestrator {
       this.relaySent = true;
       return;
     }
-    this.sendFrame(clientFrame('GameData', { data: { relay_msg: this.config.relayPayload } }));
+    sendGameData((frame) => this.sendFrame(frame), {
+      relay_msg: this.config.relayPayload,
+    });
     this.relaySent = true;
     this.relaySendAt = null;
     emit({ event: 'game_data_sent' });
@@ -1142,6 +1489,11 @@ class Orchestrator {
     if (this.membersSeen.size < requiredMembers) {
       unmet.push(
         `observed ${this.membersSeen.size} of ${requiredMembers} expected distinct members`,
+      );
+    }
+    if (this.initialSessionPlanPending || this.pendingMembershipPlans.size > 0) {
+      unmet.push(
+        `awaiting authoritative SessionPlan (${this.initialSessionPlanPending ? 'session' : 'membership'} trigger, ${this.pendingMembershipPlans.size} membership epoch(s))`,
       );
     }
     if (this.webrtcSessionExpected()) {

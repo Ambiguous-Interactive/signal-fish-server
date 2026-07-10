@@ -633,6 +633,8 @@ async fn send_ledger_burst(
     let padding = "x".repeat(padding_bytes);
     for _ in 0..count {
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: json!({
                 "ledger_sender": "RawSender",
                 "seq": *next_seq,
@@ -924,7 +926,7 @@ async fn stall_above_timeout_is_evicted_loudly_and_room_flows() {
                                 .expect("GameData payload carries a numeric seq");
                             seqs.push(seq);
                         }
-                        ServerMessage::PlayerLeft { player_id } if player_id == victim_id => {
+                        ServerMessage::PlayerLeft { player_id, .. } if player_id == victim_id => {
                             saw_victim_leave = true;
                         }
                         ServerMessage::Error { message, error_code } => panic!(

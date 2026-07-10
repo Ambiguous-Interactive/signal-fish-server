@@ -48,9 +48,9 @@
 //!    erroring). The cell pins exactly that.
 //! 6. `mixed_v2_browser_v3_native_relay_floor` — the browser as a PURE-v2
 //!    member (`--protocol-version 2` on `/v2/ws`) floors a mesh-preferring
-//!    room: zero `SessionPlan`/`NewPeer`/`Signal`/WebRTC events anywhere, the
-//!    browser negotiates protocol version 2, and the full GameData relay
-//!    matrix completes for all three. All exit 0.
+//!    room: both v3 natives receive explicit Relay/Relay empty plans, the v2
+//!    browser receives no plan, no signaling/WebRTC activity occurs, and the
+//!    full GameData relay matrix completes for all three. All exit 0.
 //! 7. `browser_cli_mid_handshake_close_single_error_exit_3` — a stub server
 //!    accepts the WebSocket, consumes `Authenticate`, then closes: the CLI
 //!    must emit exactly ONE `error` event carrying the real close reason and
@@ -317,6 +317,32 @@ fn session_plan<'a>(
     plan
 }
 
+/// Assert the universal v3 relay-floor plan: explicit and pairing-free.
+fn relay_session_plan<'a>(events: &'a [Value], who: &str) -> &'a Value {
+    let plan = single_event(events, "session_plan", who);
+    assert_eq!(str_field(plan, "topology"), "relay", "{who} plan topology");
+    assert_eq!(
+        str_field(plan, "transport"),
+        "relay",
+        "{who} plan transport"
+    );
+    assert_eq!(str_field(plan, "fallback"), "relay", "{who} plan fallback");
+    assert!(
+        plan.get("host").is_some_and(Value::is_null),
+        "{who}: relay plan must not name a host: {plan}"
+    );
+    assert!(
+        plan_peers(plan, who).is_empty(),
+        "{who}: relay plan must have no peers"
+    );
+    assert_eq!(
+        plan.get("ice_servers_count").and_then(Value::as_u64),
+        Some(0),
+        "{who}: relay plan must not carry ICE servers"
+    );
+    plan
+}
+
 /// The `(player_id, initiate)` peer entries of a `session_plan` event.
 fn plan_peers(plan: &Value, who: &str) -> Vec<(String, bool)> {
     plan.get("peers")
@@ -425,19 +451,37 @@ fn assert_exchange_sent_to(events: &[Value], who: &str, recipients: &BTreeSet<&s
     }
 }
 
-/// Assert the single overall `TransportStatus{webrtc, true}` report (pass the
-/// FULL log: exactly-once and never-fallback must hold beyond the window).
+/// Assert that the overall WebRTC status initially resolves `true` and every
+/// later report is a real state transition. A sibling may exit after the
+/// exchange criteria are met, producing a legitimate `true -> false` report
+/// before this process drains; teardown ordering is not part of the session
+/// success contract.
 fn assert_transport_status_true(full_log: &[Value], who: &str) {
-    let status = single_event(full_log, "transport_status_sent", who);
-    assert_eq!(str_field(status, "transport"), "webrtc", "{who} transport");
+    let statuses = events_named(full_log, "transport_status_sent");
+    assert!(!statuses.is_empty(), "{who}: no transport status was sent");
+    let connected: Vec<bool> = statuses
+        .iter()
+        .map(|status| {
+            assert_eq!(str_field(status, "transport"), "webrtc", "{who} transport");
+            status
+                .get("connected")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| panic!("{who}: status lacks connected flag: {status}"))
+        })
+        .collect();
     assert_eq!(
-        status.get("connected").and_then(Value::as_bool),
-        Some(true),
-        "{who}: overall webrtc status must resolve connected"
+        connected.first(),
+        Some(&true),
+        "{who}: overall webrtc status must initially resolve connected: {connected:?}"
     );
     assert!(
-        events_named(full_log, "fallback_engaged").is_empty(),
-        "{who}: a fully connected session must not engage the fallback"
+        connected.windows(2).all(|states| states[0] != states[1]),
+        "{who}: transport reports must be deduplicated state transitions: {connected:?}"
+    );
+    assert_eq!(
+        events_named(full_log, "fallback_engaged").len(),
+        connected.iter().filter(|&&state| !state).count(),
+        "{who}: every disconnected transition must engage the relay fallback"
     );
 }
 
@@ -902,10 +946,19 @@ async fn mixed_v2_browser_v3_native_relay_floor() {
             "{who}: negotiated protocol version"
         );
 
-        // A relay-floor room emits NO v3 session traffic and no WebRTC
-        // activity ever happens — assert zero across the FULL logs.
+        // Finalization is explicit for v3 even on the relay floor: v3 natives
+        // receive one authoritative Relay/Relay empty plan; v2 stays frozen.
+        if index == V2_MEMBER {
+            assert!(
+                events_named(full_log, "session_plan").is_empty(),
+                "{who}: v2 must never observe SessionPlan"
+            );
+        } else {
+            relay_session_plan(full_log, who);
+        }
+
+        // No pairing or WebRTC activity ever happens across the FULL logs.
         for name in [
-            "session_plan",
             "new_peer",
             "signal_sent",
             "signal_received",

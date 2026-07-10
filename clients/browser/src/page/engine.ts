@@ -27,10 +27,10 @@ export const UNRELIABLE_LABEL = 'unreliable';
 
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
 export interface EngineCallbacks {
-  onLocalCandidate(peer: string, candidateJson: string): void;
-  onPcState(peer: string, state: string): void;
-  onChannelOpen(peer: string, label: string): void;
-  onChannelMessage(peer: string, label: string, text: string): void;
+  onLocalCandidate(peer: string, generation: number, candidateJson: string): void;
+  onPcState(peer: string, generation: number, state: string): void;
+  onChannelOpen(peer: string, generation: number, label: string): void;
+  onChannelMessage(peer: string, generation: number, label: string, text: string): void;
 }
 
 /** An ICE server entry from a `SessionPlan` (wire shape, camel-cased here). */
@@ -42,6 +42,7 @@ export interface PlanIceServer {
 
 /** Per-remote-peer connection state. */
 interface PeerLink {
+  generation: number;
   pc: RTCPeerConnection;
   channels: Map<string, RTCDataChannel>;
   openLabels: Set<string>;
@@ -55,6 +56,7 @@ export class Engine {
   private readonly crippled: boolean;
   private readonly callbacks: EngineCallbacks;
   private readonly peers = new Map<string, PeerLink>();
+  private nextGeneration = 0;
 
   constructor(crippled: boolean, callbacks: EngineCallbacks) {
     this.crippled = crippled;
@@ -64,6 +66,20 @@ export class Engine {
   /** Whether a peer connection toward `peer` already exists. */
   isPaired(peer: string): boolean {
     return this.peers.has(peer);
+  }
+
+  isCurrentGeneration(peer: string, generation: number): boolean {
+    return this.peers.get(peer)?.generation === generation;
+  }
+
+  /** Close and forget a departed peer so a later directive can pair it anew. */
+  removePeer(peer: string): void {
+    const link = this.peers.get(peer);
+    if (link === undefined) {
+      return;
+    }
+    this.peers.delete(peer);
+    link.pc.close();
   }
 
   /**
@@ -81,8 +97,14 @@ export class Engine {
       return null;
     }
 
+    if (this.nextGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('peer-link generation overflow');
+    }
+    this.nextGeneration += 1;
+
     const pc = new RTCPeerConnection({ iceServers: convertIceServers(iceServers) });
     const link: PeerLink = {
+      generation: this.nextGeneration,
       pc,
       channels: new Map(),
       openLabels: new Set(),
@@ -96,23 +118,31 @@ export class Engine {
     if (!initiate) {
       return null;
     }
-    // Both channels must exist before the offer so the SDP negotiates SCTP
-    // and the channels open as soon as DTLS completes.
-    const reliable = pc.createDataChannel(RELIABLE_LABEL);
-    const unreliable = pc.createDataChannel(UNRELIABLE_LABEL, {
-      ordered: false,
-      maxRetransmits: 0,
-    });
-    for (const channel of [reliable, unreliable]) {
-      link.channels.set(channel.label, channel);
-      this.registerChannelHandlers(peer, channel);
+    try {
+      // Both channels must exist before the offer so the SDP negotiates SCTP
+      // and the channels open as soon as DTLS completes.
+      const reliable = pc.createDataChannel(RELIABLE_LABEL);
+      const unreliable = pc.createDataChannel(UNRELIABLE_LABEL, {
+        ordered: false,
+        maxRetransmits: 0,
+      });
+      for (const channel of [reliable, unreliable]) {
+        link.channels.set(channel.label, channel);
+        this.registerChannelHandlers(peer, link, channel);
+      }
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (typeof offer.sdp !== 'string') {
+        throw new Error(`createOffer for ${peer} produced no SDP`);
+      }
+      return offer.sdp;
+    } catch (error) {
+      if (this.peers.get(peer) === link) {
+        this.peers.delete(peer);
+        pc.close();
+      }
+      throw error;
     }
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    if (typeof offer.sdp !== 'string') {
-      throw new Error(`createOffer for ${peer} produced no SDP`);
-    }
-    return offer.sdp;
   }
 
   /**
@@ -209,24 +239,38 @@ export class Engine {
   private registerPcHandlers(peer: string, link: PeerLink): void {
     const pc = link.pc;
     pc.onconnectionstatechange = () => {
-      this.callbacks.onPcState(peer, pc.connectionState);
+      if (this.peers.get(peer) !== link) {
+        return;
+      }
+      this.callbacks.onPcState(peer, link.generation, pc.connectionState);
     };
     pc.onicecandidate = (event) => {
       // `null` marks end-of-gathering; crippled mode drops everything.
-      if (this.crippled || event.candidate === null) {
+      if (this.peers.get(peer) !== link || this.crippled || event.candidate === null) {
         return;
       }
-      this.callbacks.onLocalCandidate(peer, JSON.stringify(event.candidate.toJSON()));
+      this.callbacks.onLocalCandidate(
+        peer,
+        link.generation,
+        JSON.stringify(event.candidate.toJSON()),
+      );
     };
     pc.ondatachannel = (event) => {
+      if (this.peers.get(peer) !== link) {
+        return;
+      }
       // Responder path: store the channel BEFORE wiring its handlers so the
       // orchestrator's bookkeeping exists before any open/message callback.
       link.channels.set(event.channel.label, event.channel);
-      this.registerChannelHandlers(peer, event.channel);
+      this.registerChannelHandlers(peer, link, event.channel);
     };
   }
 
-  private registerChannelHandlers(peer: string, channel: RTCDataChannel): void {
+  private registerChannelHandlers(
+    peer: string,
+    callbackLink: PeerLink,
+    channel: RTCDataChannel,
+  ): void {
     const label = channel.label;
     // A remotely announced channel may already be open at registration time
     // (the announce task and the open transition race); notify exactly once
@@ -237,10 +281,11 @@ export class Engine {
       if (
         !openNotified &&
         channel.readyState === 'open' &&
-        link?.channels.get(label) === channel
+        link === callbackLink &&
+        link.channels.get(label) === channel
       ) {
         openNotified = true;
-        this.callbacks.onChannelOpen(peer, label);
+        this.callbacks.onChannelOpen(peer, callbackLink.generation, label);
       }
     };
     channel.onopen = notifyOpen;
@@ -248,11 +293,15 @@ export class Engine {
       queueMicrotask(notifyOpen);
     }
     channel.onmessage = (event: MessageEvent<unknown>) => {
+      const link = this.peers.get(peer);
+      if (link !== callbackLink || link.channels.get(label) !== channel) {
+        return;
+      }
       const text =
         typeof event.data === 'string'
           ? event.data
           : new TextDecoder().decode(event.data as ArrayBuffer);
-      this.callbacks.onChannelMessage(peer, label, text);
+      this.callbacks.onChannelMessage(peer, callbackLink.generation, label, text);
     };
   }
 }

@@ -24,6 +24,7 @@
 //!   crippled-ICE fault mode).
 //! - [`client`] — the single-task orchestrator and exit-code policy.
 
+pub mod accountability;
 pub mod cli;
 pub mod client;
 pub mod engine;

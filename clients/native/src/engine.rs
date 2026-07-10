@@ -58,30 +58,61 @@ pub enum EngineEvent {
     /// `RTCIceCandidateInit` to relay as `{"IceCandidate": candidate_json}`.
     LocalCandidate {
         peer: PlayerId,
+        generation: u64,
         candidate_json: String,
     },
     /// Peer-connection state transition (informational `pc_state` events).
     PcState {
         peer: PlayerId,
+        generation: u64,
         state: RTCPeerConnectionState,
     },
     /// The remote side announced a data channel toward us (responder path).
     RemoteChannel {
         peer: PlayerId,
+        generation: u64,
         channel: Arc<RTCDataChannel>,
     },
     /// A data channel (local or remote) reached the open state.
-    ChannelOpen { peer: PlayerId, label: String },
+    ChannelOpen {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+    },
     /// A text message arrived on an open data channel.
     ChannelMessage {
         peer: PlayerId,
+        generation: u64,
         label: String,
         text: String,
     },
 }
 
+impl EngineEvent {
+    pub fn peer_generation(&self) -> (PlayerId, u64) {
+        match self {
+            Self::LocalCandidate {
+                peer, generation, ..
+            }
+            | Self::PcState {
+                peer, generation, ..
+            }
+            | Self::RemoteChannel {
+                peer, generation, ..
+            }
+            | Self::ChannelOpen {
+                peer, generation, ..
+            }
+            | Self::ChannelMessage {
+                peer, generation, ..
+            } => (*peer, *generation),
+        }
+    }
+}
+
 /// Per-remote-peer connection state.
 struct PeerLink {
+    generation: u64,
     pc: Arc<RTCPeerConnection>,
     /// Channels by label, both locally created (initiator) and remotely
     /// announced (responder).
@@ -101,6 +132,7 @@ pub struct Engine {
     crippled: bool,
     events: mpsc::UnboundedSender<EngineEvent>,
     peers: HashMap<PlayerId, PeerLink>,
+    next_generation: u64,
 }
 
 impl Engine {
@@ -129,12 +161,35 @@ impl Engine {
             crippled,
             events,
             peers: HashMap::new(),
+            next_generation: 0,
         })
     }
 
     /// Whether a peer connection toward `peer` already exists.
     pub fn is_paired(&self, peer: PlayerId) -> bool {
         self.peers.contains_key(&peer)
+    }
+
+    pub fn is_current_generation(&self, peer: PlayerId, generation: u64) -> bool {
+        self.peers
+            .get(&peer)
+            .is_some_and(|link| link.generation == generation)
+    }
+
+    pub fn is_current_event(&self, event: &EngineEvent) -> bool {
+        let (peer, generation) = event.peer_generation();
+        self.is_current_generation(peer, generation)
+    }
+
+    /// Close and forget a departed peer so a later directive can pair it anew.
+    pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
+        if let Some(link) = self.peers.remove(&peer) {
+            link.pc
+                .close()
+                .await
+                .context("close departed RTCPeerConnection")?;
+        }
+        Ok(())
     }
 
     /// Number of fully connected pairs (both channels open).
@@ -160,6 +215,11 @@ impl Engine {
             tracing::debug!(%peer, "already paired; ignoring duplicate pairing directive");
             return Ok(None);
         }
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("peer-link generation overflow"))?;
+        let generation = self.next_generation;
 
         let config = RTCConfiguration {
             ice_servers: convert_ice_servers(ice_servers),
@@ -171,9 +231,8 @@ impl Engine {
                 .await
                 .context("create RTCPeerConnection")?,
         );
-        self.register_pc_handlers(peer, &pc);
-
-        let mut link = PeerLink {
+        let link = PeerLink {
+            generation,
             pc: pc.clone(),
             channels: HashMap::new(),
             open_labels: BTreeSet::new(),
@@ -181,8 +240,13 @@ impl Engine {
             remote_description_set: false,
             pair_connected: false,
         };
+        self.peers.insert(peer, link);
+        self.register_pc_handlers(peer, generation, &pc);
 
-        let offer_sdp = if initiate {
+        let result = async {
+            if !initiate {
+                return Ok(None);
+            }
             // Both channels must exist before the offer so the SDP negotiates
             // SCTP and the channels open as soon as DTLS completes.
             let reliable = pc
@@ -201,8 +265,12 @@ impl Engine {
                 .await
                 .context("create unreliable data channel")?;
             for channel in [&reliable, &unreliable] {
-                self.register_channel_handlers(peer, channel);
+                self.register_channel_handlers(peer, generation, channel);
             }
+            let link = self
+                .peers
+                .get_mut(&peer)
+                .ok_or_else(|| anyhow!("peer link removed while pairing"))?;
             link.channels.insert(RELIABLE_LABEL.to_string(), reliable);
             link.channels
                 .insert(UNRELIABLE_LABEL.to_string(), unreliable);
@@ -212,13 +280,15 @@ impl Engine {
             pc.set_local_description(offer)
                 .await
                 .context("set local description (offer)")?;
-            Some(sdp)
-        } else {
-            None
-        };
-
-        self.peers.insert(peer, link);
-        Ok(offer_sdp)
+            Ok(Some(sdp))
+        }
+        .await;
+        if result.is_err() {
+            if let Some(link) = self.peers.remove(&peer) {
+                let _ = link.pc.close().await;
+            }
+        }
+        result
     }
 
     /// Responder path: apply a remote offer and produce the answer SDP (the
@@ -341,10 +411,14 @@ impl Engine {
     ///
     /// Callbacks only forward through the event channel (sends to a dropped
     /// receiver are ignored: that happens only during shutdown).
-    fn register_pc_handlers(&self, peer: PlayerId, pc: &Arc<RTCPeerConnection>) {
+    fn register_pc_handlers(&self, peer: PlayerId, generation: u64, pc: &Arc<RTCPeerConnection>) {
         let events = self.events.clone();
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            let _ = events.send(EngineEvent::PcState { peer, state });
+            let _ = events.send(EngineEvent::PcState {
+                peer,
+                generation,
+                state,
+            });
             Box::pin(async {})
         }));
 
@@ -366,6 +440,7 @@ impl Engine {
                 Ok(candidate_json) => {
                     let _ = events.send(EngineEvent::LocalCandidate {
                         peer,
+                        generation,
                         candidate_json,
                     });
                 }
@@ -382,16 +457,22 @@ impl Engine {
             // exists before any open/message notification for it.
             let _ = events.send(EngineEvent::RemoteChannel {
                 peer,
+                generation,
                 channel: channel.clone(),
             });
-            register_channel_handlers_on(&events, peer, &channel);
+            register_channel_handlers_on(&events, peer, generation, &channel);
             Box::pin(async {})
         }));
     }
 
     /// Wire open/message callbacks on a locally created channel.
-    fn register_channel_handlers(&self, peer: PlayerId, channel: &Arc<RTCDataChannel>) {
-        register_channel_handlers_on(&self.events, peer, channel);
+    fn register_channel_handlers(
+        &self,
+        peer: PlayerId,
+        generation: u64,
+        channel: &Arc<RTCDataChannel>,
+    ) {
+        register_channel_handlers_on(&self.events, peer, generation, channel);
     }
 }
 
@@ -404,6 +485,7 @@ impl Engine {
 fn register_channel_handlers_on(
     events: &mpsc::UnboundedSender<EngineEvent>,
     peer: PlayerId,
+    generation: u64,
     channel: &Arc<RTCDataChannel>,
 ) {
     let label = channel.label().to_string();
@@ -413,6 +495,7 @@ fn register_channel_handlers_on(
     channel.on_open(Box::new(move || {
         let _ = open_events.send(EngineEvent::ChannelOpen {
             peer,
+            generation,
             label: open_label,
         });
         Box::pin(async {})
@@ -423,6 +506,7 @@ fn register_channel_handlers_on(
         let text = String::from_utf8_lossy(&message.data).into_owned();
         let _ = message_events.send(EngineEvent::ChannelMessage {
             peer,
+            generation,
             label: label.clone(),
             text,
         });
@@ -484,6 +568,8 @@ mod tests {
         assert!(offer.is_some(), "initiator must produce an offer SDP");
         assert!(engine.is_paired(peer));
         assert_eq!(engine.connected_pair_count(), 0);
+        let stale_generation = engine.peers[&peer].generation;
+        let stale_channel = engine.peers[&peer].channels[RELIABLE_LABEL].clone();
 
         let duplicate = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -493,6 +579,57 @@ mod tests {
         .expect("duplicate pairing within timeout")
         .expect("duplicate pairing is a no-op");
         assert!(duplicate.is_none(), "duplicate pairing must not re-offer");
+
+        engine
+            .remove_peer(peer)
+            .await
+            .expect("departed peer closes cleanly");
+        assert!(!engine.is_paired(peer));
+        let replacement = engine
+            .pair_with(peer, false, &[])
+            .await
+            .expect("reconnected peer can pair anew");
+        assert!(replacement.is_none(), "responder waits for the new offer");
+        assert!(engine.is_paired(peer));
+        let current_generation = engine.peers[&peer].generation;
+        assert_ne!(stale_generation, current_generation);
+
+        let stale_events = [
+            EngineEvent::LocalCandidate {
+                peer,
+                generation: stale_generation,
+                candidate_json: "{}".to_string(),
+            },
+            EngineEvent::PcState {
+                peer,
+                generation: stale_generation,
+                state: RTCPeerConnectionState::Connected,
+            },
+            EngineEvent::RemoteChannel {
+                peer,
+                generation: stale_generation,
+                channel: stale_channel,
+            },
+            EngineEvent::ChannelOpen {
+                peer,
+                generation: stale_generation,
+                label: RELIABLE_LABEL.to_string(),
+            },
+            EngineEvent::ChannelMessage {
+                peer,
+                generation: stale_generation,
+                label: RELIABLE_LABEL.to_string(),
+                text: "stale".to_string(),
+            },
+        ];
+        assert!(stale_events
+            .iter()
+            .all(|event| !engine.is_current_event(event)));
+        assert!(engine.is_current_event(&EngineEvent::PcState {
+            peer,
+            generation: current_generation,
+            state: RTCPeerConnectionState::Connected,
+        }));
     }
 
     #[test]

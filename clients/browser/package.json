@@ -14,7 +14,9 @@
     "node": ">=20"
   },
   "scripts": {
+    "prebuild": "npm test",
     "build": "node scripts/build.mjs",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc -p tsconfig.page.json && tsc -p tsconfig.cli.json",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
@@ -23,6 +25,7 @@
     "playwright-core": "1.60.0"
   },
   "devDependencies": {
+    "@msgpack/msgpack": "3.1.3",
     "@types/node": "24.10.13",
     "esbuild": "0.27.7",
     "prettier": "3.8.4",
