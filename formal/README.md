@@ -386,39 +386,83 @@ absolute-age guard). The writer (the peer draining) is deliberately UNFAIR.
 
 Also checked: `PerClassConservation` (each class independently queued ∨ written ∨
 dropped-with-close), `CtrlDropsAreLoud`, `StalenessBounded` (no head ages past
-the bound while open — safety, given the Tick cap), and `ReasonStable`. The
-liveness rests only on `WF(Tick, SojournEvict, CloseFinish)` — **never** on writer
-fairness, which is exactly what makes the sojourn close load-bearing.
+the bound while open — safety, given the Tick cap), `ShutdownWins`, and
+`ShutdownPriorityStable`. The close properties match E3 production semantics:
+an ordinary Stale/Lifecycle reason stays stable unless process drain upgrades it
+to Shutdown, after which it is terminally stable. The liveness rests only on
+`WF(Tick, SojournEvict, CloseFinish)` — **never** on writer fairness, which is
+exactly what makes the sojourn close load-bearing.
 
 ## Delivery classes (reliable / latest / volatile)
 
 `DeliveryClasses.tla` is the second **spec-first** module for P10.E2 (with
-`ControlPriorityDelivery.tla`), pinning the per-class delivery contract before the
-code. A single recipient's data queue carries three classes, modeled by
-`[class, key, id]` frames with globally-unique ids; the writer is UNFAIR.
+`ControlPriorityDelivery.tla`), pinning the per-class and wire-accountability
+contract before the code. One recipient observes one sender whose globally
+monotone `seq` spans all three classes and at least two latest keys. This matters:
+key-local queue replacement still has to preserve the sender-global WebSocket
+order.
 
 - **reliable** — backpressures while the queue is full (enablement); conserved,
   never coalesced.
-- **latest** (keyed) — a same-key send SUPERSEDES the queued predecessor in place
-  (old id → the `superseded` ledger, counted); a new-key send on a full queue
-  drop-oldest-volatile or drops the arrival (`latDropped`) — it **never parks**.
+- **latest** (keyed) — a same-key send removes the queued predecessor and appends
+  the successor, preserving global sequence order among surviving frames; a
+  new-key send on a full queue drops the oldest volatile or drops the arrival
+  (`latDropped`) — it **never parks**.
 - **volatile** — enqueue if space, else drop-oldest-volatile (`volDropped`).
+
+Every supersession or best-effort drop atomically appends an **exact gap range**
+to the priority `DeliveryReport` queue. The writer drains that control queue
+before data. Thus a report is visible before any later GameData can expose the
+gap; close-time abandonment is separate because the socket closes loudly and no
+later frame is observable on that connection.
+
+This D5 model has one implicit sender in one fixed epoch; D4 is the multi-sender
+composition. Its exact-report lane is explicitly bounded (`ReportCap=1` in the
+checked model). When that lane is full, a lossy send leaves queued predecessors
+untouched, abandons only its new frame with a loud close, and never parks. D2
+separately covers general control/data queue priority and sojourn eviction; the
+two modules remain consistent standalone models rather than a formal refinement.
 
 | Invariant | Pins | Seeded bug (checked `FALSE`) → result |
 | --- | --- | --- |
 | `ReliableConservation` | reliable is queued ∨ written ∨ dropped-with-close — never coalesced | `CoalesceReliableBug` → a reliable Head evicted into `volDropped` → **violated** |
 | `LatestConservation` / `VolatileConservation` | each class lands only in its legitimate buckets | `MisdropLatestBug` → a latest misdropped into `volDropped` → **violated** |
-| `AccountedSupersession` | every superseded id is in the ledger (coalescing is never silent) — held ALWAYS, since the ledger write is atomic with the coalesce | `SilentSupersedeBug` → supersede without ledgering → **violated** |
-| `LatestValueLastWrite` | ≤1 queued latest per key; the queued rep is the newest vs superseded ∪ written | — |
-| `ReportHonest` | the out-of-band `DeliveryReport` snapshot never overstates the true counts | `ReportOverstateBug` → published count above truth → **violated** |
+| `ExactGapAccounting` / `QueueSeqMonotone` / `WireSeqMonotone` | reports name exactly the lost sequences and surviving queued/written data stays globally increasing | `ScalarInPlaceBug` → A1,B2,A3 reports live B2 as lost and leaves A3 before B2 → **violated** |
+| `ReportsRemainCausal` / `ReportsAreCausallyPrioritized` | every exact range is queued-or-written while open, and its report precedes later gap-observing data | `SilentSupersedeBug` → supersede without report ledger/queue → **violated** |
+| `LatestValueLastWrite` | ≤1 queued latest per key; the queued representative is newest vs superseded ∪ written | — |
+| `ReportHonest` | every queued/written cumulative report snapshot is bounded by true counts | `ReportOverstateBug` → published count above truth → **violated** |
 
-Also checked: `TypeOK`, `UniqueIds`, `CoalesceNeverTouchesReliable`, `ReasonStable`.
-Deliberately scoped OUT (documented in the header): the per-successor
-`supersedes_from` scalar and client-side range classification — the D4/E5
-watermark concern, not this module. This module verifies **ledger completeness**,
-not scalar arithmetic. It is consistent with (not a formal refinement of) the #131
-`DeliveryContract.tla` — its counted per-class drops replace that model's single
-conservation law.
+Also checked: `TypeOK`, `UniqueSeqs`, `WrittenMatchesWire`,
+`CoalesceNeverTouchesReliable`, `DropsWithCloseAreLoud`,
+`LossyClassesNeverPark`, `ShutdownWins`, and `ShutdownPriorityStable`. It is
+consistent with (not a formal refinement of) the #131 `DeliveryContract.tla`;
+its counted per-class dispositions replace that model's single conservation law.
+
+**Seeded scalar/in-place counterexample.** In
+`DeliveryClasses_Small.cfg`, changing only `ScalarInPlaceBug = FALSE` to `TRUE`
+produces the registered minimal trace:
+
+1. `SendLatest("A")` queues `A:seq1`.
+2. `SendLatest("B")` queues `A:seq1, B:seq2`.
+3. `SendLatest("A")` replaces A in place, leaving `A:seq3, B:seq2`, and emits
+   the old scalar interval `[1,3)` as report range `1..2`.
+
+TLC fails `ExactGapAccounting` immediately after the third send: only A1 is in `superseded`, but
+`accountedGaps = 1..2` falsely reports live B2. A second diagnostic run with
+the earlier `ExactGapAccounting` and `QueueSeqMonotone` guards temporarily
+removed lets that same trace drain: after the report, the writer emits A3 then
+B2, and `WireSeqMonotone` fails on that second data write.
+With the checked `FALSE` arm, the model removes A1, appends A3, queues exact
+singleton range `1..1`, and drains report → B2 → A3. The exhaustive checked
+model is green at 390,068 generated / 168,615 distinct states, depth 15.
+
+**Report-capacity edge.** A diagnostic invariant that temporarily forbids the
+overflow state fails as soon as a second loss needs the full report lane: with
+`ReportCap=1`, one A supersession occupies
+the report lane, then the next A offer leaves the queued predecessor untouched,
+places only the new sequence in `droppedWithClose`, and atomically requests
+Stale close. The checked `DropsWithCloseAreLoud` and `LossyClassesNeverPark`
+invariants pin the two production obligations on that reachable branch.
 
 ## End-to-end gap accountability (flagship composition)
 

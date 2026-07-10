@@ -51,7 +51,9 @@
 (*                     "Stale" (WF — this is the liveness guarantee;         *)
 (*                     NoSojournEvictionBug disables it)                     *)
 (*   LifecycleClose    any other eviction requesting the close (reaper /     *)
-(*                     idle timeout) — exercises first-reason-wins           *)
+(*                     idle timeout)                                         *)
+(*   ShutdownClose     E3 drain close: may supersede Stale/Lifecycle and is  *)
+(*                     then terminally stable                                *)
 (*   CloseFinish       teardown: every still-queued frame is counted         *)
 (*                     dropped against the closing connection (per class)    *)
 (*                                                                         *)
@@ -104,12 +106,14 @@ VARIABLES
     droppedD,       \* data frames abandoned with a closing connection
     droppedC,       \* control frames abandoned with a closing connection
     connState,      \* "Open" | "CloseRequested" | "Closed"
-    closeReason,    \* "None" | "Stale" | "Lifecycle" (first wins)
+    closeReason,    \* "None" | "Stale" | "Lifecycle" | "Shutdown"
+    shutdownRequested, \* E3 process drain has requested priority close
     ctrlDelayedByData \* ghost: latches TRUE if data is written while a control
                       \* frame is pending — the starvation ControlAgeBounded forbids
 
 vars == <<dataQ, ctrlQ, sentD, sentC, writtenD, writtenC, droppedD,
-          droppedC, connState, closeReason, ctrlDelayedByData>>
+          droppedC, connState, closeReason, shutdownRequested,
+          ctrlDelayedByData>>
 
 (* Count queued frames of a class across both queues (ctrlQ never holds data). *)
 CountClass(q, c) == Len(SelectSeq(q, LAMBDA e: e.class = c))
@@ -129,9 +133,13 @@ CtrlPendingBehindDataHead ==
     \/ ctrlQ # <<>>
     \/ \E i \in DOMAIN dataQ : i > 1 /\ dataQ[i].class = "ctrl"
 
-(* First close reason wins. *)
+(* Ordinary close reasons are first-wins; E3 Shutdown is the priority       *)
+(* exception and supersedes an already-recorded lifecycle reason.           *)
 RequestClose(reason) ==
-    closeReason' = IF closeReason = "None" THEN reason ELSE closeReason
+    closeReason' =
+        IF reason = "Shutdown"
+          THEN "Shutdown"
+          ELSE IF closeReason = "None" THEN reason ELSE closeReason
 
 Init ==
     /\ dataQ = <<>>
@@ -144,6 +152,7 @@ Init ==
     /\ droppedC = 0
     /\ connState = "Open"
     /\ closeReason = "None"
+    /\ shutdownRequested = FALSE
     /\ ctrlDelayedByData = FALSE
 
 (* A reliable data frame is enqueued on the data queue. Backpressure is        *)
@@ -157,7 +166,8 @@ SendData ==
     /\ dataQ' = Append(dataQ, [class |-> "data", age |-> 0])
     /\ sentD' = sentD + 1
     /\ UNCHANGED <<ctrlQ, sentC, writtenD, writtenC, droppedD, droppedC,
-                   connState, closeReason, ctrlDelayedByData>>
+                   connState, closeReason, shutdownRequested,
+                   ctrlDelayedByData>>
 
 (* A control frame is enqueued. Normally onto the priority control queue;      *)
 (* under SingleQueueBug onto the data FIFO instead (the pre-split behavior     *)
@@ -174,7 +184,8 @@ SendCtrl ==
                 /\ UNCHANGED dataQ
     /\ sentC' = sentC + 1
     /\ UNCHANGED <<sentD, writtenD, writtenC, droppedD, droppedC,
-                   connState, closeReason, ctrlDelayedByData>>
+                   connState, closeReason, shutdownRequested,
+                   ctrlDelayedByData>>
 
 (* The send task writes ONE frame, control queue strictly first. Deliberately  *)
 (* UNFAIR (no fairness): a stalled peer means TLC may never schedule it. When  *)
@@ -198,7 +209,8 @@ WriterDrainCtrlFirst ==
                                /\ UNCHANGED writtenC
                                /\ ctrlDelayedByData' =
                                       (ctrlDelayedByData \/ CtrlPendingBehindDataHead)
-    /\ UNCHANGED <<sentD, sentC, droppedD, droppedC, connState, closeReason>>
+    /\ UNCHANGED <<sentD, sentC, droppedD, droppedC, connState, closeReason,
+                   shutdownRequested>>
 
 (* The oldest head has aged to the sojourn bound: close "Stale" (the liveness  *)
 (* guarantee). Disabled by NoSojournEvictionBug. *)
@@ -209,16 +221,27 @@ SojournEvict ==
     /\ connState' = "CloseRequested"
     /\ RequestClose("Stale")
     /\ UNCHANGED <<dataQ, ctrlQ, sentD, sentC, writtenD, writtenC,
-                   droppedD, droppedC, ctrlDelayedByData>>
+                   droppedD, droppedC, shutdownRequested, ctrlDelayedByData>>
 
-(* A distinct non-sojourn close path (activity reaper, idle timeout). First-   *)
-(* reason-wins is preserved by RequestClose (the house pattern), though in this *)
-(* abstraction the two close actions cannot actually contest it — both require  *)
-(* connState = "Open", which is left one-way, so the reason is set exactly once.*)
+(* A distinct non-sojourn close path (activity reaper, idle timeout). The two   *)
+(* ordinary close actions cannot contest because both require Open; the         *)
+(* ShutdownClose action below can intentionally supersede either while          *)
+(* teardown remains pending.                                                   *)
 LifecycleClose ==
     /\ connState = "Open"
     /\ connState' = "CloseRequested"
     /\ RequestClose("Lifecycle")
+    /\ UNCHANGED <<dataQ, ctrlQ, sentD, sentC, writtenD, writtenC,
+                   droppedD, droppedC, shutdownRequested, ctrlDelayedByData>>
+
+(* E3 priority exception: process drain upgrades an earlier lifecycle close *)
+(* while teardown is still pending. Once selected, Shutdown cannot change.  *)
+ShutdownClose ==
+    /\ connState \in {"Open", "CloseRequested"}
+    /\ closeReason # "Shutdown"
+    /\ connState' = "CloseRequested"
+    /\ RequestClose("Shutdown")
+    /\ shutdownRequested' = TRUE
     /\ UNCHANGED <<dataQ, ctrlQ, sentD, sentC, writtenD, writtenC,
                    droppedD, droppedC, ctrlDelayedByData>>
 
@@ -232,7 +255,7 @@ CloseFinish ==
     /\ dataQ' = <<>>
     /\ ctrlQ' = <<>>
     /\ UNCHANGED <<sentD, sentC, writtenD, writtenC, closeReason,
-                   ctrlDelayedByData>>
+                   shutdownRequested, ctrlDelayedByData>>
 
 (* One unit of wall time; every queued frame ages one tick. Enabled only with  *)
 (* a frame to age and while open, and capped so the oldest head never exceeds  *)
@@ -247,7 +270,8 @@ Tick ==
     /\ dataQ' = AgeOne(dataQ)
     /\ ctrlQ' = AgeOne(ctrlQ)
     /\ UNCHANGED <<sentD, sentC, writtenD, writtenC, droppedD, droppedC,
-                   connState, closeReason, ctrlDelayedByData>>
+                   connState, closeReason, shutdownRequested,
+                   ctrlDelayedByData>>
 
 (* Explicit terminal stutter so TLC's deadlock check stays meaningful: every   *)
 (* budget spent and either both queues drained or the connection closed. Under *)
@@ -270,6 +294,7 @@ Next ==
     \/ WriterDrainCtrlFirst
     \/ SojournEvict
     \/ LifecycleClose
+    \/ ShutdownClose
     \/ CloseFinish
     \/ Tick
     \/ Done
@@ -297,7 +322,8 @@ TypeOK ==
     /\ sentD \in 0..DataBudget
     /\ sentC \in 0..CtrlBudget
     /\ connState \in {"Open", "CloseRequested", "Closed"}
-    /\ closeReason \in {"None", "Stale", "Lifecycle"}
+    /\ closeReason \in {"None", "Stale", "Lifecycle", "Shutdown"}
+    /\ shutdownRequested \in BOOLEAN
     /\ ctrlDelayedByData \in BOOLEAN
 
 (* PER-CLASS CONSERVATION: every offered frame of each class is, at every       *)
@@ -323,11 +349,19 @@ ControlAgeBounded ==
 StalenessBounded ==
     connState = "Open" => MaxAge <= SojournBound
 
+(* Once the E3 drain request is represented, the priority reason must have  *)
+(* been installed in the same transition.                                  *)
+ShutdownWins == shutdownRequested => closeReason = "Shutdown"
+
 ----------------------------------------------------------------------------
 (* Temporal *)
 
-(* First reason wins: once recorded, the close reason never changes.            *)
-ReasonStable == [][closeReason # "None" => closeReason' = closeReason]_vars
+(* E3 close priority: an ordinary reason may only remain itself or upgrade to *)
+(* Shutdown; Shutdown itself is terminally stable.                            *)
+ShutdownPriorityStable ==
+    [][ /\ closeReason = "Shutdown" => closeReason' = "Shutdown"
+        /\ closeReason \in {"Stale", "Lifecycle"} =>
+             closeReason' \in {closeReason, "Shutdown"} ]_vars
 
 (* THE sojourn liveness: a non-empty queue never stays non-empty forever — it    *)
 (* drains, or (against a peer that never reads) the sojourn close fires and       *)
