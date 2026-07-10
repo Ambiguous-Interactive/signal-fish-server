@@ -102,6 +102,8 @@
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
     "send_queue_capacity": 1024,
-    "slow_consumer_timeout_ms": 5000
+    "control_queue_capacity": 128,
+    "slow_consumer_timeout_ms": 5000,
+    "max_sojourn_ms": 15000
   }
 }

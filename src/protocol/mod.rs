@@ -1,5 +1,6 @@
 // Protocol module: Message types, validation, and room state management
 
+pub mod delivery;
 pub mod error_codes;
 pub mod messages;
 pub mod room_codes;
@@ -9,6 +10,12 @@ pub mod validation;
 
 // Re-export everything for backward compatibility
 // This allows external code to use `use crate::protocol::*`
+
+// From delivery
+pub use delivery::{
+    DeliveryClass, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason, DeliveryReportPayload,
+    LatestDeliveryCounters, ReliableDeliveryCounters, VolatileDeliveryCounters,
+};
 
 // From error_codes
 pub use error_codes::ErrorCode;

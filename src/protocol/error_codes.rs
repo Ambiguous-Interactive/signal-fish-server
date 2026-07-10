@@ -107,6 +107,11 @@ pub enum ErrorCode {
     /// Existing connections will close with WebSocket close code 4000
     /// (`server_shutdown`) at the drain deadline.
     ServerDraining,
+
+    // Delivery-class validation (2xxx category). Appended at the END for rkyv
+    // discriminant stability; see the signaling-errors note above.
+    /// The requested delivery class/key combination is invalid.
+    InvalidDeliveryClass,
 }
 
 impl ErrorCode {
@@ -292,6 +297,9 @@ impl ErrorCode {
             Self::ServerDraining => {
                 "The server is draining for shutdown and is not accepting new room creation. Retry on another instance or after the drain deadline."
             }
+            Self::InvalidDeliveryClass => {
+                "The game-data delivery class is invalid: latest requires a key, while reliable and volatile must not include one."
+            }
         }
     }
 }
@@ -361,6 +369,7 @@ mod tests {
             ErrorCode::SlowConsumer,
             ErrorCode::ActivityTimeout,
             ErrorCode::ServerDraining,
+            ErrorCode::InvalidDeliveryClass,
         ];
 
         for error_code in &error_codes {
@@ -405,5 +414,15 @@ mod tests {
         let error = ErrorCode::RoomNotFound;
         let json = serde_json::to_string(&error).unwrap();
         assert_eq!(json, "\"ROOM_NOT_FOUND\"");
+    }
+
+    #[test]
+    fn invalid_delivery_class_uses_the_append_only_wire_token() {
+        let encoded = serde_json::to_string(&ErrorCode::InvalidDeliveryClass).unwrap();
+        assert_eq!(encoded, "\"INVALID_DELIVERY_CLASS\"");
+        assert_eq!(
+            serde_json::from_str::<ErrorCode>(&encoded).unwrap(),
+            ErrorCode::InvalidDeliveryClass
+        );
     }
 }

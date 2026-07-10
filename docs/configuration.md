@@ -198,7 +198,9 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection outbound message queue capacity in messages (must be ≥ 1); a full queue applies backpressure to senders |
+| `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY` | `websocket.control_queue_capacity` | `128` | Per-connection control-plane queue capacity in messages (must be ≥ 1) |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds delivery may wait on a full outbound queue before the recipient is disconnected as a slow consumer (must be > 0 and ≤ `600000`) |
+| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS` | `websocket.max_sojourn_ms` | `15000` | Maximum queued data age in milliseconds (must be > `0` and exceed `batch_interval_ms` when batching is enabled) |
 | `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between per-connection `RelayStats` frames for v3 clients (`0` disables; must be ≤ `3600`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
@@ -305,7 +307,9 @@ Complete reference of all configuration options with environment variable overri
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
     "send_queue_capacity": 1024,
-    "slow_consumer_timeout_ms": 5000
+    "control_queue_capacity": 128,
+    "slow_consumer_timeout_ms": 5000,
+    "max_sojourn_ms": 15000
   }
 }
 
@@ -332,6 +336,9 @@ Complete reference of all configuration options with environment variable overri
   to senders. Larger values absorb bigger relay bursts without slowing
   senders; queue slots hold pointers, so a generous capacity costs almost
   nothing until messages actually queue.
+- `control_queue_capacity` - Per-connection control-plane queue capacity in
+  messages (default: 128; must be ≥ 1). This dedicated, priority lane keeps
+  lifecycle, error, and heartbeat traffic from starving behind game data.
 - `slow_consumer_timeout_ms` - How long (milliseconds) delivery may wait for
   space in a full outbound queue before the recipient is disconnected as a
   slow consumer (default: 5000; must be > 0 and ≤ 600000). This is the loud
@@ -340,6 +347,10 @@ Complete reference of all configuration options with environment variable overri
   provides — is closed with a best-effort `SLOW_CONSUMER` error through the
   normal disconnect flow. The server never silently drops a delivery; see
   [Delivery semantics](protocol.md#delivery-semantics).
+- `max_sojourn_ms` - Maximum time a data message may remain queued before the
+  connection is closed loudly as stale (default: 15000; must be > 0). It must
+  be greater than `batch_interval_ms` when batching is enabled, ensuring a
+  healthy message gets a scheduled flush opportunity.
 
 ## Session Topology (Protocol v3)
 

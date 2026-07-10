@@ -434,6 +434,15 @@ pub const fn default_send_queue_capacity() -> usize {
     1024
 }
 
+/// Default per-connection control-plane queue capacity (messages).
+///
+/// Control traffic is small and drained before data traffic. A dedicated
+/// 128-slot lane prevents Pong, errors, and lifecycle messages from waiting
+/// behind a saturated game-data queue without allowing unbounded buffering.
+pub const fn default_control_queue_capacity() -> usize {
+    128
+}
+
 /// Default slow-consumer disconnect timeout in milliseconds.
 ///
 /// When a recipient's outbound queue is full, delivery waits up to this long
@@ -445,6 +454,14 @@ pub const fn default_send_queue_capacity() -> usize {
 /// connection can stall senders in the same room.
 pub const fn default_slow_consumer_timeout_ms() -> u64 {
     5_000
+}
+
+/// Default maximum outbound queue sojourn time in milliseconds.
+///
+/// The 15-second default bounds stale queued state while leaving ample room for
+/// transient client and network stalls.
+pub const fn default_max_sojourn_ms() -> u64 {
+    15_000
 }
 
 /// Default per-connection `RelayStats` emission interval in seconds
