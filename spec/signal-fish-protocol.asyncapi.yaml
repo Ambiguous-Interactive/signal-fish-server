@@ -2,11 +2,12 @@
 # ===========================================================
 #
 # This is the SOURCE-OF-TRUTH, codegen-friendly description of the Signal Fish
-# WebSocket signaling protocol. The wire format is JSON over WebSocket; every
-# message is a `{ "type": <Variant>, "data": <payload> }` envelope (serde
+# WebSocket signaling protocol. The signaling wire format is JSON over
+# WebSocket; every text message is a `{ "type": <Variant>, "data": <payload> }` envelope (serde
 # `#[serde(tag = "type", content = "data")]`). Variants WITHOUT a payload
 # (e.g. LeaveRoom, Ping, RoomLeft, Pong) are sent as `{ "type": <Variant> }`
-# with no `data` field.
+# with no `data` field. `GameDataBinary` is the one physical binary-frame
+# exception and is modeled explicitly as a MessagePack map below.
 #
 # It models EVERY `ClientMessage` (send / client -> server) and `ServerMessage`
 # (receive / server -> client) variant from `src/protocol/messages.rs`, plus the
@@ -43,17 +44,18 @@
 #   (`supported_transports` / `supported_topologies` / `protocol_version` on
 #   Authenticate) plus the peer-to-peer messages: Signal, SessionPlan, NewPeer,
 #   TransportStatus, PeerTransportStatus. v3 messages are tagged `x-protocol: v3`
-#   below. A relay-only room never emits SessionPlan, so a v2 client never sees
-#   v3 messages.
-# * v3 ALSO adds a relay-observability surface (there is no separate v4 — v3 is
-#   the single unshipped "current" version): the server stamps relayed
-#   GameData / GameDataBinary with a per-(sender, room) `seq` + incarnation
-#   `epoch` (v3 recipients only — pre-v3 (v2) recipients' bytes are unchanged)
-#   so any server-side loss is detectable end-to-end as a gap, and can emit the
-#   opt-in periodic RelayStats frame for attribution. The delivery contract
-#   itself (deliver-or-disconnect, SLOW_CONSUMER) is version-independent; see
-#   the ServerGameData and RelayStats schema descriptions for the normative
-#   wording. The server's default negotiation ceiling is 3
+#   below. SessionPlan is version-gated: v3 members receive an explicit
+#   relay/relay plan when no upgrade rung fits, while v2 members never receive
+#   any v3 message.
+# * v3 ALSO adds relay delivery classes and accountability (there is no separate
+#   v4 — v3 is the single unshipped "current" version). Client GameData may
+#   request reliable, keyed-latest, or volatile delivery. The server stamps
+#   relayed GameData / GameDataBinary with a per-(sender, room) `seq` +
+#   incarnation `epoch` (v3 recipients only — pre-v3 (v2) recipients' bytes are
+#   unchanged), and sends exact, causally-prioritized DeliveryReport gap ranges
+#   for class-policy loss. Opt-in RelayStats remains the aggregate diagnostic
+#   surface. See the ServerGameData and DeliveryReport schema descriptions for
+#   the normative wording. The server's default negotiation ceiling is 3
 #   (`protocol.max_protocol_version`).
 # See docs/concepts/protocol-versions.md and docs/guides/building-a-client.md.
 
@@ -65,8 +67,8 @@ info:
   description: |
     JSON-over-WebSocket signaling protocol for peer-to-peer game networking.
     v2 relay floor + optional v3 capability negotiation / WebRTC signaling +
-    optional v3 relay sequencing (GameData.seq) and delivery statistics
-    (RelayStats).
+    v3 delivery classes, relay sequencing (GameData.seq/epoch), exact
+    DeliveryReport accountability, and aggregate RelayStats diagnostics.
   license:
     name: MIT
 
@@ -138,6 +140,7 @@ channels:
       PeerTransportStatus: { $ref: '#/components/messages/PeerTransportStatus' }
       RelayStats: { $ref: '#/components/messages/RelayStats' }
       GoingAway: { $ref: '#/components/messages/GoingAway' }
+      DeliveryReport: { $ref: '#/components/messages/DeliveryReport' }
 
 operations:
   sendToServer:
@@ -194,6 +197,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/PeerTransportStatus' }
       - { $ref: '#/channels/signaling/messages/RelayStats' }
       - { $ref: '#/channels/signaling/messages/GoingAway' }
+      - { $ref: '#/channels/signaling/messages/DeliveryReport' }
 
 components:
   messages:
@@ -295,10 +299,16 @@ components:
       payload: { $ref: '#/components/schemas/ServerGameData' }
     GameDataBinary:
       title: GameDataBinary
+      contentType: application/msgpack
       summary: >-
-        In-memory broadcast carrier. Negotiated MessagePack clients receive a bare
-        binary WebSocket frame, not this enveloped variant.
-      payload: { $ref: '#/components/schemas/GameDataBinary' }
+        Physical binary WebSocket delivery: the frozen protocol-v2 MessagePack
+        map or the protocol-v3 MessagePack accountability envelope.
+      x-rust-server-variant: GameDataBinary
+      x-websocket-binary-envelope: messagepack
+      payload:
+        oneOf:
+          - { $ref: '#/components/schemas/V2BinaryGameDataEnvelope' }
+          - { $ref: '#/components/schemas/V3BinaryGameDataEnvelope' }
     AuthorityChanged:
       title: AuthorityChanged
       payload: { $ref: '#/components/schemas/AuthorityChanged' }
@@ -321,14 +331,15 @@ components:
     NewPeer:
       title: NewPeer
       summary: >-
-        v3: a new peer is available for a WebRTC connection. you_initiate
-        designates the single offerer (server-driven glare resolution).
+        v3 compatibility shape for an additive WebRTC peer directive.
+        Current finalized membership changes use complete SessionPlan refreshes.
       payload: { $ref: '#/components/schemas/NewPeer' }
     SessionPlan:
       title: SessionPlan
       summary: >-
-        v3: per-recipient session directive at lobby finalization. Latest
-        SessionPlan wins. A relay-only room emits none.
+        v3: per-recipient authoritative session directive at lobby finalization
+        and finalized membership refreshes. Latest SessionPlan wins. The relay
+        floor is an explicit relay/relay plan with no peers.
       payload: { $ref: '#/components/schemas/SessionPlan' }
     Pong:
       title: Pong
@@ -375,6 +386,10 @@ components:
       title: GoingAway
       summary: 'v3: graceful shutdown-drain advisory before close code 4000.'
       payload: { $ref: '#/components/schemas/GoingAway' }
+    DeliveryReport:
+      title: DeliveryReport
+      summary: 'v3: cumulative per-class outcomes plus exact newly-accounted gap ranges.'
+      payload: { $ref: '#/components/schemas/DeliveryReport' }
 
   schemas:
     # ---------------------------------------------------------------------
@@ -396,6 +411,16 @@ components:
       type: string
       description: Game data encoding. rkyv is reserved/internal and not advertised.
       enum: [json, message_pack, rkyv]
+    DeliveryClass:
+      type: string
+      description: >-
+        Protocol-v3 game-data delivery policy. Omission means reliable.
+        latest requires a sender-defined key; reliable and volatile forbid one.
+      enum: [reliable, latest, volatile]
+    DeliveryGapReason:
+      type: string
+      description: Why an exact server-stamped sequence range was not delivered.
+      enum: [latest_superseded, latest_dropped_full, volatile_dropped, unsupported_format]
     LobbyState:
       type: string
       enum: [waiting, lobby, finalized]
@@ -417,6 +442,15 @@ components:
       type: string
       format: uuid
       description: Player UUID.
+    BinaryPlayerId:
+      type: string
+      contentEncoding: binary
+      minLength: 16
+      maxLength: 16
+      x-messagepack-type: bin
+      description: >-
+        A UUID encoded as exactly 16 MessagePack bin bytes in RFC 4122/network
+        byte order (the canonical UUID octet sequence, not a UTF-8 UUID string).
     RoomId:
       type: string
       format: uuid
@@ -478,6 +512,60 @@ components:
         - SLOW_CONSUMER
         - ACTIVITY_TIMEOUT
         - SERVER_DRAINING
+        - INVALID_DELIVERY_CLASS
+
+    ReliableDeliveryCounters:
+      type: object
+      required: [delivered, abandoned, unsupported_format]
+      properties:
+        delivered: { type: integer, minimum: 0 }
+        abandoned:
+          type: integer
+          minimum: 0
+          description: Messages abandoned together with a loud connection close.
+        unsupported_format: { type: integer, minimum: 0 }
+    LatestDeliveryCounters:
+      type: object
+      required: [delivered, superseded, dropped_full, abandoned, unsupported_format]
+      properties:
+        delivered: { type: integer, minimum: 0 }
+        superseded: { type: integer, minimum: 0 }
+        dropped_full: { type: integer, minimum: 0 }
+        abandoned:
+          type: integer
+          minimum: 0
+          description: Messages abandoned together with a loud connection close.
+        unsupported_format: { type: integer, minimum: 0 }
+    VolatileDeliveryCounters:
+      type: object
+      required: [delivered, dropped, abandoned, unsupported_format]
+      properties:
+        delivered: { type: integer, minimum: 0 }
+        dropped: { type: integer, minimum: 0 }
+        abandoned:
+          type: integer
+          minimum: 0
+          description: Messages abandoned together with a loud connection close.
+        unsupported_format: { type: integer, minimum: 0 }
+    DeliveryCountersByClass:
+      type: object
+      required: [reliable, latest, volatile]
+      properties:
+        reliable: { $ref: '#/components/schemas/ReliableDeliveryCounters' }
+        latest: { $ref: '#/components/schemas/LatestDeliveryCounters' }
+        volatile: { $ref: '#/components/schemas/VolatileDeliveryCounters' }
+    DeliveryGap:
+      type: object
+      description: >-
+        Exact inclusive server-stamped sequence range omitted for one recipient.
+        from_seq must not exceed to_seq.
+      required: [from_player, epoch, from_seq, to_seq, reason]
+      properties:
+        from_player: { $ref: '#/components/schemas/PlayerId' }
+        epoch: { type: integer, minimum: 1, maximum: 4294967295 }
+        from_seq: { type: integer, minimum: 1 }
+        to_seq: { type: integer, minimum: 1 }
+        reason: { $ref: '#/components/schemas/DeliveryGapReason' }
 
     # ---------------------------------------------------------------------
     # Shared object schemas
@@ -500,8 +588,28 @@ components:
         username: { type: string }
         credential: { type: string }
     PlayerInfo:
+      oneOf:
+        - { $ref: '#/components/schemas/V2PlayerInfo' }
+        - { $ref: '#/components/schemas/V3PlayerInfo' }
+      description: >-
+        Version-disjoint room member snapshot. Protocol v2 omits relay
+        accountability fields; protocol v3 requires the paired epoch/seq
+        recipient baseline.
+    V2PlayerInfo:
       type: object
       required: [id, name, is_authority, is_ready, connected_at]
+      additionalProperties: false
+      properties:
+        id: { $ref: '#/components/schemas/PlayerId' }
+        name: { type: string }
+        is_authority: { type: boolean }
+        is_ready: { type: boolean }
+        connected_at: { type: string, format: date-time }
+        connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
+    V3PlayerInfo:
+      type: object
+      required: [id, name, is_authority, is_ready, connected_at, epoch, seq]
+      additionalProperties: false
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
@@ -512,12 +620,21 @@ components:
         epoch:
           type: integer
           minimum: 1
+          maximum: 4294967295
           description: >-
             v3 only: this player's current incarnation epoch (see
             ServerGameData.epoch), carried on room snapshots (RoomJoined,
-            PlayerJoined, Reconnected) so a v3 recipient learns each member's
-            epoch before that member's first relayed frame. Absent for pre-v3
-            recipients (byte-identical wire).
+            SpectatorJoined, PlayerJoined, Reconnected) so a v3 recipient learns
+            each member's epoch before that member's first relayed frame.
+        seq:
+          type: integer
+          minimum: 0
+          description: >-
+            v3 only: exact recipient-visible relay baseline paired with epoch.
+            This is the last sequence already outside this snapshot recipient's
+            delivery obligation (0 means none). Subsequent delivery or exact
+            gap coverage therefore starts at seq + 1. Absent together with
+            epoch for pre-v3 recipients (byte-identical wire).
     SenderWatermark:
       type: object
       required: [player_id, epoch, seq]
@@ -533,6 +650,7 @@ components:
         epoch:
           type: integer
           minimum: 1
+          maximum: 4294967295
         seq:
           type: integer
           minimum: 0
@@ -648,6 +766,11 @@ components:
       required: [type]
     ClientGameData:
       type: object
+      description: >-
+        Client-to-server game data. class and key are protocol-v3-only; pre-v3
+        clients omit both. Omitted class means reliable. A well-typed illegal
+        class/key pairing returns INVALID_DELIVERY_CLASS; unknown tokens, wrong
+        types, out-of-range keys, and explicit null are malformed INVALID_INPUT.
       properties:
         type: { const: GameData }
         data:
@@ -656,6 +779,21 @@ components:
           properties:
             data:
               description: Opaque application game data (any JSON value).
+            class: { $ref: '#/components/schemas/DeliveryClass' }
+            key:
+              type: integer
+              minimum: 0
+              maximum: 4294967295
+              description: Sender-defined coalescing key, present exactly for class latest.
+          allOf:
+            - if:
+                required: [class]
+                properties:
+                  class: { const: latest }
+              then:
+                required: [key]
+              else:
+                not: { required: [key] }
       required: [type, data]
     ClientSignal:
       type: object
@@ -745,7 +883,9 @@ components:
       required: [type]
     TransportStatus:
       type: object
-      description: 'v3 only. Purely informational; the relay floor never closes.'
+      description: >-
+        v3 only. Purely informational: P2P status never disables the relay
+        floor. Delivery failures can still close the physical socket loudly.
       properties:
         type: { const: TransportStatus }
         data:
@@ -794,9 +934,9 @@ components:
               type: array
               items: { $ref: '#/components/schemas/GameDataEncoding' }
             player_name_rules: { $ref: '#/components/schemas/PlayerNameRulesPayload' }
-            protocol_version: { type: integer }
-            min_protocol_version: { type: integer }
-            max_protocol_version: { type: integer }
+            protocol_version: { type: integer, minimum: 2, maximum: 3 }
+            min_protocol_version: { type: integer, minimum: 2, maximum: 3 }
+            max_protocol_version: { type: integer, minimum: 2, maximum: 3 }
             transports:
               type: array
               description: Server message transports available to this connection.
@@ -897,27 +1037,42 @@ components:
       required: [type, data]
     PlayerLeft:
       type: object
+      description: >-
+        v3 adds a terminal sender watermark so the recipient can retain any
+        priority-overtaken data tail until delivered frames plus exact prior
+        gaps cover final_seq, then retire that sender's accounting state. The
+        frozen v2 form contains player_id only.
       properties:
         type: { const: PlayerLeft }
         data:
           type: object
-          required: [player_id]
           properties:
             player_id: { $ref: '#/components/schemas/PlayerId' }
+            epoch:
+              type: integer
+              minimum: 1
+              maximum: 4294967295
+            final_seq:
+              type: integer
+              minimum: 0
+          oneOf:
+            - required: [player_id]
+              not:
+                anyOf:
+                  - required: [epoch]
+                  - required: [final_seq]
+            - required: [player_id, epoch, final_seq]
       required: [type, data]
     ServerGameData:
       type: object
       description: >-
-        DELIVERY CONTRACT (normative, all protocol versions): the relay never
-        silently drops a room-scoped message. Each relayed frame is either
-        enqueued for every connected room member (with backpressure applied to
-        the sender while a recipient's queue is momentarily full) or the
-        recipient that cannot absorb traffic for
-        websocket.slow_consumer_timeout_ms is disconnected LOUDLY — a
-        best-effort Error frame with error_code SLOW_CONSUMER followed by a
-        close, and a PlayerLeft broadcast to the room. Clients MUST treat a
-        SLOW_CONSUMER close as "you lost relayed messages" and resynchronize
-        after reconnecting.
+        DELIVERY CONTRACT: pre-v3 traffic and v3 reliable traffic preserve every
+        message or disconnect the recipient loudly. Protocol-v3 latest and
+        volatile traffic may omit data only under their documented queue policy;
+        every omission is counted and named by an exact, causally-prioritized
+        DeliveryReport gap range before later data exposes the discontinuity.
+        class omission means reliable. A recipient closed with SLOW_CONSUMER must
+        resynchronize after reconnecting.
       properties:
         type: { const: GameData }
         data:
@@ -932,60 +1087,98 @@ components:
               minimum: 1
               description: >-
                 v3 only: server-stamped relay sequence number, per (sender,
-                room). Starts at 1 and is strictly contiguous per sender while
-                the recipient stays connected, so a gap can only mean (a) the
-                recipient's own SLOW_CONSUMER eviction (messages abandoned with
-                the disconnect it was told about), (b) the sender leaving and
-                rejoining (correlate with PlayerLeft + PlayerJoined) or
-                reconnecting (PlayerReconnected) — both RESTART the counter at
-                1 — or (c) the recipient's own reconnect. Absent for pre-v3
-                recipients (their bytes are byte-identical to v3 and earlier).
-                Client-to-server GameData carries no seq; stamping is purely
-                server-side.
+                room). Starts at 1 and advances once for every accepted send.
+                Within an epoch, surviving frames are strictly increasing; a
+                discontinuity is legal only when every missing sequence is
+                covered by the union of earlier exact DeliveryReport gaps, the
+                recipient disconnected loudly, or the receiver re-baselined
+                from Reconnected.sender_watermarks. Priority lifecycle control
+                may overtake queued old-epoch data: validate that tail but do not
+                apply it after the lifecycle change. A future epoch must be
+                announced; after data advances, older epochs are invalid. A new
+                sender incarnation bumps epoch and restarts seq at 1.
+                Absent for pre-v3 recipients (their bytes are byte-identical).
+                Client-to-server GameData carries no seq or epoch; stamping is
+                purely server-side.
             epoch:
               type: integer
               minimum: 1
+              maximum: 4294967295
               description: >-
                 v3 only: server-tracked incarnation epoch. A single monotonic
                 per-connection counter that increments once per incarnation (the
                 first join is 1; each join-after-leave or reconnect increments
                 it; NOT reset when the same connection switches rooms), while seq
-                restarts at 1 within each epoch, so (epoch, seq) is strictly
-                lexicographically increasing per (sender, room) as observed by
-                any single recipient. This makes the seq restart of case (b)
-                SELF-DESCRIBING. The absolute value is not meaningful: baseline
-                each sender from the epoch you first observe for it (a newly
-                observed sender may start above 1) and compare relatively. Stamped
-                together with seq; absent for pre-v3 recipients (byte-identical
-                wire). Also carried on room snapshots (see PlayerInfo.epoch,
+                restarts at 1 within each epoch. Data-lane stamps increase
+                lexicographically per (sender, room), but priority lifecycle
+                control may be observed before a queued old-epoch tail. The
+                absolute value is not meaningful: baseline each sender from the
+                epoch first observed in a snapshot, require lifecycle announcement
+                of future epochs, and compare relatively. Stamped together with
+                seq; absent for pre-v3 recipients (byte-identical wire). Also
+                carried on room snapshots (see PlayerInfo.epoch,
                 PlayerReconnected.epoch).
+            class:
+              allOf: [{ $ref: '#/components/schemas/DeliveryClass' }]
+              description: >-
+                v3 only: the sender-requested delivery class, echoed when the
+                client supplied it. Absence means reliable.
+            key:
+              type: integer
+              minimum: 0
+              maximum: 4294967295
+              description: 'v3 only: sender-defined coalescing key for class latest.'
+          allOf:
+            - if:
+                required: [class]
+                properties:
+                  class: { const: latest }
+              then:
+                required: [key]
+              else:
+                not: { required: [key] }
       required: [type, data]
-    GameDataBinary:
+    V2BinaryGameDataEnvelope:
       type: object
+      additionalProperties: false
+      x-protocol-version: 2
       description: >-
-        Same delivery contract and v3 seq semantics as GameData (text and
-        binary relay share one per-(sender, room) counter). On the bare binary
-        MessagePack frame actually sent to negotiated-MessagePack clients, the
-        stamp is the optional trailing `seq` map key; the json/rkyv binary
-        passthrough forms have no envelope and therefore carry no stamp.
+        The frozen three-field MessagePack map sent to protocol-v2 recipients
+        that negotiated message_pack. Legacy JSON and rkyv binary paths are raw
+        payload passthrough and do not use this map.
+      required: [from_player, encoding, payload]
       properties:
-        type: { const: GameDataBinary }
-        data:
-          type: object
-          required: [from_player, encoding, payload]
-          properties:
-            from_player: { $ref: '#/components/schemas/PlayerId' }
-            encoding: { $ref: '#/components/schemas/GameDataEncoding' }
-            payload: { type: string, description: Byte payload (serde_bytes). }
-            seq:
-              type: integer
-              minimum: 1
-              description: 'v3 only: see ServerGameData seq (identical semantics).'
-            epoch:
-              type: integer
-              minimum: 1
-              description: 'v3 only: see ServerGameData epoch (identical semantics).'
-      required: [type, data]
+        from_player: { $ref: '#/components/schemas/BinaryPlayerId' }
+        encoding: { const: message_pack }
+        payload:
+          type: string
+          contentEncoding: binary
+          x-messagepack-type: bin
+          description: Opaque application payload bytes.
+    V3BinaryGameDataEnvelope:
+      type: object
+      additionalProperties: false
+      x-protocol-version: 3
+      description: >-
+        The physical MessagePack map on every protocol-v3 binary WebSocket
+        delivery. Payload bytes remain opaque; encoding identifies only those
+        bytes, while seq and epoch account the shared relay stream.
+      required: [from_player, encoding, payload, seq, epoch]
+      properties:
+        from_player: { $ref: '#/components/schemas/BinaryPlayerId' }
+        encoding: { $ref: '#/components/schemas/GameDataEncoding' }
+        payload:
+          type: string
+          contentEncoding: binary
+          x-messagepack-type: bin
+          description: Opaque application payload bytes.
+        seq:
+          type: integer
+          minimum: 1
+        epoch:
+          type: integer
+          minimum: 1
+          maximum: 4294967295
     AuthorityChanged:
       type: object
       properties:
@@ -1050,7 +1243,9 @@ components:
       required: [type, data]
     NewPeer:
       type: object
-      description: 'v3 only.'
+      description: >-
+        v3 compatibility shape. Current server membership refreshes use complete
+        SessionPlan messages instead of emitting NewPeer deltas.
       properties:
         type: { const: NewPeer }
         data:
@@ -1068,7 +1263,9 @@ components:
       type: object
       description: >-
         v3 only. Per-recipient. Payload is a flattened SessionPlanPayload (boxed
-        newtype variant). Latest SessionPlan wins.
+        newtype variant). Latest SessionPlan wins. Every v3 member receives one
+        after GameStarting, including an explicit relay/relay reset when no
+        upgrade rung fits; protocol-v2 members receive none.
       properties:
         type: { const: SessionPlan }
         data:
@@ -1087,8 +1284,19 @@ components:
               type: array
               items: { $ref: '#/components/schemas/IceServer' }
             fallback:
-              allOf: [{ $ref: '#/components/schemas/Transport' }]
+              const: relay
               description: Universal fallback transport; always relay (the floor).
+          allOf:
+            - if:
+                required: [topology]
+                properties:
+                  topology: { const: relay }
+              then:
+                properties:
+                  transport: { const: relay }
+                  peers: { maxItems: 0 }
+                  ice_servers: { maxItems: 0 }
+                not: { required: [host] }
       required: [type, data]
     Pong:
       type: object
@@ -1192,6 +1400,7 @@ components:
             epoch:
               type: integer
               minimum: 1
+              maximum: 4294967295
               description: >-
                 v3 only: the reconnector's new incarnation epoch (see
                 ServerGameData.epoch) — the same value now stamped on its relayed
@@ -1314,11 +1523,11 @@ components:
         since the connection registered and survive a reconnection's
         player-id reassignment, so a frame skipped while the connection's
         queue is full (the frame is advisory and never waits) loses nothing.
-        Intended use: attribute a GameData seq gap — dropped_for_you rises
-        with messages the server abandoned for THIS connection, and
-        backpressure_events rising means this connection is draining too
-        slowly and is pacing its room's senders toward a SLOW_CONSUMER
-        disconnect.
+        Intended use: aggregate diagnostics. Exact sequence-gap attribution is
+        carried by DeliveryReport; dropped_for_you remains the frozen aggregate
+        count for this connection. backpressure_events rising means this
+        connection is draining too slowly and is pacing reliable senders toward
+        a SLOW_CONSUMER disconnect.
       properties:
         type: { const: RelayStats }
         data:
@@ -1327,20 +1536,24 @@ components:
           properties:
             interval_ms:
               type: integer
+              minimum: 1
               description: Configured emission interval in milliseconds.
             sent_to_you:
               type: integer
+              minimum: 0
               description: >-
                 Messages the delivery layer accepted (enqueued) for this
                 connection since it registered (excludes RelayStats itself).
             dropped_for_you:
               type: integer
+              minimum: 0
               description: >-
                 Messages abandoned for this connection: undeliverable-encoding
                 replacements while connected, plus slow-consumer timeout
                 drops (which coincide with this connection's disconnect).
             backpressure_events:
               type: integer
+              minimum: 0
               description: >-
                 Deliveries that had to wait on this connection's momentarily
                 full outbound queue.
@@ -1364,4 +1577,30 @@ components:
               type: integer
               nullable: true
               description: Optional operator retry hint.
+      required: [type, data]
+    DeliveryReport:
+      type: object
+      description: >-
+        Protocol-v3 delivery accountability for this connection. Per-class
+        counters are cumulative. Each gaps entry is a newly-accounted exact
+        inclusive range and is delivered on the priority control lane before
+        any later GameData can expose that gap. A client authorizes a hole only
+        when the union of prior non-overlapping ranges covers every missing
+        sequence. Each loss-counter delta equals the current report's range units
+        for that reason. Counter-only snapshots omit gaps.
+      properties:
+        type: { const: DeliveryReport }
+        data:
+          type: object
+          required: [per_class]
+          properties:
+            per_class: { $ref: '#/components/schemas/DeliveryCountersByClass' }
+            gaps:
+              type: array
+              minItems: 1
+              maxItems: 256
+              items: { $ref: '#/components/schemas/DeliveryGap' }
+              description: >-
+                Exact newly-accounted ranges; omitted on a counter-only snapshot.
+                Additional non-mergeable ranges roll into later priority reports.
       required: [type, data]

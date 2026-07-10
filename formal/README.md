@@ -1,8 +1,9 @@
 # Formal Verification (TLA+ / TLC)
 
 This directory contains the TLA+ specification of the Protocol v3 per-room session
-lifecycle — finalize-time plan selection, per-recipient `SessionPlan` emission,
-late-join / seat-fill pairing, and host-failover re-planning — together with the TLC
+lifecycle — finalize-time plan selection, authoritative per-recipient
+`SessionPlan` publication, late-join / seat-fill membership refreshes, and
+host-failover re-planning — together with the TLC
 model configurations that exhaustively check it.
 
 The spec mirrors the implementation, not an idealization: every operator corresponds to
@@ -98,7 +99,7 @@ this table and may drift a few lines.
 | Spec operator / action                  | Code                                                                                          |
 | --------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `UpgradeLadder`                          | `UPGRADE_LADDER` — `src/server/session_policy.rs:179`                                          |
-| `RelayPair`                              | `RELAY_FLOOR` — `src/server/session_policy.rs:189`                                             |
+| `RelayPair` / `RelayPlan`                | `RELAY_FLOOR` and the explicit relay branch in `membership_session_decision` — `src/server/session_policy.rs` |
 | `TopologyRank`                           | `topology_rank` — `src/server/session_policy.rs:197`                                           |
 | `TransportEnabled`                       | `transport_enabled` — `src/server/session_policy.rs:207`                                       |
 | `IsValidPair`                            | `is_valid_pair` — `src/server/session_policy.rs:224`                                           |
@@ -109,11 +110,11 @@ this table and may drift a few lines.
 | `Pairable`                               | `SessionPlanDecision::pairable` / `ActiveSessionPlan::supported_by` — `session_policy.rs:366`  |
 | `HostInvalid`                            | `ActiveSessionPlan::host_invalid` — `src/server/session_policy.rs:88`                          |
 | `PlanFor`                                | `SessionPlanDecision::plan_for` + `host_peers_for` — `src/server/session_policy.rs:409,450`    |
-| `NewPeersFor`                            | `announce_webrtc_peer_to_members` / `announce_webrtc_peer_in_star` — `signaling.rs:375,413`    |
 | `V3Members` delivery gate                | v3 gate in `send_session_plan_to` — `src/server/session_policy.rs:899`                         |
 | `PlansForAll`                            | `send_session_plans_to_members` — `src/server/session_policy.rs:860`                           |
+| `PlanPublication`                        | per-recipient plan batches in `start_game_publication_builder` / `publish_finalized_join_membership` |
 | `ReplanResult`                           | `replan_host_session` — `src/server/session_policy.rs:793`                                     |
-| `LateJoinResult` (inside `Join`)         | `handle_active_session_late_join` — `src/server/signaling.rs:246`                              |
+| `LateJoinResult` (inside `Join`)         | `membership_session_decision` + `publish_finalized_join_membership`                            |
 | `DepartureResult` (inside `Depart`)      | `handle_session_member_departure` — `src/server/session_policy.rs:692`                         |
 | `Finalize` trigger                       | `RoomOperationCoordinator::handle_start_game` — `src/coordination/room_coordinator.rs:568` (explicit `StartGame`: not already `Finalized`, every current player ready, sender authorized — the room's `authority_player` if set, else any member; min 1 player) |
 | `Finalize` emission                      | `emit_session_plan` (after coordinator finalize) — `src/server/session_policy.rs:544`          |
@@ -130,19 +131,19 @@ this table and may drift a few lines.
 | `TypeOK`                      | Variable domains; member list duplicate-free and within `max_players`                         |
 | `AuthorityIsCurrentMember`    | `remove_player_from_room` clears a departing authority                                        |
 | `PlanLegality`                | Only ladder rungs are ever stored; the relay floor is never stored (`is_valid_pair`)          |
-| `V2Gating`                    | Appendix K: no `SessionPlan`/`NewPeer` ever reaches (or names) a sub-v3 connection            |
+| `V2Gating`                    | Appendix K: no `SessionPlan` ever reaches a sub-v3 connection                                  |
 | `HostValid`                   | A stored host plan always names a current, session-capable member — a theorem of the atomic-event abstraction (see [Atomicity argument](#atomicity-argument)) |
 | `CeilingRespected`            | Stored topology rank never exceeds the desired ceiling (`topology_rank` gate)                 |
 | `PeerCapability`              | No peer list (even a stale one) names the recipient or a member that cannot run the pair      |
 | `MeshPlanExactness`           | Fresh mesh plans list exactly the other capable members, glare-correct `initiate`             |
 | `GlareAntisymmetry`           | Exactly one initiator per mutually listed mesh pair — the smaller id (`local_initiates`)      |
 | `StarProperty`                | Fresh host plans form a star: host answers all capable clients; clients offer to host only    |
-| `EmissionRequiresStoredPlan`  | Plans are only ever emitted while a matching stored decision exists, carrying its exact pair  |
+| `EmissionMatchesSessionState` | Fresh plans match the stored decision, or explicitly reset to relay when no plan is stored     |
 | `NoEmissionWithoutQualifier`  | A replan emission implies a capable elected host; the no-qualifier arm drops + stays silent   |
-| `NewPeerSoundness`            | `NewPeer` only for WebRTC sessions, both sides capable members, topology-correct direction    |
+| `PublicationCoverage`         | Every publication covers exactly every current v3 member, including incumbents after a join   |
 | `StickyPairProperty` (action) | Topology/transport never change while stored; failover rewrites only `host`                   |
 | `HostDepartureHealedSameStep` (action) | A departing stored host is re-elected (qualifier survives) or the entry dropped — same step |
-| `RelayFloorOnly` (`Floor` model only) | With both upgrade transports config-disabled, nothing is ever stored, delivered, or emitted (the `transport_enabled` denial path) |
+| `RelayFloorOnly` (`Floor` model only) | With both upgrade transports disabled, no plan is stored; every v3 delivery is an explicit relay plan |
 
 ## Model configurations
 
@@ -157,17 +158,18 @@ live sessions, up to that same ceiling.
 | Configuration | Players (profiles)                                                       | Reaches                                                                                                       |
 | ------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
 | `Mesh`        | 2 × `V3Full`, `V3MeshWebRtc`, `V3HostWebRtcOnly`, `V3RelayOnly`           | mesh+webrtc rung; host+webrtc under the mesh ceiling; relay floor; v3-but-incapable seat-fills both directions |
-| `Host`        | 2 × `V3Full`, `V3HostWebRtcOnly`, `V2`                                    | host+webrtc star; v2 seat-fill (Appendix-K silence); capability-filtered failover; v2 authority never elected; no-qualifier entry drop |
-| `HostDirect`  | `V3HostDirect`, 2 × `V3Full`, `V3RelayOnly`; `enable_webrtc = false`      | host+direct rung via the transport config gate; `SessionPlan` without any `NewPeer` (non-WebRTC session)       |
-| `Floor`       | same players as `Mesh`; `enable_webrtc = false`, `enable_direct = false`  | the enabled-gate denial path end-to-end: capability-rich rooms still floor to relay; nothing is ever stored, delivered, or emitted (`RelayFloorOnly`) |
+| `Host`        | 2 × `V3Full`, `V3HostWebRtcOnly`, `V2`                                    | host+webrtc star; v2 seat-fill with full v3-incumbent refresh; capability-filtered failover; v2 authority never elected; no-qualifier entry drop |
+| `HostDirect`  | `V3HostDirect`, 2 × `V3Full`, `V3RelayOnly`; `enable_webrtc = false`      | host+direct rung via the transport config gate; complete non-WebRTC `SessionPlan` refreshes                     |
+| `Floor`       | same players as `Mesh`; `enable_webrtc = false`, `enable_direct = false`  | enabled-gate denial end-to-end: nothing stored; explicit relay plans delivered to every current v3 member (`RelayFloorOnly`) |
 
 The five required capability profiles (`V2`, `V3RelayOnly`, `V3MeshWebRtc`,
 `V3HostWebRtcOnly`, `V3Full`) are all covered across the `Mesh`, `Host`, and
 `HostDirect` models; `V3HostDirect` (direct without WebRTC) is added so the third
 ladder rung is reachable while WebRTC-capable members exist. The `Floor` model pins the
 opposite direction — config gates deny every rung even though the members could run
-them, so `ChoosePair` must always return the relay floor and the room must store
-nothing. The `DESIRED = relay` ceiling (denial by topology rank rather than transport
+them, so `ChoosePair` must always return the relay floor, the room must store
+nothing, and every v3 publication must be an explicit relay reset. The
+`DESIRED = relay` ceiling (denial by topology rank rather than transport
 gate) is additionally covered by the randomized-config proptests
 (`session_policy_tests.rs::properties`, whose generated `SessionConfig`s draw
 `default_topology` and per-game mappings from all three topologies).
@@ -176,28 +178,23 @@ gate) is additionally covered by the randomized-config proptests
 
 | Configuration | States generated | Distinct states | Graph depth | Wall time |
 | ------------- | ---------------- | --------------- | ----------- | --------- |
-| `Mesh`        | 896,259          | 286,344         | 12          | ~3 s      |
-| `Host`        | 165,525          | 51,593          | 12          | ~1 s      |
-| `HostDirect`  | 240,567          | 78,167          | 12          | ~1 s      |
-| `Floor`       | 17,643           | 4,069           | 12          | ~1 s      |
+| `Mesh`        | 517,050          | 151,344         | 12          | ~7 s      |
+| `Host`        | 79,948           | 22,710          | 12          | ~2 s      |
+| `HostDirect`  | 111,630          | 32,751          | 12          | ~3 s      |
+| `Floor`       | 66,463           | 16,676          | 12          | ~2 s      |
 
-The reachable state space **widened** when the finalize trigger changed from "the room
-is full" to "an explicit `StartGame` on any non-empty room": a room can now store and
-emit a session plan at 1 or 2 members (below `MAX_PLAYERS = 3`), so finalize-time
-membership ranges over every non-empty subset rather than only the full ones. Every
-invariant and property still holds across all four models — no invariant had to be
-relaxed; the additional states are sub-ceiling finalized sessions (and their late-join /
-departure / replan continuations), which the existing contracts already covered for any
-membership size.
+The reachable state space includes finalization at every non-empty membership below
+`MAX_PLAYERS`, plus an explicit relay delivery for each v3 recipient and complete
+membership refreshes after finalized joins. Those observable publications make the
+floor configuration non-vacuous. Every listed invariant and action property holds
+across all four models.
 
 Reachability of the interesting states was confirmed with temporary negated "sanity"
 invariants during development (each must be _violated_): mesh and host plans stored, the
-host+direct rung selected, replan emissions, `NewPeer` emissions, v2 seat-fill into a live
-session, the no-qualifier entry drop, and late-join plan delivery. In the `HostDirect`
-model the "a `NewPeer` was emitted" probe is **unreachable**, which is itself the
-checked contract (non-WebRTC sessions never announce `NewPeer`). The `Floor` model
-needs no reachability probes at all: its contract is exactly an unreachability claim,
-stated directly as the `RelayFloorOnly` invariant.
+host+direct rung selected, replan emissions, v2 seat-fill into a live session,
+the no-qualifier entry drop, and full late-join plan publication. The `Floor`
+model reaches explicit relay deliveries while proving that no sticky plan is
+ever stored, directly through the `RelayFloorOnly` invariant.
 
 ## Modeling decisions
 
@@ -240,8 +237,8 @@ When the stored entry is dropped (last member out, or no qualified host remains)
 server does **not** retract previously delivered plans — clients keep them and fall back
 to the relay floor. The model mirrors this honestly: `delivered` is never cleared, so
 "no stale plan exists" is deliberately **not** an invariant. The soundness claim is about
-_emission_: `EmissionRequiresStoredPlan` states plans are only ever created while a
-matching stored decision exists and carry exactly its pair and host. Exactness claims
+_emission_: `EmissionMatchesSessionState` states plans carry the stored pair and
+host when one exists, or the explicit relay reset when it does not. Exactness claims
 (`MeshPlanExactness`, `StarProperty`, `GlareAntisymmetry`) are evaluated against
 `lastEmission` — the freshly emitted plans, for which the membership is current — because
 a stale plan legitimately disagrees with the current membership (mesh departures re-emit

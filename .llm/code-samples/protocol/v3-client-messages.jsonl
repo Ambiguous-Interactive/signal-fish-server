@@ -1,4 +1,6 @@
 {"type": "Authenticate", "data": {"app_id": "mb_app_abc123", "sdk_version": "1.2.3", "platform": "unity", "protocol_version": 3, "supported_transports": ["relay", "direct", "webrtc"], "supported_topologies": ["relay", "host", "mesh"]}}
+{"type": "GameData", "data": {"data": {"position": {"x": 12, "y": 34}}, "class": "latest", "key": 7}}
+{"type": "GameData", "data": {"data": {"effect": "footstep"}, "class": "volatile"}}
 {"type": "Signal", "data": {"to": "00000000-0000-0000-0000-00000000000b", "signal": {"Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..."}}}
 {"type": "Signal", "data": {"to": "00000000-0000-0000-0000-00000000000b", "signal": {"IceCandidate": "candidate:1 1 UDP 2130706431 10.0.0.5 54321 typ host"}}}
 {"type": "TransportStatus", "data": {"transport": "webrtc", "connected": true}}

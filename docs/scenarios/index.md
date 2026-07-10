@@ -29,7 +29,7 @@ it.
 | [Host topology](v3-host-topology.md) | v3 | A star session: every client signals only the elected host. |
 | [Host failover](v3-host-failover.md) | v3 | The host departs, the server re-elects, and survivors get a fresh `SessionPlan`. |
 | [Reconnection](reconnection.md) | v2 / v3 | A dropped client reconnects with its token and replays missed events (plus the failure case). |
-| [Spectator](spectator.md) | v2 / v3 | A read-only observer joins, watches `GameData`, and leaves. |
+| [Spectator](spectator.md) | v2 / v3 | A read-only observer joins, receives a room snapshot, and leaves. |
 | [Error handling](error-handling.md) | v2 / v3 | Worked recovery from `ROOM_FULL`, `RATE_LIMIT_EXCEEDED`, `SIGNAL_TOO_LARGE`, and the relay floor. |
 
 ## Which version do I need?

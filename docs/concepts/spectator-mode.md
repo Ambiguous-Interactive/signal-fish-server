@@ -44,14 +44,18 @@ room state:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2025-01-15T10:30:00Z"
+        "connected_at": "2025-01-15T10:30:00Z",
+        "epoch": 1,
+        "seq": 17
       },
       {
         "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2025-01-15T10:31:00Z"
+        "connected_at": "2025-01-15T10:31:00Z",
+        "epoch": 2,
+        "seq": 0
       }
     ],
     "current_spectators": [
@@ -66,6 +70,12 @@ room state:
   }
 }
 ```
+
+The example shows negotiated v3: every `current_players` entry carries its
+current relay `epoch` and exact recipient-visible `seq` baseline. A pre-v3
+recipient receives the same snapshot without either field. The pair makes the
+snapshot usable as an accountability baseline if live spectator delivery is
+added later; spectators do not receive relayed gameplay today.
 
 This gives the spectator an immediate snapshot of who is in the room,
 what state the lobby is in, and who else is spectating.
@@ -184,16 +194,16 @@ missing room, the literal reason is `Room not found`):
 
 ## Use Cases
 
-- **Tournament viewing** -- Let an audience watch competitive matches in
-  real time without interfering with gameplay.
+- **Tournament viewing** -- Initialize an audience view without interfering
+  with gameplay, then carry live match state through an out-of-band channel.
 - **Coaching** -- A coach observes a student's game to provide feedback
   after the session.
 - **Debugging** -- During development, attach a spectator to capture the
   `SpectatorJoined` room snapshot (current players, spectators, and lobby
   state) without disrupting the game under test. Live room updates are
   not delivered to spectators today (see the limitation above).
-- **Streaming** -- Feed spectator data into a broadcast overlay or
-  streaming tool that renders game state for viewers.
+- **Streaming** -- Seed a broadcast overlay from the room snapshot, with live
+  game state supplied by an out-of-band application channel.
 
 ## Spectator Limits
 

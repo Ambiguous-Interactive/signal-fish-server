@@ -84,6 +84,36 @@ Send arbitrary game data to other players in the room.
 The outer `data` is the serde content tag. The inner `data` is the variant
 field and can be any JSON-serializable object.
 
+Omitting delivery metadata selects the reliable relay-floor behavior used by
+protocol v2. A negotiated-v3 client may instead classify JSON `GameData`:
+
+```json
+{
+  "type": "GameData",
+  "data": {
+    "data": { "position": [100, 200] },
+    "class": "latest",
+    "key": 7
+  }
+}
+```
+
+The valid v3 combinations are exact:
+
+| `class` | `key` | Meaning |
+| --- | --- | --- |
+| omitted or `reliable` | omitted | Preserve the message or close the slow recipient loudly |
+| `latest` | required `u32` | Retain only the newest queued value for this sender-defined key |
+| `volatile` | omitted | Deliver opportunistically without pacing the sender |
+
+A well-typed but illegal class/key pairing returns `INVALID_DELIVERY_CLASS` and
+is not relayed. Malformed metadata -- including an unknown class token, an
+out-of-range or non-integer key, or explicit `null` -- fails message decoding
+with `INVALID_INPUT`. A connection below v3 may send only the legacy form with
+both fields omitted. Raw client WebSocket binary frames have no class/key
+envelope and are always reliable; delivery classes apply only to JSON
+`GameData`.
+
 ### PlayerReady
 
 Toggle your own ready state in the lobby. This message has no payload.
@@ -141,9 +171,10 @@ Preconditions:
 
 On success the server transitions the room to `finalized` and broadcasts the
 unchanged [`GameStarting`](#gamestarting) (legacy peer metadata) to every
-member. For a negotiated v3 non-relay room it additionally emits the
-per-recipient [`SessionPlan`](#sessionplan). Sending `StartGame` to an already
-`finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
+member. It then emits a per-recipient [`SessionPlan`](#sessionplan) to every
+negotiated-v3 member. A relay-resolved room sends an explicit `relay`/`relay`
+plan with no peers; protocol-v2 members receive no plan. Sending `StartGame` to
+an already `finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
 
 !!! note "Authority and start liveness"
     In an authority room, only the authority may start, so the game does not
@@ -362,7 +393,8 @@ room-created response type.
         "is_authority": false,
         "is_ready": false,
         "connected_at": "2024-01-01T00:00:00Z",
-        "epoch": 1
+        "epoch": 1,
+        "seq": 0
       }
     ],
     "is_authority": false,
@@ -389,7 +421,9 @@ Another player joined the room.
       "name": "Player 2",
       "is_authority": false,
       "is_ready": false,
-      "connected_at": "2024-01-01T00:00:00Z"
+      "connected_at": "2024-01-01T00:00:00Z",
+      "epoch": 1,
+      "seq": 0
     }
   }
 }
@@ -398,18 +432,27 @@ Another player joined the room.
 
 ### PlayerLeft
 
-A player left the room.
+A player left the room. Protocol v3 includes the departed incarnation's
+terminal relay watermark:
 
 ```json
 
 {
   "type": "PlayerLeft",
   "data": {
-    "player_id": "player-id"
+    "player_id": "player-id",
+    "epoch": 1,
+    "final_seq": 42
   }
 }
 
 ```
+
+Priority control can overtake queued game data. A v3 recipient therefore keeps
+the departed sender's cursor until delivered frames plus causally prior exact
+`DeliveryReport` gaps cover `final_seq` in `epoch`, then retires that sender's
+cursor, gaps, and tombstone. `final_seq: 0` retires immediately. Protocol v2
+retains its frozen one-field `data` object and receives neither watermark field.
 
 ### RoomJoinFailed
 
@@ -463,37 +506,129 @@ Game data relayed from another player.
 
 ```
 
+For a v3 recipient, the server adds `seq` and `epoch` and echoes `class`/`key`
+when the sender supplied them:
+
+```json
+{
+  "type": "GameData",
+  "data": {
+    "from_player": "00000000-0000-0000-0000-00000000000a",
+    "data": { "position": [100, 200] },
+    "seq": 43,
+    "epoch": 1,
+    "class": "latest",
+    "key": 7
+  }
+}
+```
+
+An omitted `class` means reliable. Within the v3 delivery lane, the class never
+changes: reliable data is never coalesced or reclassified, and `latest` values
+coalesce only with the same `(sender, room, key)`. Pre-v3 recipients use their
+legacy reliable lane and do not receive either field.
+
 ### GameDataBinary
 
 Binary game data payload from another player. This server message variant is an
-internal broadcast carrier only; MessagePack-capable clients receive a WebSocket
-binary frame containing a bare MessagePack map with `from_player`, `encoding`,
-and `payload` fields. It is not wrapped in the JSON `{ "type": ..., "data": ... }`
-envelope.
+internal broadcast carrier only. Every negotiated-v3 binary recipient receives
+a WebSocket binary frame containing a MessagePack metadata map. The `encoding`
+field describes the opaque `payload` bytes; it does not change the outer
+envelope encoding. The frame is not wrapped in the JSON
+`{ "type": ..., "data": ... }` envelope.
 
 ```text
 MessagePack map:
-  from_player: player-id
-  encoding: message_pack
-  payload: raw bytes
+  from_player: 16 UUID bytes  # MessagePack bin, RFC 4122/network byte order
+  encoding: json | message_pack | rkyv
+  payload: raw bytes          # MessagePack bin
+  seq: 43       # required for v3
+  epoch: 1      # required for v3
 ```
 
-Clients that did not negotiate `game_data_format: "message_pack"` receive the
-JSON `GameData` fallback instead.
+For a recipient whose negotiated format differs, the server attempts a JSON
+`GameData` fallback by decoding JSON or MessagePack payload bytes. An opaque
+`rkyv` payload cannot be converted without its application type: the recipient
+instead gets an `unsupported_format` DeliveryReport followed by
+`UNSUPPORTED_GAME_DATA_FORMAT` (or just the legacy error on v2). The currently
+advertised binary format is `message_pack`; `rkyv` remains reserved/internal.
+The uniform v3 envelope still covers every internal binary encoding so no v3
+binary delivery can lose its sender identity or accountability stamp.
+
+`from_player` is the UUID's canonical 16-octet sequence, in network byte order;
+it is not the UTF-8 bytes of the hyphenated UUID string. Decoders must require a
+MessagePack binary value of exactly 16 bytes and render those bytes as the
+usual lowercase hyphenated UUID for application-facing identifiers.
+
+The v2 wire remains frozen: MessagePack recipients receive the historical
+three-field map (`from_player`, `encoding`, `payload`), while legacy JSON/rkyv
+binary paths pass the payload bytes through unchanged. Neither v2 form carries
+`seq` or `epoch`.
+
+Binary game data is always reliable. The bare binary frame has no `class` or
+`key`, and clients must not infer a delivery class from its contents.
 
 ### Delivery semantics
 
-Relayed messages — `GameData`, `GameDataBinary`, and every other server
-message — are delivered reliably and in order per connection over the
-WebSocket. The server never silently drops a delivery: when a recipient
-cannot keep up, its bounded outbound queue
-(`websocket.send_queue_capacity`, default 1024 messages) fills and delivery
-applies backpressure to senders, waiting up to
-`websocket.slow_consumer_timeout_ms` (default 5000) for space. A recipient
-whose queue stays full past that timeout is disconnected as a slow consumer:
-the server sends a best-effort `Error` with code `SLOW_CONSUMER`, then
-closes the socket through the normal disconnect flow (so the reconnection
-grace period still applies).
+The v2 contract and an unclassified v3 `GameData` are reliable: a full data
+queue applies backpressure for at most
+`websocket.slow_consumer_timeout_ms` (default 5000). If space does not become
+available, the recipient is closed loudly as a slow consumer. Raw binary game
+data is also always reliable.
+
+Negotiated v3 adds two explicitly lossy JSON classes. Loss is never silent:
+every omitted server-stamped sequence range is named by a prior
+[`DeliveryReport`](#deliveryreport).
+
+Class policy is per recipient. A pre-v3 recipient remains on its reliable FIFO
+lane even when a v3 sender supplies class metadata; the server strips the v3
+fields from that recipient's wire frame.
+
+| Class | Full-queue behavior | Terminal outcomes |
+| --- | --- | --- |
+| `reliable` | Wait for space, then close loudly on timeout | `delivered`, `abandoned`, `unsupported_format` |
+| `latest` | Replace an older queued value with the same key; for a new key, evict the oldest queued volatile value or drop the latest arrival | `delivered`, `superseded`, `dropped_full`, `abandoned`, `unsupported_format` |
+| `volatile` | Evict the oldest queued volatile value when possible; otherwise drop the arrival | `delivered`, `dropped`, `abandoned`, `unsupported_format` |
+
+`latest` and `volatile` never wait for data-queue capacity and therefore never
+backpressure their senders. Latest replacement is per
+`(sender, room, key)`: interleaved keys have independent histories, so there is
+no scalar "superseded sequence" field on a successor.
+
+At quiescence, every attempted message for a recipient connection has exactly
+one terminal outcome:
+
+```text
+attempted_reliable = delivered + abandoned + unsupported_format
+attempted_latest   = delivered + superseded + dropped_full + abandoned + unsupported_format
+attempted_volatile = delivered + dropped + abandoned + unsupported_format
+```
+
+Before quiescence, queued and in-flight messages are still pending and belong on
+neither side's terminal totals. Delivery counters are cumulative snapshots for
+one physical connection. They cannot identify a missing sender, epoch, or
+sequence, and a snapshot observed before close need not include messages
+abandoned during that close.
+
+V3 control messages use a separate bounded priority lane
+(`websocket.control_queue_capacity`, default 128). Within the recipient's
+active room generation, the writer drains that lane strictly before queued data
+so a gap-bearing `DeliveryReport`, peer lifecycle event, or error cannot starve
+behind a data backlog. The report for a lossy operation is queued atomically
+before any later data may expose its gap. The recipient's own `RoomLeft`,
+`RoomJoined`, `Reconnected`, `SpectatorJoined`, and `SpectatorLeft` transitions
+are generation barriers: the old generation drains before the transition, and
+no old-room data appears after the new snapshot. If the server cannot preserve
+that ordering or record exact accountability, it fails closed: no later data is
+exposed and the connection closes with `4002 slow_consumer`. V2 retains its
+legacy FIFO ordering.
+
+Every outbound item is also bounded by `websocket.max_sojourn_ms` (default
+15000). The deadline is measured from the oldest item across all queue lanes,
+the current batch, and the item being written; the current socket write must
+finish before that deadline. Expiry closes the recipient with `4002
+slow_consumer`, even if that client continues to send pings. Farewell `Error`
+frames are best effort; the close code is authoritative.
 
 Practical consequences:
 
@@ -501,18 +636,27 @@ Practical consequences:
   connection. A runtime that is merely "ticked" occasionally starves the
   transport: inbound frames back up on the server side and manifest as
   apparent stalls, ending in a `SLOW_CONSUMER` disconnect.
-- Sustainable throughput is bounded by the slowest recipient's ability to
-  drain its connection: room senders are paced to their slowest healthy
-  recipient, and a dead recipient costs senders at most one timeout window
-  before it is evicted. Operators can watch the
+- Reliable throughput is bounded by the slowest recipient's ability to drain
+  its connection. `latest` and `volatile` traffic keeps producers moving but
+  requires clients to process `DeliveryReport` before later data. A dead
+  recipient costs reliable senders at most one timeout window before it is
+  evicted. Operators can watch the
   `signal_fish_websocket_backpressure_events_total` and
   `signal_fish_websocket_slow_consumer_disconnects_total` Prometheus
-  counters to spot backpressure and slow-consumer evictions in production.
+  counters to spot backpressure and slow-consumer evictions in production. The
+  labeled `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`
+  counter and JSON
+  `metricsSnapshot.connections.delivery_by_class` (`connections.delivery_by_class`
+  within the raw snapshot) expose each class's attempted and terminal outcomes;
+  the equality above holds at quiescence.
 
-A binary game-data payload that cannot be converted for a recipient (for
-example, an internal binary encoding relayed to a JSON-only client) is not
-silently dropped either: the recipient receives an explicit `Error` with
-code `UNSUPPORTED_GAME_DATA_FORMAT` in place of each undeliverable payload.
+A binary game-data payload that cannot be converted for a v3 recipient is not
+silently dropped either: the server first writes an exact `DeliveryReport` gap
+with reason `unsupported_format`, then attempts a supplemental `Error` with code
+`UNSUPPORTED_GAME_DATA_FORMAT`, both before any later data. The supplemental
+error is best effort: if its write fails after the report succeeds, the socket
+disconnects and no successor is exposed. The report, not the aggregate counter
+or error alone, authorizes a gap on a continuing stream.
 
 ### Close codes
 
@@ -527,7 +671,7 @@ surface and are never renumbered):
 | ---- | ------------- | ------- |
 | `4000` | `server_shutdown` | The server is shutting down after a graceful drain |
 | `4001` | `auth_timeout` | Never authenticated within `websocket.auth_timeout_secs` |
-| `4002` | `slow_consumer` | Evicted by the delivery contract (outbound queue full past `websocket.slow_consumer_timeout_ms`) |
+| `4002` | `slow_consumer` | Delivery contract failed closed: reliable queue timeout, oldest outbound/write sojourn, or inability to preserve exact accountability/control priority |
 | `4003` | `activity_timeout` | Evicted by the `server.ping_timeout` activity reaper |
 | `4004` | `idle_timeout` | No inbound frame within `websocket.idle_timeout_secs` |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
@@ -654,6 +798,8 @@ Common error codes:
 - `RATE_LIMIT_EXCEEDED` - Too many requests
 - `AUTHENTICATION_REQUIRED` - Authentication required
 - `INVALID_APP_ID` - Invalid app ID
+- `INVALID_DELIVERY_CLASS` - Well-typed but illegal v3 class/key pairing
+- `INVALID_INPUT` - Malformed message or delivery metadata
 
 ### Pong
 
@@ -683,6 +829,12 @@ traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
 room member, so they can re-baseline after skipped `GameData`. See
 [Reconnection Flow](#reconnection-flow).
 
+`sender_watermarks` replaces every pre-disconnect sequence expectation; it is
+not a replay promise. A new physical connection also starts new
+connection-scoped `DeliveryReport` counters and gap-accounting state. Clients
+must resynchronize application state after any reconnect, especially when
+`replay` is `truncated` or `unavailable`.
+
 ```json
 
 {
@@ -701,7 +853,8 @@ room member, so they can re-baseline after skipped `GameData`. See
         "is_authority": false,
         "is_ready": false,
         "connected_at": "2024-01-01T00:00:00Z",
-        "epoch": 1
+        "epoch": 1,
+        "seq": 42
       }
     ],
     "is_authority": false,
@@ -773,7 +926,9 @@ Successfully joined a room as spectator.
         "name": "Player 1",
         "is_authority": false,
         "is_ready": false,
-        "connected_at": "2024-01-01T00:00:00Z"
+        "connected_at": "2024-01-01T00:00:00Z",
+        "epoch": 1,
+        "seq": 42
       }
     ],
     "current_spectators": [
@@ -790,7 +945,10 @@ Successfully joined a room as spectator.
 
 ```
 
-Note: The `reason` field is optional.
+Note: The `reason` field is optional. On a negotiated-v3 connection, every
+`current_players` entry carries its current `epoch` and exact recipient-visible
+`seq` baseline, as shown above. Pre-v3 recipients receive the same snapshot
+without either field.
 
 ### SpectatorJoinFailed
 
@@ -904,7 +1062,7 @@ Client                              Server
   |                                    |
   |--- StartGame --------------------->|
   |<-- GameStarting -------------------|
-  |    (+ SessionPlan on v3 non-relay) |
+  |    (+ SessionPlan on v3)           |
   |                                    |
   |--- GameData ---------------------->|
   |<-- GameData (from other player) ---|
@@ -943,16 +1101,20 @@ bounded per-room replay ring and returned in the `Reconnected` payload's
 (`GameData` / `Signal`) is **not** replayed, and a `truncated` or
 `unavailable` replay means control history is incomplete. v3 clients also use
 `sender_watermarks` from `Reconnected` to reset each current member's
-`(epoch, seq)` baseline after their absence; clients must still treat
-reconnection as requiring an application-level state resync (for example, have
-the authority or another peer re-send the current game state after
-`PlayerReconnected`).
+`(epoch, seq)` baseline after their absence. Discard all old next-sequence
+expectations and connection-scoped delivery counters; the replacement socket
+starts a new accounting lifetime. Clients must still treat reconnection as
+requiring an application-level state resync (for example, have the authority or
+another peer re-send the current game state after `PlayerReconnected`). A
+`truncated` or `unavailable` replay specifically requires snapshot resync because
+the control-event history is incomplete.
 
 ## Protocol v3 additions
 
-Protocol v3 is a **purely additive** layer on top of the v2 wire contract documented above. Everything in the
-preceding sections still applies unchanged; v3 adds optional `Authenticate` fields, v3-only messages, a
-capability-negotiation handshake, relay reliability metadata, and optional `ice_servers` fields on `RoomJoined` /
+Protocol v3 is a **purely additive** layer on top of the v2 wire contract documented above. The legacy shapes and
+default reliable behavior remain unchanged; v3 adds optional `Authenticate` fields, v3-only messages, a
+capability-negotiation handshake, classified JSON relay delivery with exact accountability, relay sequence
+metadata, and optional `ice_servers` fields on `RoomJoined` /
 `Reconnected` (the [ICE pre-gather](#ice-pre-gather), emitted only to v3 WebRTC-capable clients). A v2 client never
 sends or receives a v3 message — the relay floor is the universal default and a v2 client observes byte-identical v2
 behavior.
@@ -1026,24 +1188,26 @@ to 3 when the client omits `protocol_version`; an explicit `protocol_version` in
 clamped). `/v2/ws` behavior is unchanged.
 
 **Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
-chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor, where
-no server-driven P2P plan messages (`SessionPlan` or `NewPeer`) are emitted for that room. WebRTC `Signal` relay
-remains transport-gated between same-room v3 WebRTC peers; informational status, connection-level diagnostics,
-and shutdown advisories (`TransportStatus`, `PeerTransportStatus`, `RelayStats`, `GoingAway`) keep their own
-feature gates. This is the relay-floor guarantee: v2 and v3 clients interoperate, always.
+chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor. Every
+v3 member receives an explicit `relay`/`relay` `SessionPlan` with no peers, while v2 members receive no v3 message
+and retain byte-identical behavior. WebRTC `Signal` relay remains transport-gated between same-room v3 WebRTC
+peers; informational status, connection-level diagnostics, and shutdown advisories (`TransportStatus`,
+`PeerTransportStatus`, `RelayStats`, `DeliveryReport`, `GoingAway`) keep their own feature gates. This is the
+relay-floor guarantee: v2 and v3 clients interoperate, always.
 
 ### New v3 messages
 
-These seven messages exist only on a negotiated v3 connection.
+These eight messages exist only on a negotiated v3 connection.
 
 | Message | Direction | Purpose |
 |---|---|---|
 | `Signal` | client ⇄ server | Relay an opaque, matchbox-shaped WebRTC signal to/from a specific peer in the same room |
-| `NewPeer` | server → client | A new peer is available for a WebRTC connection (late join); designates the offerer |
-| `SessionPlan` | server → client | Per-recipient session directive emitted at finalization (alongside `GameStarting`) |
+| `NewPeer` | server → client | Compatibility shape for an additive peer directive; current finalized membership changes use full `SessionPlan` refreshes |
+| `SessionPlan` | server → client | Per-recipient authoritative session directive emitted at finalization and finalized membership refreshes |
 | `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
 | `PeerTransportStatus` | server → client | A same-room peer's reported transport state changed (fan-out of an accepted `TransportStatus`) |
 | `RelayStats` | server → client | Optional per-connection relay delivery counters when `websocket.delivery_stats_interval_secs` is enabled |
+| `DeliveryReport` | server → client | Cumulative per-class outcomes plus exact sequence ranges omitted for this connection |
 | `GoingAway` | server → client | Shutdown-drain advisory sent before the server closes the socket with `4000 server_shutdown` |
 
 #### Signal
@@ -1074,9 +1238,9 @@ Server → client (`from` names the originating peer):
 
 #### NewPeer
 
-`NewPeer` is the **late-join** pairing delta: it tells the _existing_ members of an already-running v3 WebRTC
-session that a peer is now available for a WebRTC peer connection. `you_initiate` designates exactly one side of
-each pair as the offerer, avoiding glare (see the glare rule below).
+`NewPeer` is the v3 compatibility shape for an additive WebRTC peer directive.
+`you_initiate` designates exactly one side of the pair as the offerer, avoiding
+glare (see the glare rule below).
 
 ```json
 {
@@ -1085,21 +1249,20 @@ each pair as the offerer, avoiding glare (see the glare rule below).
 }
 ```
 
-Initial pairing at finalization is owned by `SessionPlan` (below); `NewPeer` covers a peer joining or reconnecting
-_after_ finalization — and is sent **only to the existing members**, never to the joiner itself. The joiner's
-pairing (the same peers with the mirrored `initiate` flags) arrives in the fresh `SessionPlan` it receives on
-entry, keeping the client contract uniform: on `SessionPlan`, (re)configure the session and connect per
-`peers[].initiate`; on `NewPeer`, additively connect to that one peer. See the
-[late-join decision table](#late-join-decision-table).
+The current server does not use `NewPeer` as the finalized-room membership
+delta. A join or reconnect refreshes every v3 member with a complete
+`SessionPlan`, which atomically removes stale peers as well as adding new ones.
+Clients may retain `NewPeer` decoding for compatibility, but the authoritative
+rule is always: the latest `SessionPlan` wins.
 
 #### SessionPlan
 
-`SessionPlan` is the **per-recipient** session directive first emitted at lobby finalization. It is sent alongside
-the unchanged `GameStarting` (and only to v3-capable members) when a room negotiates a non-relay plan. A relay-only
-room emits **no** `SessionPlan`, so v2 clients never observe it. Each recipient gets its own tailored `peers` list,
-`initiate` flags, and, for WebRTC transports, ICE servers with freshly minted TURN credentials. It carries
-topology, transport, peers, ICE servers, and relay fallback; it does not carry legacy `ConnectionInfo` or direct
-host/port endpoint details.
+`SessionPlan` is the **per-recipient authoritative** session directive first emitted at lobby finalization. It is
+sent after the unchanged `GameStarting`, and only to v3-capable members. Every v3 member receives one: when no
+upgrade rung fits, the server emits an explicit `topology: "relay"`, `transport: "relay"`, empty-peers reset.
+Protocol-v2 members never observe it. Each recipient gets its own tailored `peers` list, `initiate` flags, and, for
+WebRTC transports, ICE servers with freshly minted TURN credentials. It carries topology, transport, peers, ICE
+servers, and relay fallback; it does not carry legacy `ConnectionInfo` or direct host/port endpoint details.
 
 `SessionPlan` can also be **re-issued mid-session** (same message shape, same v3 gating). Two triggers:
 
@@ -1111,11 +1274,12 @@ host/port endpoint details.
   topology/transport pair are electable (a seat-filling relay-only member is never named host of a session it
   cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break. If no
   member qualifies, no plan is re-issued — the session is over and the relay floor carries the room. A host
-  departure itself is still signaled by the unchanged `PlayerLeft`.
-- **Late join / reconnect into an active non-relay session.** Only the **joiner** receives a plan (its full
-  tailored view of the running session: current peers, `initiate` flags, `host`, fresh ICE); existing members
-  receive the additive [`NewPeer`](#newpeer) delta instead. The joiner is never sent `NewPeer` — its pairing is
-  the `peers[].initiate` flags in its plan.
+  departure itself is still signaled by `PlayerLeft` (with the v3 terminal
+  watermark; its v2 projection remains byte-for-byte frozen).
+- **Late join / reconnect into a finalized room.** Every current v3 member receives a complete, tailored plan.
+  The joining actor and incumbents therefore cross the same lifecycle boundary with one authoritative peer set;
+  stale links are removed without depending on an additive delta. A room with no sticky non-relay entry derives
+  an explicit `relay`/`relay` refresh from that absence.
 
 The topology and transport of a session are **sticky for its lifetime**: the selection ladder runs once at
 finalization and is never re-run mid-session, even when departures widen the capability intersection. A re-issued
@@ -1124,10 +1288,23 @@ peer lists contain only peers that can run the session — that negotiated v3 pl
 transport: a v3 member that did not (e.g. a relay-only seat-filler, or one with the `webrtc` transport but not the
 session's topology) still receives its plan, but with an **empty** `peers` list — it has no P2P peers and
 participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
-`peers` (the `NewPeer` gating applies this same predicate). At finalization this filter is vacuous, because a plan
-is only selected when every member supports it. The client contract is uniform:
-**the latest `SessionPlan` wins** — (re)configure the session and connect per `peers[].initiate`; on `NewPeer`,
-additively connect to that one peer.
+`peers`. At finalization this filter is vacuous for non-relay decisions, because an upgrade is selected only when
+every member supports it. The client contract is uniform: **the latest `SessionPlan` wins** — tear down peers absent
+from the new list, retain or rebuild those still present, and initiate only where `peers[].initiate` is true.
+
+The relay-floor reset has this exact shape:
+
+```json
+{
+  "type": "SessionPlan",
+  "data": {
+    "topology": "relay",
+    "transport": "relay",
+    "peers": [],
+    "fallback": "relay"
+  }
+}
+```
 
 ```json
 {
@@ -1257,8 +1434,8 @@ Rules:
 
 - **All-members-v3 required.** Any non-relay rung requires every room member to be v3-capable _and_ to support that
   rung's topology and transport. A single non-supporting member skips the rung.
-- **Relay floor always wins** when no rung fits. A relay-floor room emits no `SessionPlan` and relays exactly like
-  v2.
+- **Relay floor always wins** when no rung fits. V3 members receive an explicit no-peer `relay`/`relay`
+  `SessionPlan`; v2 members receive no plan and keep their frozen wire behavior.
 - **`desired` is a ceiling, not an exact match.** A mesh-preferring room that cannot run mesh falls back to a host
   topology before collapsing to relay.
 
@@ -1266,31 +1443,28 @@ This ladder is the single source of truth in `src/server/session_policy.rs` (`UP
 
 ### Late-join decision table
 
-A peer joining or reconnecting _after_ finalization is brought up to date from the **stored** plan the room is
-actually running — the decision recorded at finalization (the ladder is _not_ re-run over the current members, so
-a session that finalized to the relay floor stays relay even if every remaining member could now do better). The
-joiner's view arrives as a fresh `SessionPlan`; existing members get the additive `NewPeer` delta:
+A peer joining or reconnecting _after_ finalization is brought up to date from the room's running decision (the
+ladder is _not_ re-run over the current members, so a session that finalized to the relay floor stays relay even if
+every remaining member could now do better). The server refreshes the complete `SessionPlan` for every current v3
+member; v2 members receive only their frozen lifecycle traffic:
 
 | `room.lobby_state` | Stored (running) plan | Joiner receives | Existing members receive |
 |---|---|---|---|
 | not `Finalized` | any | nothing (initial pairing is owned by the finalize-time `SessionPlan`) | nothing |
-| `Finalized` | none (relay floor / pre-v3 room) | nothing | nothing |
-| `Finalized` | `mesh + webrtc` | `SessionPlan` (every session-capable current peer, glare `initiate`, fresh ICE) | `NewPeer` to every session-capable member |
-| `Finalized` | `host + webrtc` | `SessionPlan` (star view: client targets the stored host; a rejoining host targets all clients) | `NewPeer` along the star edge only |
-| `Finalized` | `host + direct` | `SessionPlan` (empty `ice_servers`) | nothing (`NewPeer` is WebRTC-only) |
+| `Finalized` | none (relay floor / pre-v3 room) | v3: explicit `relay + relay` plan; v2: nothing | each v3 incumbent: explicit `relay + relay` plan; v2: nothing |
+| `Finalized` | `mesh + webrtc` | `SessionPlan` (every session-capable current peer, glare `initiate`, fresh ICE) | every v3 incumbent: complete refreshed `SessionPlan` |
+| `Finalized` | `host + webrtc` | `SessionPlan` (star view: client targets the stored host; a rejoining host targets all clients) | every v3 incumbent: complete refreshed `SessionPlan` |
+| `Finalized` | `host + direct` | `SessionPlan` (empty `ice_servers`) | every v3 incumbent: complete refreshed `SessionPlan` |
 
-The joiner-directed plan is v3-gated; the `NewPeer` delta additionally requires — of the joiner **and** of every
-announced-to member — the full session predicate: v3 plus the session's topology **and** transport, the same rule
-that filters plan peer lists, so existing members are never told to pair with a peer the plan itself would not
-list. In particular, a v3 joiner that cannot run the session — a relay-only client, or one that negotiated the
+Every plan is v3-gated. The session predicate (v3 plus the session's topology **and** transport) filters peer lists,
+so members are never told to pair with a peer that cannot run the session. In particular, a v3 joiner that cannot
+run the session — a relay-only client, or one that negotiated the
 `webrtc` transport but **not** the session's topology (e.g. `topologies: ["relay"]` entering a `mesh + webrtc`
 session) — still receives the (v3-gated) `SessionPlan` describing the running session — with an **empty** `peers`
 list, since every pair with it sits outside the session contract (a relay-only peer would additionally be rejected
-by `Signal` validation); `fallback: "relay"` is its data path — and no `NewPeer` pairing fires for it in either
-direction. Symmetrically, a session-incapable member already seated in the room is omitted from a capable joiner's
-`peers` and receives no `NewPeer` about the joiner. `NewPeer` is emitted only
-when the stored **transport** is `webrtc`; a `host + direct` (LAN) session emits no `NewPeer` because there is no
-WebRTC signaling to broker — its `SessionPlan` still names the `host + direct` topology/transport and peers; any
+by `Signal` validation); `fallback: "relay"` is its data path. Symmetrically, a session-incapable member already
+seated in the room is omitted from a capable joiner's `peers`. A `host + direct` (LAN) plan still names its
+topology/transport and peers but carries no ICE because there is no WebRTC signaling to broker; any
 address metadata remains the legacy, self-declared `GameStarting.peer_connections` / `ProvideConnectionInfo`
 surface rather than a negotiated v3 transport proof. After a host failover the stored host is the _re-elected_
 one, so an ex-host that reconnects is paired as a client of the new host.
@@ -1298,7 +1472,7 @@ one, so an ex-host that reconnects is paired as a client of the new host.
 ### Glare / offerer rule
 
 For any WebRTC pair, exactly one side must send the offer. Which side is encoded in the `initiate` flag on a
-`SessionPlan` peer and in `you_initiate` on `NewPeer`:
+`SessionPlan` peer (and in `you_initiate` if a compatibility `NewPeer` is received):
 
 - **Mesh:** the peer whose `player_id` is the **lesser** of the two UUIDs sends the offer (a deterministic,
   stateless, antisymmetric rule).
@@ -1387,77 +1561,175 @@ C1                        server                          H (host)            C2
 
 ## Protocol v3 delivery reliability
 
-The v3 additions above cover WebRTC signaling. v3 ALSO adds a delivery
-reliability surface (there is no separate v4: v3 is the single unshipped
-"current" version, so everything additive over the frozen v2 floor negotiates
-under `protocol_version: 3`). A deployment can clamp
-`protocol.max_protocol_version` back to `2` to disable all of it (pure v2).
-This surface exists so clients can _detect_ relay loss end-to-end instead of
-trusting the delivery contract blindly.
+Protocol v3 also adds classified JSON delivery and exact relay accountability
+(there is no separate v4). A deployment can clamp
+`protocol.max_protocol_version` back to `2` to disable this surface and retain
+the pure v2 reliable FIFO contract.
 
 ### Sequenced relay (`seq`)
 
-Relayed `GameData` (JSON) and `GameDataBinary` / bare MessagePack frames
-delivered to a v3 recipient carry an additional server-stamped `seq` field:
-a per-(sender, room) counter that starts at `1` and increases by exactly one
-for every message the server relays from that sender to the room. Pre-v3
-(v2) recipients in the same room receive byte-identical frames with no `seq` key.
+Every relayed `GameData` (JSON) and v3 binary metadata envelope delivered to a
+v3 recipient carries a server-stamped `seq`. The server allocates
+the sequence before applying per-recipient delivery policy. It starts at `1`
+within a sender's room incarnation and increases by one for every accepted
+message from that sender. Text and binary use the same stream. Pre-v3 recipients
+receive byte-identical frames with no `seq` key.
 
 Recipient rules:
 
-- Per sender, `seq` is strictly contiguous while you stay connected. A gap
-  can only mean (a) the server abandoned messages together with _your_
-  slow-consumer disconnect (you were told: `SLOW_CONSUMER` + close), or
-  (b) the sender left and rejoined, which resets its counter to `1` — and the
-  `epoch` bumps at the same time (see below), so the reset is self-describing;
-  you are also told out of band (`PlayerLeft` / `PlayerJoined` /
-  `PlayerReconnected`), or
-  (c) a single binary payload that could not be converted for your
-  negotiated format was replaced in-stream by an `Error` with code
-  `UNSUPPORTED_GAME_DATA_FORMAT` (you were told, and the connection stayed
-  open) — you skip that one `seq` while other recipients receive it.
-- An unexplained gap — one with none of the above notifications — is a
-  server bug; report it. That is exactly the condition the sequence numbers
-  exist to make observable.
+- Within one `(sender, epoch)`, delivered sequence numbers are strictly
+  increasing but need not be contiguous. A continuing connection may accept a
+  hole only when the union of causally prior `DeliveryReport` ranges covers
+  every missing sequence for the same sender and epoch. Aggregate counters, an
+  error frame, or a report that arrives after the successor are not
+  authorization.
+- A sender first seen in `RoomJoined.current_players` or
+  `SpectatorJoined.current_players` may already be active. The paired
+  `PlayerInfo.(epoch, seq)` is the exact recipient-visible baseline: `seq` is
+  the last sequence already outside this recipient's delivery obligation, so
+  delivery or exact gap coverage starts at `seq + 1`.
+- Peer lifecycle control has priority over data in the active room generation.
+  `PlayerLeft`, a later `PlayerJoined`, or `PlayerReconnected` can therefore
+  arrive before old-epoch data that was already queued. Retain and advance the
+  old epoch's accounting cursor while it drains, but do not apply that stale
+  incarnation's payload after its lifecycle change. A future data/report epoch
+  is valid only if a lifecycle message announced that exact epoch. Once data
+  advances to an announced newer epoch, reject any later frame from an older
+  epoch. Multiple announcements may be outstanding; application data becomes
+  current only at the newest announced incarnation.
+- A v3 `PlayerLeft` terminal watermark bounds that stale state. Retain the
+  departed sender until delivered frames plus exact prior gaps contiguously
+  cover `final_seq` in the named `epoch`; then retire its cursor, pending gaps,
+  and tombstone. Reject delivery or gaps beyond that terminal. A zero terminal
+  sequence retires immediately. The v2 `PlayerLeft` shape has no watermark.
+- On this recipient's own `RoomLeft` / `RoomJoined` or `SpectatorLeft` /
+  `SpectatorJoined` transition, discard every prior-room sender baseline and
+  outstanding gap range. These recipient transitions are ordering barriers: no
+  old-room data may appear after the new room or spectator snapshot. Cumulative
+  counters retain their physical-connection lifetime.
+- After this recipient reconnects, `Reconnected.sender_watermarks` is the
+  authoritative baseline for every current sender and must exactly match the
+  paired baseline in `current_players`. Discard pre-disconnect expectations.
+  High-rate data is not replayed, so resynchronize application state before
+  applying new deltas.
+- This recipient's own loud disconnect terminates the observable stream.
+  Messages abandoned during close do not need gap records because no later data
+  can appear on that physical connection. A replacement connection starts a new
+  accounting lifetime.
+
+Any same-epoch hole on a continuing connection without complete coverage by
+prior exact reports is a protocol violation. Process control messages in
+arrival order before applying later game data so reports and lifecycle state
+are visible when a successor arrives.
 
 ### Incarnation epoch (`epoch`)
 
-Alongside `seq`, every relayed `GameData` / `GameDataBinary` to a v3 recipient
+Alongside `seq`, every relayed `GameData` / binary envelope to a v3 recipient
 also carries an `epoch`: a **monotonic per-sender** counter that increments once
 per **incarnation** of that sender's membership — its first-ever incarnation is
 `epoch` 1, and each join-after-leave or reconnect increments it. The server
 tracks it per sender connection and never resets it on a room switch, so a
 sender's first frame in a given room may begin at `epoch` 2 or higher if that
-sender was previously in another room — do not assume a room's first observed
-epoch is 1. What the contract guarantees is per `(sender, room)`: because `seq`
-restarts at `1` within every epoch, the pair `(epoch, seq)` is strictly
-**lexicographically increasing** per `(sender, room)` as observed by any single
-recipient:
+sender was previously in another room -- do not assume a room's first observed
+epoch is 1. In data-lane order, the pair `(epoch, seq)` advances
+lexicographically per `(sender, room)`:
 
 - `(1, 1), (1, 2), (1, 3)` — the sender's first incarnation, and then
 - `(2, 1), (2, 2), …` — after the sender left+rejoined or reconnected.
 
-This makes the `seq` reset in rule (b) above **self-describing**: you attribute
-the backwards `seq` jump to the `epoch` bump directly, rather than having to
-correlate a separately-ordered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected`
-control message. Each member's current epoch is also carried on the room
-snapshots — `RoomJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
-`PlayerReconnected.epoch`, and the `Reconnected` member snapshot — plus
-`Reconnected.sender_watermarks`, which carries each current member's last
-stamped `seq` in that epoch. Together they let a reconnecting client baseline a
-sender's stream before its first post-reconnect frame arrives. Like `seq`,
-`epoch` and `sender_watermarks` are stripped for pre-v3 (v2) recipients (their
-bytes stay byte-identical), so absence and presence are both part of the frozen
-wire contract.
+Priority lifecycle control may be observed before the tail of the earlier epoch,
+so the complete WebSocket frame stream is not necessarily lexicographically
+ordered across a lifecycle message. The stamped data still makes a `seq` reset
+self-describing, while the lifecycle announcement determines which incarnation
+is safe for application use. Each v3 `PlayerInfo` on room lifecycle and
+snapshot messages carries paired `epoch` and `seq` values. That `seq` is the
+last relay sequence already outside this recipient's obligation in the named
+epoch; it is `0` for a new incarnation. The same pair appears on
+`RoomJoined.current_players[]`, `SpectatorJoined.current_players[]`,
+`PlayerJoined.player`, and the `Reconnected` member snapshot.
+`PlayerReconnected.epoch` announces a new incarnation with an implicit baseline
+of zero. `Reconnected.sender_watermarks` repeats the pair after recipient
+absence and must match the member snapshot exactly. Both `PlayerInfo` fields and
+`sender_watermarks` are stripped for pre-v3 (v2) recipients (their bytes stay
+byte-identical), so absence and presence are part of the frozen wire contract.
 
 The `epoch` value is only meaningful **relatively**: baseline each sender from
-the `epoch` you first observe for it (on a snapshot or its first frame) and
-compare subsequent values against that — do NOT assume a newly observed sender
-starts at `epoch` 1. The server tracks epoch as a single monotonic counter per
-connection, so a sender that reached your room after being in another room (on
-the same connection) may first appear at `epoch` 2 or higher. The only
-guarantee — and the only one you need — is that, for a given sender in your
-room, `(epoch, seq)` never goes backwards while you stay connected.
+the epoch first observed in a snapshot or frame and compare later values against
+it. Do not assume a newly observed sender starts at epoch 1. The server tracks a
+monotonic epoch per sender connection, so a sender that reached your room after
+being in another room on the same connection may first appear at epoch 2 or
+higher.
+
+### DeliveryReport
+
+`DeliveryReport` is the authoritative v3 accounting message. Its counters are
+cumulative for one physical recipient connection; its optional `gaps` list
+names exact, newly omitted inclusive sequence ranges:
+
+```json
+{
+  "type": "DeliveryReport",
+  "data": {
+    "per_class": {
+      "reliable": {
+        "delivered": 10,
+        "abandoned": 0,
+        "unsupported_format": 0
+      },
+      "latest": {
+        "delivered": 20,
+        "superseded": 2,
+        "dropped_full": 0,
+        "abandoned": 0,
+        "unsupported_format": 0
+      },
+      "volatile": {
+        "delivered": 30,
+        "dropped": 0,
+        "abandoned": 0,
+        "unsupported_format": 0
+      }
+    },
+    "gaps": [
+      {
+        "from_player": "00000000-0000-0000-0000-00000000000a",
+        "epoch": 1,
+        "from_seq": 41,
+        "to_seq": 42,
+        "reason": "latest_superseded"
+      }
+    ]
+  }
+}
+```
+
+`from_seq` and `to_seq` are inclusive. Gap reasons are
+`latest_superseded`, `latest_dropped_full`, `volatile_dropped`, and
+`unsupported_format`. `gaps` is omitted when empty and otherwise contains from
+1 through 256 ranges. If more non-mergeable ranges accumulate, the server rolls
+them into additional priority reports. A client must retain prior ranges and
+authorize a hole only when their non-overlapping union covers every missing
+sequence; one report or range need not cover the entire hole alone.
+
+Gap-bearing reports are event-driven even when
+`websocket.delivery_stats_interval_secs` is zero. Queue-policy reports for
+`latest` / `volatile` travel on the active generation's strict-priority control
+lane and are committed atomically with the omission. An unsupported-format
+report is written inline immediately before the server attempts its best-effort
+supplemental `Error`. Both paths publish the exact range before later data can
+reveal the gap; if a supplemental error write fails, the stream disconnects.
+Counter-only snapshots may be periodic. If exact reporting cannot be preserved,
+the server closes the connection with `4002 slow_consumer` before exposing
+later data.
+
+Each report freezes its cumulative counter frontier at the ranges it contains,
+so rollover reports remain monotonic and causal. For each lossy reason, the
+counter increase since the preceding report equals the number of sequence units
+with that reason in the current report's `gaps`. The per-class counters obey the conservation equations in
+[Delivery semantics](#delivery-semantics). They are useful for totals and
+diagnostics, but only the union of prior exact ranges identifies and authorizes
+which sender, epoch, and sequences were omitted. Do not infer a gap from counter
+deltas.
 
 ### RelayStats
 
@@ -1479,15 +1751,12 @@ and only when `websocket.delivery_stats_interval_secs` is nonzero (default
 
 ```
 
-Counters are cumulative for the life of the connection. `dropped_for_you`
-covers messages the server abandoned for this connection: undeliverable
-payload replacements can increment it while you remain connected, and all
-other drops coincide with your own slow-consumer disconnect. Shutdown-drain or
-predicate-canceled control traffic skipped before enqueue is not counted as a
-drop. `backpressure_events` rising while your `seq` stream stays contiguous
-means you are draining slower than senders produce — pace yourself or expect
-eviction. Together with `seq`, this lets a client attribute loss ("server
-dropped and told me" vs "my own bug") without server log access.
+These frozen aggregate counters are cumulative for the life of the connection
+and remain useful operational diagnostics. `backpressure_events` rising means
+reliable traffic had to wait for this recipient, so it should drain faster or
+expect eviction. `dropped_for_you` cannot identify a sender, epoch, range, or
+delivery class. It never authorizes a sequence gap; use a prior exact
+`DeliveryReport` range union for that.
 
 ## Next Steps
 

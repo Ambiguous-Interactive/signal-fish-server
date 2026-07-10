@@ -26,13 +26,15 @@ Signal Fish has a mandatory floor and an optional upgrade. You can ship a fully
 working client implementing only the floor.
 
 - **v2 — the relay floor (mandatory).** The server relays every `GameData`
-  message through the WebSocket to the other players in the room. No
+  message reliably through the WebSocket to the other players in the room. No
   peer-to-peer, no WebRTC, no capability negotiation. Every client MUST implement
   this and it always works.
-- **v3 — capability negotiation + WebRTC (optional).** A client may additionally
-  advertise the transports and topologies it supports; if the room negotiates a
-  non-relay plan, the server hands each peer a `SessionPlan` and brokers WebRTC
-  signaling. The relay floor never closes — v3 is strictly additive.
+- **v3 — capability negotiation + classified delivery (optional).** A client may
+  advertise transports/topologies for a peer-to-peer plan and may classify JSON
+  relay data as reliable, keyed-latest, or volatile. Exact `DeliveryReport`
+  ranges account for every intentional sequence omission. P2P status never
+  disables the relay path; the physical WebSocket can still close loudly when
+  its delivery contract fails. Raw binary game data remains reliable.
 
 See [Protocol Versions](../concepts/protocol-versions.md) for how the negotiated
 version is chosen and clamped.
@@ -109,11 +111,13 @@ your "Start" affordance when both conditions allow it.
 | `AuthorityRequest` | Optional (see [Authority System](../concepts/authority.md)) |
 | `ProvideConnectionInfo` | Optional legacy peer metadata |
 | `Signal`, `SessionPlan`, `NewPeer`, `TransportStatus`, `PeerTransportStatus` | Optional (**v3 only**) |
+| `DeliveryReport` | **Mandatory for negotiated v3**; peers may send `latest` / `volatile` even when you do not |
+| `RelayStats`, `GoingAway` | Optional v3 diagnostics / shutdown handling |
 
 ## Optional v3 upgrade
 
-If you want peer-to-peer (WebRTC mesh or host topology), opt in during
-`Authenticate` by advertising your capabilities:
+To use peer-to-peer or classified delivery, negotiate v3 during `Authenticate`.
+Advertise only the peer-to-peer capabilities you actually implement:
 
 ```json
 {
@@ -132,22 +136,19 @@ even on the `/v3/ws` endpoint. The server echoes the negotiated
 `protocol_version`, accepted range, and current server message `transports`
 (`["websocket"]` today) in `ProtocolInfo`.
 
-When a v3 room negotiates a non-relay plan, in addition to `GameStarting` you
-receive a per-recipient **`SessionPlan`** describing the chosen `topology`
-(`host` or `mesh`), `transport` (`webrtc` / `direct`), the `host` (for `host`
-topology), your `peers` list with per-peer `initiate` flags, the `ice_servers`
-to gather against, and the universal `fallback` (always `relay`).
+After `GameStarting`, every v3 member receives a per-recipient
+**`SessionPlan`** describing the chosen `topology`, `transport`, optional
+`host`, `peers` with per-peer `initiate` flags, `ice_servers`, and universal
+`fallback`. Relay-resolved rooms send `relay`/`relay` with an empty peer list,
+which is an authoritative instruction to clear stale P2P state.
 
 The signaling rules you must follow:
 
 - **Latest `SessionPlan` wins.** A new `SessionPlan` supersedes the previous one
-  (e.g. on host failover or a late join). Apply the most recent one — including
-  its `ice_servers`, since TURN credentials rotate.
-- **On `NewPeer`, additively connect.** A `NewPeer` message means a new peer
-  joined an active session; connect to it _in addition_ to your existing peers.
-  Do not tear down existing connections.
-- **The glare rule is server-driven.** Each `NewPeer.you_initiate` (and each
-  `SessionPlan` peer's `initiate`) tells you whether _you_ send the WebRTC offer.
+  (e.g. on host failover, join, or reconnect). Apply the most recent one,
+  remove peers no longer listed, and use its latest ICE credentials.
+- **The glare rule is server-driven.** Each `SessionPlan` peer's `initiate`
+  tells you whether _you_ send the WebRTC offer.
   Exactly one side of every pair is the offerer. **Do not recompute this
   yourself** from UUID ordering or topology — just obey the flag.
 - **Relay `Signal` verbatim.** Send `{ "type": "Signal", "data": { "to": <peer>,
@@ -159,6 +160,45 @@ The signaling rules you must follow:
   path comes up or dies; peers are told via `PeerTransportStatus`. This is purely
   informational — the relay floor stays open regardless.
 
+### Classified relay delivery and exact gaps
+
+Only JSON `GameData` on a negotiated-v3 connection can be classified:
+
+```json
+{ "type": "GameData", "data": { "data": { "x": 12 }, "class": "latest", "key": 7 } }
+```
+
+- Omit `class` (or send `reliable`) with no key for commands and critical
+  events. Reliable delivery waits for queue capacity and closes a slow
+  recipient loudly rather than omitting a message.
+- Send `latest` with a required `u32` key for replaceable state. Reuse a stable
+  key for each independent state stream; values with other keys do not
+  supersede one another.
+- Send `volatile` with no key for opportunistic data. It never backpressures.
+- Never attach class/key metadata to a raw binary frame; binary is reliable.
+
+Received v3 `GameData` includes `epoch` and `seq`, and echoes `class`/`key` only
+when supplied by the sender. Within one sender epoch, delivered sequences are
+strictly increasing but can skip. Before accepting a skip on a continuing
+connection, your receive loop must already have consumed enough exact
+`DeliveryReport` ranges that their non-overlapping union covers every missing
+sequence for that sender and epoch. Reports carry at most 256 ranges and may
+roll over into multiple priority frames. Aggregate `RelayStats`, per-class
+counter deltas, and a later report are not proof.
+
+Treat baselines separately from gaps. For every v3 `PlayerInfo`, require paired
+`epoch` and `seq`; the pair is the exact recipient-visible baseline and the next
+delivery or exact gap begins at `seq + 1`. Peer lifecycle control has priority and can overtake
+already-queued old-epoch data. Keep accounting for that trailing data, but do
+not apply it after `PlayerLeft` or a newer incarnation announcement. Accept a
+future epoch only if `PlayerJoined` or `PlayerReconnected` announced that exact
+epoch; once data advances, reject older epochs. Your own room/spectator
+transition is a generation barrier and resets room-scoped cursors while keeping
+physical-connection counters. After your own reconnect, replace every
+expectation with `Reconnected.sender_watermarks`, reset connection-scoped report
+counters, and resynchronize application state. If an unexplained same-epoch
+hole appears, stop applying dependent deltas and surface a protocol error.
+
 Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
 [host topology](../scenarios/v3-host-topology.md),
 [host failover](../scenarios/v3-host-failover.md).
@@ -169,17 +209,27 @@ Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
   offerer from UUID order or topology. The server already did it; obey
   `you_initiate` / `initiate`.
 - **Always handle relay fallback.** WebRTC may never connect (NAT, firewalls).
-  The `fallback` is always `relay` and the relay floor never closes. A correct
-  v3 client keeps working over relay when P2P fails — never block gameplay on a
-  WebRTC connection succeeding.
+  The `fallback` is always `relay`, and the server never disables it because of
+  P2P state. A correct v3 client keeps working over relay when P2P fails -- never
+  block gameplay on a WebRTC connection succeeding. Delivery failures can
+  still close the physical WebSocket loudly.
 - **`StartGame` is explicit and authorized.** Readiness does not auto-start.
   Gate the action on `all_ready` and on authority (see
   [StartGame authorization](#startgame-authorization-and-readiness)).
 - **Treat `signal` as opaque.** Forward it verbatim; do not parse or rewrite it.
 - **Honor the negotiated version.** If `ProtocolInfo.protocol_version` comes back
-  as 2, do not send v3 messages (`Signal`, `TransportStatus`); they require the
-  WebRTC transport to have been negotiated and are rejected otherwise
-  (`UNSUPPORTED_TRANSPORT`).
+  as 2, do not send v3 messages (`Signal`, `TransportStatus`) or classified
+  `GameData`. Well-typed but illegal class/key pairings return
+  `INVALID_DELIVERY_CLASS`; malformed metadata, including explicit `null`,
+  returns `INVALID_INPUT`. Unnegotiated WebRTC signaling returns
+  `UNSUPPORTED_TRANSPORT`.
+- **Do not infer gaps from totals.** Only the union of causally prior exact
+  `DeliveryReport` ranges authorizes a continuing-connection sequence hole. Process priority
+  control before later data, retain old-epoch accounting while suppressing
+  stale application payloads, and reset baselines after reconnect.
+- **Treat `4002 slow_consumer` as authoritative.** A final `SLOW_CONSUMER` error
+  is best effort. Queue timeout, maximum sojourn, or failure to preserve exact
+  accountability can all produce the close.
 - **Keep the connection alive.** Send `Ping` on an interval or you will be
   dropped with `CONNECTION_IDLE_TIMEOUT`.
 - **Authenticate first.** Any other message before `Authenticate` is an error.
@@ -219,12 +269,22 @@ A client is conformant when it passes these scenarios:
 - [ ] **Reconnect (if implemented):** drop and `Reconnect` with the join
       `auth_token`, replay control-only `missed_events`, resync gameplay state
       at the application layer, and for v3 apply `sender_watermarks` as
-      per-sender `(epoch, seq)` baselines.
+      per-sender `(epoch, seq)` baselines while resetting report counters.
 - [ ] **v3 negotiation (if implemented):** advertise WebRTC, receive a
       `SessionPlan`, complete the offer/answer/ICE exchange following
       `you_initiate`, and **fall back to relay** when WebRTC fails.
-- [ ] **v3 dynamics (if implemented):** apply a superseding `SessionPlan` (host
-      failover) and additively connect on `NewPeer`.
+- [ ] **v3 dynamics (if implemented):** apply superseding `SessionPlan`s for
+      host failover and finalized membership changes, including the empty-peer
+      relay reset.
+- [ ] **v3 delivery classes (if implemented):** validate every class/key
+      combination, keep binary reliable, and verify keyed-latest and volatile
+      omissions are covered by the union of prior exact `DeliveryReport` ranges,
+      including rollover beyond 256 ranges.
+- [ ] **v3 gap lifecycle (if implemented):** distinguish an initial sender
+      baseline, an epoch reset, a recipient reconnect watermark, and an
+      authorized same-epoch gap; account but suppress lifecycle-overtaken stale
+      payloads, require future-epoch announcements, and reject an unexplained
+      hole or backward epoch.
 
 ## Generating client code from the spec
 

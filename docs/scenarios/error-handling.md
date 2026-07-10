@@ -120,19 +120,20 @@ Intent: a room mixes a v3 client (which would prefer mesh + WebRTC) with a v2 (o
 plan requires **every** member to be v3-capable and to support the chosen topology and transport, so a single
 v2 member pins the whole room to the relay floor.
 
-This is not an error message — it is the absence of one. When the lobby finalizes (a member sends `StartGame`
-once every current player is ready), both members receive the unchanged `GameStarting`. The v2 member receives
-nothing more, exactly as in the [v2 two-player relay](v2-two-player-relay.md) flow. Critically, the **v3 member
-receives no `SessionPlan`** either:
+This is not an error. When the lobby finalizes (a member sends `StartGame` once
+every current player is ready), both members receive the unchanged
+`GameStarting`. The v2 member receives nothing more, exactly as in the
+[v2 two-player relay](v2-two-player-relay.md) flow. The v3 member then receives
+an explicit relay-floor reset:
 
 ```text
 v3 member's inbox at finalization:
   GameStarting       { peer_connections: [...] }
-  (no SessionPlan)
+  SessionPlan        { topology: relay, transport: relay, peers: [], fallback: relay }
 ```
 
-Next: the v3 client must detect the missing `SessionPlan` and fall back to relayed `GameData` for the whole
-session. The rule of thumb: a v3 client only attempts peer-to-peer transports if it actually received a
-`SessionPlan` at finalization; otherwise it behaves exactly like a v2 client and relays everything through the
-server. This is the relay-floor guarantee — v2 and v3 clients always interoperate, with the relay floor as the
-universal default.
+Next: the v3 client applies the latest plan, tears down any stale P2P links, and
+uses relayed `GameData` for the whole session. The v2 client reaches the same
+data path without seeing a v3 message. This is the relay-floor guarantee: v2
+and v3 clients always interoperate, with the relay floor as the universal
+default.

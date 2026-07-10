@@ -7,8 +7,9 @@ ADR-0004 - Accepted
 ## Context
 
 Protocol v3 ([ADR-0001](0001-protocol-v3-two-axis.md)) gives the server a complete signaling story — capability
-negotiation, the topology/transport ladder, per-recipient `SessionPlan`s, opaque `Signal` relay, late-join
-`NewPeer`, transport-status reporting — but until this ADR nothing in this repository ever ran that story against a
+negotiation, the topology/transport ladder, authoritative per-recipient `SessionPlan`s, opaque `Signal` relay,
+membership refreshes, and transport-status reporting — but until this ADR nothing in this repository ever ran that
+story against a
 **real WebRTC implementation**. The in-repo conformance suites drive real sockets and assert exact wire bytes, yet
 their "clients" are test harness code: SDP strings are fabricated, ICE candidates are never gathered, and no DTLS
 handshake or SCTP data channel ever opens. That leaves the most important claim — _a real client following
@@ -76,7 +77,7 @@ the version-less path dependency). CI audits it via a dedicated cargo-deny job i
 documented in the client README and exported by `scripts/run-webrtc-interop.sh`) and N real client processes per
 scenario, then asserts over their drained JSONL event logs: glare-matrix antisymmetry, the
 full per-channel message matrix, Appendix G status resolution and fan-out, relay-floor liveness during P2P,
-crippled-ICE fallback, late-join (seat-fill) `NewPeer` pairing, and mixed v2/v3 relay-floor rooms. Everything is
+crippled-ICE fallback, late-join (seat-fill) full-plan refreshes, and mixed v2/v3 relay-floor rooms. Everything is
 deadline-bounded; there are no sleeps-as-synchronization.
 
 ### Zero-external-network CI posture

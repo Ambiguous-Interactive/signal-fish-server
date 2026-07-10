@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added protocol-v3 delivery classes and exact gap accountability (P10.E2).
+  JSON `GameData` now supports `reliable` (the default), keyed `latest`, and
+  `volatile`; raw binary game data remains reliable. Per-connection data and
+  generation-scoped priority control queues enforce class-specific
+  conservation, while `DeliveryReport` publishes cumulative per-class outcomes
+  plus up to 256 exact `(sender, epoch, sequence range, reason)` omissions per
+  frame before later data can expose a gap. Additional ranges roll into further
+  reports. Recipient room/spectator transitions remain ordering barriers.
+  Reliable capacity timeout, maximum outbound/write sojourn, and inability to
+  preserve exact accountability all fail closed with `4002 slow_consumer`. The
+  frozen v2 wire shape and reliable FIFO behavior are unchanged. Operators gain
+  raw JSON `connections.delivery_by_class` snapshots and Prometheus
+  `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}` totals.
+  Every v3 binary delivery now carries the same mandatory MessagePack
+  `from_player` / `encoding` / opaque `payload` / `seq` / `epoch` envelope,
+  including JSON and reserved rkyv payload paths; frozen v2 bytes are unchanged.
 - Added graceful shutdown drain (P10.E3). `SIGTERM`/Ctrl-C now stop new WebSocket
   upgrades, reject room-creating joins with `SERVER_DRAINING`, send v3 clients a
   best-effort `GoingAway { deadline_ms, retry_after_secs }` advisory, then close
@@ -35,13 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset on a room switch) that increments once per incarnation of the sender's
   membership (its first-ever incarnation is 1; each join-after-leave or reconnect
   increments it) while `seq` restarts at 1 within each epoch. The pair
-  `(epoch, seq)` is therefore strictly lexicographically increasing per
-  `(sender, room)` as observed by any single recipient, making a `seq` reset
-  **self-describing** (GAP-8): a recipient attributes the backwards `seq` jump to
-  the epoch bump directly instead of correlating a separately-ordered
-  `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` control message. Each member's
+  `(epoch, seq)` is lexicographically increasing in data-lane order, making a
+  `seq` reset **self-describing** (GAP-8). Priority peer-lifecycle control may
+  overtake an already-queued old-epoch tail; clients account for that tail but
+  suppress it from application state after the lifecycle change. Each member's
   current epoch is also carried on the room snapshots
-  (`RoomJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
+  (`RoomJoined.current_players[].epoch`,
+  `SpectatorJoined.current_players[].epoch`, `PlayerJoined.player.epoch`,
   `PlayerReconnected.epoch`, and the `Reconnected` member snapshot) so a v3
   recipient can baseline a sender before its first relayed frame. The epoch is
   captured into the reconnection record at disconnect and resumed at
@@ -87,16 +103,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-vacuity — `SilentSupersedeBug`, `CoalesceReliableBug`, `MisdropLatestBug`,
   `ReportOverstateBug` (each violating its intended invariant) — all pinned
   `FALSE` in the checked config (green in the auto-globbed suite). `latest` never
-  backpressures (a new-key send on a full queue drop-oldest-volatile or drops the
-  arrival); the per-successor `supersedes_from` scalar is documented as the
-  D4/E5 watermark concern, out of scope here.
+  backpressures (a new-key send on a full queue drops the oldest volatile value
+  or the latest arrival). The later `ScalarInPlaceBug` seed formally disproved
+  the proposed per-successor `supersedes_from` scalar: interleaved A1, B2, A3
+  would falsely report live B2 and could write A3 before B2. The implementation
+  instead appends the successor, preserves global queue order, and publishes an
+  exact `DeliveryReport` gap on the priority control lane.
 
 - Added the `ControlPriorityDelivery` TLA+ model
   (`formal/tla/ControlPriorityDelivery.tla` + `_Small.cfg`) — spec-first for the
   protocol-v3 P10.E2 delivery revision (merged before the code). It pins the two
   properties the queue split must satisfy, composing with the #131
-  `DeliveryContract` substrate: `ControlAgeBounded` (control rides a separate
-  queue drained strictly before data — never starved behind a data backlog) and
+  `DeliveryContract` substrate: `ControlAgeBounded` (within an active recipient
+  generation, control rides a separate queue drained strictly before data --
+  never starved behind a data backlog) and
   the `DeliveryEventuallyResolves` liveness (a frame that sits too long triggers
   a sojourn close, so `enqueued ~> written ∨ closed` holds even against a peer
   that pings but never reads — resting only on `WF(Tick, SojournEvict,
@@ -150,14 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added protocol v3 (strictly additive; clamp `protocol.max_protocol_version` back to `2` —
   pure v2 — to disable, since v3 is now the current version): relayed `GameData` /
   `GameDataBinary` delivered to a v3 recipient carry a
-  server-stamped per-`(sender, room)` `seq` starting at `1` and strictly contiguous per sender,
-  so any recipient can detect any relay gap end-to-end; pre-v3 recipients receive byte-identical
-  frames with no `seq` key. Documented in `docs/protocol.md` ("Protocol v3 delivery reliability") and the
+  server-stamped per-`(sender, room)` `seq` starting at `1` and strictly increasing per sender.
+  Exact prior `DeliveryReport` ranges account for intentional same-epoch gaps; pre-v3 recipients
+  receive byte-identical frames with no `seq` key. Documented in
+  `docs/protocol.md` ("Protocol v3 delivery reliability") and the
   AsyncAPI spec; pinned by `tests/v3_reliability_wire_golden.rs` and `tests/v3_game_data_sequencing_e2e.rs`.
 - Added the v3-only `RelayStats` server message (config-gated by
   `websocket.delivery_stats_interval_secs`, default `0` = disabled, must be ≤ 3600): periodic
   per-connection cumulative delivery accounting (`sent_to_you`, `dropped_for_you`,
-  `backpressure_events`) so clients can attribute loss without server log access.
+  `backpressure_events`) for aggregate diagnostics. These counters do not identify or
+  authorize an exact sequence gap; `DeliveryReport` owns that contract.
 - Added semantic WebSocket close codes (RFC 6455 private range, stable assignments): `4001
   auth_timeout`, `4002 slow_consumer`, `4003 activity_timeout`, `4004 idle_timeout` (`4000
   server_shutdown` reserved; plain unregistration closes with a normal `1000`). The code rides
@@ -328,7 +350,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`clients/native/tests/interop_e2e.rs`) spawns the REAL server binary plus N≥3 client processes
   over loopback (TURN disabled, zero STUN URLs — no external network) and proves the native↔native
   interop matrix cells: mesh N=3 full WebRTC with a live relay floor, host star N=3, crippled-ICE
-  relay fallback, late-join `NewPeer` seat-fill pairing, and mixed v2/v3 relay-floor rooms. Wired
+  relay fallback, late-join full-plan seat-fill refreshes, and mixed v2/v3 relay-floor rooms. Wired
   into CI via `scripts/run-webrtc-interop.sh` and the path-filtered
   `.github/workflows/webrtc-interop.yml` (interop suite + a cargo-deny audit of the client's
   independent dependency graph against `clients/native/deny.toml`). Recorded the design decisions
@@ -418,20 +440,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finalization (all players ready), the server now computes a single room-wide plan from the
   intersection of every member's negotiated capabilities and sends a per-recipient
   `ServerMessage::SessionPlan` (`{topology, transport, host?, peers, ice_servers?, fallback}`)
-  to each v3-capable member, alongside the unchanged `GameStarting`. The selection ladder is
+  to each v3-capable member after the unchanged `GameStarting`. The selection ladder is
   `mesh+webrtc` → `host+webrtc` → `host+direct` → `relay` floor, where any member lacking the
   required capability (or a disabled transport) downgrades the whole room to relay; host election
   prefers the authority, else the earliest joiner (smaller UUID tie-break); each recipient's
   `peers[].initiate` is set by the deterministic glare rule (mesh: lesser UUID offers; host:
   clients offer to the host, the host offers to none). A room that resolves to the relay floor
-  emits no `SessionPlan` and behaves byte-identically to v2 — v2 (and v3-relay-only) clients never
-  receive one. Initial pairing is delivered exclusively by this `SessionPlan` at finalize; the
-  late-join / reconnect `ServerMessage::NewPeer` path is now finalization-gated and transport-gated
-  (it fires only for a join or reconnect into an already-`Finalized` room whose recomputed plan uses
-  the WebRTC transport, then pairs per the plan's topology: mesh pairs the joiner with every other
-  WebRTC peer, host pairs a client with the elected host only — clients never offer to each other —
-  while a non-WebRTC plan, the relay floor _or_ a `host+direct` (LAN) session, emits no `NewPeer`).
-  This supersedes the P2 behavior where `NewPeer` fired on every lobby-fill join. Added
+  sends every v3 member an explicit no-peer `relay`/`relay` plan; v2 members receive no plan and
+  remain byte-identical. Initial pairing is delivered exclusively by `SessionPlan` at finalize.
+  A join or reconnect into an already-`Finalized` room refreshes every current v3 member with a
+  complete per-recipient plan while retaining the room's sticky topology and transport. `NewPeer`
+  remains a decodable compatibility wire shape but is not emitted as the current membership-delta
+  contract. This supersedes the P2 behavior where `NewPeer` fired on every lobby-fill join. Added
   a `[session]` config block (`default_topology`, `game_topology_mappings`, `enable_webrtc`,
   `enable_direct`, `ice_servers`) with validation; the new `IceServer`, `SessionPeer`, and
   `SessionPlanPayload` types are additive over the frozen v2 wire format (`host`/`ice_servers`/
@@ -459,8 +479,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records it per connection and updates metrics, ignoring it from any non-v3 connection. A
   `connected:true` P2P transport (`direct`/`webrtc`) counts as a P2P establishment; `connected:false`
   counts as a relay fallback; `connected:true` with `relay` is "still on the floor" and moves no
-  counter. The message is purely informational — the server relays `GameData` unconditionally, so
-  the relay floor never closes regardless of what is reported. Added Prometheus counters for the v3
+  counter. The message is purely informational -- reported P2P state never disables `GameData`
+  relay, although delivery failures can still close the physical socket loudly. Added Prometheus counters for the v3
   transport surface: `signal_fish_transport_session_plans_emitted_total`, per-finalized-room
   topology (`signal_fish_transport_topology_{mesh,host,relay}_selected_total`) and transport
   (`signal_fish_transport_{webrtc,direct,relay}_selected_total`) selection,
@@ -476,11 +496,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added targeted WebRTC signal relay (protocol v3 phase P2). `ClientMessage::Signal { to, signal }`
   relays an opaque, server-uninterpreted payload (matchbox-compatible `Offer` / `Answer` /
   `IceCandidate`) to a single peer in the same room, dispatched on the best-effort relay path as
-  `ServerMessage::Signal { from, signal }`.
-  On room join, existing v3 WebRTC peers and the joiner are paired via `ServerMessage::NewPeer
-  { peer_id, you_initiate }`, where the deterministic glare rule (lesser UUID initiates) designates
-  exactly one offerer per pair; P3's host topology later fixes this direction for star sessions
-  (the client offers, the host answers). Same-room enforcement, WebRTC-transport negotiation, and a
+  `ServerMessage::Signal { from, signal }`. The additive
+  `ServerMessage::NewPeer { peer_id, you_initiate }` compatibility shape was introduced with this
+  phase; current finalized-room membership changes use complete `SessionPlan` refreshes instead.
+  The deterministic glare rule (lesser UUID initiates) designates exactly one offerer per mesh
+  pair; P3's host topology fixes this direction for star sessions (the client offers, the host
+  answers). Same-room enforcement, WebRTC-transport negotiation, and a
   per-connection valid-signal rate limit (`rate_limit.max_signals`, default 600) are enforced.
   Rejected signal attempts use a separate `rate_limit.max_signal_errors` budget (default 60) so
   invalid targets and unsupported transports cannot bypass rate limiting or consume the valid ICE
@@ -514,45 +535,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negotiated v3 plus the sticky topology/transport pair are electable (the authority preference
   passes the same filter, so a seat-filling v2 or relay-only authority is never named host of a
   session it cannot run; otherwise authority preferred, else earliest joiner with a smaller-UUID
-  tie-break), and when no member qualifies the stored plan is dropped with no emission — the
-  session is over and the relay floor carries the room. Re-issued and late-join plan peer lists
+  tie-break), and when no member qualifies the stored plan is dropped — the session is over and
+  the relay floor carries the room. A join/reconnect membership event still publishes an explicit
+  relay plan to every current v3 member; a departure alone emits no replacement plan. Re-issued
+  membership-refresh plan peer lists
   are capability-filtered on both sides by the same predicate: `peers[]` names only members that
   negotiated the session's sticky topology/transport, so a v3 member that did not (e.g. a
   relay-only seat-filler, or one with the WebRTC transport but not the session's topology)
   receives its (v3-gated) plan with an empty peer list and participates
   via the relay floor (`host` stays as elected, informational), and capable members never see it
-  listed — and the late-join `NewPeer` gating applies this same full predicate to both ends of
-  every announced pair, so clients are never instructed to attempt WebRTC pairs the plan itself
-  excludes (or that `Signal` validation would reject); at finalize the filter is vacuous because
-  plan selection requires every member to support the plan. A late joiner or reconnector entering
-  an active non-relay session now receives its own tailored `SessionPlan` (current peers,
-  glare-correct `initiate` flags, stored host, fresh ICE) and is no longer sent joiner-side
-  `NewPeer`s; existing members still receive the
-  additive `NewPeer` delta (mesh: every session-capable member; host: the star edge only), making the client
-  contract uniform — the latest `SessionPlan` wins; `NewPeer` is an additive delta for existing
-  members. Topology/transport are sticky for the session lifetime (the selection ladder runs once at
-  finalize and is never re-run mid-session). A late join that itself heals an invalid host is served
-  by the re-plan to every v3 member (joiner included) instead of the joiner-plan + `NewPeer` pair. No new
+  listed, so clients are never instructed to attempt pairs the plan itself excludes (or that
+  `Signal` validation would reject); at finalize the filter is vacuous because plan selection
+  requires every member to support the plan. After a late join or reconnect, every current v3
+  member receives its own complete tailored `SessionPlan` (current peers, glare-correct `initiate`
+  flags, stored host, fresh ICE). The latest plan authoritatively replaces prior peer state;
+  `NewPeer` is retained only as a compatibility wire shape. Topology/transport are sticky for the
+  session lifetime (the selection ladder runs once at finalize and is never re-run mid-session). A
+  membership event that heals an invalid host is served by the re-plan to every v3 member. No new
   message types and no wire-shape changes; all emission stays v3-gated. Added Prometheus counters
   `signal_fish_transport_session_replans_emitted_total` (one per host re-plan event — departure
   failover or late-join self-heal; not moved when no member qualifies and the plan is dropped)
   and `signal_fish_transport_session_plans_late_join_total` (one per joiner that received a
   late-join plan; a heal-served joiner counts on the re-plan event instead);
-  `signal_fish_transport_session_plans_emitted_total` keeps meaning "finalized
-  non-relay rooms", and TURN credentials minted by re-plans/late-join plans count toward the
+  `signal_fish_transport_session_plans_emitted_total` means one finalization publication for a
+  room with v3 recipients, including the relay floor, and TURN credentials minted by
+  re-plans/late-join plans count toward the
   existing `signal_fish_transport_turn_credentials_issued_total`.
 - Added a protocol v3 multi-peer (N≥3) signaling conformance suite
   (`tests/v3_multipeer_e2e.rs`): full-lobby flows over real WebSockets pinning the global mesh
   glare matrix at N=3/N=4 (every unordered pair has exactly one offerer — the smaller UUID — and
   pairwise opaque signals relay byte-identically across all ordered pairs), the strict N=4 host
   star property (clients offer only to the host and never appear in each other's plans), the mixed
-  v2+v3 relay floor (`GameStarting` for everyone, no `SessionPlan`/`NewPeer` leakage to anyone),
+  v2+v3 relay floor (`GameStarting` for everyone, explicit relay plans for v3 only),
   N=4 host-failover re-planning (one fresh star-correct plan per survivor naming the
   earliest-joined remaining member) plus an N=4 cascade variant (two consecutive host deaths, each
   wave re-electing and re-issuing from the surviving session state), seat-filling late join into a
-  live mesh session (joiner plan +
-  per-member `NewPeer` deltas), and the full wire reconnect flow (`Reconnected` + fresh plan,
-  `PlayerReconnected` + `NewPeer`, post-reconnect signals under the restored player id).
+  live mesh session (complete plan refreshes for the joiner and every v3 incumbent), and the full
+  wire reconnect flow (`Reconnected` / `PlayerReconnected` + complete plan refreshes,
+  post-reconnect signals under the restored player id).
 - Added a true multi-process conformance suite (`tests/v3_multiprocess_e2e.rs`) that spawns the
   compiled `signal-fish-server` binary as a real child process (per-test temp config via
   `SIGNAL_FISH_CONFIG_PATH`, free-port reservation with spawn retries, `/v2/health` readiness
@@ -680,17 +700,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently dropped `GameData` under burst — each connection's outbound queue was a small bounded
   channel (`batch_size * 4` = 40 messages) written with a fire-and-forget `try_send`, so a burst
   that outpaced one recipient's drain rate discarded messages with only a metric to show for it.
-  The server now NEVER silently drops a delivery: the fast path is still a lock-free `try_send`,
-  but a full queue makes delivery wait (true backpressure) for up to
+  The server no longer silently drops reliable delivery: the fast path is a
+  non-waiting try-enqueue, but a full reliable queue makes delivery wait (true backpressure) for up to
   `websocket.slow_consumer_timeout_ms`, and only a recipient that stays full past that timeout is
   disconnected as a slow consumer (metrics + warning log + best-effort `SLOW_CONSUMER` error
   frame, then the close). Room senders are paced to their slowest healthy recipient; a dead
-  recipient costs senders at most one timeout window before it is evicted. Covered end to end by
+  recipient costs reliable senders at most one timeout window before it is evicted. Protocol-v3
+  `latest` / `volatile` omissions are instead explicit in `DeliveryReport`. Covered end to end by
   `tests/relay_backpressure_e2e.rs`; delivery semantics are documented in `docs/protocol.md`.
 - Undeliverable binary game data is no longer silently dropped by the send path: a payload that
   cannot be converted for a recipient (e.g. an internal binary encoding relayed to a JSON-only
   client) now surfaces an explicit `Error` frame with code `UNSUPPORTED_GAME_DATA_FORMAT` to that
-  recipient in place of each undeliverable payload, and the drop metric still increments.
+  recipient in place of each undeliverable payload. A v3 recipient first receives an exact
+  `DeliveryReport` gap; the aggregate drop metric still increments.
 - Hardened release and documentation validation: `release.yml` now skips binary
   attachment with a clear diagnostic when no `release-binary-*` artifacts exist,
   uses an existing `actions/download-artifact` tag, and the workflow hygiene job
@@ -784,9 +806,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed protocol v3 late-join/reconnect pairing recomputing the session plan over the current
   members instead of consulting the plan the room actually runs. A room that finalized to the relay
   floor (for example one v3 + one v2 member) could, after the v2 member departed and a v3+WebRTC
-  player filled the seat, wrongly emit `NewPeer` and push clients of a relay session into WebRTC
-  negotiation even though no `SessionPlan` was ever issued. Late join and reconnect now read the
-  stored active session plan: no stored plan ⇒ no v3 emission at all; topology/transport are sticky.
+  player filled the seat, wrongly push clients of a relay session into WebRTC negotiation. Late
+  join and reconnect now read the stored active session plan: an absent stored plan means the
+  sticky relay floor, so every current v3 member receives an explicit no-peer relay plan while
+  v2 members receive no plan; topology/transport are never re-selected mid-session.
 - Fixed lobby finalization never persisting `lobby_state = "finalized"` to room storage (the
   in-memory coordinator only broadcast `GameStarting` and tracked ready state in its own map, so the
   stored room stayed `lobby`). A post-game departure therefore regressed the room to `waiting` and a
@@ -830,15 +853,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a single data-driven constant (`UPGRADE_LADDER`) walked by topology-richness rank, the four legal
   `(topology, transport)` pairings are enforced by `is_valid_pair` plus a `debug_assert!`, and an
   exhaustive selection-invariant test guards the whole class of topology/transport drift.
-- Fixed `handle_active_session_late_join` emitting WebRTC `NewPeer` control messages for a non-WebRTC active
-  session. Late-join pairing is now gated on the plan's _transport_
-  (`SessionPlanDecision::uses_webrtc_signaling`, i.e. `transport == webrtc`) rather than its _topology_,
-  so a `host+direct` (LAN) room — a non-relay topology whose transport is not WebRTC — no longer pushes
-  clients into WebRTC negotiation. This mirrors `emit_session_plan`, which advertises ICE only for a
-  WebRTC transport. The two emission gates (`is_relay` for `SessionPlan`, `uses_webrtc_signaling` for
-  `NewPeer`/`Signal`) and their `host+direct` divergence are now pinned by a data-driven truth-table
-  test, and the module/protocol doc comments corrected to describe the late-join gate as the WebRTC
-  transport rather than a "non-relay" plan (a `host+direct` room is non-relay yet emits no `NewPeer`).
+- Fixed finalized-room membership updates deriving incremental WebRTC pairing from topology alone.
+  A join/reconnect now republishes one complete per-recipient `SessionPlan` to every current v3
+  member, so `host+direct` carries no ICE or WebRTC instructions, relay-floor rooms explicitly reset
+  stale peer state, and WebRTC peer lists use the same capability predicate as `Signal` validation.
+  `NewPeer` remains decodable for compatibility but is no longer the production membership delta.
 - Hardened `session.ice_servers` validation to reject any blank or whitespace-only URL (even alongside
   valid ones) and to report an empty `urls` list distinctly, instead of accepting a server as long as
   a single URL was non-blank. Blank URLs are propagated verbatim to clients and break `RTCIceServer`
@@ -855,8 +874,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardened internal Markdown link validation so local checks fail when a link target exists locally but is not tracked
   by Git, matching clean CI checkout behavior.
 - Fixed protocol v3 WebRTC reconnect behavior so restored peers are returned to room membership,
-  receive fresh `NewPeer` pairing, and keep the reconnected player identity for subsequent WebSocket
-  frames and disconnect cleanup.
+  every current v3 member receives a fresh authoritative `SessionPlan`, and the reconnector keeps
+  its player identity for subsequent WebSocket frames and disconnect cleanup.
 - Fixed reconnection claim handling so failed restore attempts release the claim, roll back partial
   room restoration, and let clients retry with the same token until the reconnection window expires.
 - Fixed room-join coordination cleanup so max-room-cap denials and room-count storage errors release
@@ -918,8 +937,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [`StartGame`](docs/protocol.md) client message. `StartGame` is accepted only when **every current
   player is ready** and the sender is authorized: the room's authority player if the room has one,
   otherwise **any** member. A single ready player may start (solo is allowed). On success the server
-  broadcasts the unchanged `GameStarting` (and, for a negotiated v3 non-relay room, the per-recipient
-  `SessionPlan`) exactly as before — only the trigger changed. A departure no longer regresses a
+  broadcasts the unchanged `GameStarting` followed by a per-recipient `SessionPlan` for every v3
+  member (including an explicit relay-floor plan) — only the trigger changed. A departure no longer regresses a
   partially-full lobby back to `Waiting`; the remaining players keep their readiness and can still
   start. Rejected `StartGame`s return the new `GAME_START_NOT_READY` / `GAME_START_FORBIDDEN` error
   codes (an already-started room returns `INVALID_ROOM_STATE`).
