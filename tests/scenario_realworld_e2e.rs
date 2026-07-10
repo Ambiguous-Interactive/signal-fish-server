@@ -41,7 +41,9 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::{AppAuthEntry, ProtocolConfig};
-use signal_fish_server::protocol::{ClientMessage, PlayerId, ReplayStatus, RoomId, ServerMessage};
+use signal_fish_server::protocol::{
+    ClientMessage, ErrorCode, PlayerId, ReplayStatus, RoomId, ServerMessage,
+};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use test_helpers::{create_test_server, create_test_server_with_config, test_server_config};
@@ -574,7 +576,19 @@ async fn backgrounded_tab_profile() {
             loop {
                 match tab_rx.next().await {
                     Some(Ok(Message::Text(text))) => {
-                        let _player_left = record_frame(&tab_ledger, "Tab", &text);
+                        match tab_ledger.record_text_frame("Tab", &text) {
+                            ServerMessage::Error {
+                                error_code: Some(ErrorCode::SlowConsumer),
+                                ..
+                            } => break,
+                            ServerMessage::Error {
+                                message,
+                                error_code,
+                            } => panic!(
+                                "Tab: unexpected server error mid-scenario: {message} ({error_code:?})"
+                            ),
+                            _ => {}
+                        }
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_control_frame)) => continue,
