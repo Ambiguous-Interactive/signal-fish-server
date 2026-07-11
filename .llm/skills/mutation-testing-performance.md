@@ -116,10 +116,12 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
    It also installs `cargo-mutants` and runs the inventory guard, ensuring the
    measured mutant count cannot silently skip in CI.
 7. **Shard count sized for serial execution.** `--in-place` runs each shard's
-   mutants SERIALLY (one source tree, no `-j`). Resharded to **25**: 319 mutants
-   ÷ 25 rounds up to 13/shard × ~22s ≈ <5 min/shard; `timeout-minutes: 10`. **Rule:** when
-   the mutant count or per-mutant cost changes, re-size N so each serial shard
-   still finishes well under the timeout.
+   mutants SERIALLY (one source tree, no `-j`). Measured CI shard 7, the worst
+   13-mutant shard, took 303.748s, so the budget rounds up to 24s/mutant. Resharded to
+   **27**: 319 mutants ÷ 27 rounds up to 12/shard × 24s = 288s/shard;
+   `timeout-minutes: 10`. **Rule:** when the mutant count or per-mutant cost
+   changes, re-size N so each serial shard still finishes under the 5-minute
+   target with measured headroom.
 
 ---
 
@@ -142,12 +144,12 @@ re-checking the others can silently reintroduce the cancellation:
     re-added cold dep build) fails loudly instead of merely running slowly.
 - Enforced by `test_mutation_shard_budget_is_feasible_vs_timeout`.
 
-Measured locally after the fix: per-mutant ~22s (Build ~15s + Test ~7s), 0 cold
-dep recompiles, deterministic (13 mutants/shard × ~22s ≈ <5 min at the budget).
-CI runs on a 4-vCPU runner, so the per-shard wall-clock is **still to be
-confirmed** by a `workflow_dispatch` run (tracked in `PLAN.md` as `MUTPERF-001`,
-open until CI-validated); the 10-min `timeout-minutes` guarantees no cancellation
-in the meantime.
+Measured in CI: shard 7, the worst 13-mutant shard, took 303.748s, or
+23.3652s/mutant.
+Rounding up to a 24s/mutant budget and using 27 shards caps the modeled largest
+shard at `ceil(319/27) × 24s = 12 × 24s = 288s`, below the 5-minute target.
+The 10-minute `timeout-minutes` retains headroom for runner variance or an
+occasional cache miss.
 
 ---
 

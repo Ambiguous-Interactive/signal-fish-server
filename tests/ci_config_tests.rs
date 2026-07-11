@@ -21329,10 +21329,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // .cargo/mutants.toml. Re-measure (and update mutation.yml's shard count if
 // needed) whenever the scope or the mutated code changes materially.
 const MUTATION_TOTAL_MUTANTS: u32 = 319;
-// LOCAL-measured per-mutant budget (~22s wall-clock for in-place + slice +
-// lib-only incremental rebuild + relink + lib test run). A small ceiling above
-// the measurement absorbs runner variance. Update ONLY after re-measuring.
-const MUTATION_PER_MUTANT_BUDGET_SECS: u32 = 23;
+// CI-measured per-mutant budget: shard 7, the worst 13-mutant shard, took
+// 303.748s, so ceil(303.748 / 13) = 24s for the in-place + slice + lib-only
+// oracle. Update ONLY after re-measuring.
+const MUTATION_PER_MUTANT_BUDGET_SECS: u32 = 24;
 // Soft target: each shard should finish in under 5 minutes.
 const MUTATION_TARGET_SECS: u32 = 300;
 // Allowed band for the mutants job `timeout-minutes`. The floor stops anyone
@@ -21531,12 +21531,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/25"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/27"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/25` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/27` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -21682,7 +21682,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/25 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/27 --print-cmd",
         violations.join("\n")
     );
 }
