@@ -798,6 +798,7 @@ pub(super) async fn handle_socket(
         let batch_size = config.websocket_config.batch_size;
         let batch_interval_ms = config.websocket_config.batch_interval_ms;
         let max_sojourn = Duration::from_millis(config.websocket_config.max_sojourn_ms);
+        let ping_write_timeout = Duration::from_secs(config.websocket_config.pong_timeout_secs);
 
         let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
 
@@ -820,11 +821,32 @@ pub(super) async fn handle_socket(
                                 break;
                             };
                             let payload = command.nonce.to_be_bytes().to_vec().into();
-                            if sender.send(Message::Ping(payload)).await.is_err() {
-                                break;
+                            match tokio::time::timeout(
+                                ping_write_timeout,
+                                sender.send(Message::Ping(payload)),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    let _ = command.written.send(Instant::now());
+                                    continue;
+                                }
+                                Ok(Err(err)) => {
+                                    tracing::debug!(
+                                        error = %err,
+                                        "Failed to write WebSocket Ping"
+                                    );
+                                }
+                                Err(_elapsed) => {
+                                    tracing::info!(
+                                        timeout_secs = ping_write_timeout.as_secs(),
+                                        "WebSocket Ping write timed out - closing connection"
+                                    );
+                                    send_task_close_signal
+                                        .request_close(CloseReason::ActivityTimeout);
+                                }
                             }
-                            let _ = command.written.send(Instant::now());
-                            continue;
+                            break;
                         }
                         received = async {
                             if batching_enabled {
