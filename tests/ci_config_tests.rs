@@ -15886,6 +15886,17 @@ fn test_nextest_config_exists_and_is_valid() {
          File: {}",
         nextest_config.display()
     );
+
+    let normalized = content.replace("\r\n", "\n");
+    assert!(
+        normalized.contains("powershell-subprocess = { max-threads = 1 }")
+            && normalized.contains(
+                "filter = 'test(/when_pwsh_available/)'\n\
+test-group = 'powershell-subprocess'",
+            ),
+        ".config/nextest.toml must serialize direct PowerShell integration tests across \
+         nextest's per-test processes. Keep those tests named `*_when_pwsh_available`."
+    );
 }
 
 #[test]
@@ -16365,7 +16376,8 @@ fn test_powershell_native_process_helpers_do_not_pollute_pipeline() {
 }
 
 #[test]
-fn test_powershell_native_bytes_helper_returns_single_result_object_when_available() {
+#[serial_test::serial]
+fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
         .args([
@@ -16427,6 +16439,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_availab
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -16504,6 +16517,7 @@ fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh_available() {
     let root = repo_root();
     let hook = root.join("scripts/hooks/pre-commit.ps1");
@@ -16597,6 +16611,7 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_push_workflow_direct_script_detector_matches_assignment_edge_cases_when_pwsh_available()
 {
     let root = repo_root();
@@ -16669,6 +16684,7 @@ jobs:
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -16784,6 +16800,7 @@ fn after_lifetime_helper() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
