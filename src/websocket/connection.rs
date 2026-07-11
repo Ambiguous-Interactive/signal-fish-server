@@ -41,6 +41,20 @@ struct ServerPingCommand {
     written: oneshot::Sender<Instant>,
 }
 
+#[derive(Clone, Copy)]
+struct ObservedPong {
+    nonce: u64,
+    received_at: Instant,
+}
+
+fn pong_satisfies_probe(
+    observation: Option<ObservedPong>,
+    nonce: u64,
+    written_at: Instant,
+) -> bool {
+    observation.is_some_and(|pong| pong.nonce == nonce && pong.received_at >= written_at)
+}
+
 /// Enqueue a message on this connection's own outbound queue, honoring the
 /// server-wide no-silent-drop contract: backpressure while the queue is
 /// momentarily full, then a loud slow-consumer close if it never drains.
@@ -437,7 +451,7 @@ pub(super) async fn handle_socket(
     // application delivery lanes. At most one probe is outstanding, so one
     // slot is sufficient and cannot accumulate stale probes.
     let (ping_command_tx, mut ping_command_rx) = mpsc::channel::<ServerPingCommand>(1);
-    let (pong_nonce_tx, pong_nonce_rx) = watch::channel(0_u64);
+    let (pong_observation_tx, pong_observation_rx) = watch::channel(None::<ObservedPong>);
 
     // Keep a clone of tx for sending auth responses
     let tx_clone = tx.clone();
@@ -576,12 +590,11 @@ pub(super) async fn handle_socket(
 
     let server_ping_interval_secs = server.config().websocket_config.server_ping_interval_secs;
     if server_ping_interval_secs > 0 {
-        let pong_timeout =
-            Duration::from_secs(server.config().websocket_config.pong_timeout_secs.max(1));
+        let pong_timeout = Duration::from_secs(server.config().websocket_config.pong_timeout_secs);
         let ping_commands = ping_command_tx.clone();
         let ping_close_signal = close_signal.clone();
         let mut ping_task_close = ping_task_close;
-        let mut pong_nonces = pong_nonce_rx;
+        let mut pong_observations = pong_observation_rx;
         let server_for_ping = server.clone();
         let effective_player_id_for_ping = Arc::clone(&effective_player_id);
         tokio::spawn(async move {
@@ -602,11 +615,10 @@ pub(super) async fn handle_socket(
                 let nonce = next_nonce;
                 next_nonce = next_nonce.checked_add(1).unwrap_or(1);
                 // Discard unsolicited/stale Pongs before publishing this
-                // probe. A Pong only satisfies the probe if it arrives after
-                // the corresponding command is issued (including the valid
-                // race where it arrives before the write acknowledgement is
-                // observed here).
-                let _ = pong_nonces.borrow_and_update();
+                // probe. The write task returns the completed-write timestamp,
+                // so a predictable Pong that races this command but precedes
+                // the actual Ping write cannot satisfy the probe.
+                let _ = pong_observations.borrow_and_update();
                 let (written_tx, written_rx) = oneshot::channel();
                 let command = ServerPingCommand {
                     nonce,
@@ -644,11 +656,16 @@ pub(super) async fn handle_socket(
                             tracing::debug!(?reason, "Connection closing while awaiting WebSocket Pong");
                             return;
                         }
-                        changed = pong_nonces.changed() => {
+                        changed = pong_observations.changed() => {
                             if changed.is_err() {
                                 return;
                             }
-                            if *pong_nonces.borrow_and_update() == nonce {
+                            let observation = *pong_observations.borrow_and_update();
+                            if pong_satisfies_probe(
+                                observation,
+                                nonce,
+                                written_at,
+                            ) {
                                 server_for_ping
                                     .metrics()
                                     .record_websocket_ping_rtt(written_at.elapsed())
@@ -676,7 +693,7 @@ pub(super) async fn handle_socket(
         });
     } else {
         drop(ping_task_close);
-        drop(pong_nonce_rx);
+        drop(pong_observation_rx);
     }
 
     // Periodic per-connection RelayStats emission (protocol v3, opt-in via
@@ -1488,7 +1505,10 @@ pub(super) async fn handle_socket(
                 }
                 Message::Pong(payload) => {
                     if let Ok(bytes) = <[u8; 8]>::try_from(payload.as_ref()) {
-                        pong_nonce_tx.send_replace(u64::from_be_bytes(bytes));
+                        pong_observation_tx.send_replace(Some(ObservedPong {
+                            nonce: u64::from_be_bytes(bytes),
+                            received_at: Instant::now(),
+                        }));
                     }
                     // A slow persistence refresh must not delay transport
                     // acknowledgement past the Pong deadline.
@@ -1571,6 +1591,36 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), listener.closed())
             .await
             .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+    }
+
+    #[test]
+    fn pong_probe_rejects_matching_nonce_observed_before_write() {
+        let written_at = Instant::now();
+
+        assert!(!pong_satisfies_probe(
+            Some(ObservedPong {
+                nonce: 1,
+                received_at: written_at - Duration::from_millis(1),
+            }),
+            1,
+            written_at,
+        ));
+        assert!(pong_satisfies_probe(
+            Some(ObservedPong {
+                nonce: 1,
+                received_at: written_at,
+            }),
+            1,
+            written_at,
+        ));
+        assert!(!pong_satisfies_probe(
+            Some(ObservedPong {
+                nonce: 2,
+                received_at: written_at + Duration::from_millis(1),
+            }),
+            1,
+            written_at,
+        ));
     }
 
     #[test]

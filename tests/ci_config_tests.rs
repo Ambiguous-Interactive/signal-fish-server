@@ -5668,7 +5668,9 @@ fn test_lychee_config_exists_and_is_valid() {
 
     let mut missing_fields = Vec::new();
     for (field, description) in required_fields {
-        if !content.contains(field) {
+        let assignment = Regex::new(&format!(r"(?m)^[ \t]*{}[ \t]*=", regex::escape(field)))
+            .expect("required lychee field must form a valid assignment regex");
+        if !assignment.is_match(&content) {
             missing_fields.push(format!("  - {field} ({description})"));
         }
     }

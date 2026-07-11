@@ -13,10 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection receives a transport-level Ping every 10 seconds and must return
   the matching Pong within 5 seconds or close with `4003 activity_timeout`.
   The probes bypass application delivery queues, require no client protocol
-  change, and publish timeout and round-trip latency metrics. Operators can set
+  change, reject guessed matching Pongs observed before the socket write begins,
+  and publish timeout and round-trip latency metrics. Operators can set
   `websocket.server_ping_interval_secs` to `0` to disable them. Documentation
   consistently distinguishes these WebSocket probes from application pings and
-  reflects the 24-connection default in the sample configuration.
+  reflects the 24-connection default in examples and deployment guidance.
 
 - Added protocol-v3 delivery classes and exact gap accountability (P10.E2).
   JSON `GameData` now supports `reliable` (the default), keyed `latest`, and
