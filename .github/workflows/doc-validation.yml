@@ -653,6 +653,7 @@ jobs:
             --accept 200,204,301,302,307,308,429
             --config .lychee.toml
             --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
+            --remap "https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server"
             --timeout 30
             --max-retries 3
             --exclude-path './target/*'

@@ -85,6 +85,8 @@ jobs:
           # so a bare `$1` is expanded as the shell's positional param (unbound -> the
           # job aborts; or empty -> every self-link masks to the workspace dir). The
           # `\$1` survives the single eval pass and reaches lychee as the literal `$1`.
+          # crates.io rejects automated rendered-page requests under its data-access
+          # policy, so validate this package through its canonical sparse-index record.
           # Local-dev parity: run the same check with
           #   lychee --config .lychee.toml \
           #     --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://$PWD/\$1" \
@@ -94,6 +96,7 @@ jobs:
             --verbose --no-progress --cache --max-cache-age 7d
             --config .lychee.toml
             --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
+            --remap "https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server"
             --exclude-path tests/
             --exclude-path target/
             --exclude-path third_party/
