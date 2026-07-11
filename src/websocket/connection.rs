@@ -38,7 +38,12 @@ pub(super) const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
 
 struct ServerPingCommand {
     nonce: u64,
-    written: oneshot::Sender<Instant>,
+    write_timing: oneshot::Sender<PingWriteTiming>,
+}
+
+struct PingWriteTiming {
+    started_at: Instant,
+    completed_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -50,11 +55,11 @@ struct ObservedPong {
 fn pong_rtt_for_probe(
     observation: Option<ObservedPong>,
     nonce: u64,
-    written_at: Instant,
+    write_started_at: Instant,
 ) -> Option<Duration> {
     let pong = observation?;
-    (pong.nonce == nonce && pong.received_at >= written_at)
-        .then(|| pong.received_at.duration_since(written_at))
+    (pong.nonce == nonce && pong.received_at >= write_started_at)
+        .then(|| pong.received_at.duration_since(write_started_at))
 }
 
 /// Enqueue a message on this connection's own outbound queue, honoring the
@@ -617,14 +622,15 @@ pub(super) async fn handle_socket(
                 let nonce = next_nonce;
                 next_nonce = next_nonce.checked_add(1).unwrap_or(1);
                 // Discard unsolicited/stale Pongs before publishing this
-                // probe. The write task returns the completed-write timestamp,
-                // so a predictable Pong that races this command but precedes
-                // the actual Ping write cannot satisfy the probe.
+                // probe. The write task returns timestamps bracketing the send,
+                // so a predictable Pong observed before the write begins cannot
+                // satisfy the probe while a fast reply received before the send
+                // future returns remains valid.
                 let _ = pong_observations.borrow_and_update();
-                let (written_tx, written_rx) = oneshot::channel();
+                let (write_timing_tx, write_timing_rx) = oneshot::channel();
                 let command = ServerPingCommand {
                     nonce,
-                    written: written_tx,
+                    write_timing: write_timing_tx,
                 };
                 tokio::select! {
                     reason = ping_task_close.closed() => {
@@ -637,20 +643,20 @@ pub(super) async fn handle_socket(
                         }
                     }
                 }
-                let written_at = tokio::select! {
+                let write_timing = tokio::select! {
                     reason = ping_task_close.closed() => {
                         tracing::debug!(?reason, "Connection closing during WebSocket Ping write");
                         break;
                     }
-                    result = written_rx => {
-                        let Ok(written_at) = result else {
+                    result = write_timing_rx => {
+                        let Ok(write_timing) = result else {
                             break;
                         };
-                        written_at
+                        write_timing
                     }
                 };
 
-                let deadline = tokio::time::sleep_until(written_at + pong_timeout);
+                let deadline = tokio::time::sleep_until(write_timing.completed_at + pong_timeout);
                 tokio::pin!(deadline);
                 loop {
                     tokio::select! {
@@ -664,7 +670,7 @@ pub(super) async fn handle_socket(
                             }
                             let observation = *pong_observations.borrow_and_update();
                             if let Some(rtt) =
-                                pong_rtt_for_probe(observation, nonce, written_at)
+                                pong_rtt_for_probe(observation, nonce, write_timing.started_at)
                             {
                                 server_for_ping
                                     .metrics()
@@ -821,6 +827,7 @@ pub(super) async fn handle_socket(
                                 break;
                             };
                             let payload = command.nonce.to_be_bytes().to_vec().into();
+                            let write_started_at = Instant::now();
                             match tokio::time::timeout(
                                 ping_write_timeout,
                                 sender.send(Message::Ping(payload)),
@@ -828,7 +835,10 @@ pub(super) async fn handle_socket(
                             .await
                             {
                                 Ok(Ok(())) => {
-                                    let _ = command.written.send(Instant::now());
+                                    let _ = command.write_timing.send(PingWriteTiming {
+                                        started_at: write_started_at,
+                                        completed_at: Instant::now(),
+                                    });
                                     continue;
                                 }
                                 Ok(Err(err)) => {
@@ -1616,17 +1626,18 @@ mod tests {
     }
 
     #[test]
-    fn pong_probe_uses_post_write_matching_observation_for_rtt() {
-        let written_at = Instant::now();
+    fn pong_probe_accepts_matching_observation_after_write_starts() {
+        let write_started_at = Instant::now();
+        let write_completed_at = write_started_at + Duration::from_millis(2);
 
         assert_eq!(
             pong_rtt_for_probe(
                 Some(ObservedPong {
                     nonce: 1,
-                    received_at: written_at - Duration::from_millis(1),
+                    received_at: write_started_at - Duration::from_millis(1),
                 }),
                 1,
-                written_at,
+                write_started_at,
             ),
             None,
         );
@@ -1634,10 +1645,10 @@ mod tests {
             pong_rtt_for_probe(
                 Some(ObservedPong {
                     nonce: 1,
-                    received_at: written_at,
+                    received_at: write_started_at,
                 }),
                 1,
-                written_at,
+                write_started_at,
             ),
             Some(Duration::ZERO),
         );
@@ -1645,21 +1656,25 @@ mod tests {
             pong_rtt_for_probe(
                 Some(ObservedPong {
                     nonce: 1,
-                    received_at: written_at + Duration::from_millis(1),
+                    received_at: write_started_at + Duration::from_millis(1),
                 }),
                 1,
-                written_at,
+                write_started_at,
             ),
             Some(Duration::from_millis(1)),
+        );
+        assert!(
+            write_started_at + Duration::from_millis(1) < write_completed_at,
+            "the regression case is a valid Pong observed before send completion",
         );
         assert_eq!(
             pong_rtt_for_probe(
                 Some(ObservedPong {
                     nonce: 2,
-                    received_at: written_at + Duration::from_millis(1),
+                    received_at: write_started_at + Duration::from_millis(1),
                 }),
                 1,
-                written_at,
+                write_started_at,
             ),
             None,
         );
