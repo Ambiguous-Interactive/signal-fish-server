@@ -102,11 +102,13 @@ include_verbatim = false
 #   lychee --config .lychee.toml \
 #     --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://$PWD/\$1" \
 #     <files...>
-# crates.io rejects automated requests to its rendered crate page. Validate the
-# published package through the canonical sparse-index record instead. CI repeats
-# this command-line remap because its working-tree remap takes CLI precedence.
+# crates.io rejects automated requests to its rendered crate page, while the
+# version badge can return upstream timeouts. Validate both package-specific URLs
+# through the canonical sparse-index record instead. CI repeats these command-line
+# remaps because its working-tree remap takes CLI precedence.
 remap = [
     "https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server",
+    "https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server",
 ]
 
 # Custom headers for specific domains (if needed)

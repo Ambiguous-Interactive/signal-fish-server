@@ -13462,6 +13462,7 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
             vec![
                 "--config .lychee.toml",
                 "--remap \"https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server\"",
+                "--remap \"https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server\"",
                 "--exclude-path tests/",
                 "--exclude-path target/",
                 "--exclude-path third_party/",
@@ -13476,6 +13477,7 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
             vec![
                 "--config .lychee.toml",
                 "--remap \"https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server\"",
+                "--remap \"https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server\"",
                 "--exclude-path './target/*'",
                 "--exclude-path './third_party/*'",
                 "--exclude-path './.github/test-fixtures/*'",
