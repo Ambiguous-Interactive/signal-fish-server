@@ -173,7 +173,7 @@ On startup the server looks for `config.json` in the working directory. See
     "require_metrics_auth": false,
     "max_message_size": 65536,
     "max_signal_bytes": 16384,
-    "max_connections_per_ip": 10,
+    "max_connections_per_ip": 24,
     "transport": {
       "tls": { "enabled": false },
       "token_binding": { "enabled": false }

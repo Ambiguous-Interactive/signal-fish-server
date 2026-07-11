@@ -89,8 +89,8 @@ pub struct ServerMetrics {
     /// Connections force-closed because their outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`.
     pub websocket_slow_consumer_disconnects: AtomicU64,
-    /// Server-initiated protocol pings that did not receive their matching
-    /// Pong before `websocket.pong_timeout_secs`.
+    /// Server-initiated RFC 6455 WebSocket pings that did not receive their
+    /// matching Pong before `websocket.pong_timeout_secs`.
     pub websocket_ping_timeouts: AtomicU64,
     /// Delivery attempts routed through the reliable server delivery and
     /// reservation paths: one per message per recipient, counted before the
