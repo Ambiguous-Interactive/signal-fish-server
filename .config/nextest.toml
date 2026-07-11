@@ -74,3 +74,14 @@ success-output = "never"
 # under a loaded runner (not hung) is not spuriously killed; the genuinely heavy
 # tests get their own larger override above.
 slow-timeout = { period = "120s", terminate-after = 3 }
+
+# Mutation-oracle profile. Mutants that remove a progress guard can hang a test
+# indefinitely; terminate that isolated process quickly so cargo-mutants records
+# the nontermination as a caught mutant rather than exhausting its 120s outer
+# scenario timeout. The baseline runs the same profile and Cargo build target via
+# `cargo nextest run --lib --cargo-profile mutants --profile mutants --locked`.
+[profile.mutants]
+fail-fast = true
+failure-output = "immediate-final"
+success-output = "never"
+slow-timeout = { period = "10s", terminate-after = 1 }

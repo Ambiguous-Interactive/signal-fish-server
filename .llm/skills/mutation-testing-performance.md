@@ -63,7 +63,7 @@ cancelled**. Three compounding causes:
    previous one — incremental compilation never gets locality and per-mutant cost
    grew (measured ~55s and climbing).
 3. **Per-mutant relink.** Every mutant relinks the crate; a slow linker multiplies
-   that across 323 mutants × N shards.
+   that across 319 mutants × N shards.
 
 Net effect: each shard paid a full cold build before testing a single mutant, so
 the 20-min timeout fired before any shard finished.
@@ -77,8 +77,9 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
 1. **`--in-place` + a warm shared cache (biggest win).** Build in the
    `rust-cache`-warmed `./target` so dependency rlibs are reused — measured **0 cold
    dep recompiles**. A `baseline` job warms a SHARED `rust-cache`
-   (`shared-key: "mutants"`) with the **same profile + RUSTFLAGS** the shards use,
-   and is the green-gate for `--baseline=skip`. **Rule:** keep `--in-place`; never
+   (`shared-key: "mutants"`) with the **same Cargo profile + nextest profile +
+   RUSTFLAGS** the shards use, and is the green-gate for `--baseline=skip`.
+   **Rule:** keep `--in-place`; never
    a `/tmp` scratch build (recompiles all deps cold) and never `--copy-target`
    (deep-copies the multi-GB `target/`).
 2. **`--sharding slice`.** Each shard gets a CONTIGUOUS mutant range, preserving
@@ -93,9 +94,9 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
    **Rule:** keep the linker in the per-target var, NOT a bare
    `-C linker=clang` in RUSTFLAGS — cargo-mutants re-encodes RUSTFLAGS
    (`CARGO_ENCODED_RUSTFLAGS`), which would override a devcontainer's per-target
-   linker and diverge the shard fingerprint from the `cargo test` warm build,
-   forcing a cold rebuild. The warm job and shards must resolve the identical
-   linker + RUSTFLAGS so the cached build fingerprint matches.
+   linker and diverge the shard fingerprint from the `cargo nextest run` warm
+   build, forcing a cold rebuild. The warm job and shards must resolve the
+   identical linker + RUSTFLAGS so the cached build fingerprint matches.
 4. **`[profile.mutants]`.** Inherits `dev` with `debug=0` and `incremental=true`.
    **Rule:** use `profile.mutants`, NOT `profile.ci` — `profile.ci` sets
    `incremental=false`, which defeats lever 2.
@@ -104,9 +105,18 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
    the test, so the build no longer compiles ~20 integration-test binaries per
    mutant. **Rule:** keep `--lib` in `additional_cargo_args` (not
    `additional_cargo_test_args`); never re-add `--all-features` — the scoped
-   modules have zero feature gates, so `cargo mutants --list` stays 323 either way.
-6. **Shard count sized for serial execution.** `--in-place` runs each shard's
-   mutants SERIALLY (one source tree, no `-j`). Resharded to **25**: 323 mutants
+   modules have zero feature gates, so `cargo mutants --list` stays 319 either way.
+6. **Process-isolated nextest oracle (`test_tool = "nextest"`).** A mutation
+   that removes a progress guard can hang one unit test. Fail-fast alone does
+   not terminate a sibling that is already running, so the dedicated
+   `[profile.mutants]` also sets a 10-second per-test termination. **Rule:** both
+   the baseline and every mutant shard must install `cargo-nextest` and select
+   that profile. The baseline must run the exact unmutated oracle:
+   `cargo nextest run --lib --cargo-profile mutants --profile mutants --locked`.
+   It also installs `cargo-mutants` and runs the inventory guard, ensuring the
+   measured mutant count cannot silently skip in CI.
+7. **Shard count sized for serial execution.** `--in-place` runs each shard's
+   mutants SERIALLY (one source tree, no `-j`). Resharded to **25**: 319 mutants
    ÷ 25 rounds up to 13/shard × ~22s ≈ <5 min/shard; `timeout-minutes: 10`. **Rule:** when
    the mutant count or per-mutant cost changes, re-size N so each serial shard
    still finishes well under the timeout.
@@ -119,7 +129,7 @@ Treat these four quantities as one interlocked budget — changing any one witho
 re-checking the others can silently reintroduce the cancellation:
 
 ```text
-{ mutant-count (323), shard-count N, per-shard timeout, per-mutant budget }
+{ mutant-count (319), shard-count N, per-shard timeout, per-mutant budget }
 ```
 
 - **Per-shard target: < 5 min.** `ceil(mutant-count / N) × per-mutant-budget`
@@ -170,7 +180,8 @@ Two pre-existing **free guards** also cover this workflow without new code:
   script CI (`mutation.yml`) and local devs both invoke
   (`bash scripts/run-mutants.sh --shard <k>/<N>` or `--warm`).
 - **Scope / oracle / feature set:** `.cargo/mutants.toml` (`examine_globs`,
-  `additional_cargo_args = ["--lib"]`).
+  `additional_cargo_args = ["--lib"]`, `test_tool = "nextest"`, mutation
+  nextest profile selection).
 
 Do not duplicate flags into the workflow YAML or a developer's shell history;
 change them once in the script (or the toml) so every runner stays in lockstep.

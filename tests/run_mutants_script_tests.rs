@@ -6,7 +6,7 @@
 //! `MUTANTS_DRY_RUN=1` env var), which prints the exact command it WOULD run and
 //! exits without launching a real mutation pass. That makes the tests fast and
 //! lets them lock the performance-critical flags forever without paying for a
-//! ~199-mutant run.
+//! full mutation run.
 //!
 //! Mirrors the structure of tests/workflow_hygiene_script_tests.rs: each test
 //! invokes `bash` through `common::bash_command()` (which scrubs nested-Cargo
@@ -244,10 +244,11 @@ fn test_run_mutants_rejects_malformed_shard() {
 
 #[cfg(unix)]
 #[test]
-fn test_run_mutants_warm_mode_builds_lib_profile() {
-    // The --warm mode is the baseline job's green-gate AND cache-warmer: a full
-    // `cargo test --lib` build+run with the mutants profile, so the shards can
-    // use --baseline=skip and reuse the warm target/ via --in-place.
+fn test_run_mutants_warm_mode_uses_exact_unmutated_oracle() {
+    // The --warm mode is the baseline job's green-gate AND cache-warmer. It must
+    // run the exact unmutated nextest oracle used by cargo-mutants: --lib scope,
+    // the Cargo `mutants` build profile, the nextest `mutants` runtime profile,
+    // and the locked dependency graph.
     let (success, stdout, stderr) = run_mutants_script(&["--warm", "--print-cmd"]);
     assert!(
         success,
@@ -255,16 +256,18 @@ fn test_run_mutants_warm_mode_builds_lib_profile() {
          stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    for needle in ["cargo test", "--lib", "--profile mutants"] {
-        assert!(
-            stdout.contains(needle),
-            "scripts/run-mutants.sh --warm --print-cmd must print a `cargo test --lib \
-             --profile mutants` command (the warm/green-gate build) but is missing `{needle}`.\n\
-             Why this matters: the warm build must match the shards' profile + scope so the\n\
-             shared rust-cache fingerprint is reusable and the baseline can be skipped.\n\
-             Fix: keep `cargo test --lib --profile mutants --locked` as the --warm command.\n\
-             Verify: bash scripts/run-mutants.sh --warm --print-cmd\n\
-             Full output:\n{stdout}"
-        );
-    }
+    let cargo_lines: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with("cargo "))
+        .collect();
+    assert_eq!(
+        cargo_lines,
+        ["cargo nextest run --lib --cargo-profile mutants --profile mutants --locked"],
+        "scripts/run-mutants.sh --warm --print-cmd must print exactly the unmutated \
+         cargo-mutants oracle. `--cargo-profile mutants` selects the matching Cargo build \
+         profile; `--profile mutants` selects nextest's per-test 10s termination policy.\n\
+         Fix: restore the exact nextest command in scripts/run-mutants.sh.\n\
+         Verify: bash scripts/run-mutants.sh --warm --print-cmd\n\
+         Full output:\n{stdout}"
+    );
 }
