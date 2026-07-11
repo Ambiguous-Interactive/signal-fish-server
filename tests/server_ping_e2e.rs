@@ -133,33 +133,44 @@ async fn missing_pong_closes_with_activity_timeout() {
     }
 
     // The timeout is now authoritative. Resume the client direction before
-    // reading the close so tungstenite's queued automatic Pong/close response
-    // cannot leave unread bytes in the proxy. Windows turns a socket teardown
-    // with unread bytes into WSAECONNRESET, which can mask an already-forwarded
-    // semantic close frame.
+    // reading the close so tungstenite can flush its queued automatic Pong.
+    // Windows can still turn this teardown into WSAECONNRESET before
+    // tungstenite exposes the already-forwarded semantic close frame, so that
+    // platform accepts only that specific transport error after the server's
+    // timeout metric has proved the close cause.
     proxy.resume(Direction::ClientToServer);
 
     let close_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     loop {
-        let frame = tokio::time::timeout_at(close_deadline, ws.next())
+        let next = tokio::time::timeout_at(close_deadline, ws.next())
             .await
             .expect("timed out waiting for missed-Pong close")
-            .expect("connection ended without a close frame")
-            .expect("websocket read failed before close frame");
+            .expect("connection ended without a close frame");
+        let frame = match next {
+            Ok(frame) => frame,
+            #[cfg(windows)]
+            Err(tokio_tungstenite::tungstenite::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::ConnectionReset =>
+            {
+                break;
+            }
+            Err(error) => panic!("websocket read failed before close frame: {error}"),
+        };
         if let Message::Close(Some(frame)) = frame {
             assert_eq!(u16::from(frame.code), 4003);
             assert_eq!(frame.reason, "activity_timeout");
-            assert_eq!(
-                server
-                    .metrics()
-                    .websocket_ping_timeouts
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "missed Pong must increment the timeout counter exactly once"
-            );
             break;
         }
     }
+
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "missed Pong must increment the timeout counter exactly once"
+    );
 
     running.shutdown().await;
 }
