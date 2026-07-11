@@ -50,9 +50,9 @@ pub struct Cli {
     #[arg(long)]
     pub expect_total_peers: Option<usize>,
 
-    /// Exit successfully as soon as GameStarting has been received, WITHOUT
-    /// establishing any P2P pairs (a received SessionPlan is logged but not
-    /// acted on, so no offers/answers/candidates are ever produced). Used by
+    /// Exit successfully after GameStarting and its authoritative SessionPlan,
+    /// WITHOUT establishing any P2P pairs (the plan is logged but not acted
+    /// on, so no offers/answers/candidates are ever produced). Used by
     /// late-join harnesses to vacate a seat in a finalized room; not intended
     /// to be combined with --exchange or --relay-payload.
     #[arg(long)]

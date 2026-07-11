@@ -6,6 +6,112 @@ use signal_fish_server::{
 use std::sync::Arc;
 use tokio::time::Duration;
 
+/// Scoped in-process Axum server for real-socket integration tests.
+///
+/// Tests must call [`Self::shutdown`] so upgraded WebSocket tasks finish before
+/// the Tokio runtime and LeakSanitizer inspect process teardown. [`Drop`] only
+/// provides best-effort cancellation for panic paths because it cannot await
+/// socket or server-task completion.
+#[allow(dead_code)]
+pub struct RunningTestServer {
+    addr: std::net::SocketAddr,
+    server: Arc<EnhancedGameServer>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    serve_task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    shutdown_complete: bool,
+}
+
+#[allow(dead_code)]
+impl RunningTestServer {
+    pub async fn spawn(server: Arc<EnhancedGameServer>, router: axum::Router) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let serve_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        Self {
+            addr,
+            server,
+            shutdown_tx: Some(shutdown_tx),
+            serve_task: Some(serve_task),
+            shutdown_complete: false,
+        }
+    }
+
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
+    pub async fn shutdown(mut self) {
+        self.server.begin_shutdown_drain();
+        let _ = self
+            .shutdown_tx
+            .take()
+            .expect("test server shutdown signal missing")
+            .send(());
+        self.server.close_connections_for_shutdown();
+
+        let settle_timeout =
+            signal_fish_server::websocket::registered_connection_shutdown_settle_timeout();
+        let remaining = self
+            .server
+            .wait_for_shutdown_connections(settle_timeout)
+            .await;
+        assert_eq!(
+            remaining, 0,
+            "test server retained {remaining} WebSocket handler(s) after shutdown"
+        );
+
+        let mut serve_task = self
+            .serve_task
+            .take()
+            .expect("test server serve task missing");
+        match tokio::time::timeout(settle_timeout, &mut serve_task).await {
+            Ok(result) => result
+                .expect("test server Axum task panicked")
+                .expect("test server Axum task failed"),
+            Err(_) => {
+                serve_task.abort();
+                let _ = serve_task.await;
+                panic!("test server Axum task did not stop after connection drain");
+            }
+        }
+        self.shutdown_complete = true;
+    }
+}
+
+impl Drop for RunningTestServer {
+    fn drop(&mut self) {
+        // A destructor cannot await the normal bounded drain. Still reject new
+        // upgrades and ask registered socket tasks to close before stopping the
+        // listener, so a test panic leaves the runtime as little work as
+        // possible to cancel.
+        self.server.begin_shutdown_drain();
+        self.server.close_connections_for_shutdown();
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(serve_task) = self.serve_task.take() {
+            serve_task.abort();
+        }
+        assert!(
+            self.shutdown_complete || std::thread::panicking(),
+            "RunningTestServer dropped without awaiting shutdown()"
+        );
+    }
+}
+
 /// Create a test server with in-memory backend for integration tests
 #[allow(dead_code)]
 pub async fn create_test_server() -> Arc<EnhancedGameServer> {

@@ -25,8 +25,7 @@ use signal_fish_server::protocol::{ClientMessage, ErrorCode, ServerMessage};
 use signal_fish_server::server::EnhancedGameServer;
 use signal_fish_server::websocket::create_router;
 use std::sync::Arc;
-use test_helpers::create_test_server;
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type WsStream =
@@ -48,23 +47,9 @@ const GROSSLY_OVERSIZED_BYTES: usize = 8 * 1024 * 1024;
 /// this suite is a ceiling on an event-driven read, never an expected wait.
 const READ_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(20);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> (WsSink, WsReceiver) {
@@ -113,7 +98,8 @@ async fn assert_ping_pong_roundtrip(sink: &mut WsSink, receiver: &mut WsReceiver
 #[tokio::test]
 async fn grossly_oversized_frame_is_killed_at_the_transport_layer() {
     let server = create_test_server().await;
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let (mut sink, mut receiver) = connect(addr).await;
 
     let oversized = "x".repeat(GROSSLY_OVERSIZED_BYTES);
@@ -121,6 +107,7 @@ async fn grossly_oversized_frame_is_killed_at_the_transport_layer() {
     if send_result.is_err() {
         // The server tore the connection down while the frame was still being
         // written — transport-layer rejection observed on the send side.
+        running_server.shutdown().await;
         return;
     }
 
@@ -132,7 +119,10 @@ async fn grossly_oversized_frame_is_killed_at_the_transport_layer() {
             .expect("timed out waiting for the server to terminate the connection");
         match frame {
             // Acceptable terminations: close frame, transport error, EOF.
-            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                running_server.shutdown().await;
+                return;
+            }
             Some(Ok(Message::Text(text))) => {
                 let message: ServerMessage =
                     serde_json::from_str(&text).expect("valid ServerMessage");
@@ -165,7 +155,8 @@ async fn grossly_oversized_frame_is_killed_at_the_transport_layer() {
 #[tokio::test]
 async fn slightly_oversized_message_gets_polite_error_and_connection_survives() {
     let server = create_test_server().await;
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let (mut sink, mut receiver) = connect(addr).await;
 
     let slightly_oversized = "x".repeat(MAX_MESSAGE_SIZE + 1);
@@ -195,4 +186,5 @@ async fn slightly_oversized_message_gets_polite_error_and_connection_survives() 
 
     // And the connection must remain fully usable afterwards.
     assert_ping_pong_roundtrip(&mut sink, &mut receiver).await;
+    running_server.shutdown().await;
 }

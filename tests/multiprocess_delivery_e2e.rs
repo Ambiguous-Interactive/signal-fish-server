@@ -481,6 +481,8 @@ async fn join_room_raw(
 async fn send_burst(sink: &mut WsSink, payload: &mut LedgerPayload, count: u64) {
     for _ in 0..count {
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.next(),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -576,7 +578,7 @@ async fn drain_healthy_until_complete(
                         });
                         seqs.push(seq);
                     }
-                    ServerMessage::PlayerLeft { player_id } if player_id == faulted_peer => {
+                    ServerMessage::PlayerLeft { player_id, .. } if player_id == faulted_peer => {
                         saw_faulted_leave = true;
                     }
                     ServerMessage::Error { message, error_code } => panic!(
@@ -894,6 +896,8 @@ async fn server_sigkill_mid_relay_bounds_loss() {
         let mut payload = LedgerPayload::new("Sender", PADDING_BYTES);
         while !*kill_rx.borrow() && payload.sent() < WRITER_CAP {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: payload.next(),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");

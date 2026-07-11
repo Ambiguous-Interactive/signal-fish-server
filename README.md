@@ -101,6 +101,7 @@ ws://localhost:3536/v2/ws
 - **Spectator mode** -- join rooms as a spectator without participating in gameplay
 - **Reconnection** -- token-based reconnection with event replay within a configurable window
 - **Message batching** -- configurable batching for high-throughput game data delivery
+- **Delivery classes** -- v3 reliable, keyed-latest, and volatile JSON relay with exact gap accountability
 - **Rate limiting** -- in-memory rate limiting for room creation and join attempts
 - **Metrics** -- Prometheus-compatible metrics at `/metrics/prom` and JSON metrics at `/metrics`
 - **Flexible configuration** -- JSON config file with environment variable overrides
@@ -225,7 +226,12 @@ On startup the server looks for `config.json` in the working directory. See
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
-    "idle_timeout_secs": 300
+    "idle_timeout_secs": 300,
+    "send_queue_capacity": 1024,
+    "control_queue_capacity": 128,
+    "slow_consumer_timeout_ms": 5000,
+    "max_sojourn_ms": 15000,
+    "delivery_stats_interval_secs": 0
   }
 }
 ```
@@ -278,6 +284,11 @@ complete reference.
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Post-auth idle timeout in seconds (`0` disables)    |
+| `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY`     | `websocket.send_queue_capacity`    | `1024`    | Per-connection data queue capacity                  |
+| `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY`  | `websocket.control_queue_capacity` | `128`     | Per-connection v3 control queue capacity            |
+| `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000`  | Reliable capacity wait before close `4002`          |
+| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS`          | `websocket.max_sojourn_ms`         | `15000`   | Oldest outbound-item/write deadline                 |
+| `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Periodic v3 counter snapshots (`0` disables)        |
 | `RUST_LOG`                                       | --                                 | `info`    | Standard `tracing` log filter                       |
 
 ### CLI Flags
@@ -298,9 +309,10 @@ configuration values.
 
 ## Protocol Reference
 
-Signal Fish Server uses a JSON-based WebSocket protocol (v2). Messages are JSON
-objects with a `type` field and an optional `data` field. MessagePack encoding
-is also supported for game data when `enable_message_pack_game_data` is enabled.
+Signal Fish Server uses a JSON-based WebSocket protocol with a frozen v2 relay
+floor and additive v3 capabilities. Messages are JSON objects with a `type`
+field and an optional `data` field. MessagePack encoding is also supported for
+game data when `enable_message_pack_game_data` is enabled.
 
 Building a client? See the [Platform Integration Guide](docs/guides/platform-integration.md)
 for which WebRTC stack to use per platform (browser, native, mobile, Steam, Godot,
@@ -316,7 +328,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 | ------------------ | -------------------------------------------------------------------------------- |
 | `Authenticate`     | Authenticate with app ID (required when auth is enabled)                         |
 | `JoinRoom`         | Join or create a room (implicit create with no `room_code`, explicit join/create with `room_code`) |
-| `GameData`         | Send arbitrary game data to other players in the room                            |
+| `GameData`         | Send arbitrary game data; negotiated v3 JSON may select reliable, keyed-latest, or volatile delivery |
 | `AuthorityRequest` | Request or release game authority                                                |
 | `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
 | `ProvideConnectionInfo` | Share legacy self-declared metadata for v2/back-compat; not v3 capability proof |
@@ -362,10 +374,24 @@ Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/cod
 | `PlayerJoined`       | Another player joined the room                           |
 | `PlayerLeft`         | A player left the room                                   |
 | `GameData`           | Game data relayed from another player                    |
+| `DeliveryReport`     | V3 cumulative per-class outcomes and exact prior gap ranges |
 | `LobbyStateChanged`  | Lobby state transitioned (`waiting`, `lobby`, `finalized`) |
 | `AuthorityResponse`  | Authority request result                                 |
 | `Error`              | An error occurred; includes message and optional code    |
 | `Pong`               | Response to a client `Ping`                              |
+
+Delivery class policy is per recipient. A classified v3 send can use
+latest/volatile policy for a v3 peer while the same message remains reliable
+FIFO, with v3 fields stripped, for a v2 peer. Raw binary game data is always
+reliable. On a continuing v3 stream, only the union of causally prior exact
+`DeliveryReport` ranges authorizes a sequence hole; aggregate counters do not.
+
+Operators can inspect raw JSON
+`metricsSnapshot.connections.delivery_by_class` from
+`/metrics?includeSnapshot=true`, or Prometheus
+`signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`. At
+quiescence, each class's `attempted` value equals the sum of its terminal
+outcomes. See [Delivery semantics](docs/protocol.md#delivery-semantics).
 
 ### Typical Session Flow
 

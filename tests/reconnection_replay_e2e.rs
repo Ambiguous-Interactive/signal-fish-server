@@ -24,8 +24,7 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     assert_message_conservation, deadline_after, next_matching_server_message_within,
@@ -50,7 +49,7 @@ fn app_entry() -> AppAuthEntry {
 /// ring via `event_buffer_size`), keeping the handle for metrics assertions.
 async fn start_server_with_config(
     server_config: ServerConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let mut server_config = server_config;
     server_config.auth_enabled = true;
 
@@ -73,40 +72,25 @@ async fn start_server_with_config(
     .await
     .expect("server builds");
 
-    let addr = start_server(game_server.clone()).await;
-    (addr, game_server)
+    let running_server = start_server(game_server.clone()).await;
+    (running_server, game_server)
 }
 
-async fn start_server_default() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+async fn start_server_default() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     start_server_with_config(test_server_config()).await
 }
 
-async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
     use axum::routing::get;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
 
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -322,7 +306,7 @@ async fn await_join_leave_cycle(ws: &mut WsStream, expected: PlayerId, context: 
         SERVER_MESSAGE_TIMEOUT,
         context,
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == expected => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == expected => Some(()),
             _ => None,
         },
     )
@@ -366,7 +350,8 @@ async fn churn_join_leave(
 
 #[tokio::test]
 async fn missed_control_events_are_replayed_completely() {
-    let (addr, game_server) = start_server_default().await;
+    let (running_server, game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -431,7 +416,7 @@ async fn missed_control_events_are_replayed_completely() {
     assert!(
         matches!(
             &reconnected.missed_events[1],
-            ServerMessage::PlayerLeft { player_id } if *player_id == churner_id
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == churner_id
         ),
         "second missed event must be the churner's PlayerLeft: {:?}",
         reconnected.missed_events
@@ -443,6 +428,7 @@ async fn missed_control_events_are_replayed_completely() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 /// Regression (missed_events epoch leak) + non-vacuity for the previous test:
@@ -458,7 +444,8 @@ async fn missed_control_events_are_replayed_completely() {
 /// unconditional wipe.
 #[tokio::test]
 async fn missed_events_strip_epoch_for_pre_v3_reconnector() {
-    let (addr, game_server) = start_server_default().await;
+    let (running_server, game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate(&mut peer_a, Some(3)).await;
@@ -506,6 +493,7 @@ async fn missed_events_strip_epoch_for_pre_v3_reconnector() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -517,7 +505,8 @@ async fn missed_events_strip_epoch_for_pre_v3_reconnector() {
 async fn overflowed_replay_ring_reports_truncated() {
     let mut config = test_server_config();
     config.event_buffer_size = 3;
-    let (addr, game_server) = start_server_with_config(config).await;
+    let (running_server, game_server) = start_server_with_config(config).await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -571,7 +560,7 @@ async fn overflowed_replay_ring_reports_truncated() {
     assert!(
         matches!(
             &reconnected.missed_events[0],
-            ServerMessage::PlayerLeft { player_id } if *player_id == churner_ids[1]
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == churner_ids[1]
         ),
         "oldest surviving event must be the second churner's PlayerLeft: {:?}",
         reconnected.missed_events
@@ -582,7 +571,7 @@ async fn overflowed_replay_ring_reports_truncated() {
             ServerMessage::PlayerJoined { player } if player.id == churner_ids[2]
         ) && matches!(
             &reconnected.missed_events[2],
-            ServerMessage::PlayerLeft { player_id } if *player_id == churner_ids[2]
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == churner_ids[2]
         ),
         "the newest churn cycle must survive intact: {:?}",
         reconnected.missed_events
@@ -607,6 +596,7 @@ async fn overflowed_replay_ring_reports_truncated() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -626,7 +616,8 @@ async fn overflowed_replay_ring_reports_truncated() {
 async fn truncated_replay_still_carries_full_room_snapshot() {
     let mut config = test_server_config();
     config.event_buffer_size = 3;
-    let (addr, game_server) = start_server_with_config(config).await;
+    let (running_server, game_server) = start_server_with_config(config).await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -672,7 +663,17 @@ async fn truncated_replay_still_carries_full_room_snapshot() {
         SERVER_MESSAGE_TIMEOUT,
         "SpectatorJoined ack",
         |message| match message {
-            ServerMessage::SpectatorJoined(payload) => Some(payload.spectator_id),
+            ServerMessage::SpectatorJoined(payload) => {
+                assert!(
+                    !payload.current_players.is_empty()
+                        && payload
+                            .current_players
+                            .iter()
+                            .all(|player| player.epoch.is_some()),
+                    "a v3 spectator snapshot must baseline every current sender epoch"
+                );
+                Some(payload.spectator_id)
+            }
             ServerMessage::SpectatorJoinFailed { reason, error_code } => {
                 panic!("spectator join failed: {reason} ({error_code:?})")
             }
@@ -754,6 +755,7 @@ async fn truncated_replay_still_carries_full_room_snapshot() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +765,8 @@ async fn truncated_replay_still_carries_full_room_snapshot() {
 
 #[tokio::test]
 async fn v2_recipient_gets_no_replay_key() {
-    let (addr, game_server) = start_server_default().await;
+    let (running_server, game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -822,6 +825,7 @@ async fn v2_recipient_gets_no_replay_key() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -831,7 +835,8 @@ async fn v2_recipient_gets_no_replay_key() {
 
 #[tokio::test]
 async fn game_data_is_never_replayed() {
-    let (addr, game_server) = start_server_default().await;
+    let (running_server, game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -856,6 +861,8 @@ async fn game_data_is_never_replayed() {
         send(
             &mut peer_a,
             &ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "tick": 1 }),
             },
         )
@@ -935,11 +942,13 @@ async fn game_data_is_never_replayed() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn reconnected_baseline_precedes_room_data_during_reconnect() {
-    let (addr, game_server) = start_server_default().await;
+    let (running_server, game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -963,6 +972,8 @@ async fn reconnected_baseline_precedes_room_data_during_reconnect() {
             send(
                 &mut peer_a,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: serde_json::json!({ "phase": "during-reconnect", "n": n }),
                 },
             )
@@ -1004,6 +1015,8 @@ async fn reconnected_baseline_precedes_room_data_during_reconnect() {
     send(
         &mut peer_a,
         &ClientMessage::GameData {
+            class: None,
+            key: None,
             data: serde_json::json!({ "phase": "post-baseline-marker" }),
         },
     )
@@ -1032,6 +1045,7 @@ async fn reconnected_baseline_precedes_room_data_during_reconnect() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 /// Issue #136 (F4 / proposal D): the reconnection token must reach the client
@@ -1042,7 +1056,8 @@ async fn reconnected_baseline_precedes_room_data_during_reconnect() {
 /// the token from `RoomJoined`, lose the socket, reconnect with that token.
 #[tokio::test]
 async fn reconnect_succeeds_with_only_the_wire_token() {
-    let (addr, game_server) = start_server_default().await;
+    let (running_server, game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3(&mut peer_a).await;
@@ -1139,13 +1154,15 @@ async fn reconnect_succeeds_with_only_the_wire_token() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 /// The token field is v3+ only: a pure-v2 joiner's raw `RoomJoined` JSON must
 /// not contain a `reconnection_token` key (frozen v2 bytes).
 #[tokio::test]
 async fn v2_room_joined_has_no_reconnection_token_key() {
-    let (addr, _game_server) = start_server_default().await;
+    let (running_server, _game_server) = start_server_default().await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v2(&mut peer).await;
@@ -1166,6 +1183,7 @@ async fn v2_room_joined_has_no_reconnection_token_key() {
         !raw.contains("reconnection_token"),
         "v2 RoomJoined bytes must not gain a reconnection_token key: {raw}"
     );
+    running_server.shutdown().await;
 }
 
 /// Drain `ws` until it observes `PlayerLeft` for `expected` — the disconnect
@@ -1177,7 +1195,7 @@ async fn await_player_left(ws: &mut WsStream, expected: PlayerId, context: &str)
         SERVER_MESSAGE_TIMEOUT,
         context,
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == expected => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == expected => Some(()),
             _ => None,
         },
     )

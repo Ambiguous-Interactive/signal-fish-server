@@ -34,8 +34,10 @@ binary game-data transport.
 ## Binary Game Data
 
 - `ServerMessage::GameDataBinary` is an in-memory broadcast carrier.
-- The negotiated binary WebSocket frame is the private `websocket::sending` bare
-  MessagePack frame.
+- The negotiated-v3 binary WebSocket frame is the private
+  `websocket::sending` MessagePack metadata envelope for every opaque payload
+  encoding. V2 keeps its historical MessagePack map or raw JSON/rkyv
+  passthrough bytes.
 - Do not re-export the binary frame encoder or frame struct as public API.
 - `ProtocolInfo.game_data_formats` comes from
   `ProtocolConfig::supported_game_data_formats()`: `json` is always advertised

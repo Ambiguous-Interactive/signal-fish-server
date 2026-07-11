@@ -489,6 +489,8 @@ fn test_real_broadcast_message_zero_cost_cloning() {
         data: serde_json::json!({"action": "move", "x": 100, "y": 200}),
         seq: None,
         epoch: None,
+        class: None,
+        key: None,
     };
 
     let broadcast = BroadcastMessage::new(message);
@@ -551,6 +553,8 @@ fn test_real_broadcast_message_performance() {
         data: serde_json::json!({"state": "x".repeat(1000)}),
         seq: None,
         epoch: None,
+        class: None,
+        key: None,
     };
 
     let broadcast = BroadcastMessage::new(message);
@@ -578,12 +582,16 @@ fn test_real_server_message_serialization_roundtrip() {
         ServerMessage::RoomLeft,
         ServerMessage::PlayerLeft {
             player_id: Uuid::new_v4(),
+            epoch: None,
+            final_seq: None,
         },
         ServerMessage::GameData {
             from_player: player_id,
             data: serde_json::json!({"x": 1, "y": 2}),
             seq: None,
             epoch: None,
+            class: None,
+            key: None,
         },
         ServerMessage::PlayerJoined {
             player: PlayerInfo {
@@ -595,6 +603,7 @@ fn test_real_server_message_serialization_roundtrip() {
                 connection_info: None,
                 region_id: "test".to_string(),
                 epoch: None,
+                seq: None,
             },
         },
     ];
@@ -624,6 +633,8 @@ fn test_real_broadcast_room_simulation() {
         data: serde_json::json!({"move": "forward", "speed": 5}),
         seq: None,
         epoch: None,
+        class: None,
+        key: None,
     };
 
     let broadcast = BroadcastMessage::new(message);

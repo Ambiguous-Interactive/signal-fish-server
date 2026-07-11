@@ -41,18 +41,21 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::{AppAuthEntry, ProtocolConfig};
-use signal_fish_server::protocol::{ClientMessage, PlayerId, ReplayStatus, RoomId, ServerMessage};
+use signal_fish_server::protocol::{
+    ClientMessage, ErrorCode, PlayerId, ReplayStatus, RoomId, ServerMessage,
+};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{create_test_server, create_test_server_with_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{
+    create_test_server, create_test_server_with_config, test_server_config, RunningTestServer,
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
+use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
 use websocket_test_helpers::delivery_ledger::{
-    extract, DeliveryLedger, DisconnectReason, LedgerPayload, ReceiverExpectation,
-    SenderExpectation,
+    LedgerPayload, ReceiverExpectation, SenderExpectation,
 };
-use websocket_test_helpers::{assert_message_conservation, next_matching_server_message_within};
+use websocket_test_helpers::next_matching_server_message_within;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -69,23 +72,9 @@ const SERVER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
 // Shared infrastructure (mirrors tests/relay_chaos_e2e.rs).
 // ---------------------------------------------------------------------------
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 /// Connect a websocket client to `addr` — the server directly, or a
@@ -154,17 +143,11 @@ async fn join_room(
 
 /// Record one text frame into the ledger for `receiver_name`; returns any
 /// `PlayerLeft` id observed instead. Server errors fail loudly.
-fn record_frame(ledger: &DeliveryLedger, receiver_name: &str, text: &str) -> Option<PlayerId> {
-    let message: ServerMessage = serde_json::from_str(text).expect("valid ServerMessage");
+fn record_frame(auditor: &ConformanceAuditor, receiver_name: &str, text: &str) -> Option<PlayerId> {
+    let message = auditor.record_text_frame(receiver_name, text);
     match message {
-        ServerMessage::GameData { data, .. } => {
-            let (sender, seq) = extract(&data).unwrap_or_else(|| {
-                panic!("{receiver_name}: GameData without ledger fields: {data}")
-            });
-            ledger.record(receiver_name, &sender, seq, None);
-            None
-        }
-        ServerMessage::PlayerLeft { player_id } => Some(player_id),
+        ServerMessage::GameData { .. } => None,
+        ServerMessage::PlayerLeft { player_id, .. } => Some(player_id),
         ServerMessage::Error {
             message,
             error_code,
@@ -179,6 +162,8 @@ fn record_frame(ledger: &DeliveryLedger, receiver_name: &str, text: &str) -> Opt
 /// [`LedgerPayload`]'s fixed padding cannot express.
 async fn send_ledger_frame(sink: &mut WsSink, sender: &str, seq: u64, padding_bytes: usize) {
     let message = ClientMessage::GameData {
+        class: None,
+        key: None,
         data: serde_json::json!({
             "ledger_sender": sender,
             "seq": seq,
@@ -195,6 +180,8 @@ async fn send_ledger_frame(sink: &mut WsSink, sender: &str, seq: u64, padding_by
 async fn send_burst(sink: &mut WsSink, payload: &mut LedgerPayload, count: u64) {
     for _ in 0..count {
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.next(),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -235,9 +222,9 @@ async fn poll_until(context: &str, mut condition: impl FnMut() -> bool) {
 /// read so a satisfied condition never blocks on a silent wire.
 async fn drain_until(
     receiver: &mut WsReceiver,
-    ledger: &DeliveryLedger,
+    ledger: &ConformanceAuditor,
     receiver_name: &str,
-    mut done: impl FnMut(&DeliveryLedger) -> bool,
+    mut done: impl FnMut(&ConformanceAuditor) -> bool,
 ) {
     while !done(ledger) {
         let frame = tokio::time::timeout(EVENT_DEADLINE, receiver.next())
@@ -258,7 +245,7 @@ async fn drain_until(
 /// phase boundary after a churner departs.
 async fn drain_until_player_left(
     receiver: &mut WsReceiver,
-    ledger: &DeliveryLedger,
+    ledger: &ConformanceAuditor,
     receiver_name: &str,
     expected: PlayerId,
 ) {
@@ -315,17 +302,21 @@ async fn rollback_profile_short() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
-    let ledger = Arc::new(DeliveryLedger::new());
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
     let total_per_sender = rollback_total_per_sender();
 
     let scenario = async {
         let names: Vec<String> = (0..CLIENTS).map(|index| format!("Roll{index}")).collect();
         let mut sinks = Vec::new();
         let mut receivers = Vec::new();
+        let mut joined_ids = Vec::new();
         for name in &names {
             let (mut sink, mut receiver) = connect(addr).await;
-            let _id = join_room(&mut sink, &mut receiver, ROOM, name).await;
+            let id = join_room(&mut sink, &mut receiver, ROOM, name).await;
+            joined_ids.push(id);
+            ledger.record_consumed_v2_room_snapshot(name, &joined_ids);
             sinks.push(sink);
             receivers.push(receiver);
         }
@@ -403,8 +394,8 @@ async fn rollback_profile_short() {
             }
         })
         .collect();
-    ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics).await;
+    ledger.assert_conformance(&metrics, &expectations).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,15 +433,17 @@ async fn wifi_jitter_profile() {
     server_config.websocket_config.slow_consumer_timeout_ms = 5_000;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
-    let ledger = Arc::new(DeliveryLedger::new());
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
     let scenario = async {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut jittery_sink, mut jittery_rx) = connect(proxy.addr()).await;
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _jittery_id = join_room(&mut jittery_sink, &mut jittery_rx, ROOM, "Jittery").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let jittery_id = join_room(&mut jittery_sink, &mut jittery_rx, ROOM, "Jittery").await;
+        ledger.record_consumed_v2_room_snapshot("Jittery", &[sender_id, jittery_id]);
 
         // 60Hz paced sender for ~8s (interval = the game loop's shape).
         let sender_task = tokio::spawn(async move {
@@ -511,11 +504,13 @@ async fn wifi_jitter_profile() {
     // runner). The zero-loss intent is carried exactly by the three checks
     // around it: zero evictions, the ledger's gap-free completeness, and the
     // conservation law.
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[expectation("Jittery", &[("Sender", SEND_TICKS)])],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[expectation("Jittery", &[("Sender", SEND_TICKS)])],
+        )
+        .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -550,17 +545,20 @@ async fn backgrounded_tab_profile() {
     server_config.websocket_config.slow_consumer_timeout_ms = 5_000;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
-    let ledger = Arc::new(DeliveryLedger::new());
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
     let scenario = async {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut watcher_sink, mut watcher_rx) = connect(addr).await;
         let (mut tab_sink, mut tab_rx) = connect(proxy.addr()).await;
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
-        let _tab_id = join_room(&mut tab_sink, &mut tab_rx, ROOM, "Tab").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
+        ledger.record_consumed_v2_room_snapshot("Watcher", &[sender_id, watcher_id]);
+        let tab_id = join_room(&mut tab_sink, &mut tab_rx, ROOM, "Tab").await;
+        ledger.record_consumed_v2_room_snapshot("Tab", &[sender_id, watcher_id, tab_id]);
 
         // The tab drains whenever its link allows, for the whole scenario;
         // when the server finally evicts it (phase 2), it records the
@@ -570,13 +568,25 @@ async fn backgrounded_tab_profile() {
             loop {
                 match tab_rx.next().await {
                     Some(Ok(Message::Text(text))) => {
-                        let _player_left = record_frame(&tab_ledger, "Tab", &text);
+                        match tab_ledger.record_text_frame("Tab", &text) {
+                            ServerMessage::Error {
+                                error_code: Some(ErrorCode::SlowConsumer),
+                                ..
+                            } => break,
+                            ServerMessage::Error {
+                                message,
+                                error_code,
+                            } => panic!(
+                                "Tab: unexpected server error mid-scenario: {message} ({error_code:?})"
+                            ),
+                            _ => {}
+                        }
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_control_frame)) => continue,
                 }
             }
-            tab_ledger.note_receiver_disconnected("Tab", DisconnectReason::SlowConsumerEviction);
+            tab_ledger.record_close("Tab", 4002, "slow_consumer");
         });
 
         // Watcher drains continuously; its completion target arrives late
@@ -687,14 +697,16 @@ async fn backgrounded_tab_profile() {
             >= 1,
         "the abandoned tab must be evicted loudly"
     );
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[
-            expectation("Watcher", &[("Sender", total_sent)]),
-            expectation("Tab", &[("Sender", total_sent)]),
-        ],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[
+                expectation("Watcher", &[("Sender", total_sent)]),
+                expectation("Tab", &[("Sender", total_sent)]),
+            ],
+        )
+        .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +720,7 @@ const RECONNECT_APP_ID: &str = "scenario-reconnect-app";
 /// the `/v3/ws` alias, app auth enabled (mirrors
 /// `tests/reconnection_replay_e2e.rs`, the proven reconnect harness), and
 /// the in-process handle kept for `register_reconnect_token`.
-async fn start_reconnect_server() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config = test_server_config();
@@ -740,25 +752,13 @@ async fn start_reconnect_server() -> (std::net::SocketAddr, Arc<EnhancedGameServ
     .await
     .expect("reconnect scenario server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind reconnect test listener");
-    let addr = listener.local_addr().expect("read listener address");
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .with_state(game_server.clone());
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("reconnect test server serve loop");
-    });
-
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect_v3(addr: std::net::SocketAddr) -> WsStream {
@@ -809,8 +809,12 @@ async fn authenticate_v3(ws: &mut WsStream) {
     .await
 }
 
-/// Join `room_code`, returning `(player_id, room_id)`.
-async fn join_room_v3(ws: &mut WsStream, room_code: &str, player_name: &str) -> (PlayerId, RoomId) {
+/// Join `room_code`, returning the authoritative room snapshot.
+async fn join_room_v3(
+    ws: &mut WsStream,
+    room_code: &str,
+    player_name: &str,
+) -> Box<signal_fish_server::protocol::RoomJoinedPayload> {
     send_on(
         ws,
         &ClientMessage::JoinRoom {
@@ -825,7 +829,7 @@ async fn join_room_v3(ws: &mut WsStream, room_code: &str, player_name: &str) -> 
     .await;
     next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "RoomJoined", |message| {
         match message {
-            ServerMessage::RoomJoined(payload) => Some((payload.player_id, payload.room_id)),
+            ServerMessage::RoomJoined(payload) => Some(payload),
             ServerMessage::RoomJoinFailed { reason, error_code } => {
                 panic!("room join failed for {player_name}: {reason} ({error_code:?})")
             }
@@ -874,9 +878,9 @@ async fn register_reconnect_token(
 /// sequential phases.
 async fn drain_ws_until(
     ws: &mut WsStream,
-    ledger: &DeliveryLedger,
+    ledger: &ConformanceAuditor,
     receiver_name: &str,
-    mut done: impl FnMut(&DeliveryLedger) -> bool,
+    mut done: impl FnMut(&ConformanceAuditor) -> bool,
 ) {
     while !done(ledger) {
         let frame = tokio::time::timeout(EVENT_DEADLINE, ws.next())
@@ -908,22 +912,27 @@ async fn reconnect_under_fire() {
     /// Phase-B (post-reconnect) burst.
     const POST_RECONNECT_BURST: u64 = 100;
 
-    let (addr, game_server) = start_reconnect_server().await;
+    let (running_server, game_server) = start_reconnect_server().await;
+    let addr = running_server.addr();
     let metrics = game_server.metrics();
-    let ledger = DeliveryLedger::new();
+    let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V3);
 
     let scenario = async {
         let mut sender = connect_v3(addr).await;
         authenticate_v3(&mut sender).await;
-        let (_sender_id, _room) = join_room_v3(&mut sender, ROOM, "Sender").await;
+        let _sender_join = join_room_v3(&mut sender, ROOM, "Sender").await;
 
         let mut watcher = connect_v3(addr).await;
         authenticate_v3(&mut watcher).await;
-        let (_watcher_id, _room) = join_room_v3(&mut watcher, ROOM, "Watcher").await;
+        let watcher_join = join_room_v3(&mut watcher, ROOM, "Watcher").await;
+        ledger.record_message("Watcher", &ServerMessage::RoomJoined(watcher_join.clone()));
 
         let mut victim = connect_v3(addr).await;
         authenticate_v3(&mut victim).await;
-        let (victim_id, room_id) = join_room_v3(&mut victim, ROOM, "Victim").await;
+        let victim_join = join_room_v3(&mut victim, ROOM, "Victim").await;
+        let victim_id = victim_join.player_id;
+        let room_id = victim_join.room_id;
+        ledger.record_message("Victim", &ServerMessage::RoomJoined(victim_join));
 
         // --- Phase A: burst, cut mid-burst, keep bursting ----------------
         let mut pre_payload = LedgerPayload::new("SenderPre", PADDING_BYTES);
@@ -931,6 +940,8 @@ async fn reconnect_under_fire() {
             send_on(
                 &mut sender,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: pre_payload.next(),
                 },
             )
@@ -960,10 +971,7 @@ async fn reconnect_under_fire() {
         })
         .await;
         victim_tail.expect("victim socket never observed the server-side cut");
-        ledger.note_receiver_disconnected(
-            "Victim",
-            DisconnectReason::InjectedFault("server-side mid-burst disconnect".to_string()),
-        );
+        ledger.note_injected_fault("Victim", "server-side mid-burst disconnect");
 
         // The fire continues: the second half of the burst goes out while
         // the victim is gone.
@@ -971,6 +979,8 @@ async fn reconnect_under_fire() {
             send_on(
                 &mut sender,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: pre_payload.next(),
                 },
             )
@@ -1010,6 +1020,7 @@ async fn reconnect_under_fire() {
             },
         )
         .await;
+        ledger.record_reconnect("Victim", "VictimReborn", &reconnected);
 
         // v3 contract: the replay-completeness marker is PRESENT and one of
         // the two states a live replay ring can report (`unavailable` would
@@ -1043,6 +1054,8 @@ async fn reconnect_under_fire() {
             send_on(
                 &mut sender,
                 &ClientMessage::GameData {
+                    class: None,
+                    key: None,
                     data: post_payload.next(),
                 },
             )
@@ -1075,21 +1088,23 @@ async fn reconnect_under_fire() {
         0,
         "a deliberate disconnect + reconnect must never register as a slow consumer"
     );
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[
-            expectation(
-                "Watcher",
-                &[("SenderPre", pre_total), ("SenderPost", post_total)],
-            ),
-            // Disconnected mid-burst: any gap-free prefix of the pre-cut
-            // stream is legal; a mid-stream hole is not.
-            expectation("Victim", &[("SenderPre", pre_total)]),
-            // Fresh epoch: ONLY the post-reconnect stream, complete.
-            expectation("VictimReborn", &[("SenderPost", post_total)]),
-        ],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[
+                expectation(
+                    "Watcher",
+                    &[("SenderPre", pre_total), ("SenderPost", post_total)],
+                ),
+                // Disconnected mid-burst: any gap-free prefix of the pre-cut
+                // stream is legal; a mid-stream hole is not.
+                expectation("Victim", &[("SenderPre", pre_total)]),
+                // Fresh epoch: ONLY the post-reconnect stream, complete.
+                expectation("VictimReborn", &[("SenderPost", post_total)]),
+            ],
+        )
+        .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,8 +1125,9 @@ async fn lobby_churn_during_relay() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
-    let ledger = DeliveryLedger::new();
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+    let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V2);
 
     let scenario = async {
         // Three persistent members in a 4-seat room: every churner's join
@@ -1120,9 +1136,11 @@ async fn lobby_churn_during_relay() {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut recv_a_sink, mut recv_a_rx) = connect(addr).await;
         let (mut recv_b_sink, mut recv_b_rx) = connect(addr).await;
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _recv_a_id = join_room(&mut recv_a_sink, &mut recv_a_rx, ROOM, "RecvA").await;
-        let _recv_b_id = join_room(&mut recv_b_sink, &mut recv_b_rx, ROOM, "RecvB").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let recv_a_id = join_room(&mut recv_a_sink, &mut recv_a_rx, ROOM, "RecvA").await;
+        ledger.record_consumed_v2_room_snapshot("RecvA", &[sender_id, recv_a_id]);
+        let recv_b_id = join_room(&mut recv_b_sink, &mut recv_b_rx, ROOM, "RecvB").await;
+        ledger.record_consumed_v2_room_snapshot("RecvB", &[sender_id, recv_a_id, recv_b_id]);
 
         for epoch in 0..CHURN_EPOCHS {
             let churn_name = format!("Churn{epoch}");
@@ -1139,6 +1157,12 @@ async fn lobby_churn_during_relay() {
             let churn_payload =
                 join_room_payload(&mut churn_sink, &mut churn_rx, ROOM, &churn_name).await;
             let churn_id = churn_payload.player_id;
+            let churn_players: Vec<_> = churn_payload
+                .current_players
+                .iter()
+                .map(|player| player.id)
+                .collect();
+            ledger.record_consumed_v2_room_snapshot(&churn_name, &churn_players);
             assert_eq!(
                 churn_payload.lobby_state,
                 signal_fish_server::protocol::LobbyState::Lobby,
@@ -1193,6 +1217,7 @@ async fn lobby_churn_during_relay() {
                 |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
             )
             .await;
+            ledger.record_message(&churn_name, &ServerMessage::RoomLeft);
             drain_until_player_left(&mut recv_a_rx, &ledger, "RecvA", churn_id).await;
             drain_until_player_left(&mut recv_b_rx, &ledger, "RecvB", churn_id).await;
         }
@@ -1235,6 +1260,6 @@ async fn lobby_churn_during_relay() {
             total_sent: MESSAGES_PER_EPOCH,
         }],
     }));
-    ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics).await;
+    ledger.assert_conformance(&metrics, &expectations).await;
+    running_server.shutdown().await;
 }

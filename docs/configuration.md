@@ -197,9 +197,11 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
-| `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection outbound message queue capacity in messages (must be ≥ 1); a full queue applies backpressure to senders |
-| `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds delivery may wait on a full outbound queue before the recipient is disconnected as a slow consumer (must be > 0 and ≤ `600000`) |
-| `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between per-connection `RelayStats` frames for v3 clients (`0` disables; must be ≤ `3600`) |
+| `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection data queue capacity (must be ≥ 1); only reliable delivery waits when full |
+| `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY` | `websocket.control_queue_capacity` | `128` | Per-connection v3 priority control queue capacity (must be ≥ 2) |
+| `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds reliable delivery may wait for data-queue space before closing the recipient with `4002 slow_consumer` (must be > 0 and ≤ `600000`) |
+| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS` | `websocket.max_sojourn_ms` | `15000` | Maximum age of the oldest outbound item through socket-write completion before a `4002 slow_consumer` close (must be > `0` and exceed `batch_interval_ms` when batching is enabled) |
+| `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between v3 aggregate `RelayStats` and counter-only `DeliveryReport` snapshots (`0` disables periodic snapshots, not exact gap reports; must be ≤ `3600`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
 ## Common Configurations
@@ -305,7 +307,10 @@ Complete reference of all configuration options with environment variable overri
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
     "send_queue_capacity": 1024,
-    "slow_consumer_timeout_ms": 5000
+    "control_queue_capacity": 128,
+    "slow_consumer_timeout_ms": 5000,
+    "max_sojourn_ms": 15000,
+    "delivery_stats_interval_secs": 0
   }
 }
 
@@ -326,20 +331,38 @@ Complete reference of all configuration options with environment variable overri
   that heartbeat (which `server.ping_timeout` already requires) are never
   affected by the 300s default. Keep this enabled in production — it reclaims
   zombie sockets that would otherwise hold file descriptors open indefinitely.
-- `send_queue_capacity` - Per-connection outbound message queue capacity in
-  messages (default: 1024; must be ≥ 1). Bounds how many undelivered server
-  messages may queue for one connection before delivery applies backpressure
-  to senders. Larger values absorb bigger relay bursts without slowing
-  senders; queue slots hold pointers, so a generous capacity costs almost
-  nothing until messages actually queue.
+- `send_queue_capacity` - Per-connection data queue capacity in messages
+  (default: 1024; must be ≥ 1). Reliable messages wait for space and apply
+  sender backpressure. V3 `latest` and `volatile` messages never wait: their
+  class policy accounts for any omission in a prior exact `DeliveryReport`.
+  Larger values absorb bigger relay bursts; queue slots hold pointers, so the
+  configured capacity costs little until messages actually queue.
+- `control_queue_capacity` - Per-connection control-plane queue capacity in
+  messages (default: 128; must be ≥ 2). Within the active recipient generation,
+  negotiated v3 drains this dedicated lane strictly before data, keeping exact
+  delivery reports, peer lifecycle events, errors, and heartbeats from starving
+  behind game data. The recipient's own room/spectator transitions are
+  generation barriers that drain old-room data first. If exact accountability
+  cannot be queued, the connection fails closed before later data is exposed.
 - `slow_consumer_timeout_ms` - How long (milliseconds) delivery may wait for
-  space in a full outbound queue before the recipient is disconnected as a
-  slow consumer (default: 5000; must be > 0 and ≤ 600000). This is the loud
-  alternative to silently dropping messages: a connection that cannot absorb
-  traffic for this long — on top of the buffering `send_queue_capacity`
-  provides — is closed with a best-effort `SLOW_CONSUMER` error through the
-  normal disconnect flow. The server never silently drops a delivery; see
-  [Delivery semantics](protocol.md#delivery-semantics).
+  reliable space in a full data queue before the recipient is disconnected as
+  a slow consumer (default: 5000; must be > 0 and ≤ 600000). A connection that
+  cannot absorb reliable traffic for this long is closed with authoritative
+  WebSocket code `4002 slow_consumer`; the `SLOW_CONSUMER` error is best effort.
+  `latest` and `volatile` do not use this wait.
+- `max_sojourn_ms` - Maximum age of the oldest outbound item before the
+  connection is closed loudly with `4002 slow_consumer` (default: 15000; must
+  be > 0), even if it continues sending pings. The deadline covers every queue
+  lane, the current batch/in-flight item, and completion of the current socket
+  write. It must be greater than `batch_interval_ms` when batching is enabled,
+  ensuring a healthy item gets a scheduled flush opportunity.
+- `delivery_stats_interval_secs` - Periodic v3 aggregate/counter snapshot
+  cadence (default: 0, disabled; must be ≤ 3600). This does not suppress exact
+  gap-bearing `DeliveryReport` frames, which are emitted whenever a lossy class
+  or unsupported format omits a sequence range.
+
+See [Delivery semantics](protocol.md#delivery-semantics) for class policies and
+the exact gap-authorization contract.
 
 ## Session Topology (Protocol v3)
 
@@ -376,8 +399,9 @@ deployment keeps working exactly like v2. ICE servers are advertised only when a
 WebRTC topology (`mesh`, or `host` with the WebRTC transport) is actually
 selected — plus, with `enable_ice_pregather`, at join/reconnect time for v3
 WebRTC-capable members of non-relay-desired games still in the lobby; under the
-default `relay` topology no `SessionPlan` is emitted and no ICE is pre-gathered
-at all.
+default `relay` topology each v3 member receives an explicit no-peer
+`relay`/`relay` `SessionPlan`, while no ICE is pre-gathered at all. V2 members
+receive no plan.
 
 ## TURN and STUN (ICE Credentials) (Protocol v3)
 

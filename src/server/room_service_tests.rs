@@ -1,10 +1,16 @@
+use super::connection_manager::RelayStamp;
 use super::*;
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
-use crate::coordination::{ClientDeliveryHandle, MessageCoordinator};
-use crate::database::{create_database, DatabaseConfig, GameDatabase, RoomCleanupOutcome};
+use crate::coordination::{
+    ClientDeliveryHandle, MessageCoordinator, RoomEventCompletion, RoomEventJob,
+    RoomEventMutationGuard, RoomEventSequencer,
+};
+use crate::database::{
+    create_database, DatabaseConfig, GameDatabase, InMemoryDatabase, RoomCleanupOutcome,
+};
 use crate::protocol::{
     ConnectionInfo, ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage,
     SpectatorInfo,
@@ -95,12 +101,12 @@ async fn create_test_server_with_message_coordinator_and_lock(
     let rate_limiter = Arc::new(RoomRateLimiter::new(config.rate_limit_config.clone()));
     Arc::clone(&rate_limiter).start_cleanup_task();
 
-    let connection_manager = ConnectionManager::new(
+    let connection_manager = Arc::new(ConnectionManager::new(
         config.max_connections_per_ip,
         Arc::clone(&metrics),
         Arc::clone(&message_coordinator),
         config.websocket_config.delivery_stats_interval_secs > 0,
-    );
+    ));
     let reconnection_manager = if config.enable_reconnection {
         Some(Arc::new(crate::reconnection::ReconnectionManager::new(
             config.reconnection_window.as_secs(),
@@ -125,6 +131,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         Arc::clone(&room_applications),
         protocol_config.clone(),
         reconnection_manager.clone(),
+        Arc::clone(&connection_manager),
     );
 
     let (shutdown_drain_tx, _) = watch::channel(false);
@@ -145,7 +152,9 @@ async fn create_test_server_with_message_coordinator_and_lock(
         reconnection_manager,
         auth_middleware: Arc::new(crate::auth::AuthMiddleware::disabled()),
         room_applications,
-        active_session_plans: DashMap::new(),
+        active_session_plans: Arc::new(DashMap::new()),
+        pending_durable_player_detaches: Arc::new(DashMap::new()),
+        fail_retain_room_publication_snapshot: AtomicBool::new(false),
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
         dashboard_metrics_cache,
@@ -455,10 +464,6 @@ impl GameDatabase for DrainAfterCreateDatabase {
         self.inner.transition_room_to_lobby(room_id).await
     }
 
-    async fn transition_room_to_waiting(&self, room_id: &RoomId) -> anyhow::Result<()> {
-        self.inner.transition_room_to_waiting(room_id).await
-    }
-
     async fn toggle_player_ready(
         &self,
         room_id: &RoomId,
@@ -467,8 +472,12 @@ impl GameDatabase for DrainAfterCreateDatabase {
         self.inner.toggle_player_ready(room_id, player_id).await
     }
 
-    async fn finalize_room_game(&self, room_id: &RoomId) -> anyhow::Result<()> {
-        self.inner.finalize_room_game(room_id).await
+    async fn finalize_room_game(
+        &self,
+        room_id: &RoomId,
+        expected: &crate::database::FinalizeRoomGameExpectation,
+    ) -> anyhow::Result<crate::database::FinalizeRoomGameOutcome> {
+        self.inner.finalize_room_game(room_id, expected).await
     }
 
     async fn add_spectator_to_room(
@@ -525,9 +534,11 @@ enum DrainTrigger {
     RoomLeftSend,
     PlayerLeftBroadcast,
     FirstFarewellTrySend,
+    MissingTerminalTail,
 }
 
 struct DrainTriggerCoordinator {
+    room_events: Arc<RoomEventSequencer>,
     trigger: DrainTrigger,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
@@ -541,6 +552,7 @@ struct DrainTriggerCoordinator {
 impl DrainTriggerCoordinator {
     fn new(trigger: DrainTrigger) -> Self {
         Self {
+            room_events: Arc::new(RoomEventSequencer::default()),
             trigger,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
@@ -578,7 +590,7 @@ impl DrainTriggerCoordinator {
             .read()
             .await
             .get(player_id)
-            .is_some_and(|handle| handle.sender.try_send(message).is_ok())
+            .is_some_and(|handle| handle.sender.try_send(message, None).is_ok())
     }
 
     async fn recipients_for(
@@ -603,6 +615,18 @@ impl DrainTriggerCoordinator {
 
 #[async_trait::async_trait]
 impl MessageCoordinator for DrainTriggerCoordinator {
+    async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
+        self.room_events.lock(*room_id).await
+    }
+
+    fn enqueue_room_event(
+        &self,
+        mutation_guard: RoomEventMutationGuard,
+        job: RoomEventJob,
+    ) -> RoomEventCompletion {
+        self.room_events.enqueue(mutation_guard, job)
+    }
+
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
@@ -701,9 +725,48 @@ impl MessageCoordinator for DrainTriggerCoordinator {
                 .fetch_add(1, Ordering::Relaxed);
         }
         for handle in self.recipients_for(room_id, Some(except_player)).await {
-            let _ = handle.sender.try_send(Arc::clone(&message));
+            let _ = handle.sender.try_send(Arc::clone(&message), None);
         }
         Ok(true)
+    }
+
+    async fn commit_room_messages_if_members_with_hook<'a>(
+        &'a self,
+        _room_id: &RoomId,
+        _expected_members: &[PlayerId],
+        recipient_messages: Vec<crate::coordination::RoomRecipientMessages>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + 'a>,
+                > + Send
+                + 'a,
+        >,
+        after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+    ) -> anyhow::Result<crate::coordination::RoomMessageTransactionOutcome> {
+        if !before_send().await? {
+            return Ok(crate::coordination::RoomMessageTransactionOutcome::HookRejected);
+        }
+        let max_phases = recipient_messages
+            .iter()
+            .map(crate::coordination::RoomRecipientMessages::phase_count)
+            .max()
+            .unwrap_or(0);
+        let mut after_first_phase = Some(after_first_phase);
+        for phase in 0..max_phases {
+            for batch in &recipient_messages {
+                if let Some(message) = batch.message_in_phase(phase) {
+                    let _ = self.deliver_to(&batch.player_id, Arc::clone(message)).await;
+                }
+            }
+            if phase == 0
+                && !after_first_phase
+                    .take()
+                    .expect("transaction state callback runs once")(0)
+            {
+                break;
+            }
+        }
+        Ok(crate::coordination::RoomMessageTransactionOutcome::Committed)
     }
 
     async fn broadcast_to_room(
@@ -712,7 +775,7 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
         for handle in self.recipients_for(room_id, None).await {
-            let _ = handle.sender.try_send(Arc::clone(&message));
+            let _ = handle.sender.try_send(Arc::clone(&message), None);
         }
         Ok(())
     }
@@ -724,9 +787,53 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
         for handle in self.recipients_for(room_id, Some(except_player)).await {
-            let _ = handle.sender.try_send(Arc::clone(&message));
+            let _ = handle.sender.try_send(Arc::clone(&message), None);
         }
         Ok(())
+    }
+
+    async fn broadcast_to_room_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        message: Arc<ServerMessage>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        before_send().await;
+        self.broadcast_to_room(room_id, message).await?;
+        Ok(true)
+    }
+
+    async fn broadcast_to_room_if_members_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        message: Arc<ServerMessage>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        let mut routed: Vec<_> = self
+            .room_players
+            .read()
+            .await
+            .get(room_id)
+            .into_iter()
+            .flat_map(|players| players.iter().copied())
+            .collect();
+        let mut expected = expected_members.to_vec();
+        routed.sort_unstable();
+        expected.sort_unstable();
+        if routed != expected {
+            return Ok(false);
+        }
+        self.broadcast_to_room_with_hook(room_id, message, before_send)
+            .await
     }
 
     async fn register_local_client(
@@ -748,6 +855,23 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         }
         self.clients.write().await.insert(player_id, delivery);
         Ok(())
+    }
+
+    async fn unroute_local_client_with_tail<'a>(
+        &'a self,
+        player_id: PlayerId,
+        _room_id: RoomId,
+        clear_assignment: Box<dyn FnOnce() -> Option<(ClientDeliveryHandle, u32, u64)> + Send + 'a>,
+    ) -> anyhow::Result<Option<(u32, u64)>> {
+        let Some((delivery, epoch, final_seq)) = clear_assignment() else {
+            return Ok(None);
+        };
+        self.register_local_client(player_id, None, delivery)
+            .await?;
+        if self.trigger == DrainTrigger::MissingTerminalTail {
+            return Ok(None);
+        }
+        Ok(Some((epoch, final_seq)))
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
@@ -809,6 +933,126 @@ async fn register_client(
     (player_id, receiver)
 }
 
+struct JoinedPairFixture {
+    server: Arc<EnhancedGameServer>,
+    database: Arc<InMemoryDatabase>,
+    room_id: RoomId,
+    leaver: PlayerId,
+    survivor: PlayerId,
+    leaver_rx: mpsc::Receiver<Arc<ServerMessage>>,
+    survivor_rx: mpsc::Receiver<Arc<ServerMessage>>,
+    reconnect_token: String,
+}
+
+fn drain_queued_messages(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+) -> Vec<Arc<ServerMessage>> {
+    let mut messages = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(message) => messages.push(message),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return messages;
+            }
+        }
+    }
+}
+
+async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
+    let database = Arc::new(InMemoryDatabase::new());
+    database
+        .initialize()
+        .await
+        .expect("initialize lifecycle test database");
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48100".parse().unwrap()).await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48101".parse().unwrap()).await;
+    server.set_client_protocol(
+        &leaver,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+
+    server
+        .handle_join_room(
+            &leaver,
+            "leave-convergence".to_string(),
+            Some("LVC001".to_string()),
+            "leaver".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let initial_messages = drain_queued_messages(&mut leaver_rx);
+    let reconnect_token = initial_messages
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::RoomJoined(payload) => payload.reconnection_token.clone(),
+            _ => None,
+        })
+        .expect("v3 join baseline carries a pre-issued reconnect token");
+    let room_id = server
+        .get_client_room(&leaver)
+        .await
+        .expect("creator has a room assignment");
+
+    server
+        .handle_join_room(
+            &survivor,
+            "leave-convergence".to_string(),
+            Some("LVC001".to_string()),
+            "survivor".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let leaver_messages = drain_queued_messages(&mut leaver_rx);
+    assert!(
+        leaver_messages.iter().any(|message| matches!(
+            message.as_ref(),
+            ServerMessage::PlayerJoined { player } if player.id == survivor
+        )),
+        "peer-visible membership exists before testing terminal convergence"
+    );
+    let survivor_messages = drain_queued_messages(&mut survivor_rx);
+    assert!(
+        survivor_messages
+            .iter()
+            .any(|message| matches!(message.as_ref(), ServerMessage::RoomJoined(_))),
+        "survivor baseline commits before the leave scenario"
+    );
+
+    JoinedPairFixture {
+        server,
+        database,
+        room_id,
+        leaver,
+        survivor,
+        leaver_rx,
+        survivor_rx,
+        reconnect_token,
+    }
+}
+
 async fn wait_for_backpressure_event(server: &EnhancedGameServer) {
     timeout(Duration::from_secs(1), async {
         while server
@@ -822,6 +1066,24 @@ async fn wait_for_backpressure_event(server: &EnhancedGameServer) {
     })
     .await
     .expect("delivery should reach the backpressure wait");
+}
+
+async fn wait_for_distributed_lock(server: &EnhancedGameServer, lock_key: &str) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if server
+                .distributed_lock
+                .is_locked(lock_key)
+                .await
+                .expect("distributed lock state can be read")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("operation should reach its distributed lock");
 }
 
 fn assert_next_message_matches(
@@ -840,6 +1102,1014 @@ fn assert_no_queued_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, c
     match receiver.try_recv() {
         Ok(message) => panic!("{context}: unexpected queued message {message:?}"),
         Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn seated_room_join_rejects_an_existing_spectator_role() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48019".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "role-guard".to_string(),
+            Some("ROLE01".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+
+    let (spectator, mut spectator_rx) =
+        register_client(&server, "127.0.0.1:48020".parse().unwrap()).await;
+    server
+        .spectator_service
+        .join(
+            &spectator,
+            room.game_name.clone(),
+            room.code.clone(),
+            "Watcher".to_string(),
+        )
+        .await
+        .expect("spectator join succeeds");
+    assert_next_message_matches(&mut spectator_rx, "spectator baseline", |message| {
+        matches!(message, ServerMessage::SpectatorJoined(_))
+    });
+    assert_next_message_matches(&mut creator_rx, "spectator notification", |message| {
+        matches!(message, ServerMessage::NewSpectatorJoined { .. })
+    });
+
+    server
+        .handle_join_room(
+            &spectator,
+            room.game_name.clone(),
+            Some(room.code.clone()),
+            "Dual Role".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert_next_message_matches(&mut spectator_rx, "dual-role rejection", |message| {
+        matches!(
+            message,
+            ServerMessage::RoomJoinFailed {
+                error_code: Some(ErrorCode::AlreadyInRoom),
+                ..
+            }
+        )
+    });
+    assert!(server.spectator_service.is_spectating(&spectator));
+    assert_eq!(server.get_client_room(&spectator).await, None);
+    let players = server
+        .database
+        .get_room_players(&room.id)
+        .await
+        .expect("fetch seated players");
+    assert!(
+        players.iter().all(|player| player.id != spectator),
+        "rejected spectator must not be persisted as a seated player"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectator_join_waits_for_one_slot_baseline_capacity() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:47990".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "spectator-capacity".to_string(),
+            Some("SPCAP1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+
+    let (spectator_sender, mut spectator_rx) = mpsc::channel(1);
+    let fill_sender = spectator_sender.clone();
+    let spectator = server
+        .connection_manager
+        .register_client(
+            spectator_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47991".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("spectator connection registers");
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill the one-slot spectator queue");
+
+    let mut join = {
+        let service = server.spectator_service.clone();
+        let game_name = room.game_name.clone();
+        let room_code = room.code.clone();
+        tokio::spawn(async move {
+            service
+                .join(
+                    &spectator,
+                    game_name,
+                    room_code,
+                    "capacity-watcher".to_string(),
+                )
+                .await
+        })
+    };
+    wait_for_backpressure_event(&server).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut join)
+            .await
+            .is_err(),
+        "spectator admission waits instead of rejecting a momentarily full baseline queue"
+    );
+    assert!(
+        !server.spectator_service.is_spectating(&spectator),
+        "spectator membership is not published before its baseline commits"
+    );
+    join.abort();
+    join.await
+        .expect_err("test aborts only the caller awaiting the owned spectator join");
+
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let join_result = timeout(Duration::from_secs(1), spectator_rx.recv())
+        .await
+        .expect("owned spectator join finishes after capacity frees");
+    assert!(matches!(
+        join_result.as_deref(),
+        Some(ServerMessage::SpectatorJoined(_))
+    ));
+    let publication = timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("spectator publication follows its baseline");
+    assert!(matches!(
+        publication.as_deref(),
+        Some(ServerMessage::NewSpectatorJoined { .. })
+    ));
+    assert!(server.spectator_service.is_spectating(&spectator));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn aborting_backpressured_spectator_detach_still_publishes_departure() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:47980".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "owned-spectator-detach".to_string(),
+            Some("SPDET1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+    let (spectator_sender, mut spectator_rx) = mpsc::channel(1);
+    let fill_sender = spectator_sender.clone();
+    let spectator = server
+        .connection_manager
+        .register_client(
+            spectator_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47981".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("spectator registration succeeds");
+    server
+        .spectator_service
+        .join(
+            &spectator,
+            room.game_name.clone(),
+            room.code.clone(),
+            "watcher".to_string(),
+        )
+        .await
+        .expect("spectator joins before detach");
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorJoined(_))
+    ));
+    assert!(matches!(
+        creator_rx.recv().await.as_deref(),
+        Some(ServerMessage::NewSpectatorJoined { .. })
+    ));
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill the one-slot spectator acknowledgement queue");
+
+    let detach = {
+        let service = server.spectator_service.clone();
+        tokio::spawn(async move { service.leave(&spectator).await })
+    };
+    wait_for_backpressure_event(&server).await;
+    detach.abort();
+    detach
+        .await
+        .expect_err("test aborts only the caller awaiting owned spectator detach");
+    assert!(!server.spectator_service.is_spectating(&spectator));
+
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let acknowledgement = timeout(Duration::from_secs(1), spectator_rx.recv())
+        .await
+        .expect("owned detach acknowledgement should arrive");
+    assert!(matches!(
+        acknowledgement.as_deref(),
+        Some(ServerMessage::SpectatorLeft { .. })
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), creator_rx.recv())
+            .await
+            .expect("owned spectator departure should publish")
+            .as_deref(),
+        Some(ServerMessage::SpectatorDisconnected { spectator_id, .. })
+            if *spectator_id == spectator
+    ));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn aborting_join_while_baseline_is_backpressured_still_completes_admission() {
+    let server = create_test_server().await;
+    let (sender, mut receiver) = mpsc::channel(1);
+    let fill_sender = sender.clone();
+    let player_id = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47992".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("client registration succeeds");
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill the one-slot join baseline queue");
+
+    let join = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            server
+                .handle_join_room(
+                    &player_id,
+                    "owned-join".to_string(),
+                    None,
+                    "joiner".to_string(),
+                    Some(4),
+                    Some(true),
+                    None,
+                )
+                .await;
+        })
+    };
+    wait_for_backpressure_event(&server).await;
+    join.abort();
+    join.await
+        .expect_err("test aborts the request future after the owned join committed");
+
+    assert!(matches!(
+        receiver.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let baseline = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("owned join should finish after capacity frees")
+        .expect("join baseline remains deliverable");
+    let room_id = match baseline.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_id,
+        other => panic!("expected RoomJoined after abort, got {other:?}"),
+    };
+    assert_eq!(server.get_client_room(&player_id).await, Some(room_id));
+    assert!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup succeeds")
+            .is_some_and(|room| room.players.contains_key(&player_id)),
+        "owned join publishes one coherent DB and routing membership"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn aborting_leave_while_ack_is_backpressured_still_publishes_terminal_event() {
+    let server = create_test_server().await;
+    let (leaver_sender, mut leaver_rx) = mpsc::channel(1);
+    let fill_sender = leaver_sender.clone();
+    let leaver = server
+        .connection_manager
+        .register_client(
+            leaver_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47993".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("leaver registration succeeds");
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:47994".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "owned-leave".to_string(),
+            Some("OWNLV1".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill the one-slot leave acknowledgement queue");
+
+    let leave = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.leave_room(&leaver).await })
+    };
+    wait_for_backpressure_event(&server).await;
+    leave.abort();
+    leave
+        .await
+        .expect_err("test aborts the request future after terminal unroute");
+
+    assert!(matches!(
+        leaver_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let acknowledgement = timeout(Duration::from_secs(1), leaver_rx.recv())
+        .await
+        .expect("owned leave sends acknowledgement after capacity frees");
+    assert!(matches!(
+        acknowledgement.as_deref(),
+        Some(ServerMessage::RoomLeft)
+    ));
+    match timeout(Duration::from_secs(1), survivor_rx.recv())
+        .await
+        .expect("owned leave publishes terminal event")
+        .expect("survivor channel remains open")
+        .as_ref()
+    {
+        ServerMessage::PlayerLeft {
+            player_id,
+            epoch: Some(epoch),
+            final_seq: Some(final_seq),
+        } => {
+            assert_eq!(*player_id, leaver);
+            assert_eq!((*epoch, *final_seq), (1, 0));
+        }
+        other => panic!("expected complete terminal PlayerLeft, got {other:?}"),
+    }
+    assert_eq!(server.get_client_room(&leaver).await, None);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn aborting_reconnect_while_baseline_is_backpressured_still_restores_identity() {
+    let server = create_test_server().await;
+    let (existing, mut existing_rx) =
+        register_client(&server, "127.0.0.1:47970".parse().unwrap()).await;
+    let (reconnecting, _old_rx) =
+        register_client(&server, "127.0.0.1:47971".parse().unwrap()).await;
+    let (current_sender, mut current_rx) = mpsc::channel(1);
+    let fill_sender = current_sender.clone();
+    let current = server
+        .connection_manager
+        .register_client(
+            current_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47972".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("replacement connection registers");
+    let room = server
+        .database
+        .create_room(
+            "owned-reconnect".to_string(),
+            Some("OWNRC1".to_string()),
+            4,
+            true,
+            existing,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    let reconnecting_info = PlayerInfo {
+        id: reconnecting,
+        name: "reconnecting".to_string(),
+        is_authority: false,
+        is_ready: false,
+        connected_at: chrono::Utc::now(),
+        connection_info: None,
+        epoch: None,
+        seq: None,
+        region_id: "region-a".to_string(),
+    };
+    server
+        .database
+        .add_player_to_room(&room.id, reconnecting_info.clone())
+        .await
+        .expect("reconnecting member insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room.id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room.id)
+        .await;
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection is enabled")
+        .register_disconnection(
+            reconnecting,
+            room.id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room.id, &reconnecting)
+        .await
+        .expect("disconnect removes DB membership");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("disconnect removes routing");
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill the one-slot reconnect baseline queue");
+
+    let reconnect = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            server
+                .handle_reconnect(&current, &reconnecting, &room.id, &token)
+                .await
+        })
+    };
+    wait_for_backpressure_event(&server).await;
+    reconnect.abort();
+    reconnect
+        .await
+        .expect_err("test aborts only the caller awaiting the owned reconnect");
+
+    assert!(matches!(
+        current_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    match timeout(Duration::from_secs(1), current_rx.recv())
+        .await
+        .expect("owned reconnect baseline should arrive")
+        .expect("replacement channel remains open")
+        .as_ref()
+    {
+        ServerMessage::Reconnected(payload) => assert_eq!(payload.player_id, reconnecting),
+        other => panic!("expected Reconnected after abort, got {other:?}"),
+    }
+    assert!(matches!(
+        timeout(Duration::from_secs(1), existing_rx.recv())
+            .await
+            .expect("owned reconnect should notify peers")
+            .as_deref(),
+        Some(ServerMessage::PlayerReconnected { player_id, .. })
+            if *player_id == reconnecting
+    ));
+    assert!(server.connection_manager.has_client(&reconnecting));
+    assert!(!server.connection_manager.has_client(&current));
+    assert!(server
+        .database
+        .get_room_players(&room.id)
+        .await
+        .expect("room players")
+        .iter()
+        .any(|player| player.id == reconnecting));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn delayed_ready_event_commits_before_a_concurrent_join_mutates_membership() {
+    let server = create_test_server().await;
+    let (creator_sender, mut creator_rx) = mpsc::channel(1);
+    let fill_sender = creator_sender.clone();
+    let creator = server
+        .connection_manager
+        .register_client(
+            creator_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47995".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("creator registration succeeds");
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:47996".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "ready-join-order".to_string(),
+            Some("RJOIN1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("delay the ready broadcast on creator capacity");
+
+    let ready = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.handle_player_ready(&creator).await })
+    };
+    wait_for_backpressure_event(&server).await;
+    let join = {
+        let server = Arc::clone(&server);
+        let game_name = room.game_name.clone();
+        let room_code = room.code.clone();
+        tokio::spawn(async move {
+            server
+                .handle_join_room(
+                    &joiner,
+                    game_name,
+                    Some(room_code),
+                    "joiner".to_string(),
+                    Some(4),
+                    Some(true),
+                    None,
+                )
+                .await
+        })
+    };
+    wait_for_distributed_lock(
+        &server,
+        &format!("room_join:{}:{}", room.game_name, room.code),
+    )
+    .await;
+    assert!(
+        !server
+            .database
+            .get_room_players(&room.id)
+            .await
+            .expect("room players")
+            .iter()
+            .any(|player| player.id == joiner),
+        "join DB mutation waits behind the delayed ready lifecycle event"
+    );
+
+    assert!(matches!(
+        creator_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    match timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("ready event becomes deliverable")
+        .expect("creator channel remains open")
+        .as_ref()
+    {
+        ServerMessage::LobbyStateChanged { ready_players, .. } => {
+            assert_eq!(ready_players, &vec![creator]);
+        }
+        other => panic!("expected ready LobbyStateChanged first, got {other:?}"),
+    }
+    ready.await.expect("ready task should not panic");
+    let baseline = timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("join baseline should arrive");
+    assert!(matches!(
+        baseline.as_deref(),
+        Some(ServerMessage::RoomJoined(_))
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), creator_rx.recv())
+            .await
+            .expect("join event should follow ready event")
+            .as_deref(),
+        Some(ServerMessage::PlayerJoined { player }) if player.id == joiner
+    ));
+    join.await.expect("join task should not panic");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn two_concurrent_joins_publish_in_database_mutation_order() {
+    let server = create_test_server().await;
+    let (creator_sender, mut creator_rx) = mpsc::channel(1);
+    let fill_sender = creator_sender.clone();
+    let creator = server
+        .connection_manager
+        .register_client(
+            creator_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:47997".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("creator registration succeeds");
+    let (first, mut first_rx) = register_client(&server, "127.0.0.1:47998".parse().unwrap()).await;
+    let (second, mut second_rx) =
+        register_client(&server, "127.0.0.1:47999".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "join-join-order".to_string(),
+            Some("JJOIN1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("delay the first PlayerJoined broadcast");
+
+    let spawn_join = |player_id, name: &'static str| {
+        let server = Arc::clone(&server);
+        let game_name = room.game_name.clone();
+        let room_code = room.code.clone();
+        tokio::spawn(async move {
+            server
+                .handle_join_room(
+                    &player_id,
+                    game_name,
+                    Some(room_code),
+                    name.to_string(),
+                    Some(4),
+                    Some(true),
+                    None,
+                )
+                .await
+        })
+    };
+    let first_join = spawn_join(first, "first");
+    wait_for_backpressure_event(&server).await;
+    let second_join = spawn_join(second, "second");
+    wait_for_distributed_lock(
+        &server,
+        &format!("room_join:{}:{}", room.game_name, room.code),
+    )
+    .await;
+    assert!(
+        !server
+            .database
+            .get_room_players(&room.id)
+            .await
+            .expect("room players")
+            .iter()
+            .any(|player| player.id == second),
+        "second join cannot mutate DB while first event delivery is delayed"
+    );
+
+    assert!(matches!(
+        creator_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let mut published = Vec::new();
+    while published.len() < 2 {
+        let message = timeout(Duration::from_secs(1), creator_rx.recv())
+            .await
+            .expect("ordered join event should arrive")
+            .expect("creator channel remains open");
+        if let ServerMessage::PlayerJoined { player } = message.as_ref() {
+            published.push(player.id);
+        }
+    }
+    assert_eq!(published, vec![first, second]);
+    first_join.await.expect("first join task should not panic");
+    second_join
+        .await
+        .expect("second join task should not panic");
+    assert!(matches!(
+        first_rx.recv().await.as_deref(),
+        Some(ServerMessage::RoomJoined(_))
+    ));
+    assert!(matches!(
+        second_rx.recv().await.as_deref(),
+        Some(ServerMessage::RoomJoined(_))
+    ));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
+    let server = create_test_server().await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48001".parse().unwrap()).await;
+    let (survivor_sender, mut survivor_rx) = mpsc::channel(1);
+    let fill_sender = survivor_sender.clone();
+    let survivor = server
+        .connection_manager
+        .register_client(
+            survivor_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48002".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("survivor registration succeeds");
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:48003".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "leave-join-order".to_string(),
+            Some("LJOIN1".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("delay PlayerLeft on survivor capacity");
+
+    let leave = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.leave_room(&leaver).await })
+    };
+    wait_for_backpressure_event(&server).await;
+    assert!(matches!(
+        leaver_rx.recv().await.as_deref(),
+        Some(ServerMessage::RoomLeft)
+    ));
+    let join = {
+        let server = Arc::clone(&server);
+        let game_name = room.game_name.clone();
+        let room_code = room.code.clone();
+        tokio::spawn(async move {
+            server
+                .handle_join_room(
+                    &joiner,
+                    game_name,
+                    Some(room_code),
+                    "replacement".to_string(),
+                    Some(4),
+                    Some(true),
+                    None,
+                )
+                .await
+        })
+    };
+    wait_for_distributed_lock(
+        &server,
+        &format!("room_join:{}:{}", room.game_name, room.code),
+    )
+    .await;
+    assert!(
+        !server
+            .database
+            .get_room_players(&room.id)
+            .await
+            .expect("room players")
+            .iter()
+            .any(|player| player.id == joiner),
+        "replacement join waits until the terminal leave event commits"
+    );
+
+    assert!(matches!(
+        survivor_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    let terminal = timeout(Duration::from_secs(1), survivor_rx.recv())
+        .await
+        .expect("terminal leave event should arrive");
+    assert!(matches!(
+        terminal.as_deref(),
+        Some(ServerMessage::PlayerLeft { player_id, .. }) if *player_id == leaver
+    ));
+    let replacement = timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("replacement baseline should arrive");
+    assert!(matches!(
+        replacement.as_deref(),
+        Some(ServerMessage::RoomJoined(_))
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), survivor_rx.recv())
+            .await
+            .expect("replacement event should follow terminal leave")
+            .as_deref(),
+        Some(ServerMessage::PlayerJoined { player }) if player.id == joiner
+    ));
+    leave.await.expect("leave task should not panic");
+    join.await.expect("join task should not panic");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn room_join_snapshot_baselines_preexisting_relay_tail_before_player_left() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) =
+        register_client(&server, "127.0.0.1:48004".parse().unwrap()).await;
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:48005".parse().unwrap()).await;
+    server.set_client_protocol(
+        &joiner,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    let room = server
+        .database
+        .create_room(
+            "relay-baseline".to_string(),
+            Some("BASE01".to_string()),
+            4,
+            true,
+            existing,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room.id)
+        .await;
+    for expected in 1..=100 {
+        assert_eq!(
+            server
+                .connection_manager
+                .next_relay_stamp_in_room(&existing, &room.id),
+            Some(RelayStamp {
+                epoch: 1,
+                seq: expected,
+            })
+        );
+    }
+
+    server
+        .handle_join_room(
+            &joiner,
+            room.game_name.clone(),
+            Some(room.code.clone()),
+            "late-joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let baseline = timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("join baseline should arrive")
+        .expect("joiner channel remains open");
+    let existing_snapshot = match baseline.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload
+            .current_players
+            .iter()
+            .find(|player| player.id == existing)
+            .expect("baseline includes existing sender"),
+        other => panic!("expected RoomJoined, got {other:?}"),
+    };
+    assert_eq!(
+        (existing_snapshot.epoch, existing_snapshot.seq),
+        (Some(1), Some(100))
+    );
+
+    server.leave_room(&existing).await;
+    loop {
+        let message = timeout(Duration::from_secs(1), joiner_rx.recv())
+            .await
+            .expect("terminal event should arrive")
+            .expect("joiner channel remains open");
+        if let ServerMessage::PlayerLeft {
+            player_id,
+            epoch,
+            final_seq,
+        } = message.as_ref()
+        {
+            assert_eq!(*player_id, existing);
+            assert_eq!((*epoch, *final_seq), (Some(1), Some(100)));
+            break;
+        }
     }
 }
 
@@ -910,6 +2180,578 @@ async fn leave_room_sends_confirmation_and_clears_membership() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn leave_storage_error_preserves_membership_routing_and_reconnect_token() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture.database.fail_remove_player_from_room_for_test(true);
+
+    fixture.server.leave_room(&fixture.leaver).await;
+
+    let stored_players = fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("membership remains readable after injected failure");
+    assert!(stored_players
+        .iter()
+        .any(|player| player.id == fixture.leaver));
+    assert_eq!(
+        fixture.server.get_client_room(&fixture.leaver).await,
+        Some(fixture.room_id),
+        "an unknown durable outcome must leave the local assignment intact"
+    );
+    let routed = fixture
+        .server
+        .message_coordinator
+        .routed_player_ids(&fixture.room_id)
+        .await
+        .expect("routing lookup succeeds")
+        .expect("room has routed members");
+    assert!(routed.contains(&fixture.leaver));
+    assert_no_queued_message(
+        &mut fixture.leaver_rx,
+        "storage failure must not acknowledge an uncommitted leave",
+    );
+    assert_no_queued_message(
+        &mut fixture.survivor_rx,
+        "storage failure must not publish a false PlayerLeft",
+    );
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        0,
+        "failed persistence is not a completed departure"
+    );
+
+    let armed_token = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(fixture.leaver, fixture.room_id, false, None, 1)
+        .await;
+    assert_eq!(
+        armed_token, fixture.reconnect_token,
+        "a retryable storage failure must preserve the token already held by the client"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reachable() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture.database.fail_remove_player_from_room_for_test(true);
+
+    fixture.server.unregister_client(&fixture.leaver).await;
+
+    assert!(
+        !fixture
+            .server
+            .connection_manager
+            .has_client(&fixture.leaver),
+        "a dead room-bound connection must release its client/IP slot even when storage fails"
+    );
+    assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+    let routed = fixture
+        .server
+        .message_coordinator
+        .routed_player_ids(&fixture.room_id)
+        .await
+        .expect("routing lookup succeeds")
+        .expect("survivor remains routed");
+    assert!(!routed.contains(&fixture.leaver));
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "storage-failed disconnect still publishes its terminal epoch",
+        |message| matches!(message, ServerMessage::PlayerLeft { player_id, epoch: Some(_), final_seq: Some(_), } if *player_id == fixture.leaver),
+    );
+
+    let stored_players = fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("failed removal leaves a reconnect-window reservation");
+    assert!(stored_players
+        .iter()
+        .any(|player| player.id == fixture.leaver));
+    let reconnection_manager = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection enabled");
+    assert!(
+        reconnection_manager
+            .has_pending_reconnection(&fixture.leaver)
+            .await
+    );
+    assert!(reconnection_manager
+        .validate_reconnection(&fixture.leaver, &fixture.room_id, &fixture.reconnect_token,)
+        .await
+        .is_ok());
+    let joined_before_reconnect = fixture
+        .server
+        .metrics
+        .players_joined
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        1,
+        "forced local terminal teardown counts as one disconnected player"
+    );
+
+    fixture
+        .database
+        .fail_remove_player_from_room_for_test(false);
+    let (current, mut current_rx) =
+        register_client(&fixture.server, "127.0.0.1:48102".parse().unwrap()).await;
+    fixture.server.set_client_protocol(
+        &current,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    assert!(
+        fixture
+            .server
+            .handle_reconnect(
+                &current,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await
+    );
+    assert_next_message_matches(
+        &mut current_rx,
+        "reconnect baseline after storage recovery",
+        |message| matches!(message, ServerMessage::Reconnected(_)),
+    );
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "survivor observes restored membership",
+        |message| matches!(message, ServerMessage::PlayerReconnected { player_id, .. } if *player_id == fixture.leaver),
+    );
+    assert_eq!(
+        fixture
+            .server
+            .metrics
+            .players_joined
+            .load(Ordering::Relaxed),
+        joined_before_reconnect + 1
+    );
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        1,
+        "reconnect must not erase or duplicate the prior terminal transition"
+    );
+    assert_eq!(
+        fixture
+            .server
+            .metrics
+            .players_joined
+            .load(Ordering::Relaxed)
+            .saturating_sub(fixture.server.metrics.players_left.load(Ordering::Relaxed)),
+        2,
+        "active-player conservation returns to the two live room members"
+    );
+    assert_eq!(
+        fixture
+            .server
+            .cleanup_pending_durable_player_detaches()
+            .await,
+        0,
+        "successful reconnect clears the stale durable-detach candidate"
+    );
+    assert!(fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("restored membership remains readable")
+        .iter()
+        .any(|player| player.id == fixture.leaver));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn disconnect_storage_error_retries_without_reconnection_support() {
+    let server = create_test_server_with_config(ServerConfig {
+        enable_reconnection: false,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48120".parse().unwrap()).await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48121".parse().unwrap()).await;
+
+    server
+        .handle_join_room(
+            &leaver,
+            "detach-retry".to_string(),
+            Some("DTR001".to_string()),
+            "leaver".to_string(),
+            Some(4),
+            Some(false),
+            None,
+        )
+        .await;
+    drain_queued_messages(&mut leaver_rx);
+    let room_id = server
+        .get_client_room(&leaver)
+        .await
+        .expect("leaver joined retry room");
+    server
+        .handle_join_room(
+            &survivor,
+            "detach-retry".to_string(),
+            Some("DTR001".to_string()),
+            "survivor".to_string(),
+            Some(4),
+            Some(false),
+            None,
+        )
+        .await;
+    drain_queued_messages(&mut survivor_rx);
+    drain_queued_messages(&mut leaver_rx);
+
+    let database = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    database.fail_remove_player_from_room_for_test(true);
+    server.unregister_client(&leaver).await;
+
+    assert!(!server.connection_manager.has_client(&leaver));
+    assert_next_message_matches(
+        &mut survivor_rx,
+        "storage-failed disconnect still publishes a terminal boundary",
+        |message| matches!(message, ServerMessage::PlayerLeft { player_id, .. } if *player_id == leaver),
+    );
+    assert!(database
+        .get_room_players(&room_id)
+        .await
+        .expect("durable ghost remains visible during outage")
+        .iter()
+        .any(|player| player.id == leaver));
+    assert!(server.reconnection_manager().is_none());
+
+    database.fail_remove_player_from_room_for_test(false);
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    assert!(!database
+        .get_room_players(&room_id)
+        .await
+        .expect("membership remains readable after recovery")
+        .iter()
+        .any(|player| player.id == leaver));
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        1,
+        "successful retry accounts the durable removal exactly once"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
+    let server = create_test_server_with_config(ServerConfig {
+        enable_reconnection: false,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48130".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &survivor,
+            "join-rollback".to_string(),
+            Some("JRB001".to_string()),
+            "survivor".to_string(),
+            Some(4),
+            Some(false),
+            None,
+        )
+        .await;
+    drain_queued_messages(&mut survivor_rx);
+    let room_id = server
+        .get_client_room(&survivor)
+        .await
+        .expect("survivor joined rollback room");
+
+    let (joiner, joiner_rx) = register_client(&server, "127.0.0.1:48131".parse().unwrap()).await;
+    drop(joiner_rx);
+    let database = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    database.fail_remove_player_from_room_for_test(true);
+    let joined_before = server.metrics.players_joined.load(Ordering::Relaxed);
+    let left_before = server.metrics.players_left.load(Ordering::Relaxed);
+
+    server
+        .handle_join_room(
+            &joiner,
+            "join-rollback".to_string(),
+            Some("JRB001".to_string()),
+            "joiner".to_string(),
+            Some(4),
+            Some(false),
+            None,
+        )
+        .await;
+
+    assert_eq!(server.get_client_room(&joiner).await, None);
+    assert_no_queued_message(
+        &mut survivor_rx,
+        "an undeliverable RoomJoined must not publish PlayerJoined",
+    );
+    assert_eq!(
+        server.metrics.players_joined.load(Ordering::Relaxed),
+        joined_before + 1,
+        "storage admission occurred before baseline delivery failed"
+    );
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1,
+        "unpublished admission rollback balances the logical player immediately"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .players_joined
+            .load(Ordering::Relaxed)
+            .saturating_sub(server.metrics.players_left.load(Ordering::Relaxed)),
+        1,
+        "only the survivor remains active"
+    );
+    assert!(database
+        .get_room_players(&room_id)
+        .await
+        .expect("rollback ghost remains readable during outage")
+        .iter()
+        .any(|player| player.id == joiner));
+
+    database.fail_remove_player_from_room_for_test(false);
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    assert!(!database
+        .get_room_players(&room_id)
+        .await
+        .expect("membership remains readable after retry")
+        .iter()
+        .any(|player| player.id == joiner));
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1,
+        "durable repair does not double-count the logical rollback"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectator_disconnect_storage_error_releases_socket_and_retries_durable_detach() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database
+        .initialize()
+        .await
+        .expect("initialize spectator retry database");
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48102".parse().unwrap()).await;
+    let (spectator, mut spectator_rx) =
+        register_client(&server, "127.0.0.1:48103".parse().unwrap()).await;
+    let room = database
+        .create_room(
+            "spectator-retry".to_string(),
+            Some("SPR001".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("create spectator retry room");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+    server
+        .spectator_service
+        .join(
+            &spectator,
+            "spectator-retry".to_string(),
+            "SPR001".to_string(),
+            "watcher".to_string(),
+        )
+        .await
+        .expect("join spectator");
+    drain_queued_messages(&mut creator_rx);
+    drain_queued_messages(&mut spectator_rx);
+
+    database.fail_remove_spectator_from_room_for_test(true);
+    server.unregister_client(&spectator).await;
+
+    assert!(!server.connection_manager.has_client(&spectator));
+    assert!(
+        server.spectator_service.is_spectating(&spectator),
+        "failed durable detach remains indexed for maintenance retry"
+    );
+    assert!(database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("read room after failed detach")
+        .expect("room remains")
+        .get_spectators()
+        .iter()
+        .any(|entry| entry.id == spectator));
+
+    database.fail_remove_spectator_from_room_for_test(false);
+    assert_eq!(
+        server.spectator_service.retry_disconnected_detaches().await,
+        1
+    );
+    assert!(!server.spectator_service.is_spectating(&spectator));
+    assert!(database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("read converged room")
+        .expect("room remains")
+        .get_spectators()
+        .iter()
+        .all(|entry| entry.id != spectator));
+    assert_next_message_matches(
+        &mut creator_rx,
+        "retried detach publishes the peer-visible terminal roster",
+        |message| matches!(message, ServerMessage::SpectatorDisconnected { spectator_id, .. } if *spectator_id == spectator),
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn absent_storage_member_converges_local_role_and_peer_roster() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture
+        .database
+        .remove_player_from_room(&fixture.room_id, &fixture.leaver)
+        .await
+        .expect("external removal succeeds")
+        .expect("test member existed in storage");
+
+    fixture.server.leave_room(&fixture.leaver).await;
+
+    assert!(fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("fetch converged roster")
+        .iter()
+        .all(|player| player.id != fixture.leaver));
+    assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+    let routed = fixture
+        .server
+        .message_coordinator
+        .routed_player_ids(&fixture.room_id)
+        .await
+        .expect("routing lookup succeeds")
+        .expect("survivor remains routed");
+    assert!(!routed.contains(&fixture.leaver));
+    assert!(routed.contains(&fixture.survivor));
+    assert_next_message_matches(
+        &mut fixture.leaver_rx,
+        "authoritative absent-row leave acknowledgement",
+        |message| matches!(message, ServerMessage::RoomLeft),
+    );
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "peer-visible absent-row convergence",
+        |message| matches!(message, ServerMessage::PlayerLeft { player_id, .. } if *player_id == fixture.leaver),
+    );
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        1,
+        "the converging call published one logical terminal membership transition"
+    );
+
+    let fallback_token = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(fixture.leaver, fixture.room_id, false, None, 1)
+        .await;
+    assert_ne!(
+        fallback_token, fixture.reconnect_token,
+        "an authoritative absence must discard the old room token"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn unregister_snapshot_failure_creates_no_broken_reconnect_record() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture.database.fail_get_room_by_id_for_test(true);
+
+    fixture.server.unregister_client(&fixture.leaver).await;
+
+    let reconnection_manager = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection enabled");
+    assert!(
+        !reconnection_manager
+            .has_pending_reconnection(&fixture.leaver)
+            .await,
+        "an incomplete room snapshot must not mint an unrestorable pending record"
+    );
+    assert!(matches!(
+        reconnection_manager
+            .validate_reconnection(&fixture.leaver, &fixture.room_id, &fixture.reconnect_token,)
+            .await,
+        Err(crate::reconnection::ReconnectionError::NoRecord)
+    ));
+    assert_eq!(
+        fixture
+            .server
+            .metrics
+            .reconnection_sessions_active
+            .load(Ordering::Relaxed),
+        0
+    );
+
+    fixture.database.fail_get_room_by_id_for_test(false);
+    let stored_room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .expect("room snapshot recovers after injected failure")
+        .expect("survivor keeps room alive");
+    assert!(!stored_room.players.contains_key(&fixture.leaver));
+    assert_eq!(
+        stored_room.authority_player, None,
+        "the normal leave still clears the departed authority in storage"
+    );
+    assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "peers still observe the terminal leave",
+        |message| matches!(message, ServerMessage::PlayerLeft { player_id, .. } if *player_id == fixture.leaver),
+    );
+    assert_no_queued_message(
+        &mut fixture.leaver_rx,
+        "disconnect teardown does not send a voluntary RoomLeft acknowledgement",
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn draining_unregister_removes_membership_without_roomleft_noise() {
     let server = create_test_server().await;
     let (player_id, mut receiver) =
@@ -948,6 +2790,7 @@ async fn draining_unregister_removes_membership_without_roomleft_noise() {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: "region-a".to_string(),
             },
         )
@@ -1554,6 +3397,7 @@ async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave()
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: "region-a".to_string(),
             },
         )
@@ -1685,6 +3529,7 @@ async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: "region-a".to_string(),
             },
         )
@@ -1720,6 +3565,79 @@ async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
     assert_no_queued_message(
         &mut survivor_rx,
         "PlayerLeft must not be delivered after drain starts inside send",
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn missing_terminal_tail_suppresses_incomplete_player_left() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::MissingTerminalTail,
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48025".parse().unwrap()).await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48026".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "terminal-tail-test".to_string(),
+            Some("TAIL01".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor insert succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+
+    server.leave_room(&leaver).await;
+
+    assert_no_queued_message(
+        &mut leaver_rx,
+        "tail failure must suppress RoomLeft with its failed transaction",
+    );
+    assert_no_queued_message(
+        &mut survivor_rx,
+        "v3 peers must never receive PlayerLeft without a complete terminal watermark",
+    );
+    assert_eq!(
+        coordinator
+            .player_left_broadcast_calls
+            .load(Ordering::Relaxed),
+        0
     );
 }
 
@@ -1833,6 +3751,7 @@ async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: "region-a".to_string(),
             },
         )
@@ -1936,6 +3855,7 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: "region-a".to_string(),
             },
         )

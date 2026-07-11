@@ -13,8 +13,9 @@ seam** and the **topology shapes**. For the wire-level message details see the
 A negotiated v3 room resolves to exactly one topology for its lifetime:
 
 - **Relay** — the v2 server-relay hub, and the universal floor. Every client
-  supports it; `GameData` is fanned out through the server. A relay room emits no
-  `SessionPlan`, and its authoritative game-data path stays v2-compatible.
+  supports it; `GameData` is fanned out through the server. A relay room sends
+  every v3 member an explicit no-peer `relay`/`relay` `SessionPlan`; v2 members
+  receive no plan and its authoritative game-data path stays v2-compatible.
 - **Host** — a star around one elected authoritative peer (the host). Each client
   connects only to the host; clients never connect to each other. Used with the
   `webrtc` or `direct` transport.
@@ -50,8 +51,8 @@ every current player is ready, and the server broadcasts the unchanged
    for determinism.
 4. **Emit per-recipient `SessionPlan`s.** Each v3 member receives a plan tailored
    to it — its own `peers` list, per-recipient `initiate` flags, and ICE servers
-   only when the selected transport is WebRTC. A relay-floor room emits **no**
-   plan.
+   only when the selected transport is WebRTC. A relay-floor plan has no host,
+   peers, or ICE and explicitly resets stale P2P state.
 5. **Record the decision.** A non-relay decision is stored as the room's _active
    session plan_ (topology, transport, host) — the single source of truth for
    the session the room is running. Late joins, reconnects, and departures
@@ -66,21 +67,20 @@ finalize ──> broadcast GameStarting (v2, unchanged)
    v
 choose_session_plan(members, config)         # ladder walk; all-members-v3 gate
    |
-   +-- relay floor? --> emit nothing (clients keep relaying GameData)
-   |
-   +-- non-relay plan:
-         for each v3 member:
-             build per-recipient peers + initiate flags
-             if transport == webrtc:
-                 build per-recipient ICE servers (STUN + minted TURN)
-             send SessionPlan  (after GameStarting, ordering preserved)
+   +-- for each v3 member:
+         build per-recipient peers + initiate flags
+         if transport == webrtc:
+             build per-recipient ICE servers (STUN + minted TURN)
+         else if relay floor:
+             use empty host/peers/ICE as an authoritative reset
+         send SessionPlan  (after GameStarting, ordering preserved)
 ```
 
-The all-members-v3 gate is the back-compat invariant for server-driven P2P
-plans: a single v2 or relay-only member forces the room plan to the relay floor,
-so no `SessionPlan` or `NewPeer` pairing is emitted for that room. Every
-v3-only message still has a negotiated-v3 recipient gate, so it can never reach
-a v2 client; `Signal` itself is same-room plus WebRTC-transport gated.
+The all-members-v3 gate is the back-compat invariant for P2P upgrades: a single
+v2 or relay-only member forces the room plan to the relay floor. The v3 members
+receive the explicit relay reset; every v3-only message still has a
+negotiated-v3 recipient gate, so it can never reach a v2 client. `Signal` itself
+is same-room plus WebRTC-transport gated.
 
 ## Per-recipient peer lists
 
@@ -92,37 +92,23 @@ The same room produces a different plan for each recipient:
 - **Host.** The host's `peers` is every client (each `initiate = false` — the host
   answers all). Each client's `peers` is just the host (`initiate = true` — clients
   offer to the host). Clients never appear in each other's peer lists.
-- **Relay.** No plan is emitted (an empty peer list defensively otherwise).
+- **Relay.** Every v3 recipient gets the same empty-peer `relay`/`relay` reset.
 
 ## Late join and reconnect
 
 A peer joining or reconnecting _after_ finalization is brought into the session
-the room is **actually running** — the stored active session plan, never a
-recomputation over the current members (a departure can reopen a seat, so the
-live membership can drift from the finalize-time membership; a recompute could
-contradict the session every member already configured). With a stored non-relay
-plan in a `Finalized` room:
+the room is **actually running**. A non-relay active plan is rehydrated over the
+current members, never selected again from the ladder; absence of a sticky plan
+derives the explicit relay floor. Every current v3 member receives a complete,
+tailored `SessionPlan`: current peers, glare-correct `initiate` flags, the stored
+host, and freshly minted ICE for WebRTC. A v3 member that cannot run the session
+still receives an empty-peer plan and participates through relay. Protocol-v2
+members receive only their frozen lifecycle traffic.
 
-- the **joiner** receives a fresh tailored `SessionPlan` — current peers,
-  glare-correct `initiate` flags, the stored host, and freshly minted ICE for a
-  WebRTC transport (a reconnector's original TURN credentials may have expired;
-  a seat-filling joiner never had any). It is deliberately **not** sent
-  `NewPeer`. A v3 joiner that cannot run the session — it did not negotiate the
-  session's topology and transport (e.g. a relay-only seat-filler) — still
-  receives the plan, but with an **empty** `peers` list — it has no P2P peers
-  and participates via the relay floor;
-- **existing members** receive the additive `NewPeer` delta, only when the
-  stored transport is WebRTC and both ends of each announced pair can run the
-  session (mesh: every session-capable member learns of the joiner; host: only
-  along the star edge). A `host + direct` room has a non-relay topology but
-  no WebRTC signaling transport, so it emits no `NewPeer`.
-
-A room with no stored plan (it finalized to the relay floor, or pre-dates v3)
-emits nothing at all on a late join. See the
-[late-join decision table](../protocol.md#late-join-decision-table) for the
-exact behavior. The key invariants: initial pairing is owned by the
-finalize-time `SessionPlan`; `NewPeer` only covers post-finalization arrivals
-and only ever targets existing members.
+The full refresh replaces the old additive `NewPeer` membership delta. It gives
+incumbents and the joining actor one authoritative peer set and removes stale
+links in the same transition. See the
+[late-join decision table](../protocol.md#late-join-decision-table).
 
 ICE can also arrive **before** any plan: an eligible v3 client — one that
 negotiated the WebRTC transport and the game's desired topology — joining (or
@@ -154,16 +140,17 @@ check for it:
   downgraded its capabilities). The server re-elects a host
   over the remaining members and sends every remaining v3 member a fresh
   per-recipient `SessionPlan` — same topology and transport, new `host`, fresh
-  per-recipient ICE for WebRTC. The departure itself is still signaled by the
-  unchanged v2 `PlayerLeft`; an ex-host that later reconnects is paired as a
+  per-recipient ICE for WebRTC. The departure itself is still signaled by
+  `PlayerLeft`; v3 adds the terminal delivery watermark while the v2 projection
+  stays frozen. An ex-host that later reconnects is paired as a
   _client_ of the re-elected host.
 - **A late join / reconnect finds the stored host invalid.** The same
   re-election + full re-plan runs first (one re-plan event), delivering every
   current **v3** member — the joiner included, even one that cannot run the
   session itself (the heal is about the room; such a joiner's plan carries
-  empty `peers`) — a fresh plan, in place of the normal joiner-plan + `NewPeer`
-  emission (which would duplicate it). A normal late join with the host
-  present and capable never re-plans.
+  empty `peers`) — a fresh plan. A normal late join with the host present and
+  capable refreshes membership-derived plan fields without counting a host
+  re-plan.
 
 Re-election is **capability-aware**: only members that negotiated v3 plus the
 stored sticky (topology, transport) pair are electable — a seat-filling v2 or
@@ -179,10 +166,9 @@ as election: `peers[]` names only members that negotiated v3 plus the session's
 topology and transport, so a member that did not (e.g. a v3-relay-only
 seat-filler, or one lacking the session's topology) receives its plan with an
 empty `peers` list — it participates via the relay floor, with `host` kept as
-elected, informational — and never appears in other members' lists (the
-`NewPeer` gating applies this same predicate to both ends of every announced
-pair). At finalization the filter is vacuous, because a plan is only selected
-when every member supports it.
+elected, informational — and never appears in other members' lists. At
+finalization the filter is vacuous for non-relay plans, because an upgrade is
+selected only when every member supports it.
 
 - **Any other departure** (a mesh member, a host-topology client while the host
   remains) re-emits nothing: `PlayerLeft` already tells peers to prune the
@@ -195,11 +181,12 @@ receipt, (re)configure the session and connect per `peers[].initiate`.
 
 ## Fallback to the floor
 
-Every non-relay plan carries `fallback: "relay"`. The relay floor never closes:
-the server keeps relaying `GameData` unconditionally, regardless of any peer's
-reported P2P state (`TransportStatus { connected: false }`). A client that cannot
-establish — or loses — its P2P path always has a working transport to fall back
-to. The full client-side state machine, including timeouts and the
+Every non-relay plan carries `fallback: "relay"`. P2P status never disables the
+relay floor: the server keeps accepting `GameData` regardless of any peer's
+reported state (`TransportStatus { connected: false }`). A client that cannot
+establish -- or loses -- its P2P path can fall back without renegotiation. The
+physical WebSocket can still close loudly when its delivery contract fails. The
+full client-side state machine, including timeouts and the
 `TransportStatus` signaling, lives in the
 [Transport Fallback Contract](transport-fallback.md).
 
@@ -208,7 +195,7 @@ to. The full client-side state machine, including timeouts and the
 - [Transport Fallback Contract](transport-fallback.md) — client-side state machine
   and the relay-floor guarantee.
 - [Protocol v3 additions](../protocol.md#protocol-v3-additions) — the wire messages
-  (`Signal`, `NewPeer`, `SessionPlan`, `TransportStatus`, `PeerTransportStatus`),
+  (`Signal`, `SessionPlan`, `TransportStatus`, `PeerTransportStatus`),
   the selection ladder, the glare rule, and ICE/TURN.
 - [TURN and STUN configuration](../configuration.md#turn-and-stun-ice-credentials-protocol-v3)
   — enabling ephemeral TURN credentials.

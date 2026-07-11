@@ -87,7 +87,7 @@
 //! (tests/ci_config_tests.rs::test_proptest_tests_ignored_under_miri).
 
 use proptest::prelude::*;
-use signal_fish_server::protocol::{ClientMessage, ServerMessage};
+use signal_fish_server::protocol::{ClientMessage, DeliveryClass, ServerMessage};
 
 /// Run `body` on a thread with a generous (32 MiB) stack and return its
 /// result. Used only for the deep-nesting probes so the rmp_serde / serde_json
@@ -535,6 +535,134 @@ fn game_data_seq_boundary_values_decode_on_both_paths() {
         }
         assert_decoders_return(json.as_bytes());
     }
+}
+
+/// E2's enum and integer additions stay total on both fuzzed encodings. The
+/// class/key relationship is validated by the message handler; serde's job is
+/// to reject unknown enum tokens and out-of-domain integer representations
+/// without panicking or truncating them.
+#[test]
+fn delivery_class_and_report_boundaries_decode_on_both_paths() {
+    let client_cases = [
+        ("reliable", DeliveryClass::Reliable, None),
+        ("latest", DeliveryClass::Latest, Some(u32::MAX)),
+        ("volatile", DeliveryClass::Volatile, None),
+    ];
+    for (token, expected_class, key) in client_cases {
+        let mut data = serde_json::json!({
+            "data": {"state": 1},
+            "class": token,
+        });
+        if let Some(key) = key {
+            data["key"] = serde_json::json!(key);
+        }
+        let value = serde_json::json!({"type": "GameData", "data": data});
+        let json = serde_json::to_vec(&value).expect("client JSON encodes");
+        let decoded = serde_json::from_slice::<ClientMessage>(&json)
+            .unwrap_or_else(|err| panic!("class {token} must decode: {err}"));
+        match &decoded {
+            ClientMessage::GameData {
+                class, key: actual, ..
+            } => {
+                assert_eq!(*class, Some(expected_class));
+                assert_eq!(*actual, key);
+            }
+            other => panic!("expected client GameData, got {other:?}"),
+        }
+        let msgpack = rmp_serde::to_vec_named(&decoded).expect("client MessagePack encodes");
+        match rmp_serde::from_slice::<ClientMessage>(&msgpack).expect("MessagePack decodes") {
+            ClientMessage::GameData {
+                class, key: actual, ..
+            } => {
+                assert_eq!(class, Some(expected_class));
+                assert_eq!(actual, key);
+            }
+            other => panic!("expected client GameData, got {other:?}"),
+        }
+        assert_decoders_return(&json);
+        assert_decoders_return(&msgpack);
+    }
+
+    for hostile in [
+        serde_json::json!("unknown"),
+        serde_json::json!(1),
+        serde_json::Value::Null,
+    ] {
+        let json = serde_json::to_vec(&serde_json::json!({
+            "type": "GameData",
+            "data": {"data": null, "class": hostile}
+        }))
+        .expect("hostile class JSON encodes");
+        assert!(
+            serde_json::from_slice::<ClientMessage>(&json).is_err(),
+            "an explicit invalid class must be rejected"
+        );
+        assert_decoders_return(&json);
+    }
+
+    for hostile_key in [
+        serde_json::json!(-1),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+        serde_json::json!(1.5),
+        serde_json::json!("1"),
+        serde_json::Value::Null,
+    ] {
+        let json = serde_json::to_vec(&serde_json::json!({
+            "type": "GameData",
+            "data": {"data": null, "class": "latest", "key": hostile_key}
+        }))
+        .expect("hostile key JSON encodes");
+        assert!(
+            serde_json::from_slice::<ClientMessage>(&json).is_err(),
+            "an out-of-domain latest key must be rejected"
+        );
+        assert_decoders_return(&json);
+    }
+
+    let player = "00000000-0000-0000-0000-000000000001";
+    let report = serde_json::json!({
+        "type": "DeliveryReport",
+        "data": {
+            "per_class": {
+                "reliable": {
+                    "delivered": u64::MAX,
+                    "abandoned": 0,
+                    "unsupported_format": 1
+                },
+                "latest": {
+                    "delivered": 0,
+                    "superseded": u64::MAX,
+                    "dropped_full": 1,
+                    "abandoned": 2,
+                    "unsupported_format": 3
+                },
+                "volatile": {
+                    "delivered": 4,
+                    "dropped": u64::MAX,
+                    "abandoned": 5,
+                    "unsupported_format": 6
+                }
+            },
+            "gaps": [{
+                "from_player": player,
+                "epoch": u32::MAX,
+                "from_seq": 0,
+                "to_seq": u64::MAX,
+                "reason": "volatile_dropped"
+            }]
+        }
+    });
+    let json = serde_json::to_vec(&report).expect("report JSON encodes");
+    let decoded = serde_json::from_slice::<ServerMessage>(&json).expect("report decodes");
+    let msgpack = rmp_serde::to_vec_named(&decoded).expect("report MessagePack encodes");
+    let round_trip =
+        rmp_serde::from_slice::<ServerMessage>(&msgpack).expect("report MessagePack decodes");
+    assert_eq!(
+        serde_json::to_value(round_trip).expect("round-trip report serializes"),
+        serde_json::to_value(decoded).expect("original report serializes")
+    );
+    assert_decoders_return(&json);
+    assert_decoders_return(&msgpack);
 }
 
 /// Truncations of VALID MessagePack encodings (the highest-value corruption:

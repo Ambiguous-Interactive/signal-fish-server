@@ -1,5 +1,5 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 /// Default constants for validation (can be overridden by config)
@@ -179,11 +179,13 @@ pub struct SessionPeer {
 
 /// The per-recipient session directive emitted at lobby finalization (v3 only).
 ///
-/// Sent alongside the unchanged `GameStarting` to each v3-capable member of a
-/// room whose negotiated plan is *not* the relay floor (Appendix A/B/D/E). It
-/// tells the recipient which topology/transport to use, who (if anyone) the host
-/// is, which peers to connect to (with per-recipient `initiate` flags), the ICE
-/// servers to gather against, and the universal `fallback` transport.
+/// Sent after the unchanged `GameStarting` to each v3-capable member
+/// (Appendix A/B/D/E). It tells the recipient which topology/transport to use,
+/// who (if anyone) the host is, which peers to connect to (with per-recipient
+/// `initiate` flags), the ICE servers to gather against, and the universal
+/// `fallback` transport. The relay floor is explicit: `topology: relay`,
+/// `transport: relay`, and empty host/peer/ICE fields reset any prior pairing
+/// state. Protocol-v2 recipients receive no `SessionPlan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionPlanPayload {
     /// Chosen session topology (`relay`, `host`, or `mesh`).
@@ -264,12 +266,20 @@ pub struct PlayerInfo {
     /// incarnation epoch behind
     /// [`ServerMessage::GameData::epoch`](crate::protocol::ServerMessage) — a
     /// monotonic per-sender counter (not reset on a room switch), carried on
-    /// room snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`) so a v3
-    /// recipient learns each member's epoch before their first relayed frame.
+    /// room snapshots (`RoomJoined`/`PlayerJoined`/`Reconnected`/
+    /// `SpectatorJoined`) so a v3 recipient learns each member's epoch before
+    /// their first relayed frame.
     /// `None` — and absent from the wire — for pre-v3 recipients and in every
     /// non-snapshot use, keeping v2 bytes byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u32>,
+    /// Relay tail already represented by this snapshot (v3 only). A recipient
+    /// owes no `GameData` at or below this sequence in the paired `epoch`;
+    /// later delivery and terminal `PlayerLeft.final_seq` accounting starts
+    /// strictly above it. Always present together with `epoch` on v3 wire
+    /// snapshots and absent from the frozen v2 representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     /// Deployment region that currently hosts this player (internal only).
     #[serde(skip_serializing, skip_deserializing, default)]
     pub region_id: String,
@@ -380,7 +390,11 @@ pub struct ProtocolInfoPayload {
     ///
     /// `None` for negotiated v2 connections so the v2 wire contract stays
     /// byte-identical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub protocol_version: Option<u16>,
     /// Lowest protocol version this deployment accepts (v3+ only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,6 +408,15 @@ pub struct ProtocolInfoPayload {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transports: Option<Vec<String>>,
+}
+
+/// Preserve omission as `None` while rejecting an explicitly null wire value.
+fn deserialize_present_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Describes the characters your deployment allows inside `player_name`.
@@ -452,6 +475,7 @@ mod tests {
             connected_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             connection_info,
             epoch: None,
+            seq: None,
             region_id: "test-region".to_string(),
         }
     }

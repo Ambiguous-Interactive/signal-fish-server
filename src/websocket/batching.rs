@@ -1,3 +1,7 @@
+use crate::coordination::outbound_queue::{
+    OutboundPayload, OutboundReceiver, QueuedOutbound, TryReceiveError,
+};
+use crate::coordination::{CloseReason, ConnectionCloseSignal};
 use crate::protocol::{PlayerId, ServerMessage};
 use axum::extract::ws::{Message, WebSocket};
 use std::collections::VecDeque;
@@ -7,33 +11,40 @@ use tokio::time::Instant;
 
 use crate::server::EnhancedGameServer;
 
-use super::sending::send_single_message;
+use super::sending::{send_single_message, SendAccounting, SendDisposition};
 
 /// Message batcher for WebSocket connections
 /// Batches multiple messages together to reduce syscall overhead
 pub(super) struct MessageBatcher {
-    pending: VecDeque<Arc<ServerMessage>>,
+    pending: VecDeque<QueuedOutbound>,
+    #[cfg(test)]
     batch_size: usize,
+    #[cfg(test)]
     batch_interval: Duration,
+    #[cfg(test)]
     last_flush: Instant,
 }
 
 impl MessageBatcher {
-    pub(super) fn new(batch_size: usize, batch_interval_ms: u64) -> Self {
+    pub(super) fn new(batch_size: usize, _batch_interval_ms: u64) -> Self {
         Self {
             pending: VecDeque::with_capacity(batch_size),
+            #[cfg(test)]
             batch_size,
-            batch_interval: Duration::from_millis(batch_interval_ms),
+            #[cfg(test)]
+            batch_interval: Duration::from_millis(_batch_interval_ms),
+            #[cfg(test)]
             last_flush: Instant::now(),
         }
     }
 
     /// Queue a message for batching
-    pub(super) fn queue(&mut self, message: Arc<ServerMessage>) {
-        self.pending.push_back(message);
+    pub(super) fn queue(&mut self, message: impl Into<QueuedOutbound>) {
+        self.pending.push_back(message.into());
     }
 
     /// Check if batch should be flushed
+    #[cfg(test)]
     pub(super) fn should_flush(&self) -> bool {
         // Flush if batch is full or time threshold exceeded
         self.pending.len() >= self.batch_size
@@ -44,20 +55,14 @@ impl MessageBatcher {
     /// sends drain incrementally via [`Self::pop_front`] so a cancelled write
     /// cannot lose the rest of the batch).
     #[cfg(test)]
-    pub(super) fn flush(&mut self) -> Vec<Arc<ServerMessage>> {
+    pub(super) fn flush(&mut self) -> Vec<QueuedOutbound> {
         self.last_flush = Instant::now();
         std::mem::take(&mut self.pending).into_iter().collect()
     }
 
     /// Take the oldest pending message (FIFO), if any.
-    pub(super) fn pop_front(&mut self) -> Option<Arc<ServerMessage>> {
+    pub(super) fn pop_front(&mut self) -> Option<QueuedOutbound> {
         self.pending.pop_front()
-    }
-
-    /// Record that a (possibly incremental) flush completed, resetting the
-    /// batch-interval timer.
-    pub(super) fn mark_flushed(&mut self) {
-        self.last_flush = Instant::now();
     }
 
     /// Get pending message count
@@ -68,6 +73,26 @@ impl MessageBatcher {
     /// Check if batch is empty
     pub(super) fn is_empty(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    pub(super) fn oldest_enqueued_at(&self) -> Option<Instant> {
+        self.pending.front().map(|message| message.enqueued_at)
+    }
+
+    pub(super) fn count_by_class(&self) -> [(crate::protocol::DeliveryClass, u64); 3] {
+        let mut counts = [
+            (crate::protocol::DeliveryClass::Reliable, 0),
+            (crate::protocol::DeliveryClass::Latest, 0),
+            (crate::protocol::DeliveryClass::Volatile, 0),
+        ];
+        for class in self.pending.iter().filter_map(QueuedOutbound::class) {
+            match class {
+                crate::protocol::DeliveryClass::Reliable => counts[0].1 += 1,
+                crate::protocol::DeliveryClass::Latest => counts[1].1 += 1,
+                crate::protocol::DeliveryClass::Volatile => counts[2].1 += 1,
+            }
+        }
+        counts
     }
 }
 
@@ -82,23 +107,135 @@ impl MessageBatcher {
 pub(super) async fn send_batch(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     batcher: &mut MessageBatcher,
+    receiver: &mut OutboundReceiver,
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
-) -> Result<(), ()> {
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
+) -> Result<(), QueueWriteError> {
     let mut batch_size = 0_usize;
-    while let Some(message) = batcher.pop_front() {
-        if send_single_message(sender, message, player_id, server)
-            .await
-            .is_err()
-        {
-            return Err(());
+    while !batcher.is_empty() {
+        loop {
+            match receiver.try_recv_control() {
+                Ok(Some(control)) => {
+                    send_queued(
+                        sender,
+                        control,
+                        batcher.oldest_enqueued_at(),
+                        receiver,
+                        player_id,
+                        server,
+                        close_signal,
+                        max_sojourn,
+                    )
+                    .await?;
+                }
+                Ok(None) => break,
+                Err(TryReceiveError::AccountabilityFailed) => {
+                    if close_signal.request_close(CloseReason::SlowConsumer) {
+                        server
+                            .metrics()
+                            .increment_websocket_slow_consumer_disconnects();
+                    }
+                    return Err(QueueWriteError::AccountabilityFailed);
+                }
+                Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
+            }
         }
+
+        let Some(message) = batcher.pop_front() else {
+            break;
+        };
+        send_queued(
+            sender,
+            message,
+            batcher.oldest_enqueued_at(),
+            receiver,
+            player_id,
+            server,
+            close_signal,
+            max_sojourn,
+        )
+        .await?;
         batch_size += 1;
     }
     if batch_size > 0 {
         tracing::trace!(%player_id, batch_size, "Flushed message batch");
     }
-    batcher.mark_flushed();
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueueWriteError {
+    SocketClosed,
+    SojournExpired,
+    AccountabilityFailed,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn send_queued(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    queued: QueuedOutbound,
+    oldest_batched: Option<Instant>,
+    receiver: &OutboundReceiver,
+    player_id: &PlayerId,
+    server: &Arc<EnhancedGameServer>,
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
+) -> Result<(), QueueWriteError> {
+    let class = queued.class();
+    let metadata = queued.metadata;
+    let oldest = receiver
+        .oldest_enqueued_at()
+        .into_iter()
+        .chain(oldest_batched)
+        .chain(std::iter::once(queued.enqueued_at))
+        .min();
+    let message = match queued.payload {
+        OutboundPayload::Message(message) => message,
+        OutboundPayload::DeliveryReport(report) => {
+            Arc::new(ServerMessage::DeliveryReport(Box::new(report)))
+        }
+    };
+    let mut accounting = SendAccounting::new(receiver, server, *player_id, class);
+    let recipient_supports_v3 = receiver.supports_v3();
+    let recipient_format = receiver.game_data_format();
+    let write = send_single_message(
+        sender,
+        message,
+        player_id,
+        recipient_supports_v3,
+        recipient_format,
+        metadata,
+        &mut accounting,
+    );
+    let result = if max_sojourn.is_zero() {
+        write.await.map_err(|()| QueueWriteError::SocketClosed)
+    } else {
+        let deadline = oldest.unwrap_or_else(Instant::now) + max_sojourn;
+        match tokio::time::timeout_at(deadline, write).await {
+            Ok(result) => result.map_err(|()| QueueWriteError::SocketClosed),
+            Err(_) => {
+                let initiated_close = close_signal.request_close(CloseReason::SlowConsumer);
+                if initiated_close {
+                    server
+                        .metrics()
+                        .increment_websocket_slow_consumer_disconnects();
+                }
+                tracing::warn!(
+                    %player_id,
+                    max_sojourn_ms = max_sojourn.as_millis() as u64,
+                    initiated_close,
+                    "Outbound message exceeded the maximum queue sojourn; closing recipient"
+                );
+                return Err(QueueWriteError::SojournExpired);
+            }
+        }
+    };
+    let disposition = result?;
+    if disposition == SendDisposition::Written {
+        accounting.complete_written();
+    }
     Ok(())
 }
 
@@ -119,6 +256,8 @@ mod tests {
         let mut batcher = MessageBatcher::new(10, 16);
         let message = Arc::new(ServerMessage::PlayerLeft {
             player_id: uuid::Uuid::new_v4(),
+            epoch: None,
+            final_seq: None,
         });
 
         batcher.queue(message);
@@ -134,6 +273,8 @@ mod tests {
         for _ in 0..2 {
             let message = Arc::new(ServerMessage::PlayerLeft {
                 player_id: uuid::Uuid::new_v4(),
+                epoch: None,
+                final_seq: None,
             });
             batcher.queue(message);
         }
@@ -144,6 +285,8 @@ mod tests {
         // Add one more to reach batch size
         let message = Arc::new(ServerMessage::PlayerLeft {
             player_id: uuid::Uuid::new_v4(),
+            epoch: None,
+            final_seq: None,
         });
         batcher.queue(message);
 
@@ -168,6 +311,8 @@ mod tests {
         let mut batcher = MessageBatcher::new(100, 50); // size 100 (unreachable), 50ms interval
         batcher.queue(Arc::new(ServerMessage::PlayerLeft {
             player_id: uuid::Uuid::new_v4(),
+            epoch: None,
+            final_seq: None,
         }));
         assert_eq!(batcher.len(), 1);
         assert!(
@@ -201,6 +346,8 @@ mod tests {
         for _ in 0..2 {
             let message = Arc::new(ServerMessage::PlayerLeft {
                 player_id: uuid::Uuid::new_v4(),
+                epoch: None,
+                final_seq: None,
             });
             batcher.queue(message);
         }
@@ -214,6 +361,8 @@ mod tests {
         for _ in 0..2 {
             let message = Arc::new(ServerMessage::PlayerLeft {
                 player_id: uuid::Uuid::new_v4(),
+                epoch: None,
+                final_seq: None,
             });
             batcher.queue(message);
         }
@@ -243,6 +392,8 @@ mod tests {
         for _ in 0..3 {
             batcher.queue(Arc::new(ServerMessage::PlayerLeft {
                 player_id: uuid::Uuid::new_v4(),
+                epoch: None,
+                final_seq: None,
             }));
         }
         assert_eq!(batcher.len(), 3);

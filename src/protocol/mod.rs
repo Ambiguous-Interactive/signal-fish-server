@@ -1,5 +1,7 @@
 // Protocol module: Message types, validation, and room state management
 
+pub mod binary;
+pub mod delivery;
 pub mod error_codes;
 pub mod messages;
 pub mod room_codes;
@@ -9,6 +11,16 @@ pub mod validation;
 
 // Re-export everything for backward compatibility
 // This allows external code to use `use crate::protocol::*`
+
+// From binary
+pub use binary::{decode_v3_binary_game_data, V3BinaryGameDataFrame};
+
+// From delivery
+pub use delivery::{
+    DeliveryClass, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason, DeliveryReportPayload,
+    LatestDeliveryCounters, ReliableDeliveryCounters, VolatileDeliveryCounters,
+    DELIVERY_REPORT_MAX_GAPS,
+};
 
 // From error_codes
 pub use error_codes::ErrorCode;
@@ -79,6 +91,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -90,6 +103,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -105,6 +119,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -130,6 +145,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -158,6 +174,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -230,6 +247,7 @@ mod tests {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: types::DEFAULT_REGION_ID.to_string(),
             },
         );
@@ -293,6 +311,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -312,6 +331,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -344,6 +364,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         let player2 = PlayerInfo {
@@ -354,6 +375,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -401,6 +423,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         let player2 = PlayerInfo {
@@ -411,6 +434,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -449,6 +473,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -477,6 +502,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
 
@@ -514,6 +540,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         room.add_player(player1);
@@ -542,6 +569,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         };
         room.add_player(player2);
@@ -586,6 +614,7 @@ mod tests {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: types::DEFAULT_REGION_ID.to_string(),
             });
         }
@@ -631,6 +660,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         });
 
@@ -642,6 +672,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: types::DEFAULT_REGION_ID.to_string(),
         });
 
@@ -681,6 +712,7 @@ mod tests {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: types::DEFAULT_REGION_ID.to_string(),
             });
         }

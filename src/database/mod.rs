@@ -12,6 +12,37 @@ pub struct RoomCleanupOutcome {
     pub inactive_rooms_cleaned: usize,
 }
 
+/// Result of atomically transitioning a room into the finalized state.
+///
+/// Callers use this compare-and-set result to ensure only the winner publishes
+/// the one-time game-start event. An already-finalized room is a normal race
+/// outcome, not a storage failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeRoomGameOutcome {
+    Finalized,
+    AlreadyFinalized,
+    SnapshotChanged,
+}
+
+/// Exact room state from which a game-start publication was prepared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeRoomGameExpectation {
+    pub members: Vec<PlayerId>,
+    pub authority_player: Option<PlayerId>,
+    pub lobby_state: crate::protocol::LobbyState,
+}
+
+impl FinalizeRoomGameExpectation {
+    #[must_use]
+    pub fn from_room(room: &Room) -> Self {
+        Self {
+            members: room.players.keys().copied().collect(),
+            authority_player: room.authority_player,
+            lobby_state: room.lobby_state.clone(),
+        }
+    }
+}
+
 impl RoomCleanupOutcome {
     /// Total rooms removed (empty + inactive).
     pub fn total_cleaned(&self) -> usize {
@@ -152,11 +183,8 @@ pub trait GameDatabase: Send + Sync {
     /// Get player count statistics by game for metrics
     async fn get_game_player_percentiles(&self) -> Result<HashMap<String, HashMap<String, f64>>>;
 
-    /// Transition room to lobby state when full
+    /// Transition a non-empty waiting room into its lobby state.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()>;
-
-    /// Transition room back to waiting state when no longer full
-    async fn transition_room_to_waiting(&self, room_id: &RoomId) -> Result<()>;
 
     /// Toggle player ready state and return lobby information if successful
     /// Returns (lobby_state, ready_players, all_ready) if in lobby state
@@ -166,8 +194,12 @@ pub trait GameDatabase: Send + Sync {
         player_id: &PlayerId,
     ) -> Result<Option<(crate::protocol::LobbyState, Vec<PlayerId>, bool)>>;
 
-    /// Finalize room game when all players are ready
-    async fn finalize_room_game(&self, room_id: &RoomId) -> Result<()>;
+    /// Atomically finalize a room game when all players are ready.
+    async fn finalize_room_game(
+        &self,
+        room_id: &RoomId,
+        expected: &FinalizeRoomGameExpectation,
+    ) -> Result<FinalizeRoomGameOutcome>;
 
     /// Add spectator to room (atomic operation)
     /// Returns true if successfully added, false if room is full or doesn't exist
@@ -275,6 +307,18 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     fail_get_room_players: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    fail_get_room_by_id: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_remove_player_from_room: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pause_authority_request_after_commit: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    authority_request_commit_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_authority_request_commit: tokio::sync::Notify,
+    #[cfg(test)]
     get_room_players_calls: std::sync::atomic::AtomicU32,
 }
 
@@ -287,6 +331,18 @@ impl InMemoryDatabase {
             #[cfg(test)]
             fail_get_room_players: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
+            fail_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            pause_authority_request_after_commit: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            authority_request_commit_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_authority_request_commit: tokio::sync::Notify::new(),
+            #[cfg(test)]
             get_room_players_calls: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -295,6 +351,51 @@ impl InMemoryDatabase {
     pub(crate) fn fail_get_room_players_for_test(&self, fail: bool) {
         self.fail_get_room_players
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_get_room_by_id_for_test(&self, fail: bool) {
+        self.fail_get_room_by_id
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_remove_player_from_room_for_test(&self, fail: bool) {
+        self.fail_remove_player_from_room
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_remove_spectator_from_room_for_test(&self, fail: bool) {
+        self.fail_remove_spectator_from_room
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_authority_request_after_commit_for_test(&self) {
+        self.pause_authority_request_after_commit
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_authority_request_commit_for_test(&self) {
+        self.authority_request_commit_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_authority_request_commit_for_test(&self) {
+        self.release_authority_request_commit.notify_one();
+    }
+
+    #[cfg(test)]
+    async fn pause_after_authority_request_commit_for_test(&self) {
+        if self
+            .pause_authority_request_after_commit
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.authority_request_commit_reached.notify_one();
+            self.release_authority_request_commit.notified().await;
+        }
     }
 
     #[cfg(test)]
@@ -350,6 +451,7 @@ impl GameDatabase for InMemoryDatabase {
             // Room-state record, not a wire snapshot: the v3 incarnation epoch
             // is filled at snapshot-send time, so this stays `None`.
             epoch: None,
+            seq: None,
             region_id: region_id.clone(),
         };
 
@@ -425,6 +527,14 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>> {
+        #[cfg(test)]
+        if self
+            .fail_get_room_by_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected get_room_by_id failure for test");
+        }
+
         let rooms = self.rooms.read().await;
         Ok(rooms.get(room_id).cloned())
     }
@@ -451,6 +561,14 @@ impl GameDatabase for InMemoryDatabase {
         room_id: &RoomId,
         player_id: &PlayerId,
     ) -> Result<Option<PlayerInfo>> {
+        #[cfg(test)]
+        if self
+            .fail_remove_player_from_room
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected remove_player_from_room failure for test");
+        }
+
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             let removed_player = room.players.remove(player_id);
@@ -467,10 +585,9 @@ impl GameDatabase for InMemoryDatabase {
             }
 
             // Prune the departed player's ready entry so it cannot linger in
-            // `RoomJoined` / `Reconnected` payloads: `finalize_room_game`
-            // force-populates `ready_players` with every member, and
-            // `transition_room_to_waiting` clears it only on the Lobby →
-            // Waiting regression (a Finalized room never regresses).
+            // `RoomJoined` / `Reconnected` payloads. Departures intentionally
+            // preserve the room lifecycle state and every remaining member's
+            // readiness, so the departing id must be removed directly.
             room.ready_players.retain(|id| id != player_id);
 
             // If removed player was authority, CLEAR authority (don't auto-reassign per protocol)
@@ -557,6 +674,9 @@ impl GameDatabase for InMemoryDatabase {
                     player.is_authority = true;
                 }
 
+                drop(rooms);
+                #[cfg(test)]
+                self.pause_after_authority_request_commit_for_test().await;
                 Ok((true, None))
             } else {
                 // RELEASE AUTHORITY CASE
@@ -575,6 +695,9 @@ impl GameDatabase for InMemoryDatabase {
                     player.is_authority = false;
                 }
 
+                drop(rooms);
+                #[cfg(test)]
+                self.pause_after_authority_request_commit_for_test().await;
                 Ok((true, None))
             }
         } else {
@@ -834,24 +957,6 @@ impl GameDatabase for InMemoryDatabase {
         Ok(())
     }
 
-    async fn transition_room_to_waiting(&self, room_id: &RoomId) -> Result<()> {
-        let mut rooms = self.rooms.write().await;
-        if let Some(room) = rooms.get_mut(room_id) {
-            // Only transition if room is currently in lobby but no longer meets lobby requirements
-            if room.lobby_state == crate::protocol::LobbyState::Lobby && !room.should_enter_lobby()
-            {
-                room.lobby_state = crate::protocol::LobbyState::Waiting;
-                room.lobby_started_at = None;
-                room.ready_players.clear();
-                // Clear ready status for all players
-                for player in room.players.values_mut() {
-                    player.is_ready = false;
-                }
-            }
-        }
-        Ok(())
-    }
-
     async fn toggle_player_ready(
         &self,
         room_id: &RoomId,
@@ -879,28 +984,40 @@ impl GameDatabase for InMemoryDatabase {
         Ok(None)
     }
 
-    async fn finalize_room_game(&self, room_id: &RoomId) -> Result<()> {
+    async fn finalize_room_game(
+        &self,
+        room_id: &RoomId,
+        expected: &FinalizeRoomGameExpectation,
+    ) -> Result<FinalizeRoomGameOutcome> {
         let mut rooms = self.rooms.write().await;
-        if let Some(room) = rooms.get_mut(room_id) {
-            // The caller (the room coordinator, holding the room-operation
-            // lock) is the policy authority that determined every player is
-            // ready; the store persists that decision. The coordinator tracks
-            // ready state in its own map, so the room's per-player flags are
-            // synchronized here rather than required as a precondition —
-            // otherwise finalization would silently no-op and the persisted
-            // `lobby_state` could never reach `Finalized` (which gates v3
-            // late-join/reconnect pairing and departure re-planning).
-            if room.lobby_state != crate::protocol::LobbyState::Finalized {
-                let member_ids: Vec<PlayerId> = room.players.keys().copied().collect();
-                for player in room.players.values_mut() {
-                    player.is_ready = true;
-                }
-                room.ready_players = member_ids;
-                room.lobby_state = crate::protocol::LobbyState::Finalized;
-                room.game_finalized_at = Some(chrono::Utc::now());
-            }
+        let room = rooms
+            .get_mut(room_id)
+            .ok_or_else(|| anyhow::anyhow!("room not found while finalizing game"))?;
+        if room.lobby_state == crate::protocol::LobbyState::Finalized {
+            return Ok(FinalizeRoomGameOutcome::AlreadyFinalized);
         }
-        Ok(())
+        let mut current_members: Vec<PlayerId> = room.players.keys().copied().collect();
+        current_members.sort_unstable();
+        let mut expected_members = expected.members.clone();
+        expected_members.sort_unstable();
+        if current_members != expected_members
+            || room.authority_player != expected.authority_player
+            || room.lobby_state != expected.lobby_state
+        {
+            return Ok(FinalizeRoomGameOutcome::SnapshotChanged);
+        }
+
+        // The caller is the policy authority that determined every player is
+        // ready. Ready state is coordinated separately, so synchronize the
+        // persisted player flags as part of the same one-time transition.
+        let member_ids: Vec<PlayerId> = room.players.keys().copied().collect();
+        for player in room.players.values_mut() {
+            player.is_ready = true;
+        }
+        room.ready_players = member_ids;
+        room.lobby_state = crate::protocol::LobbyState::Finalized;
+        room.game_finalized_at = Some(chrono::Utc::now());
+        Ok(FinalizeRoomGameOutcome::Finalized)
     }
 
     async fn add_spectator_to_room(
@@ -921,6 +1038,14 @@ impl GameDatabase for InMemoryDatabase {
         room_id: &RoomId,
         spectator_id: &PlayerId,
     ) -> Result<Option<SpectatorInfo>> {
+        #[cfg(test)]
+        if self
+            .fail_remove_spectator_from_room
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected remove_spectator_from_room failure for test");
+        }
+
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             Ok(room.remove_spectator(spectator_id))
@@ -1118,6 +1243,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: "us-east-1".to_string(),
         }
     }
@@ -1513,8 +1639,8 @@ mod tests {
     async fn test_remove_player_from_room_prunes_ready_players() {
         // `finalize_room_game` force-populates `ready_players` with every
         // member; removing a player must prune its id so it cannot linger in
-        // `RoomJoined` / `Reconnected` payloads (a Finalized room never
-        // regresses, so `transition_room_to_waiting`'s clear never runs).
+        // `RoomJoined` / `Reconnected` payloads while the room state and the
+        // remaining members' readiness stay unchanged.
         let db = InMemoryDatabase::new();
         let room = create_test_room(&db, "prune_game", "PRUNE1")
             .await
@@ -1534,6 +1660,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: "us-east-1".to_string(),
         };
         assert!(db
@@ -1541,9 +1668,24 @@ mod tests {
             .await
             .expect("add_player_to_room should not error"));
 
-        db.finalize_room_game(&room.id)
+        let start_snapshot = db
+            .get_room_by_id(&room.id)
             .await
-            .expect("finalize_room_game should not error");
+            .expect("room lookup should not error")
+            .expect("room should exist");
+        let expectation = FinalizeRoomGameExpectation::from_room(&start_snapshot);
+        assert_eq!(
+            db.finalize_room_game(&room.id, &expectation)
+                .await
+                .expect("finalize_room_game should not error"),
+            FinalizeRoomGameOutcome::Finalized
+        );
+        assert_eq!(
+            db.finalize_room_game(&room.id, &expectation)
+                .await
+                .expect("repeated finalize should be a normal CAS result"),
+            FinalizeRoomGameOutcome::AlreadyFinalized
+        );
         let finalized = db
             .get_room_by_id(&room.id)
             .await

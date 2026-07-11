@@ -1,8 +1,11 @@
 use crate::auth::AppInfo;
 use crate::config::AppAuthEntry;
 use crate::coordination::{
-    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome,
-    InMemoryRoomOperationCoordinator, MessageCoordinator, RoomOperationCoordinatorTrait,
+    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliveryPermit,
+    DeliveryReserveError, DeliverySender, DeliveryTrySendError, InMemoryRoomOperationCoordinator,
+    MessageCoordinator, RoomEventCompletion, RoomEventJob, RoomEventMutationGuard,
+    RoomEventSequencer, RoomMessageTransactionOutcome, RoomOperationCoordinatorTrait,
+    RoomRecipientMessages,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
@@ -16,6 +19,8 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -58,7 +63,7 @@ mod signaling_tests;
 mod spectator_handlers;
 mod spectator_service;
 
-use connection_manager::ConnectionManager;
+use connection_manager::{ClientLifecycle, ConnectionManager};
 pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 pub use shutdown::ShutdownDrain;
@@ -71,7 +76,7 @@ pub struct EnhancedGameServer {
     /// In-memory game state storage
     database: Arc<dyn GameDatabase>,
     /// Connection management (clients, IP accounting)
-    connection_manager: ConnectionManager,
+    connection_manager: Arc<ConnectionManager>,
     /// Server configuration
     config: ServerConfig,
     /// Protocol configuration for validation
@@ -103,7 +108,13 @@ pub struct EnhancedGameServer {
     /// Sticky per-room session decision recorded at finalize (protocol v3):
     /// consulted by late-join/reconnect pairing and departure re-planning
     /// instead of re-running the selection ladder (see `session_policy.rs`).
-    active_session_plans: DashMap<RoomId, session_policy::ActiveSessionPlan>,
+    active_session_plans: Arc<DashMap<RoomId, session_policy::ActiveSessionPlan>>,
+    /// Durable player removals that failed after the physical connection was
+    /// already gone. Maintenance retries these independently of whether
+    /// reconnect support is enabled.
+    pending_durable_player_detaches: Arc<DashMap<(RoomId, PlayerId), ()>>,
+    #[cfg(test)]
+    fail_retain_room_publication_snapshot: AtomicBool,
     /// Spectator lifecycle manager
     spectator_service: SpectatorService,
     /// Transport-level security options (TLS, token binding, etc.)
@@ -247,7 +258,7 @@ impl EnhancedGameServer {
             metrics.clone(),
         ));
 
-        let connection_manager = ConnectionManager::new(
+        let connection_manager = Arc::new(ConnectionManager::new(
             config.max_connections_per_ip,
             metrics.clone(),
             message_coordinator.clone(),
@@ -255,7 +266,7 @@ impl EnhancedGameServer {
             // emission is enabled, keeping the delivery hot path at a single
             // cheap registry miss otherwise.
             config.websocket_config.delivery_stats_interval_secs > 0,
-        );
+        ));
 
         // Initialize reconnection manager if enabled (in-memory only). Built
         // before the room coordinator and spectator service so both can record
@@ -303,6 +314,7 @@ impl EnhancedGameServer {
             room_applications.clone(),
             protocol_config.clone(),
             reconnection_manager.clone(),
+            Arc::clone(&connection_manager),
         );
 
         let (shutdown_drain_tx, _) = watch::channel(false);
@@ -323,7 +335,10 @@ impl EnhancedGameServer {
             reconnection_manager,
             auth_middleware,
             room_applications,
-            active_session_plans: DashMap::new(),
+            active_session_plans: Arc::new(DashMap::new()),
+            pending_durable_player_detaches: Arc::new(DashMap::new()),
+            #[cfg(test)]
+            fail_retain_room_publication_snapshot: AtomicBool::new(false),
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
@@ -387,6 +402,31 @@ impl EnhancedGameServer {
         let player_id = self
             .connection_manager
             .register_client(sender, close, client_addr, self.instance_id)
+            .await?;
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(&player_id, CloseReason::Shutdown);
+        }
+        Ok(player_id)
+    }
+
+    pub(crate) async fn register_classified_client_with_close(
+        &self,
+        sender: crate::coordination::outbound_queue::OutboundSender,
+        close: ConnectionCloseSignal,
+        client_addr: SocketAddr,
+    ) -> Result<PlayerId, RegisterClientError> {
+        if self.is_draining() {
+            return Err(RegisterClientError::ServerDraining);
+        }
+        let player_id = self
+            .connection_manager
+            .register_classified_client(
+                DeliverySender::classified(sender),
+                close,
+                client_addr,
+                self.instance_id,
+            )
             .await?;
         if self.is_draining() {
             self.connection_manager
@@ -537,31 +577,97 @@ impl EnhancedGameServer {
 
     /// Assign a connected client to a room (used by integration tests that hydrate server state).
     pub async fn assign_client_to_room(&self, player_id: &PlayerId, room_id: RoomId) {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
         self.connection_manager
             .assign_client_to_room(player_id, room_id)
             .await;
     }
 
     /// Disconnect a client (alias for unregister_client for testing compatibility)
-    pub async fn disconnect_client(&self, player_id: &PlayerId) {
+    pub async fn disconnect_client(self: &Arc<Self>, player_id: &PlayerId) {
         self.unregister_client(player_id).await;
     }
 
     /// Unregister a client connection
-    pub async fn unregister_client(&self, player_id: &PlayerId) {
-        // Check if player is in a room and register for reconnection
-        let (room_id_opt, was_authority) = {
-            let room_id = self.get_client_room(player_id).await;
-            let was_authority = if let Some(ref room_id) = room_id {
-                if let Ok(Some(room)) = self.database.get_room_by_id(room_id).await {
-                    room.authority_player == Some(*player_id)
-                } else {
-                    false
+    pub async fn unregister_client(self: &Arc<Self>, player_id: &PlayerId) {
+        if let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) {
+            self.unregister_client_with_lifecycle(lifecycle).await;
+        } else {
+            let server = Arc::clone(self);
+            let player_id = *player_id;
+            let task = tokio::spawn(async move {
+                server.unregister_client_locked(&player_id).await;
+            });
+            if let Err(error) = task.await {
+                tracing::error!(%player_id, %error, "Owned client unregister transaction failed");
+            }
+        }
+    }
+
+    pub(crate) fn client_lifecycle(&self, player_id: &PlayerId) -> Option<Arc<ClientLifecycle>> {
+        self.connection_manager.client_lifecycle(player_id)
+    }
+
+    pub(crate) async fn unregister_client_with_lifecycle(
+        self: &Arc<Self>,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
+        let server = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            let player_id = lifecycle.player_id();
+            if !server
+                .connection_manager
+                .lifecycle_matches(&player_id, &lifecycle)
+            {
+                return;
+            }
+            server.unregister_client_locked(&player_id).await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%error, "Owned client unregister transaction failed");
+        }
+    }
+
+    async fn unregister_client_locked(&self, player_id: &PlayerId) {
+        let room_id_opt = self.get_client_room(player_id).await;
+        // One authoritative snapshot supplies every reconnect-restoration
+        // field. A missing player/room or storage error must not degrade into a
+        // pending record with `was_authority = false` and no player metadata.
+        let reconnect_snapshot = if let Some(room_id) = room_id_opt {
+            match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(room)) => match room.players.get(player_id).cloned() {
+                    Some(player_info) => Some((
+                        room_id,
+                        room.authority_player == Some(*player_id),
+                        player_info,
+                    )),
+                    None => {
+                        tracing::warn!(%player_id, %room_id, "Assigned player was absent from the reconnect room snapshot");
+                        None
+                    }
+                },
+                Ok(None) => {
+                    tracing::warn!(%player_id, %room_id, "Assigned reconnect room was absent from storage");
+                    None
                 }
-            } else {
-                false
-            };
-            (room_id, was_authority)
+                Err(error) => {
+                    tracing::warn!(%player_id, %room_id, %error, "Failed to capture reconnect room snapshot");
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         // Clean up spectator state (if this client was observing a room)
@@ -583,11 +689,16 @@ impl EnhancedGameServer {
             self.connection_manager
                 .request_close_for(player_id, CloseReason::Shutdown);
             self.discard_pre_issued_reconnection_token(player_id).await;
-        } else if let Some(room_id) = room_id_opt {
-            self.register_disconnection_for_reconnect(player_id, room_id, was_authority)
-                .await;
+        } else if let Some((room_id, was_authority, player_info)) = reconnect_snapshot {
+            self.register_disconnection_for_reconnect(
+                player_id,
+                room_id,
+                was_authority,
+                player_info,
+            )
+            .await;
             registered_reconnect = true;
-        } else {
+        } else if room_id_opt.is_none() {
             // No room to reconnect into: any token pre-issued at an earlier
             // join must not outlive the connection (bounded-map contract).
             self.discard_pre_issued_reconnection_token(player_id).await;
@@ -615,7 +726,7 @@ impl EnhancedGameServer {
             // Remove from room if joined
             if let Some(room_id) = room_id_opt {
                 tracing::info!(%player_id, %room_id, draining = false, "Removing player from room during unregister");
-                self.leave_room(player_id).await;
+                self.leave_room_locked(player_id, false).await;
                 // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
                 // Tests should properly handle the asynchronous nature of message delivery
             }
@@ -686,6 +797,25 @@ impl EnhancedGameServer {
         self.database.as_ref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_retain_room_publication_snapshot_for_test(&self, fail: bool) {
+        self.fail_retain_room_publication_snapshot
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn should_retain_room_publication_snapshot(&self) -> bool {
+        #[cfg(test)]
+        {
+            !self
+                .fail_retain_room_publication_snapshot
+                .load(std::sync::atomic::Ordering::Acquire)
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     pub fn instance_id(&self) -> Uuid {
         self.instance_id
     }
@@ -731,6 +861,9 @@ pub struct InMemoryMessageCoordinator {
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
     metrics: Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: Duration,
+    room_event_sequencer: Arc<RoomEventSequencer>,
+    #[cfg(test)]
+    fail_room_transactions: AtomicBool,
     #[allow(dead_code)]
     instance_id: Uuid,
 }
@@ -738,16 +871,52 @@ pub struct InMemoryMessageCoordinator {
 enum ConditionalDeliveryReservation {
     Reserved {
         player_id: PlayerId,
-        sender: mpsc::Sender<Arc<ServerMessage>>,
-        permit: mpsc::OwnedPermit<Arc<ServerMessage>>,
+        sender: DeliverySender,
+        permit: DeliveryPermit,
         stats: Option<Arc<ConnectionDeliveryStats>>,
     },
     ChannelClosed {
         player_id: PlayerId,
-        sender: mpsc::Sender<Arc<ServerMessage>>,
+        sender: DeliverySender,
     },
-    SlowConsumer(PlayerId),
+    SlowConsumer {
+        player_id: PlayerId,
+        sender: DeliverySender,
+    },
     Canceled,
+}
+
+enum RoomBatchReservation {
+    Reserved {
+        player_id: PlayerId,
+        sender: DeliverySender,
+        permits: Vec<Option<DeliveryPermit>>,
+        stats: Option<Arc<ConnectionDeliveryStats>>,
+    },
+    ChannelClosed {
+        player_id: PlayerId,
+        sender: DeliverySender,
+    },
+    SlowConsumer {
+        player_id: PlayerId,
+        sender: DeliverySender,
+    },
+    Canceled,
+}
+
+fn room_message_for_recipient(
+    message: &Arc<ServerMessage>,
+    player_id: &PlayerId,
+) -> Arc<ServerMessage> {
+    match message.as_ref() {
+        ServerMessage::AuthorityChanged {
+            authority_player, ..
+        } => Arc::new(ServerMessage::AuthorityChanged {
+            authority_player: *authority_player,
+            you_are_authority: *authority_player == Some(*player_id),
+        }),
+        _ => Arc::clone(message),
+    }
 }
 
 use std::collections::HashSet;
@@ -776,6 +945,9 @@ impl InMemoryMessageCoordinator {
             room_players: Arc::new(RwLock::new(HashMap::new())),
             metrics,
             slow_consumer_timeout,
+            room_event_sequencer: Arc::new(RoomEventSequencer::default()),
+            #[cfg(test)]
+            fail_room_transactions: AtomicBool::new(false),
             instance_id: Uuid::new_v4(),
         }
     }
@@ -792,6 +964,7 @@ impl InMemoryMessageCoordinator {
         &self,
         recipients: Vec<(PlayerId, ClientDeliveryHandle)>,
         message: Arc<ServerMessage>,
+        room_id: Option<RoomId>,
     ) {
         if recipients.is_empty() {
             return;
@@ -799,25 +972,26 @@ impl InMemoryMessageCoordinator {
 
         let outcomes =
             futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
-                let message = Arc::clone(&message);
+                let message = room_message_for_recipient(&message, player_id);
                 async move {
-                    let outcome = crate::coordination::deliver_or_disconnect(
+                    let outcome = crate::coordination::deliver_or_disconnect_in_room(
                         &self.metrics,
                         self.slow_consumer_timeout,
                         player_id,
                         handle,
                         message,
+                        room_id,
                     )
                     .await;
-                    (*player_id, outcome)
+                    (*player_id, handle.sender.clone(), outcome)
                 }
             }))
             .await;
 
-        let slow_consumers: Vec<PlayerId> = outcomes
+        let slow_consumers: Vec<(PlayerId, DeliverySender)> = outcomes
             .into_iter()
-            .filter(|(_, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
-            .map(|(player_id, _)| player_id)
+            .filter(|(_, _, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
+            .map(|(player_id, sender, _)| (player_id, sender))
             .collect();
 
         if !slow_consumers.is_empty() {
@@ -826,8 +1000,13 @@ impl InMemoryMessageCoordinator {
             // unregister flow performs the full cleanup (room membership,
             // reconnection window, peer notifications).
             let mut clients = self.local_clients.write().await;
-            for player_id in &slow_consumers {
-                clients.remove(player_id);
+            for (player_id, attempted_sender) in &slow_consumers {
+                let still_attempted_connection = clients
+                    .get(player_id)
+                    .is_some_and(|current| current.sender.same_channel(attempted_sender));
+                if still_attempted_connection {
+                    clients.remove(player_id);
+                }
             }
         }
     }
@@ -875,6 +1054,87 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    async fn reserve_initial_transition(
+        &self,
+        player_id: PlayerId,
+        delivery: &ClientDeliveryHandle,
+    ) -> Result<DeliveryPermit, DeliveryOutcome> {
+        self.metrics.increment_websocket_delivery_attempts();
+        let stats = self.metrics.connection_delivery_stats(&player_id);
+        match delivery.sender.try_reserve_control(None) {
+            Ok(permit) => return Ok(permit),
+            Err(DeliveryReserveError::Closed) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                return Err(DeliveryOutcome::ChannelClosed);
+            }
+            Err(DeliveryReserveError::Canceled) => {
+                self.record_canceled_delivery(player_id);
+                return Err(DeliveryOutcome::Canceled);
+            }
+            Err(DeliveryReserveError::Full) => {}
+        }
+
+        self.metrics.increment_websocket_backpressure_events();
+        if let Some(stats) = &stats {
+            stats
+                .backpressure_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        match tokio::time::timeout(
+            self.slow_consumer_timeout,
+            delivery.sender.reserve_control(None),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(DeliveryReserveError::Canceled)) => {
+                self.record_canceled_delivery(player_id);
+                Err(DeliveryOutcome::Canceled)
+            }
+            Ok(Err(DeliveryReserveError::Closed | DeliveryReserveError::Full)) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                Err(DeliveryOutcome::ChannelClosed)
+            }
+            Err(_) => {
+                let initiated_close = delivery.close.request_close(CloseReason::SlowConsumer);
+                if initiated_close {
+                    self.metrics.increment_websocket_slow_consumer_disconnects();
+                }
+                self.metrics.increment_websocket_messages_dropped();
+                if let Some(stats) = &stats {
+                    stats
+                        .dropped_for_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                tracing::warn!(
+                    %player_id,
+                    timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                    initiated_close,
+                    "Initial room transition queue stayed full; closing recipient"
+                );
+                Err(DeliveryOutcome::SlowConsumer)
+            }
+        }
+    }
+
+    fn commit_initial_transition(
+        &self,
+        player_id: PlayerId,
+        permit: DeliveryPermit,
+        message: Arc<ServerMessage>,
+    ) -> DeliveryOutcome {
+        let stats = self.metrics.connection_delivery_stats(&player_id);
+        match permit.send(message) {
+            Ok(outcome) => {
+                crate::coordination::record_queue_outcome(&self.metrics, stats.as_ref(), outcome)
+            }
+            Err(_) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                DeliveryOutcome::ChannelClosed
+            }
+        }
+    }
+
     async fn deliver_to_one_if(
         &self,
         player_id: PlayerId,
@@ -889,17 +1149,15 @@ impl InMemoryMessageCoordinator {
 
         self.metrics.increment_websocket_delivery_attempts();
         let connection_stats = self.metrics.connection_delivery_stats(&player_id);
-        let message = match handle.sender.try_send(message) {
-            Ok(()) => {
-                self.metrics.increment_websocket_deliveries_enqueued();
-                if let Some(stats) = &connection_stats {
-                    stats
-                        .sent_to_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return Some(DeliveryOutcome::Delivered);
+        let message = match handle.sender.try_send(message, None) {
+            Ok(outcome) => {
+                return Some(crate::coordination::record_queue_outcome(
+                    &self.metrics,
+                    connection_stats.as_ref(),
+                    outcome,
+                ));
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(DeliveryTrySendError::Closed) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
                 tracing::debug!(
                     %player_id,
@@ -907,7 +1165,19 @@ impl InMemoryMessageCoordinator {
                 );
                 return Some(DeliveryOutcome::ChannelClosed);
             }
-            Err(mpsc::error::TrySendError::Full(message)) => message,
+            Err(DeliveryTrySendError::Full(message)) => message,
+            Err(
+                DeliveryTrySendError::AccountabilityUnavailable
+                | DeliveryTrySendError::InvalidMetadata,
+            ) => {
+                return Some(crate::coordination::fail_delivery_closed(
+                    &self.metrics,
+                    connection_stats.as_ref(),
+                    &player_id,
+                    &handle,
+                    "Conditional delivery queue failed closed",
+                ));
+            }
         };
 
         self.metrics.increment_websocket_backpressure_events();
@@ -917,7 +1187,7 @@ impl InMemoryMessageCoordinator {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        let reserve = handle.sender.reserve();
+        let reserve = handle.sender.reserve_control(None);
         tokio::pin!(reserve);
         let timeout = tokio::time::sleep(self.slow_consumer_timeout);
         tokio::pin!(timeout);
@@ -929,19 +1199,32 @@ impl InMemoryMessageCoordinator {
                         self.record_canceled_delivery(player_id);
                         return None;
                     }
-                    permit.send(message);
+                    let outcome = match permit.send(message) {
+                        Ok(outcome) if outcome.enqueued => outcome,
+                        Ok(_) => {
+                            self.record_canceled_delivery(player_id);
+                            return Some(DeliveryOutcome::Canceled);
+                        }
+                        Err(_) => {
+                            self.metrics.increment_websocket_deliveries_channel_closed();
+                            return Some(DeliveryOutcome::ChannelClosed);
+                        }
+                    };
+                    debug_assert_eq!(outcome.losses, 0);
                     self.metrics.increment_websocket_deliveries_enqueued();
                     if let Some(stats) = &connection_stats {
-                        stats
-                            .sent_to_you
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        stats.sent_to_you.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     Some(DeliveryOutcome::Delivered)
                 }
-                Err(_receiver_gone) => {
+                Err(DeliveryReserveError::Closed | DeliveryReserveError::Full) => {
                     self.metrics.increment_websocket_deliveries_channel_closed();
                     tracing::debug!(%player_id, "Recipient connection closed while backpressured");
                     Some(DeliveryOutcome::ChannelClosed)
+                }
+                Err(DeliveryReserveError::Canceled) => {
+                    self.record_canceled_delivery(player_id);
+                    Some(DeliveryOutcome::Canceled)
                 }
             },
             changed = drain.changed() => {
@@ -984,6 +1267,7 @@ impl InMemoryMessageCoordinator {
         handle: ClientDeliveryHandle,
         should_send: &(dyn Fn() -> bool + Send + Sync),
         mut drain: watch::Receiver<bool>,
+        room_id: Option<RoomId>,
     ) -> ConditionalDeliveryReservation {
         if *drain.borrow() || !should_send() {
             return ConditionalDeliveryReservation::Canceled;
@@ -992,14 +1276,14 @@ impl InMemoryMessageCoordinator {
         self.metrics.increment_websocket_delivery_attempts();
         let stats = self.metrics.connection_delivery_stats(&player_id);
         let sender = handle.sender.clone();
-        match sender.clone().try_reserve_owned() {
+        match sender.try_reserve_control(room_id) {
             Ok(permit) => ConditionalDeliveryReservation::Reserved {
                 player_id,
                 sender,
                 permit,
                 stats,
             },
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(DeliveryReserveError::Closed) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
                 tracing::debug!(
                     %player_id,
@@ -1007,7 +1291,11 @@ impl InMemoryMessageCoordinator {
                 );
                 ConditionalDeliveryReservation::ChannelClosed { player_id, sender }
             }
-            Err(mpsc::error::TrySendError::Full(sender)) => {
+            Err(DeliveryReserveError::Canceled) => {
+                self.record_canceled_delivery(player_id);
+                ConditionalDeliveryReservation::Canceled
+            }
+            Err(DeliveryReserveError::Full) => {
                 self.metrics.increment_websocket_backpressure_events();
                 if let Some(stats) = &stats {
                     stats
@@ -1016,7 +1304,7 @@ impl InMemoryMessageCoordinator {
                 }
 
                 let reserved_sender = sender.clone();
-                let reserve = sender.reserve_owned();
+                let reserve = sender.reserve_control(room_id);
                 tokio::pin!(reserve);
                 let timeout = tokio::time::sleep(self.slow_consumer_timeout);
                 tokio::pin!(timeout);
@@ -1036,13 +1324,17 @@ impl InMemoryMessageCoordinator {
                                 }
                             }
                         }
-                        Err(_receiver_gone) => {
+                        Err(DeliveryReserveError::Closed | DeliveryReserveError::Full) => {
                             self.metrics.increment_websocket_deliveries_channel_closed();
                             tracing::debug!(%player_id, "Recipient connection closed while backpressured");
                             ConditionalDeliveryReservation::ChannelClosed {
                                 player_id,
                                 sender: reserved_sender.clone(),
                             }
+                        }
+                        Err(DeliveryReserveError::Canceled) => {
+                            self.record_canceled_delivery(player_id);
+                            ConditionalDeliveryReservation::Canceled
                         }
                     },
                     changed = drain.changed() => {
@@ -1074,10 +1366,292 @@ impl InMemoryMessageCoordinator {
                             "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                              instead of silently dropping messages"
                         );
-                        ConditionalDeliveryReservation::SlowConsumer(player_id)
+                        ConditionalDeliveryReservation::SlowConsumer {
+                            player_id,
+                            sender: reserved_sender,
+                        }
                     }
                 }
             }
+        }
+    }
+
+    async fn reserve_room_batch(
+        &self,
+        player_id: PlayerId,
+        handle: ClientDeliveryHandle,
+        frame_count: usize,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+        room_id: RoomId,
+    ) -> RoomBatchReservation {
+        let mut permits = Vec::with_capacity(frame_count);
+        let sender = handle.sender.clone();
+        let mut stats = None;
+
+        for _ in 0..frame_count {
+            match self
+                .reserve_one_if(
+                    player_id,
+                    handle.clone(),
+                    should_send,
+                    drain.clone(),
+                    Some(room_id),
+                )
+                .await
+            {
+                ConditionalDeliveryReservation::Reserved {
+                    permit,
+                    stats: reservation_stats,
+                    ..
+                } => {
+                    stats = reservation_stats;
+                    permits.push(Some(permit));
+                }
+                ConditionalDeliveryReservation::ChannelClosed { player_id, sender } => {
+                    for _ in &permits {
+                        self.record_canceled_delivery(player_id);
+                    }
+                    return RoomBatchReservation::ChannelClosed { player_id, sender };
+                }
+                ConditionalDeliveryReservation::SlowConsumer { player_id, sender } => {
+                    for _ in &permits {
+                        self.record_canceled_delivery(player_id);
+                    }
+                    return RoomBatchReservation::SlowConsumer { player_id, sender };
+                }
+                ConditionalDeliveryReservation::Canceled => {
+                    for _ in &permits {
+                        self.record_canceled_delivery(player_id);
+                    }
+                    return RoomBatchReservation::Canceled;
+                }
+            }
+        }
+
+        RoomBatchReservation::Reserved {
+            player_id,
+            sender,
+            permits,
+            stats,
+        }
+    }
+
+    fn record_batch_cancellations(&self, reservations: &[RoomBatchReservation]) {
+        for reservation in reservations {
+            if let RoomBatchReservation::Reserved {
+                player_id, permits, ..
+            } = reservation
+            {
+                for _ in permits {
+                    self.record_canceled_delivery(*player_id);
+                }
+            }
+        }
+    }
+
+    fn batch_reservations_cover_recipients(
+        reservations: &[RoomBatchReservation],
+        recipients: &[(PlayerId, ClientDeliveryHandle)],
+    ) -> bool {
+        reservations.len() == recipients.len()
+            && recipients.iter().all(|(player_id, handle)| {
+                reservations.iter().any(|reservation| match reservation {
+                    RoomBatchReservation::Reserved {
+                        player_id: reserved_player,
+                        sender,
+                        ..
+                    } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
+                    RoomBatchReservation::ChannelClosed { .. }
+                    | RoomBatchReservation::SlowConsumer { .. }
+                    | RoomBatchReservation::Canceled => false,
+                })
+            })
+    }
+
+    async fn broadcast_to_room_if_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+        expected_members: Option<&[PlayerId]>,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+        drain: watch::Receiver<bool>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        let mut before_send = Some(before_send);
+
+        loop {
+            if *drain.borrow() || !should_send() {
+                tracing::debug!(%room_id, ?except_player, "Conditional room broadcast skipped before replay hook");
+                return Ok(false);
+            }
+
+            let recipients = self.collect_room_recipients(room_id, except_player).await;
+
+            let reservations =
+                futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
+                    self.reserve_one_if(
+                        *player_id,
+                        handle.clone(),
+                        should_send,
+                        drain.clone(),
+                        Some(*room_id),
+                    )
+                }))
+                .await;
+
+            if *drain.borrow() || !should_send() {
+                self.record_reserved_cancellations(&reservations);
+                tracing::debug!(%room_id, ?except_player, "Conditional room broadcast canceled before replay record");
+                return Ok(false);
+            }
+
+            // A recipient can change queue generation or room scope while its
+            // reservation is pending. That invalidates only this routing
+            // snapshot, not the room event itself. Cancel permits already held
+            // for stable peers and retry resolution; aborting here would drop a
+            // valid event for every stable recipient.
+            if reservations
+                .iter()
+                .any(|reservation| matches!(reservation, ConditionalDeliveryReservation::Canceled))
+            {
+                self.record_reserved_cancellations(&reservations);
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            let slow_consumers: Vec<(PlayerId, DeliverySender)> = reservations
+                .iter()
+                .filter_map(|reservation| match reservation {
+                    ConditionalDeliveryReservation::SlowConsumer { player_id, sender } => {
+                        Some((*player_id, sender.clone()))
+                    }
+                    ConditionalDeliveryReservation::Reserved { .. }
+                    | ConditionalDeliveryReservation::ChannelClosed { .. }
+                    | ConditionalDeliveryReservation::Canceled => None,
+                })
+                .collect();
+            if !slow_consumers.is_empty() {
+                self.record_reserved_cancellations(&reservations);
+                let mut clients = self.local_clients.write().await;
+                for (player_id, attempted_sender) in &slow_consumers {
+                    let still_attempted_connection = clients
+                        .get(player_id)
+                        .is_some_and(|current| current.sender.same_channel(attempted_sender));
+                    if still_attempted_connection {
+                        clients.remove(player_id);
+                    }
+                }
+                continue;
+            }
+
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
+                .get(room_id)
+                .map(|players| {
+                    players
+                        .iter()
+                        .filter(|player_id| except_player != Some(*player_id))
+                        .filter_map(|player_id| {
+                            clients
+                                .get(player_id)
+                                .map(|handle| (*player_id, handle.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(expected_members) = expected_members {
+                let mut current: Vec<PlayerId> = current_recipients
+                    .iter()
+                    .map(|(player_id, _)| *player_id)
+                    .collect();
+                let mut expected = expected_members.to_vec();
+                current.sort_unstable();
+                expected.sort_unstable();
+                if current != expected {
+                    self.record_reserved_cancellations(&reservations);
+                    tracing::debug!(%room_id, "Room broadcast canceled because published membership changed");
+                    return Ok(false);
+                }
+            }
+
+            if !Self::reservations_cover_recipients(&reservations, &current_recipients) {
+                self.record_reserved_cancellations(&reservations);
+                drop(clients);
+                drop(room_players);
+                continue;
+            }
+
+            if *drain.borrow() || !should_send() {
+                self.record_reserved_cancellations(&reservations);
+                tracing::debug!(%room_id, ?except_player, "Conditional room broadcast canceled before replay record");
+                return Ok(false);
+            }
+
+            // No capacity wait happens while these routing locks are held.
+            // Once this final guard passes, replay recording and permit sends
+            // are one commit relative to reconnect registration's write lock.
+            let Some(before_send) = before_send.take() else {
+                tracing::error!(%room_id, ?except_player, "Conditional room broadcast replay hook was already consumed");
+                return Ok(false);
+            };
+            before_send().await;
+
+            let mut delivered = false;
+            for reservation in reservations {
+                match reservation {
+                    ConditionalDeliveryReservation::Reserved {
+                        player_id,
+                        permit,
+                        stats,
+                        ..
+                    } => {
+                        let recipient_message = room_message_for_recipient(&message, &player_id);
+                        match permit.send(recipient_message) {
+                            Ok(outcome) if outcome.enqueued => {
+                                delivered = true;
+                                self.metrics.increment_websocket_deliveries_enqueued();
+                                if let Some(stats) = &stats {
+                                    stats
+                                        .sent_to_you
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                            Ok(_) => {
+                                self.metrics.increment_websocket_deliveries_canceled();
+                                tracing::debug!(
+                                    %room_id,
+                                    ?except_player,
+                                    %player_id,
+                                    "Conditional room broadcast permit became stale at commit"
+                                );
+                            }
+                            Err(_) => {
+                                self.metrics.increment_websocket_deliveries_channel_closed();
+                            }
+                        }
+                    }
+                    ConditionalDeliveryReservation::ChannelClosed { .. } => {}
+                    ConditionalDeliveryReservation::SlowConsumer { .. }
+                    | ConditionalDeliveryReservation::Canceled => {
+                        tracing::debug!(
+                            %room_id,
+                            ?except_player,
+                            "Conditional room broadcast reached an invalid reservation at commit"
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+
+            return Ok(delivered);
         }
     }
 
@@ -1097,7 +1671,7 @@ impl InMemoryMessageCoordinator {
                         player_id: reserved_player,
                         sender,
                     } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
-                    ConditionalDeliveryReservation::SlowConsumer(_)
+                    ConditionalDeliveryReservation::SlowConsumer { .. }
                     | ConditionalDeliveryReservation::Canceled => false,
                 })
             })
@@ -1106,6 +1680,24 @@ impl InMemoryMessageCoordinator {
 
 #[async_trait::async_trait]
 impl MessageCoordinator for InMemoryMessageCoordinator {
+    async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
+        self.room_event_sequencer.lock(*room_id).await
+    }
+
+    fn enqueue_room_event(
+        &self,
+        mutation_guard: RoomEventMutationGuard,
+        job: RoomEventJob,
+    ) -> RoomEventCompletion {
+        self.room_event_sequencer.enqueue(mutation_guard, job)
+    }
+
+    #[cfg(test)]
+    fn fail_room_transactions_for_test(&self, fail: bool) {
+        self.fail_room_transactions
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
@@ -1113,7 +1705,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
     ) -> anyhow::Result<()> {
         let handle = { self.local_clients.read().await.get(player_id).cloned() };
         if let Some(handle) = handle {
-            self.deliver_to_all(vec![(*player_id, handle)], message)
+            self.deliver_to_all(vec![(*player_id, handle)], message, None)
                 .await;
         } else {
             // Normal during disconnect races (e.g. a room notification issued
@@ -1121,6 +1713,135 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             tracing::debug!(%player_id, "Player not registered with coordinator; message unroutable");
         }
         Ok(())
+    }
+
+    async fn send_to_player_in_room(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            room_players
+                .get(room_id)
+                .filter(|players| players.contains(player_id))
+                .and_then(|_| clients.get(player_id).cloned())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+
+        let outcome = crate::coordination::deliver_or_disconnect_in_room(
+            &self.metrics,
+            self.slow_consumer_timeout,
+            player_id,
+            &handle,
+            message,
+            Some(*room_id),
+        )
+        .await;
+        if outcome == DeliveryOutcome::SlowConsumer {
+            let mut clients = self.local_clients.write().await;
+            if clients
+                .get(player_id)
+                .is_some_and(|current| current.sender.same_channel(&handle.sender))
+            {
+                clients.remove(player_id);
+            }
+        }
+        Ok(outcome == DeliveryOutcome::Delivered)
+    }
+
+    async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let mut players: Vec<PlayerId> = room_players
+            .get(room_id)
+            .into_iter()
+            .flat_map(|players| players.iter().copied())
+            .filter(|player_id| clients.contains_key(player_id))
+            .collect();
+        players.sort_unstable();
+        Ok(Some(players))
+    }
+
+    async fn send_to_player_in_room_if_members(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            room_players
+                .get(room_id)
+                .filter(|players| players.contains(player_id))
+                .and_then(|_| clients.get(player_id).cloned())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+
+        let (_drain_tx, drain) = watch::channel(false);
+        let should_send = || true;
+        let reservation = self
+            .reserve_one_if(*player_id, handle, &should_send, drain, Some(*room_id))
+            .await;
+        let ConditionalDeliveryReservation::Reserved {
+            sender,
+            permit,
+            stats,
+            ..
+        } = reservation
+        else {
+            return Ok(false);
+        };
+
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let mut current_members: Vec<PlayerId> = room_players
+            .get(room_id)
+            .into_iter()
+            .flat_map(|players| players.iter().copied())
+            .filter(|routed_player| clients.contains_key(routed_player))
+            .collect();
+        current_members.sort_unstable();
+        let mut expected_members = expected_members.to_vec();
+        expected_members.sort_unstable();
+        let recipient_matches = clients
+            .get(player_id)
+            .is_some_and(|current| current.sender.same_channel(&sender));
+        if current_members != expected_members || !recipient_matches {
+            self.record_canceled_delivery(*player_id);
+            return Ok(false);
+        }
+
+        let delivered = match permit.send(message) {
+            Ok(outcome) if outcome.enqueued => {
+                self.metrics.increment_websocket_deliveries_enqueued();
+                if let Some(stats) = &stats {
+                    stats
+                        .sent_to_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                true
+            }
+            Ok(_) => {
+                self.record_canceled_delivery(*player_id);
+                false
+            }
+            Err(_) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                false
+            }
+        };
+        drop(clients);
+        drop(room_players);
+        Ok(delivered)
     }
 
     async fn send_to_player_if(
@@ -1135,11 +1856,18 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             tracing::debug!(%player_id, "Player not registered with coordinator; conditional message unroutable");
             return Ok(false);
         };
+        let attempted_sender = handle.sender.clone();
         let outcome = self
             .deliver_to_one_if(*player_id, handle, message, should_send, drain)
             .await;
         if outcome == Some(DeliveryOutcome::SlowConsumer) {
-            self.local_clients.write().await.remove(player_id);
+            let mut clients = self.local_clients.write().await;
+            let still_attempted_connection = clients
+                .get(player_id)
+                .is_some_and(|current| current.sender.same_channel(&attempted_sender));
+            if still_attempted_connection {
+                clients.remove(player_id);
+            }
         }
         Ok(outcome == Some(DeliveryOutcome::Delivered))
     }
@@ -1154,9 +1882,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             tracing::debug!(%player_id, "Farewell skipped: player not registered with coordinator");
             return Ok(false);
         };
-        match handle.sender.try_send(message) {
-            Ok(()) => Ok(true),
-            Err(mpsc::error::TrySendError::Full(_)) => {
+        match handle.sender.try_send(message, None) {
+            Ok(outcome) => Ok(outcome.enqueued),
+            Err(DeliveryTrySendError::Full(_)) => {
                 // Advisory frame to a connection that is being closed anyway:
                 // do not wait, do not escalate, do not overwrite the close
                 // reason. The teardown itself is the loud signal.
@@ -1166,7 +1894,11 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 );
                 Ok(false)
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(
+                DeliveryTrySendError::Closed
+                | DeliveryTrySendError::AccountabilityUnavailable
+                | DeliveryTrySendError::InvalidMetadata,
+            ) => {
                 tracing::debug!(%player_id, "Farewell skipped: connection already closed");
                 Ok(false)
             }
@@ -1188,16 +1920,20 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             tracing::debug!(%player_id, "Farewell skipped: caller state changed before enqueue");
             return Ok(false);
         }
-        match handle.sender.try_send(message) {
-            Ok(()) => Ok(true),
-            Err(mpsc::error::TrySendError::Full(_)) => {
+        match handle.sender.try_send(message, None) {
+            Ok(outcome) => Ok(outcome.enqueued),
+            Err(DeliveryTrySendError::Full(_)) => {
                 tracing::debug!(
                     %player_id,
                     "Farewell skipped: outbound queue full on a closing connection"
                 );
                 Ok(false)
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(
+                DeliveryTrySendError::Closed
+                | DeliveryTrySendError::AccountabilityUnavailable
+                | DeliveryTrySendError::InvalidMetadata,
+            ) => {
                 tracing::debug!(%player_id, "Farewell skipped: connection already closed");
                 Ok(false)
             }
@@ -1210,7 +1946,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
         let recipients = self.collect_room_recipients(room_id, None).await;
-        self.deliver_to_all(recipients, message).await;
+        self.deliver_to_all(recipients, message, Some(*room_id))
+            .await;
         Ok(())
     }
 
@@ -1223,8 +1960,349 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let recipients = self
             .collect_room_recipients(room_id, Some(except_player))
             .await;
-        self.deliver_to_all(recipients, message).await;
+        self.deliver_to_all(recipients, message, Some(*room_id))
+            .await;
         Ok(())
+    }
+
+    async fn broadcast_to_room_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        message: Arc<ServerMessage>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        let (_drain_tx, drain_rx) = watch::channel(false);
+        let should_send = || true;
+        self.broadcast_to_room_if_with_hook(
+            room_id,
+            None,
+            None,
+            message,
+            &should_send,
+            drain_rx,
+            before_send,
+        )
+        .await
+    }
+
+    async fn broadcast_to_room_if_members_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        message: Arc<ServerMessage>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<bool> {
+        let (_drain_tx, drain_rx) = watch::channel(false);
+        let should_send = || true;
+        self.broadcast_to_room_if_with_hook(
+            room_id,
+            None,
+            Some(expected_members),
+            message,
+            &should_send,
+            drain_rx,
+            before_send,
+        )
+        .await
+    }
+
+    async fn commit_room_messages_if_members_with_hook<'a>(
+        &'a self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+        recipient_messages: Vec<RoomRecipientMessages>,
+        before_send: Box<
+            dyn FnOnce() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + 'a>,
+                > + Send
+                + 'a,
+        >,
+        after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+    ) -> anyhow::Result<RoomMessageTransactionOutcome> {
+        #[cfg(test)]
+        if self
+            .fail_room_transactions
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            anyhow::bail!("injected room message transaction failure");
+        }
+
+        let mut expected = expected_members.to_vec();
+        expected.sort_unstable();
+        if expected.is_empty() || expected.windows(2).any(|pair| pair.first() == pair.get(1)) {
+            anyhow::bail!("room message transaction requires unique non-empty membership");
+        }
+
+        let mut batch_members: Vec<PlayerId> = recipient_messages
+            .iter()
+            .map(|batch| batch.player_id)
+            .collect();
+        batch_members.sort_unstable();
+        if batch_members != expected {
+            anyhow::bail!("room message batches must cover every expected member exactly once");
+        }
+        if recipient_messages
+            .iter()
+            .all(|batch| batch.messages.is_empty())
+        {
+            anyhow::bail!("room message transaction requires at least one frame");
+        }
+        if recipient_messages
+            .iter()
+            .any(|batch| batch.first_phase > 1 || batch.phase_count() > 2)
+        {
+            anyhow::bail!("room message transactions support exactly two ordered phases");
+        }
+
+        let messages_by_player: HashMap<PlayerId, RoomRecipientMessages> = recipient_messages
+            .into_iter()
+            .map(|batch| (batch.player_id, batch))
+            .collect();
+        let max_phases = messages_by_player
+            .values()
+            .map(RoomRecipientMessages::phase_count)
+            .max()
+            .unwrap_or(0);
+        let mut before_send = Some(before_send);
+        let mut after_first_phase = Some(after_first_phase);
+        let (_drain_tx, drain) = watch::channel(false);
+        let should_send = || true;
+
+        loop {
+            let recipients = self.collect_room_recipients(room_id, None).await;
+            let mut routed: Vec<PlayerId> =
+                recipients.iter().map(|(player_id, _)| *player_id).collect();
+            routed.sort_unstable();
+            if routed != expected {
+                return Ok(RoomMessageTransactionOutcome::RoutingChanged);
+            }
+
+            let reservation_inputs: Option<Vec<_>> = recipients
+                .iter()
+                .map(|(player_id, handle)| {
+                    messages_by_player
+                        .get(player_id)
+                        .map(|batch| (*player_id, handle.clone(), batch.messages.len()))
+                })
+                .collect();
+            let Some(reservation_inputs) = reservation_inputs else {
+                anyhow::bail!("validated room transaction recipient lost its message batch");
+            };
+            let reservations = futures_util::future::join_all(reservation_inputs.into_iter().map(
+                |(player_id, handle, frame_count)| {
+                    self.reserve_room_batch(
+                        player_id,
+                        handle,
+                        frame_count,
+                        &should_send,
+                        drain.clone(),
+                        *room_id,
+                    )
+                },
+            ))
+            .await;
+
+            if reservations
+                .iter()
+                .any(|reservation| matches!(reservation, RoomBatchReservation::Canceled))
+            {
+                self.record_batch_cancellations(&reservations);
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            let unavailable_recipients: Vec<(PlayerId, DeliverySender)> = reservations
+                .iter()
+                .filter_map(|reservation| match reservation {
+                    RoomBatchReservation::SlowConsumer { player_id, sender }
+                    | RoomBatchReservation::ChannelClosed { player_id, sender } => {
+                        Some((*player_id, sender.clone()))
+                    }
+                    RoomBatchReservation::Reserved { .. } | RoomBatchReservation::Canceled => None,
+                })
+                .collect();
+            if !unavailable_recipients.is_empty() {
+                self.record_batch_cancellations(&reservations);
+                let mut clients = self.local_clients.write().await;
+                for (player_id, attempted_sender) in &unavailable_recipients {
+                    if clients
+                        .get(player_id)
+                        .is_some_and(|current| current.sender.same_channel(attempted_sender))
+                    {
+                        clients.remove(player_id);
+                    }
+                }
+                continue;
+            }
+
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
+                .get(room_id)
+                .map(|players| {
+                    players
+                        .iter()
+                        .filter_map(|player_id| {
+                            clients
+                                .get(player_id)
+                                .map(|handle| (*player_id, handle.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut current_members: Vec<PlayerId> = current_recipients
+                .iter()
+                .map(|(player_id, _)| *player_id)
+                .collect();
+            current_members.sort_unstable();
+            if current_members != expected
+                || !Self::batch_reservations_cover_recipients(&reservations, &current_recipients)
+            {
+                self.record_batch_cancellations(&reservations);
+                return Ok(RoomMessageTransactionOutcome::RoutingChanged);
+            }
+
+            let Some(commit_hook) = before_send.take() else {
+                self.record_batch_cancellations(&reservations);
+                anyhow::bail!("room message transaction hook was already consumed");
+            };
+            match commit_hook().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.record_batch_cancellations(&reservations);
+                    return Ok(RoomMessageTransactionOutcome::HookRejected);
+                }
+                Err(error) => {
+                    self.record_batch_cancellations(&reservations);
+                    return Err(error);
+                }
+            }
+
+            let mut reservations = reservations;
+            let mut failed_frames = 0_usize;
+            for phase in 0..max_phases {
+                let failed_before_phase = failed_frames;
+                for reservation in &mut reservations {
+                    let RoomBatchReservation::Reserved {
+                        player_id,
+                        permits,
+                        stats,
+                        ..
+                    } = reservation
+                    else {
+                        tracing::error!(
+                            %room_id,
+                            phase,
+                            "Non-reserved recipient survived final room transaction validation"
+                        );
+                        continue;
+                    };
+                    let Some(batch) = messages_by_player.get(player_id) else {
+                        let skipped = permits.iter_mut().filter_map(Option::take).count();
+                        failed_frames += skipped;
+                        for _ in 0..skipped {
+                            self.record_canceled_delivery(*player_id);
+                        }
+                        tracing::error!(
+                            %room_id,
+                            %player_id,
+                            skipped,
+                            "Validated room transaction recipient lost its message batch"
+                        );
+                        continue;
+                    };
+                    let Some(message) = batch.message_in_phase(phase) else {
+                        continue;
+                    };
+                    let permit_index = phase - batch.first_phase;
+                    let Some(permit) = permits.get_mut(permit_index).and_then(Option::take) else {
+                        failed_frames += 1;
+                        self.record_canceled_delivery(*player_id);
+                        tracing::error!(
+                            %room_id,
+                            %player_id,
+                            phase,
+                            "Room transaction frame lost its reserved permit"
+                        );
+                        continue;
+                    };
+                    match permit.send(Arc::clone(message)) {
+                        Ok(outcome) if outcome.enqueued => {
+                            self.metrics.increment_websocket_deliveries_enqueued();
+                            if let Some(stats) = stats {
+                                stats
+                                    .sent_to_you
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        Ok(_) => {
+                            failed_frames += 1;
+                            self.record_canceled_delivery(*player_id);
+                            tracing::warn!(
+                                %room_id,
+                                %player_id,
+                                phase,
+                                "Room transaction permit became stale after durable commit"
+                            );
+                        }
+                        Err(_) => {
+                            failed_frames += 1;
+                            self.metrics.increment_websocket_deliveries_channel_closed();
+                            tracing::warn!(
+                                %room_id,
+                                %player_id,
+                                phase,
+                                "Room transaction recipient closed after durable commit"
+                            );
+                        }
+                    }
+                }
+                if phase == 0 {
+                    let continue_publication = match after_first_phase.take() {
+                        Some(after_first_phase) => {
+                            after_first_phase(failed_frames - failed_before_phase)
+                        }
+                        None => {
+                            tracing::error!(
+                                %room_id,
+                                "Room transaction state callback was already consumed"
+                            );
+                            false
+                        }
+                    };
+                    if !continue_publication {
+                        for reservation in &reservations {
+                            let RoomBatchReservation::Reserved {
+                                player_id, permits, ..
+                            } = reservation
+                            else {
+                                continue;
+                            };
+                            let skipped = permits.iter().filter(|permit| permit.is_some()).count();
+                            failed_frames += skipped;
+                            for _ in 0..skipped {
+                                self.record_canceled_delivery(*player_id);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            return Ok(if failed_frames == 0 {
+                RoomMessageTransactionOutcome::Committed
+            } else {
+                RoomMessageTransactionOutcome::CommittedDegraded { failed_frames }
+            });
+        }
     }
 
     async fn broadcast_to_room_except_if_with_hook<'a>(
@@ -1240,132 +2318,23 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 + 'a,
         >,
     ) -> anyhow::Result<bool> {
-        let mut before_send = Some(before_send);
-
-        loop {
-            if *drain.borrow() || !should_send() {
-                tracing::debug!(%room_id, %except_player, "Conditional room broadcast skipped: caller state changed before replay hook");
-                return Ok(false);
-            }
-
-            let recipients = self
-                .collect_room_recipients(room_id, Some(except_player))
-                .await;
-
-            let reservations =
-                futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
-                    self.reserve_one_if(*player_id, handle.clone(), should_send, drain.clone())
-                }))
-                .await;
-
-            if reservations
-                .iter()
-                .any(|reservation| matches!(reservation, ConditionalDeliveryReservation::Canceled))
-                || *drain.borrow()
-                || !should_send()
-            {
-                self.record_reserved_cancellations(&reservations);
-                tracing::debug!(%room_id, %except_player, "Conditional room broadcast canceled before replay record");
-                return Ok(false);
-            }
-
-            let slow_consumers: Vec<PlayerId> = reservations
-                .iter()
-                .filter_map(|reservation| match reservation {
-                    ConditionalDeliveryReservation::SlowConsumer(player_id) => Some(*player_id),
-                    ConditionalDeliveryReservation::Reserved { .. }
-                    | ConditionalDeliveryReservation::ChannelClosed { .. }
-                    | ConditionalDeliveryReservation::Canceled => None,
-                })
-                .collect();
-            if !slow_consumers.is_empty() {
-                self.record_reserved_cancellations(&reservations);
-                let mut clients = self.local_clients.write().await;
-                for player_id in &slow_consumers {
-                    clients.remove(player_id);
-                }
-                continue;
-            }
-
-            let room_players = self.room_players.read().await;
-            let clients = self.local_clients.read().await;
-            let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
-                .get(room_id)
-                .map(|players| {
-                    players
-                        .iter()
-                        .filter(|player_id| *player_id != except_player)
-                        .filter_map(|player_id| {
-                            clients
-                                .get(player_id)
-                                .map(|handle| (*player_id, handle.clone()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if !Self::reservations_cover_recipients(&reservations, &current_recipients) {
-                self.record_reserved_cancellations(&reservations);
-                drop(clients);
-                drop(room_players);
-                continue;
-            }
-
-            if *drain.borrow() || !should_send() {
-                self.record_reserved_cancellations(&reservations);
-                tracing::debug!(%room_id, %except_player, "Conditional room broadcast canceled before replay record");
-                return Ok(false);
-            }
-
-            // No capacity wait happens while these routing locks are held.
-            // Once this final drain check passes, the broadcast is committed:
-            // the hook and permit sends are kept in the same critical section
-            // so reconnect registration cannot observe a baseline between
-            // replay recording and live delivery.
-            let Some(before_send) = before_send.take() else {
-                tracing::error!(%room_id, %except_player, "Conditional room broadcast replay hook was already consumed");
-                return Ok(false);
-            };
-            // The hook runs while the routing locks above are still held.
-            // Keep hook implementations from calling back into MessageCoordinator
-            // or awaiting work that depends on these locks.
-            before_send().await;
-
-            let mut delivered = false;
-            for reservation in reservations {
-                match reservation {
-                    ConditionalDeliveryReservation::Reserved { permit, stats, .. } => {
-                        permit.send(Arc::clone(&message));
-                        delivered = true;
-                        self.metrics.increment_websocket_deliveries_enqueued();
-                        if let Some(stats) = &stats {
-                            stats
-                                .sent_to_you
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    ConditionalDeliveryReservation::ChannelClosed { .. } => {}
-                    ConditionalDeliveryReservation::SlowConsumer(_)
-                    | ConditionalDeliveryReservation::Canceled => {
-                        tracing::debug!(
-                            %room_id,
-                            %except_player,
-                            "Conditional room broadcast canceled by stale reservation state"
-                        );
-                        return Ok(false);
-                    }
-                }
-            }
-
-            return Ok(delivered);
-        }
+        self.broadcast_to_room_if_with_hook(
+            room_id,
+            Some(except_player),
+            None,
+            message,
+            should_send,
+            drain,
+            before_send,
+        )
+        .await
     }
 
     async fn broadcast_to_room_except_with_message<'a>(
         &'a self,
         room_id: &RoomId,
         except_player: &PlayerId,
-        build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
+        build_message: Box<dyn FnOnce() -> Option<Arc<ServerMessage>> + Send + 'a>,
     ) -> anyhow::Result<()> {
         // Lock ordering matches `collect_room_recipients` and reconnect's
         // initial-message registration path. Holding these read locks while
@@ -1394,7 +2363,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         drop(clients);
         drop(room_players);
 
-        self.deliver_to_all(recipients, message).await;
+        if let Some(message) = message {
+            self.deliver_to_all(recipients, message, Some(*room_id))
+                .await;
+        }
         Ok(())
     }
 
@@ -1404,23 +2376,58 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: Option<RoomId>,
         delivery: ClientDeliveryHandle,
     ) -> anyhow::Result<()> {
-        // Lock ordering: room_players first, then local_clients
-        // (consistent with broadcast_to_room / broadcast_to_room_except read paths
-        //  to prevent ABBA deadlocks)
+        // Lock ordering: room_players first, then local_clients. Registration
+        // replaces the player's routing scope, including `None` on leave; merely
+        // updating the sender map would retain a stale old-room recipient.
+        let mut room_players = self.room_players.write().await;
+        room_players.retain(|_, players| {
+            players.remove(&player_id);
+            !players.is_empty()
+        });
         if let Some(room_id) = room_id {
-            let mut room_players = self.room_players.write().await;
             room_players
                 .entry(room_id)
                 .or_insert_with(HashSet::new)
                 .insert(player_id);
-            let mut clients = self.local_clients.write().await;
-            clients.insert(player_id, delivery);
-        } else {
-            // No room_players lock needed when room_id is None
-            let mut clients = self.local_clients.write().await;
-            clients.insert(player_id, delivery);
         }
+        let mut clients = self.local_clients.write().await;
+        clients.insert(player_id, delivery);
         Ok(())
+    }
+
+    async fn unroute_local_client_with_tail<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        clear_assignment: Box<dyn FnOnce() -> Option<(ClientDeliveryHandle, u32, u64)> + Send + 'a>,
+    ) -> anyhow::Result<Option<(u32, u64)>> {
+        // Relay broadcasts hold the read side of these locks while allocating
+        // the sender stamp and snapshotting recipients. Taking both write
+        // locks makes the captured tail and route removal one indivisible
+        // boundary: every old-room stamp is <= `final_seq`, and none can be
+        // allocated after the member becomes unroutable.
+        let mut room_players = self.room_players.write().await;
+        let mut clients = self.local_clients.write().await;
+        let cleared = clear_assignment();
+
+        let was_routed = room_players
+            .get(&room_id)
+            .is_some_and(|players| players.contains(&player_id));
+        room_players.retain(|_, players| {
+            players.remove(&player_id);
+            !players.is_empty()
+        });
+        let terminal_tail = if let Some((delivery, epoch, final_seq)) = cleared {
+            clients.insert(player_id, delivery);
+            Some((epoch, final_seq))
+        } else {
+            clients.remove(&player_id);
+            None
+        };
+        if !was_routed {
+            tracing::debug!(%player_id, %room_id, "Player route was already absent at terminal watermark capture");
+        }
+        Ok(terminal_tail)
     }
 
     async fn register_local_client_with_initial_message<'a>(
@@ -1430,6 +2437,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         delivery: ClientDeliveryHandle,
         build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
+        let permit = match self.reserve_initial_transition(player_id, &delivery).await {
+            Ok(permit) => permit,
+            Err(outcome) => return Ok(outcome),
+        };
         // Lock ordering matches `register_local_client` and
         // `collect_room_recipients`. While this write lock is held, broadcasts
         // cannot snapshot room recipients. The reconnect path uses that to:
@@ -1439,56 +2450,18 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let mut room_players = self.room_players.write().await;
         let mut clients = self.local_clients.write().await;
 
-        self.metrics.increment_websocket_delivery_attempts();
-        let stats = self.metrics.connection_delivery_stats(&player_id);
-        let outcome = match delivery.sender.try_send(build_message()) {
-            Ok(()) => {
-                self.metrics.increment_websocket_deliveries_enqueued();
-                if let Some(stats) = &stats {
-                    stats
-                        .sent_to_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                room_players
-                    .entry(room_id)
-                    .or_insert_with(HashSet::new)
-                    .insert(player_id);
-                clients.insert(player_id, delivery);
-                DeliveryOutcome::Delivered
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.metrics.increment_websocket_deliveries_channel_closed();
-                tracing::debug!(
-                    %player_id,
-                    %room_id,
-                    "Initial room message skipped: recipient connection already closing"
-                );
-                DeliveryOutcome::ChannelClosed
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metrics.increment_websocket_backpressure_events();
-                let initiated_close = delivery.close.request_close(CloseReason::SlowConsumer);
-                if initiated_close {
-                    self.metrics.increment_websocket_slow_consumer_disconnects();
-                }
-                self.metrics.increment_websocket_messages_dropped();
-                if let Some(stats) = &stats {
-                    stats
-                        .backpressure_events
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stats
-                        .dropped_for_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                tracing::warn!(
-                    %player_id,
-                    %room_id,
-                    initiated_close,
-                    "Initial room message queue was full; closing recipient instead of registering it"
-                );
-                DeliveryOutcome::SlowConsumer
-            }
-        };
+        let outcome = self.commit_initial_transition(player_id, permit, build_message());
+        if outcome == DeliveryOutcome::Delivered {
+            room_players.retain(|_, players| {
+                players.remove(&player_id);
+                !players.is_empty()
+            });
+            room_players
+                .entry(room_id)
+                .or_insert_with(HashSet::new)
+                .insert(player_id);
+            clients.insert(player_id, delivery.clone());
+        }
 
         Ok(outcome)
     }
@@ -1499,12 +2472,22 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: RoomId,
         delivery: ClientDeliveryHandle,
         build_message: Box<
-            dyn FnOnce() -> std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Arc<ServerMessage>> + Send + 'a>,
+            dyn FnOnce(
+                    Vec<PlayerId>,
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = anyhow::Result<Arc<ServerMessage>>>
+                            + Send
+                            + 'a,
+                    >,
                 > + Send
                 + 'a,
         >,
     ) -> anyhow::Result<DeliveryOutcome> {
+        let permit = match self.reserve_initial_transition(player_id, &delivery).await {
+            Ok(permit) => permit,
+            Err(outcome) => return Ok(outcome),
+        };
         // Same lock ordering and routing transition as the sync builder, but
         // the async builder itself is part of the critical section. Reconnect
         // uses this to fetch replay after every older broadcast has either
@@ -1513,57 +2496,29 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let mut room_players = self.room_players.write().await;
         let mut clients = self.local_clients.write().await;
 
-        let message = build_message().await;
-        self.metrics.increment_websocket_delivery_attempts();
-        let stats = self.metrics.connection_delivery_stats(&player_id);
-        let outcome = match delivery.sender.try_send(message) {
-            Ok(()) => {
-                self.metrics.increment_websocket_deliveries_enqueued();
-                if let Some(stats) = &stats {
-                    stats
-                        .sent_to_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                room_players
-                    .entry(room_id)
-                    .or_insert_with(HashSet::new)
-                    .insert(player_id);
-                clients.insert(player_id, delivery);
-                DeliveryOutcome::Delivered
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.metrics.increment_websocket_deliveries_channel_closed();
-                tracing::debug!(
-                    %player_id,
-                    %room_id,
-                    "Initial room message skipped: recipient connection already closing"
-                );
-                DeliveryOutcome::ChannelClosed
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metrics.increment_websocket_backpressure_events();
-                let initiated_close = delivery.close.request_close(CloseReason::SlowConsumer);
-                if initiated_close {
-                    self.metrics.increment_websocket_slow_consumer_disconnects();
-                }
-                self.metrics.increment_websocket_messages_dropped();
-                if let Some(stats) = &stats {
-                    stats
-                        .backpressure_events
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stats
-                        .dropped_for_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                tracing::warn!(
-                    %player_id,
-                    %room_id,
-                    initiated_close,
-                    "Initial room message queue was full; closing recipient instead of registering it"
-                );
-                DeliveryOutcome::SlowConsumer
-            }
-        };
+        let mut routed_players: Vec<PlayerId> = room_players
+            .get(&room_id)
+            .into_iter()
+            .flat_map(|players| players.iter().copied())
+            .filter(|routed_player| clients.contains_key(routed_player))
+            .collect();
+        if !routed_players.contains(&player_id) {
+            routed_players.push(player_id);
+        }
+        routed_players.sort_unstable();
+        let message = build_message(routed_players).await?;
+        let outcome = self.commit_initial_transition(player_id, permit, message);
+        if outcome == DeliveryOutcome::Delivered {
+            room_players.retain(|_, players| {
+                players.remove(&player_id);
+                !players.is_empty()
+            });
+            room_players
+                .entry(room_id)
+                .or_insert_with(HashSet::new)
+                .insert(player_id);
+            clients.insert(player_id, delivery.clone());
+        }
 
         Ok(outcome)
     }

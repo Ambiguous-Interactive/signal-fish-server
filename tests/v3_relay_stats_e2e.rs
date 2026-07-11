@@ -20,8 +20,7 @@ use signal_fish_server::protocol::{ClientMessage, ServerMessage};
 use signal_fish_server::server::EnhancedGameServer;
 use signal_fish_server::websocket::create_router;
 use std::sync::Arc;
-use test_helpers::{create_test_server_with_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server_with_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     maybe_next_matching_server_message_within, next_matching_server_message_within, WsStream,
@@ -41,26 +40,15 @@ fn v3_protocol_config() -> ProtocolConfig {
 
 async fn start_test_server(
     delivery_stats_interval_secs: u64,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let mut server_config = test_server_config();
     server_config.websocket_config.delivery_stats_interval_secs = delivery_stats_interval_secs;
     let server = create_test_server_with_config(server_config, v3_protocol_config()).await;
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
     let router = create_router("http://localhost:3000").with_state(server.clone());
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
+    let running_server = RunningTestServer::spawn(server.clone(), router).await;
 
-    (addr, server)
+    (running_server, server)
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -107,7 +95,8 @@ async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
 
 #[tokio::test]
 async fn v3_client_receives_periodic_relay_stats_when_enabled() {
-    let (addr, _server) = start_test_server(1).await;
+    let (running_server, _server) = start_test_server(1).await;
+    let addr = running_server.addr();
     let mut ws = connect(addr).await;
     authenticate(&mut ws, 3).await;
 
@@ -158,11 +147,13 @@ async fn v3_client_receives_periodic_relay_stats_when_enabled() {
             "a healthy idle connection has no backpressure"
         );
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v2_client_never_receives_relay_stats_even_when_enabled() {
-    let (addr, _server) = start_test_server(1).await;
+    let (running_server, _server) = start_test_server(1).await;
+    let addr = running_server.addr();
     let mut ws = connect(addr).await;
     authenticate(&mut ws, 2).await;
 
@@ -181,12 +172,14 @@ async fn v2_client_never_receives_relay_stats_even_when_enabled() {
         "RelayStats is part of the v3 reliability surface and must never be \
          emitted to a pre-v3 (v2) connection"
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn nobody_receives_relay_stats_with_default_config() {
     // Default config: delivery_stats_interval_secs = 0 (disabled).
-    let (addr, _server) = start_test_server(0).await;
+    let (running_server, _server) = start_test_server(0).await;
+    let addr = running_server.addr();
     let mut ws = connect(addr).await;
     authenticate(&mut ws, 3).await;
 
@@ -204,4 +197,5 @@ async fn nobody_receives_relay_stats_with_default_config() {
         stray.is_none(),
         "the default configuration must emit no RelayStats frames at all"
     );
+    running_server.shutdown().await;
 }

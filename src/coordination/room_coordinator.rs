@@ -14,13 +14,16 @@ use uuid::Uuid;
 use crate::distributed::{DistributedLock, LockHandle};
 use crate::protocol::{PeerConnectionInfo, PlayerId, PlayerInfo, RoomId};
 
-use super::MessageCoordinator;
+use super::{
+    MessageCoordinator, RoomEventCompletion, RoomEventMutationGuard, RoomMessageTransactionOutcome,
+    RoomRecipientMessages,
+};
 
 const LOBBY_TRANSITION_LOCK_TTL: Duration = Duration::from_secs(10);
 const ROOM_OPERATION_LOCK_TTL: Duration = Duration::from_secs(5);
 
-/// Snapshot of a room at finalization, surfaced so the capability-aware server
-/// layer can compute and emit the v3 SessionPlan after `GameStarting`.
+/// Snapshot of a room at finalization, used to build the capability-aware
+/// `GameStarting` and v3 `SessionPlan` publication from one member snapshot.
 ///
 /// Returned by [`RoomOperationCoordinatorTrait::handle_start_game`] on the
 /// finalize path (all current players ready and the sender authorized).
@@ -34,12 +37,49 @@ pub struct FinalizedRoom {
     pub members: Vec<PlayerInfo>,
 }
 
+/// The complete outbound publication associated with one successful game start.
+///
+/// `after_game_starting` records the sticky session decision and its metrics
+/// after every `GameStarting` frame is queued and before any tailored plan. It
+/// runs under the same final routing snapshot as the reserved message batches.
+pub struct StartGamePublication {
+    pub recipient_messages: Vec<RoomRecipientMessages>,
+    pub after_game_starting: Box<dyn FnOnce() + Send + 'static>,
+}
+
+/// Builds the capability-aware publication once the coordinator has captured
+/// the exact finalized member snapshot and uniform `GameStarting` frame.
+pub type StartGamePublicationBuilder = Box<
+    dyn FnOnce(&FinalizedRoom, Arc<crate::protocol::ServerMessage>) -> StartGamePublication
+        + Send
+        + 'static,
+>;
+
+impl StartGamePublication {
+    fn game_starting_only(
+        finalized: &FinalizedRoom,
+        game_starting: Arc<crate::protocol::ServerMessage>,
+    ) -> Self {
+        Self {
+            recipient_messages: finalized
+                .members
+                .iter()
+                .map(|member| RoomRecipientMessages {
+                    player_id: member.id,
+                    first_phase: 0,
+                    messages: vec![Arc::clone(&game_starting)],
+                })
+                .collect(),
+            after_game_starting: Box::new(|| {}),
+        }
+    }
+}
+
 /// The outcome of an explicit `StartGame`
 /// ([`RoomOperationCoordinatorTrait::handle_start_game`]).
 #[derive(Debug, Clone)]
 pub enum StartGameOutcome {
-    /// The room finalized; `GameStarting` has already been broadcast and the
-    /// caller should emit the v3 `SessionPlan` from this snapshot.
+    /// The room finalized and its complete start publication was committed.
     Started(FinalizedRoom),
     /// Not every current player is ready (maps to `GAME_START_NOT_READY`).
     NotReady,
@@ -147,6 +187,15 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
         player_id: &PlayerId,
     ) -> Result<StartGameOutcome>;
 
+    /// Start a game with one pre-reserved, exact-membership publication that
+    /// includes `GameStarting`, sticky session state, and tailored plans.
+    async fn handle_start_game_with_publication(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        build_publication: StartGamePublicationBuilder,
+    ) -> Result<StartGameOutcome>;
+
     /// The current ready set for a room, filtered to present members.
     ///
     /// The live ready state is tracked by the coordinator (not persisted to the
@@ -167,6 +216,7 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
 }
 
 /// In-memory room operation coordinator
+#[derive(Clone)]
 pub struct InMemoryRoomOperationCoordinator {
     coordinator: Arc<dyn MessageCoordinator>,
     distributed_lock: Arc<dyn DistributedLock>,
@@ -198,21 +248,96 @@ impl InMemoryRoomOperationCoordinator {
         }
     }
 
-    /// Record a room-uniform broadcast for reconnection replay (no-op when
-    /// reconnection is disabled). Called right BEFORE delivery so the event is
-    /// buffered even if the broadcast partially fails, matching "what a
-    /// connected player would have been sent".
-    async fn record_replayable_room_event(
+    /// Commit a room-uniform replay record and its live broadcast under one
+    /// routing snapshot. Reconnect registration takes the write side of that
+    /// snapshot, so it observes the event through replay or live delivery,
+    /// never both.
+    fn enqueue_replayable_room_event(
         &self,
         room_id: &RoomId,
-        message: &crate::protocol::ServerMessage,
-    ) {
-        let Some(reconnection_manager) = &self.reconnection_manager else {
-            return;
-        };
-        reconnection_manager
-            .record_room_event(room_id, message)
-            .await;
+        message: crate::protocol::ServerMessage,
+        mutation_guard: RoomEventMutationGuard,
+    ) -> RoomEventCompletion {
+        let message = Arc::new(message);
+        let replay_message = Arc::clone(&message);
+        let reconnection_manager = self.reconnection_manager.clone();
+        let replay_room_id = *room_id;
+        let coordinator = Arc::clone(&self.coordinator);
+        self.coordinator.enqueue_room_event(
+            mutation_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    coordinator
+                        .broadcast_to_room_with_hook(
+                            &replay_room_id,
+                            message,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(reconnection_manager) = reconnection_manager {
+                                        reconnection_manager
+                                            .record_room_event(
+                                                &replay_room_id,
+                                                replay_message.as_ref(),
+                                            )
+                                            .await;
+                                    }
+                                })
+                            }),
+                        )
+                        .await
+                })
+            }),
+        )
+    }
+
+    fn enqueue_authority_result(
+        &self,
+        room_id: &RoomId,
+        player_id: PlayerId,
+        response: crate::protocol::ServerMessage,
+        authority_player: Option<Option<PlayerId>>,
+        mutation_guard: RoomEventMutationGuard,
+    ) -> RoomEventCompletion {
+        let coordinator = Arc::clone(&self.coordinator);
+        let reconnection_manager = self.reconnection_manager.clone();
+        let event_room_id = *room_id;
+        self.coordinator.enqueue_room_event(
+            mutation_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    coordinator
+                        .send_to_player(&player_id, Arc::new(response))
+                        .await?;
+
+                    let Some(authority_player) = authority_player else {
+                        return Ok(true);
+                    };
+                    let message = Arc::new(crate::protocol::ServerMessage::AuthorityChanged {
+                        authority_player,
+                        you_are_authority: false,
+                    });
+                    let replay_message = Arc::clone(&message);
+                    coordinator
+                        .broadcast_to_room_with_hook(
+                            &event_room_id,
+                            message,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(reconnection_manager) = reconnection_manager {
+                                        reconnection_manager
+                                            .record_room_event(
+                                                &event_room_id,
+                                                replay_message.as_ref(),
+                                            )
+                                            .await;
+                                    }
+                                })
+                            }),
+                        )
+                        .await
+                })
+            }),
+        )
     }
 }
 
@@ -312,7 +437,7 @@ impl Drop for RoomOperationLockGuard {
 #[async_trait]
 impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool> {
-        // For in-memory implementation, just simulate the operation
+        let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
         let lock_key = format!("room_lobby_transition:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
             Arc::clone(&self.distributed_lock),
@@ -322,46 +447,93 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         )
         .await?;
 
-        let result = async {
-            // Enter the lobby EXACTLY ONCE. `should_enter_lobby` is now true for
-            // any non-empty `Waiting` room (`max_players` is a ceiling), so the
-            // join path calls this on every join; persisting the transition and
-            // short-circuiting a room that already left `Waiting` keeps a room
-            // from re-broadcasting `LobbyStateChanged` on each join. A late
-            // joiner therefore reads an accurate `lobby_state: Lobby` in its
-            // `RoomJoined` and receives no redundant follow-up.
-            match self.database.get_room_by_id(room_id).await {
-                Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Waiting => {}
-                Ok(Some(_)) => return Ok(false), // already Lobby/Finalized: no-op
-                Ok(None) => return Err(anyhow::anyhow!("Room not found")),
-                Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
+        // Enter the lobby exactly once. All fallible snapshot work happens
+        // before persistence changes. The room-event guard keeps membership
+        // and ready-state mutations out of this snapshot until the resulting
+        // event has committed.
+        match self.database.get_room_by_id(room_id).await {
+            Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Waiting => {}
+            Ok(Some(_)) => {
+                drop(mutation_guard);
+                lock_guard.release().await;
+                return Ok(false);
             }
-
-            // Persist Waiting -> Lobby under the lock; the broadcast happens
-            // after release (see below).
-            self.database.transition_room_to_lobby(room_id).await?;
-            Ok(true)
+            Ok(None) => {
+                drop(mutation_guard);
+                lock_guard.release().await;
+                return Err(anyhow::anyhow!("Room not found"));
+            }
+            Err(error) => {
+                drop(mutation_guard);
+                lock_guard.release().await;
+                return Err(anyhow::anyhow!("Failed to get room: {error}"));
+            }
         }
-        .await;
 
-        // The room-operation lock protects state, never delivery: coordinator
-        // sends apply backpressure (bounded by the slow-consumer timeout) and
-        // must not extend a distributed-lock critical section past its TTL.
-        lock_guard.release().await;
+        let room_players = self.database.get_room_players(room_id).await?;
+        let routed_players = self.coordinator.routed_player_ids(room_id).await?;
+        let current_ids: HashSet<PlayerId> = match routed_players {
+            Some(routed_players) => {
+                let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
+                room_players
+                    .iter()
+                    .filter(|player| routed.contains(&player.id))
+                    .map(|player| player.id)
+                    .collect()
+            }
+            None => room_players.iter().map(|player| player.id).collect(),
+        };
+        let ready_set = self
+            .ready_players
+            .read()
+            .await
+            .get(room_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut ready_players: Vec<PlayerId> =
+            ready_set.intersection(&current_ids).copied().collect();
+        ready_players.sort_unstable();
+        let all_ready = !current_ids.is_empty()
+            && current_ids
+                .iter()
+                .all(|player_id| ready_set.contains(player_id));
+        let message = crate::protocol::ServerMessage::LobbyStateChanged {
+            lobby_state: crate::protocol::LobbyState::Lobby,
+            ready_players,
+            all_ready,
+        };
 
-        if matches!(result, Ok(true)) {
-            let message = crate::protocol::ServerMessage::LobbyStateChanged {
-                lobby_state: crate::protocol::LobbyState::Lobby,
-                ready_players: Vec::new(),
-                all_ready: false,
+        // From the first durable mutation onward this task owns the room guard
+        // and distributed lock. Dropping the caller only detaches its join
+        // handle; the transition still reaches the synchronous FIFO enqueue.
+        let coordinator = self.clone();
+        let room_id = *room_id;
+        let transaction = tokio::spawn(async move {
+            let transition = coordinator
+                .database
+                .transition_room_to_lobby(&room_id)
+                .await;
+            let completion = match transition {
+                Ok(()) => {
+                    coordinator.enqueue_replayable_room_event(&room_id, message, mutation_guard)
+                }
+                Err(error) => {
+                    lock_guard.release().await;
+                    return Err(error);
+                }
             };
-            self.record_replayable_room_event(room_id, &message).await;
-            self.coordinator
-                .broadcast_to_room(room_id, Arc::new(message))
-                .await?;
+
+            // Delivery backpressure must not extend the TTL-bounded operation
+            // lock; the FIFO job itself retains the room mutation guard.
+            lock_guard.release().await;
+            completion.await?;
             tracing::info!(%room_id, "Room transitioned to lobby state (in-memory)");
-        }
-        result
+            Ok(true)
+        });
+
+        transaction
+            .await
+            .map_err(|error| anyhow::anyhow!("Owned lobby transition task failed: {error}"))?
     }
 
     async fn coordinate_authority_transfer(
@@ -370,6 +542,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         new_authority: &PlayerId,
     ) -> Result<bool> {
         // For in-memory implementation, just simulate the operation
+        let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
         let lock_key = format!("authority_transfer:{room_id}:{new_authority}");
         let lock_guard = RoomOperationLockGuard::acquire(
             Arc::clone(&self.distributed_lock),
@@ -379,19 +552,17 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         )
         .await?;
 
-        // Nothing to mutate for the in-memory simulation; release the
-        // room-operation lock before delivery (sends can be backpressured and
-        // must never run inside a TTL-bounded critical section).
-        lock_guard.release().await;
-
         let message = crate::protocol::ServerMessage::AuthorityChanged {
             authority_player: Some(*new_authority),
             you_are_authority: false, // Will be customized per client
         };
-        self.record_replayable_room_event(room_id, &message).await;
-        self.coordinator
-            .broadcast_to_room(room_id, Arc::new(message))
-            .await?;
+        let completion = self.enqueue_replayable_room_event(room_id, message, mutation_guard);
+
+        // Nothing to mutate for the in-memory simulation; enqueue before
+        // releasing the ordering gate, then await delivery outside the
+        // TTL-bounded room-operation lock.
+        lock_guard.release().await;
+        completion.await?;
         tracing::info!(%room_id, %new_authority, "Authority transferred (in-memory)");
         Ok(true)
     }
@@ -418,7 +589,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         player_id: &PlayerId,
         become_authority: bool,
     ) -> Result<(bool, Option<String>)> {
-        // For in-memory implementation, use the actual database authority request method
+        let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
         let lock_key = format!("room_authority:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
             Arc::clone(&self.distributed_lock),
@@ -428,133 +599,77 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         )
         .await?;
 
-        // The locked section performs the state mutation and *collects* the
-        // notifications; delivery happens after the lock is released because
-        // coordinator sends can be backpressured (bounded by the slow-consumer
-        // timeout) and must never stretch a TTL-bounded critical section.
-        let mut outbound: Vec<(PlayerId, crate::protocol::ServerMessage)> = Vec::new();
-        let result = async {
+        // From the first durable mutation onward this owned task retains both
+        // operation guards. Dropping the caller only detaches its join handle;
+        // the database result still reaches the synchronous FIFO enqueue.
+        let coordinator = self.clone();
+        let room_id = *room_id;
+        let player_id = *player_id;
+        let transaction = tokio::spawn(async move {
             tracing::info!(%room_id, %player_id, %become_authority, "InMemory: Processing authority request");
 
-            // Use the database's atomic authority request method
-            let result = self
+            let (result, response, authority_change) = match coordinator
                 .database
-                .request_room_authority(room_id, player_id, become_authority)
-                .await;
-
-            match result {
+                .request_room_authority(&room_id, &player_id, become_authority)
+                .await
+            {
                 Ok((granted, reason)) => {
-                    if granted {
-                        // Broadcast authority change to all players
-                        let new_authority = if become_authority {
-                            Some(*player_id)
-                        } else {
+                    let response = crate::protocol::ServerMessage::AuthorityResponse {
+                        granted,
+                        reason: reason.clone(),
+                        error_code: if granted {
                             None
-                        };
-
-                        // First queue the specific authority response for the requester
-                        outbound.push((
-                            *player_id,
-                            crate::protocol::ServerMessage::AuthorityResponse {
-                                granted,
-                                reason: reason.clone(),
-                                error_code: None,
-                            },
-                        ));
-
-                        // Instead of broadcasting, we need to send a custom message to each player
-                        // to set the you_are_authority flag correctly.
-                        // Get all player IDs in the room from database
-                        let room = match self.database.get_room_by_id(room_id).await {
-                            Ok(Some(room)) => room,
-                            Ok(None) => {
-                                tracing::error!(%room_id, "Room not found when handling authority change");
-                                return Ok((granted, reason));
-                            }
-                            Err(e) => {
-                                tracing::error!(%room_id, "Failed to get room: {}", e);
-                                return Ok((granted, reason));
-                            }
-                        };
-
-                        for room_player_id in room.players.keys() {
-                            // This player is the authority if they requested authority and it was granted
-                            let is_authority = become_authority && room_player_id == player_id;
-                            outbound.push((
-                                *room_player_id,
-                                crate::protocol::ServerMessage::AuthorityChanged {
-                                    authority_player: new_authority,
-                                    you_are_authority: is_authority,
-                                },
-                            ));
-                        }
-
+                        } else {
+                            Some(crate::protocol::ErrorCode::AuthorityDenied)
+                        },
+                    };
+                    let authority_change = granted.then_some(if become_authority {
+                        Some(player_id)
+                    } else {
+                        None
+                    });
+                    if granted {
                         tracing::info!(%room_id, %player_id, %become_authority, "Authority request granted (in-memory)");
                     } else {
-                        // Queue the denial response for the requester
-                        outbound.push((
-                            *player_id,
-                            crate::protocol::ServerMessage::AuthorityResponse {
-                                granted,
-                                reason: reason.clone(),
-                                error_code: Some(crate::protocol::ErrorCode::AuthorityDenied),
-                            },
-                        ));
-
                         tracing::info!(%room_id, %player_id, %become_authority, ?reason, "Authority request denied (in-memory)");
                     }
 
-                    Ok((granted, reason))
+                    ((granted, reason), response, authority_change)
                 }
                 Err(e) => {
                     tracing::error!(%room_id, %player_id, %become_authority, "Authority request failed: {}", e);
-
-                    outbound.push((
-                        *player_id,
+                    (
+                        (false, Some("Storage error".to_string())),
                         crate::protocol::ServerMessage::AuthorityResponse {
                             granted: false,
                             reason: Some("Storage error".to_string()),
                             error_code: Some(crate::protocol::ErrorCode::StorageError),
                         },
-                    ));
-
-                    Ok((false, Some("Storage error".to_string())))
+                        None,
+                    )
                 }
+            };
+            let completion = coordinator.enqueue_authority_result(
+                &room_id,
+                player_id,
+                response,
+                authority_change,
+                mutation_guard,
+            );
+
+            // Delivery backpressure must not extend the TTL-bounded operation
+            // lock. The FIFO job owns the room mutation guard and sends exactly
+            // one response before any room-scoped AuthorityChanged.
+            lock_guard.release().await;
+            if let Err(error) = completion.await {
+                tracing::error!(%room_id, %player_id, %error, "Failed to emit authority result");
             }
-        }
-        .await;
+            result
+        });
 
-        lock_guard.release().await;
-
-        // Deliver concurrently ACROSS recipients (a single backpressured
-        // recipient must not delay everyone else's notification by up to the
-        // slow-consumer timeout) while preserving each recipient's OWN
-        // message order (the requester sees AuthorityResponse before its
-        // AuthorityChanged). Rooms are small, so the quadratic grouping scan
-        // is trivially cheap and keeps first-queued-first-sent order.
-        let mut per_recipient: Vec<(PlayerId, Vec<crate::protocol::ServerMessage>)> = Vec::new();
-        for (target, message) in outbound {
-            match per_recipient.iter_mut().find(|(pid, _)| *pid == target) {
-                Some((_, messages)) => messages.push(message),
-                None => per_recipient.push((target, vec![message])),
-            }
-        }
-        futures_util::future::join_all(per_recipient.into_iter().map(
-            |(target, messages)| async move {
-                for message in messages {
-                    if let Err(e) = self
-                        .coordinator
-                        .send_to_player(&target, Arc::new(message))
-                        .await
-                    {
-                        tracing::error!(%target, "Failed to send authority notification: {}", e);
-                    }
-                }
-            },
-        ))
-        .await;
-
-        result
+        transaction
+            .await
+            .map_err(|error| anyhow::anyhow!("Owned authority request task failed: {error}"))
     }
 
     async fn handle_player_ready(
@@ -564,6 +679,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         _app_id: Option<Uuid>,
     ) -> std::result::Result<(), PlayerReadyError> {
         // For in-memory implementation, simulate player ready toggle
+        let mut mutation_guard = Some(self.coordinator.lock_room_event_mutation(room_id).await);
         let lock_key = format!("room_ready_state:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
             Arc::clone(&self.distributed_lock),
@@ -574,6 +690,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         .await
         .map_err(PlayerReadyError::Internal)?;
 
+        let mut completion = None;
         let result = async {
             // Get current room state to check if it has enough players for lobby actions
             let room = match self.database.get_room_by_id(room_id).await {
@@ -601,9 +718,25 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             let room_players = match self.database.get_room_players(room_id).await {
                 Ok(players) => players,
                 Err(e) => {
-                    tracing::error!("Failed to get room players: {}", e);
-                    Vec::new()
+                    return Err(PlayerReadyError::Internal(
+                        e.context("failed to load room membership for ready toggle"),
+                    ));
                 }
+            };
+            let routed_players = self
+                .coordinator
+                .routed_player_ids(room_id)
+                .await
+                .map_err(PlayerReadyError::Internal)?;
+            let room_players: Vec<PlayerInfo> = match routed_players {
+                Some(routed_players) => {
+                    let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
+                    room_players
+                        .into_iter()
+                        .filter(|player| routed.contains(&player.id))
+                        .collect()
+                }
+                None => room_players,
             };
             let current_ids: HashSet<PlayerId> = room_players.iter().map(|p| p.id).collect();
 
@@ -638,26 +771,34 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             // so clients know `StartGame` is now permitted) is broadcast after
             // the lock releases below.
             tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
+            let message = crate::protocol::ServerMessage::LobbyStateChanged {
+                lobby_state: crate::protocol::LobbyState::Lobby,
+                ready_players: ready_players_vec.clone(),
+                all_ready,
+            };
+            let Some(ready_guard) = mutation_guard.take() else {
+                return Err(PlayerReadyError::Internal(anyhow::anyhow!(
+                    "ready mutation guard was unavailable before publication"
+                )));
+            };
+            completion = Some(self.enqueue_replayable_room_event(room_id, message, ready_guard));
             Ok((ready_players_vec, all_ready))
         }
         .await;
 
         // Broadcast outside the TTL-bounded critical section: delivery can be
         // backpressured by a slow recipient and must never hold the room lock.
+        drop(mutation_guard);
         lock_guard.release().await;
 
         match result {
-            Ok((ready_players, all_ready)) => {
-                let message = crate::protocol::ServerMessage::LobbyStateChanged {
-                    lobby_state: crate::protocol::LobbyState::Lobby,
-                    ready_players,
-                    all_ready,
+            Ok((_ready_players, _all_ready)) => {
+                let Some(completion) = completion else {
+                    return Err(PlayerReadyError::Internal(anyhow::anyhow!(
+                        "successful ready toggle did not enqueue its publication"
+                    )));
                 };
-                self.record_replayable_room_event(room_id, &message).await;
-                self.coordinator
-                    .broadcast_to_room(room_id, Arc::new(message))
-                    .await
-                    .map_err(PlayerReadyError::Internal)?;
+                completion.await.map_err(PlayerReadyError::Internal)?;
                 Ok(())
             }
             Err(err) => Err(err),
@@ -668,15 +809,31 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     /// members when every current player is ready and the sender is permitted
     /// to start (the room's authority, or any member if no authority is set).
     ///
-    /// Returns the [`StartGameOutcome`]: `Started(FinalizedRoom)` on success (the
-    /// `GameStarting` broadcast has already been sent, so the caller only needs
-    /// to emit the v3 `SessionPlan`), or a rejection variant the caller maps to
+    /// Returns the [`StartGameOutcome`]: `Started(FinalizedRoom)` after the
+    /// complete publication commits, or a rejection variant the caller maps to
     /// the matching `ErrorCode`.
     async fn handle_start_game(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
     ) -> Result<StartGameOutcome> {
+        self.handle_start_game_with_publication(
+            room_id,
+            player_id,
+            Box::new(|finalized, game_starting| {
+                StartGamePublication::game_starting_only(finalized, game_starting)
+            }),
+        )
+        .await
+    }
+
+    async fn handle_start_game_with_publication(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        build_publication: StartGamePublicationBuilder,
+    ) -> Result<StartGameOutcome> {
+        let mut mutation_guard = Some(self.coordinator.lock_room_event_mutation(room_id).await);
         let lock_key = format!("room_ready_state:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
             Arc::clone(&self.distributed_lock),
@@ -688,6 +845,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
         // Captured under the lock for the post-release broadcast.
         let mut relay_type_for_broadcast: Option<String> = None;
+        let mut lobby_state_for_finalize = None;
         let result = async {
             let room = match self.database.get_room_by_id(room_id).await {
                 Ok(Some(room)) => room,
@@ -695,6 +853,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
             };
             relay_type_for_broadcast = Some(room.relay_type.clone());
+            lobby_state_for_finalize = Some(room.lobby_state.clone());
 
             // Already started: a finalized room cannot be started again.
             if room.lobby_state == crate::protocol::LobbyState::Finalized {
@@ -711,10 +870,18 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
             let room_players = match self.database.get_room_players(room_id).await {
                 Ok(players) => players,
-                Err(e) => {
-                    tracing::error!("Failed to get room players: {}", e);
-                    Vec::new()
+                Err(e) => return Err(e.context("failed to load room membership for game start")),
+            };
+            let routed_players = self.coordinator.routed_player_ids(room_id).await?;
+            let room_players: Vec<PlayerInfo> = match routed_players {
+                Some(routed_players) => {
+                    let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
+                    room_players
+                        .into_iter()
+                        .filter(|player| routed.contains(&player.id))
+                        .collect()
                 }
+                None => room_players,
             };
 
             // All current players must be ready (min 1 — solo is allowed).
@@ -730,70 +897,137 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 return Ok(StartGameOutcome::NotReady);
             }
 
-            // Persist the finalized lobby state BEFORE broadcasting, still under
-            // the room-operation lock, so storage and clients agree the session
-            // is live. Without this write the stored room stays `Lobby` forever:
-            // a post-game departure would wrongly regress it and replay the
-            // lobby cycle, and every `Finalized`-gated path (v3 late-join /
-            // reconnect pairing, departure re-planning) would be unreachable.
-            // Best-effort: a persist failure must not abort the v2 GameStarting
-            // broadcast (the relay floor still works).
-            if let Err(err) = self.database.finalize_room_game(room_id).await {
-                tracing::warn!(%room_id, error = %err, "Failed to persist finalized lobby state");
-            }
-
-            // Re-read membership AFTER persisting `Finalized` so the broadcast and
-            // the emitted plan reflect the authoritative finalized member set, not
-            // the pre-check snapshot. `leave_room` is not serialized against this
-            // lock, so a player could depart between the all-ready check above and
-            // here; using the post-finalize read keeps `GameStarting.peer_connections`
-            // and `FinalizedRoom.members` consistent with the persisted room (a
-            // player who left before finalize is not named as a phantom peer/host).
-            // Any departure AFTER finalize is a Finalized-room leave, handled by
-            // `handle_session_member_departure` (PlayerLeft + v3 re-plan).
-            let finalized_members = match self.database.get_room_players(room_id).await {
-                Ok(players) if !players.is_empty() => players,
-                // Fall back to the pre-check snapshot if the room vanished (e.g.
-                // the last member left concurrently) — the broadcast below is then
-                // best-effort and the departure path carries the relay floor.
-                _ => room_players,
-            };
-
             Ok(StartGameOutcome::Started(FinalizedRoom {
                 game_name: room.game_name.clone(),
                 authority_player: room.authority_player,
-                members: finalized_members,
+                members: room_players,
             }))
         }
         .await;
 
-        // Broadcast + ready-set cleanup happen outside the TTL-bounded
-        // critical section: delivery can be backpressured by a slow recipient
-        // and must never hold the room lock. State is already consistent —
-        // the room is persisted `Finalized`, so a concurrent `PlayerReady`
-        // is rejected regardless of the ready-set contents, and clearing the
-        // set afterwards is idempotent cleanup.
-        lock_guard.release().await;
-
-        if let Ok(StartGameOutcome::Started(finalized)) = &result {
-            // Preserve the legacy GameStarting metadata; v3 transport proof comes
-            // from negotiation and TransportStatus, not this payload.
-            let relay_type = relay_type_for_broadcast.unwrap_or_default();
+        let completion = if let Ok(StartGameOutcome::Started(finalized)) = &result {
+            let Some(lobby_state) = lobby_state_for_finalize.take() else {
+                drop(mutation_guard);
+                lock_guard.release().await;
+                anyhow::bail!("start candidate omitted its pre-finalization lobby state");
+            };
+            let Some(start_guard) = mutation_guard.take() else {
+                lock_guard.release().await;
+                anyhow::bail!("start mutation guard was unavailable before publication");
+            };
+            let relay_type = relay_type_for_broadcast.take().unwrap_or_default();
             let peer_connections =
                 PeerConnectionInfo::from_players(&finalized.members, &relay_type);
             let game_start_message =
                 Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
-            self.coordinator
-                .broadcast_to_room(room_id, game_start_message)
-                .await?;
+            let expected_members: Vec<PlayerId> =
+                finalized.members.iter().map(|member| member.id).collect();
+            let finalize_expectation = crate::database::FinalizeRoomGameExpectation {
+                members: expected_members.clone(),
+                authority_player: finalized.authority_player,
+                lobby_state,
+            };
+            let publication = build_publication(finalized, game_start_message);
+            let coordinator = Arc::clone(&self.coordinator);
+            let database = Arc::clone(&self.database);
+            let ready_players = Arc::clone(&self.ready_players);
+            let finalize_room_id = *room_id;
+            Some(self.coordinator.enqueue_room_event(
+                start_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        let StartGamePublication {
+                            recipient_messages,
+                            after_game_starting,
+                        } = publication;
+                        let outcome = coordinator
+                            .commit_room_messages_if_members_with_hook(
+                                &finalize_room_id,
+                                &expected_members,
+                                recipient_messages,
+                                Box::new(move || {
+                                    Box::pin(async move {
+                                        match database
+                                            .finalize_room_game(
+                                                &finalize_room_id,
+                                                &finalize_expectation,
+                                            )
+                                            .await?
+                                        {
+                                            crate::database::FinalizeRoomGameOutcome::Finalized => Ok(true),
+                                            crate::database::FinalizeRoomGameOutcome::AlreadyFinalized => {
+                                                Ok(false)
+                                            }
+                                            crate::database::FinalizeRoomGameOutcome::SnapshotChanged => {
+                                                anyhow::bail!(
+                                                    "room state changed while starting the game"
+                                                )
+                                            }
+                                        }
+                                    })
+                                }),
+                                Box::new(move |_failed_phase_zero| {
+                                    after_game_starting();
+                                    true
+                                }),
+                            )
+                            .await?;
+                        match outcome {
+                            RoomMessageTransactionOutcome::Committed => {
+                                ready_players.write().await.remove(&finalize_room_id);
+                                Ok(true)
+                            }
+                            RoomMessageTransactionOutcome::CommittedDegraded {
+                                failed_frames,
+                            } => {
+                                // The durable CAS won. A socket closed during
+                                // that async hook, but healthy recipients were
+                                // still attempted phase-by-phase and sticky
+                                // session state was published. Finalization is
+                                // authoritative, so ready state must not linger.
+                                ready_players.write().await.remove(&finalize_room_id);
+                                tracing::warn!(
+                                    room_id = %finalize_room_id,
+                                    failed_frames,
+                                    "Game start committed with degraded frame delivery"
+                                );
+                                Ok(true)
+                            }
+                            RoomMessageTransactionOutcome::HookRejected => {
+                                // Another coordinator won the durable start CAS.
+                                // Its publication owns delivery, but this node's
+                                // local ready snapshot is equally obsolete.
+                                ready_players.write().await.remove(&finalize_room_id);
+                                Ok(false)
+                            }
+                            RoomMessageTransactionOutcome::RoutingChanged => {
+                                anyhow::bail!("room membership changed while starting the game")
+                            }
+                        }
+                    })
+                }),
+            ))
+        } else {
+            None
+        };
 
-            // Clear ready players for this room since the game has started.
-            let mut ready_map = self.ready_players.write().await;
-            ready_map.remove(room_id);
-            drop(ready_map);
+        // Release the TTL-bounded distributed lock before awaiting any
+        // backpressured delivery. On the start path the detached FIFO job owns
+        // the local mutation guard through persistence + broadcast.
+        lock_guard.release().await;
+
+        if let Ok(StartGameOutcome::Started(_finalized)) = &result {
+            let Some(completion) = completion else {
+                anyhow::bail!("successful game start did not enqueue its publication");
+            };
+            let committed = completion.await?;
+            if !committed {
+                return Ok(StartGameOutcome::AlreadyStarted);
+            }
 
             tracing::info!(%room_id, %player_id, "Game started via explicit StartGame (in-memory)");
         }
+        drop(mutation_guard);
 
         result
     }
@@ -835,7 +1069,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordination::{MembershipUpdate, MessageCoordinator};
+    use crate::coordination::{
+        ClientDeliveryHandle, ConnectionCloseSignal, MembershipUpdate, MessageCoordinator,
+        RoomEventCompletion, RoomEventJob, RoomEventMutationGuard, RoomEventSequencer,
+    };
     use crate::database::{GameDatabase, InMemoryDatabase};
     use crate::distributed::{
         DistributedLock, InMemoryDistributedLock, LockHandle, SequencedMessage,
@@ -844,7 +1081,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::{BTreeMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{Mutex, Notify};
+    use tokio::sync::{mpsc, Mutex, Notify};
     use tokio::time::{sleep, timeout};
 
     use crate::protocol::ErrorCode;
@@ -871,9 +1108,9 @@ mod tests {
     async fn clear_ready_players_removes_the_rooms_coordinator_entry() {
         // Leak guard: a `PlayerReady` toggle creates a per-room ready entry in
         // the coordinator's in-memory map; that entry is pure garbage once the
-        // room empties/deletes and must be removable. `leave_room` (last member
-        // departs) and empty-room cleanup both call `clear_ready_players`; this
-        // verifies the mechanism they rely on actually drops the entry.
+        // room is deleted and must be removable. Maintenance uses this method
+        // for explicit cleanup, with `prune_ready_players` as the all-paths
+        // backstop; this verifies the shared removal mechanism.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let lock = Arc::new(InMemoryDistributedLock::new());
@@ -920,6 +1157,428 @@ mod tests {
             .expect("repeat clear is a no-op");
     }
 
+    #[tokio::test]
+    async fn lobby_transition_preserves_ready_state_that_won_first() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9898);
+        let room = database
+            .create_room(
+                "ready-before-lobby".to_string(),
+                None,
+                1,
+                true,
+                player,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        let coord = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            Arc::new(InMemoryDistributedLock::new()),
+            database,
+            None,
+        );
+
+        coord
+            .handle_player_ready(&room.id, &player, None)
+            .await
+            .expect("ready toggle succeeds while room is Waiting");
+        assert!(coord
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("lobby transition succeeds"));
+
+        let broadcasts = messages.broadcasts().await;
+        assert_eq!(broadcasts.len(), 2);
+        for event in broadcasts {
+            match event.message {
+                ServerMessage::LobbyStateChanged {
+                    ready_players,
+                    all_ready,
+                    ..
+                } => {
+                    assert_eq!(ready_players, vec![player]);
+                    assert!(all_ready);
+                }
+                other => panic!("expected lobby snapshot, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_ready_broadcast_preserves_mutation_order() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let messages = Arc::new(
+            crate::server::InMemoryMessageCoordinator::with_delivery_policy(
+                Duration::from_secs(30),
+                Arc::clone(&metrics),
+            ),
+        );
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9901);
+        let room = database
+            .create_room(
+                "ordered-ready-game".to_string(),
+                None,
+                1,
+                true,
+                player,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("pre-fill recipient queue");
+        messages
+            .register_local_client(
+                player,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("route ready recipient");
+        let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
+            messages, lock, database, None,
+        ));
+
+        let first = {
+            let coord = Arc::clone(&coord);
+            tokio::spawn(async move { coord.handle_player_ready(&room.id, &player, None).await })
+        };
+        for _ in 0..10_000 {
+            if metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed),
+            1,
+            "first ready snapshot must be stalled before the second mutation"
+        );
+        let second = {
+            let coord = Arc::clone(&coord);
+            tokio::spawn(async move { coord.handle_player_ready(&room.id, &player, None).await })
+        };
+
+        assert!(matches!(
+            receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+        let first_snapshot = receiver.recv().await.expect("first ready snapshot");
+        let second_snapshot = receiver.recv().await.expect("second ready snapshot");
+        match first_snapshot.as_ref() {
+            ServerMessage::LobbyStateChanged {
+                ready_players,
+                all_ready,
+                ..
+            } => {
+                assert_eq!(ready_players, &[player]);
+                assert!(*all_ready);
+            }
+            other => panic!("expected first ready snapshot, got {other:?}"),
+        }
+        match second_snapshot.as_ref() {
+            ServerMessage::LobbyStateChanged {
+                ready_players,
+                all_ready,
+                ..
+            } => {
+                assert!(ready_players.is_empty());
+                assert!(!all_ready);
+            }
+            other => panic!("expected second ready snapshot, got {other:?}"),
+        }
+        first
+            .await
+            .expect("first ready task should not panic")
+            .expect("first ready succeeds");
+        second
+            .await
+            .expect("second ready task should not panic")
+            .expect("second ready succeeds");
+    }
+
+    #[tokio::test]
+    async fn delayed_authority_release_precedes_later_claim() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let messages = Arc::new(
+            crate::server::InMemoryMessageCoordinator::with_delivery_policy(
+                Duration::from_secs(30),
+                Arc::clone(&metrics),
+            ),
+        );
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let authority = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9911);
+        let claimant = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9912);
+        let room = database
+            .create_room(
+                "ordered-authority-game".to_string(),
+                None,
+                2,
+                true,
+                authority,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(
+                &room.id,
+                PlayerInfo {
+                    id: claimant,
+                    name: "claimant".to_string(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: chrono::Utc::now(),
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: "region-a".to_string(),
+                },
+            )
+            .await
+            .expect("add claimant"));
+
+        let (authority_sender, mut authority_receiver) = mpsc::channel(1);
+        authority_sender
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("pre-fill authority queue");
+        let (claimant_sender, mut claimant_receiver) = mpsc::channel(8);
+        messages
+            .register_local_client(
+                authority,
+                Some(room.id),
+                ClientDeliveryHandle::new(authority_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("route authority");
+        messages
+            .register_local_client(
+                claimant,
+                Some(room.id),
+                ClientDeliveryHandle::new(claimant_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("route claimant");
+        let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
+            messages, lock, database, None,
+        ));
+
+        let release = {
+            let coord = Arc::clone(&coord);
+            tokio::spawn(async move {
+                coord
+                    .handle_authority_request(&room.id, &authority, false)
+                    .await
+            })
+        };
+        for _ in 0..10_000 {
+            if metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let claim = {
+            let coord = Arc::clone(&coord);
+            tokio::spawn(async move {
+                coord
+                    .handle_authority_request(&room.id, &claimant, true)
+                    .await
+            })
+        };
+
+        assert!(matches!(
+            authority_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+        assert!(matches!(
+            authority_receiver.recv().await.as_deref(),
+            Some(ServerMessage::AuthorityResponse { granted: true, .. })
+        ));
+        assert!(matches!(
+            authority_receiver.recv().await.as_deref(),
+            Some(ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            })
+        ));
+        assert!(matches!(
+            authority_receiver.recv().await.as_deref(),
+            Some(ServerMessage::AuthorityChanged {
+                authority_player: Some(id),
+                you_are_authority: false,
+            }) if *id == claimant
+        ));
+        assert!(matches!(
+            claimant_receiver.recv().await.as_deref(),
+            Some(ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            })
+        ));
+        assert!(matches!(
+            claimant_receiver.recv().await.as_deref(),
+            Some(ServerMessage::AuthorityResponse { granted: true, .. })
+        ));
+        assert!(matches!(
+            claimant_receiver.recv().await.as_deref(),
+            Some(ServerMessage::AuthorityChanged {
+                authority_player: Some(id),
+                you_are_authority: true,
+            }) if *id == claimant
+        ));
+        release
+            .await
+            .expect("release task should not panic")
+            .expect("release succeeds");
+        claim
+            .await
+            .expect("claim task should not panic")
+            .expect("claim succeeds");
+    }
+
+    #[tokio::test]
+    async fn aborted_authority_request_after_commit_still_publishes_exactly_once() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let replay = Arc::new(crate::reconnection::ReconnectionManager::new(
+            30,
+            8,
+            Arc::new(crate::metrics::ServerMetrics::new()),
+        ));
+        let authority = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9921);
+        let room = database
+            .create_room(
+                "abort-authority-game".to_string(),
+                None,
+                2,
+                true,
+                authority,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        let (sender, mut receiver) = mpsc::channel(8);
+        messages
+            .register_local_client(
+                authority,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("route authority");
+        let pending_reconnector = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9922);
+        replay
+            .register_disconnection(pending_reconnector, room.id, false, None, 0)
+            .await;
+        let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
+            messages,
+            lock.clone(),
+            database.clone(),
+            Some(replay.clone()),
+        ));
+        database.pause_authority_request_after_commit_for_test();
+
+        let request = {
+            let coord = Arc::clone(&coord);
+            tokio::spawn(async move {
+                coord
+                    .handle_authority_request(&room.id, &authority, false)
+                    .await
+            })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_authority_request_commit_for_test(),
+        )
+        .await
+        .expect("authority mutation reaches the post-commit pause");
+        assert_eq!(
+            database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("read committed authority state")
+                .expect("room remains present")
+                .authority_player,
+            None,
+            "storage commit occurs before the caller is canceled"
+        );
+
+        request.abort();
+        request
+            .await
+            .expect_err("test aborts only the caller awaiting the owned transaction");
+        database.release_authority_request_commit_for_test();
+
+        let response = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("authority response arrives");
+        assert!(matches!(
+            response.as_deref(),
+            Some(ServerMessage::AuthorityResponse { granted: true, .. })
+        ));
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("authority event arrives");
+        assert!(matches!(
+            event.as_deref(),
+            Some(ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            })
+        ));
+        let unexpected = receiver.try_recv();
+        assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
+        let replayed = replay.get_missed_events(&room.id, 0).await;
+        assert_eq!(
+            replayed
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    ServerMessage::AuthorityChanged {
+                        authority_player: None,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the committed authority change is recorded exactly once"
+        );
+        assert!(
+            !lock
+                .is_locked(&format!("room_authority:{}", room.id))
+                .await
+                .expect("lock state is readable"),
+            "delivery wait must not retain the TTL-bounded authority lock"
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct BroadcastEvent {
         room_id: RoomId,
@@ -928,9 +1587,11 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingMessageCoordinator {
+        room_events: Arc<RoomEventSequencer>,
         broadcasts: Mutex<Vec<BroadcastEvent>>,
         failed_broadcast_calls: Mutex<HashSet<usize>>,
         broadcast_attempts: AtomicUsize,
+        degraded_transaction_frames: AtomicUsize,
     }
 
     impl RecordingMessageCoordinator {
@@ -941,10 +1602,27 @@ mod tests {
         async fn broadcasts(&self) -> Vec<BroadcastEvent> {
             self.broadcasts.lock().await.clone()
         }
+
+        fn degrade_next_transaction(&self, failed_frames: usize) {
+            self.degraded_transaction_frames
+                .store(failed_frames, Ordering::Release);
+        }
     }
 
     #[async_trait]
     impl MessageCoordinator for RecordingMessageCoordinator {
+        async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
+            self.room_events.lock(*room_id).await
+        }
+
+        fn enqueue_room_event(
+            &self,
+            mutation_guard: RoomEventMutationGuard,
+            job: RoomEventJob,
+        ) -> RoomEventCompletion {
+            self.room_events.enqueue(mutation_guard, job)
+        }
+
         async fn send_to_player(
             &self,
             _player_id: &PlayerId,
@@ -996,6 +1674,100 @@ mod tests {
             Ok(())
         }
 
+        async fn broadcast_to_room_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            before_send().await;
+            self.broadcast_to_room(room_id, message).await?;
+            Ok(true)
+        }
+
+        async fn broadcast_to_room_if_members_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            self.broadcast_to_room_with_hook(room_id, message, before_send)
+                .await
+        }
+
+        async fn broadcast_to_room_except_if_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            except_player: &PlayerId,
+            message: Arc<ServerMessage>,
+            should_send: &(dyn Fn() -> bool + Send + Sync),
+            drain: tokio::sync::watch::Receiver<bool>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            if *drain.borrow() || !should_send() {
+                return Ok(false);
+            }
+            before_send().await;
+            self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+            Ok(true)
+        }
+
+        async fn commit_room_messages_if_members_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            recipient_messages: Vec<RoomRecipientMessages>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,
+                    > + Send
+                    + 'a,
+            >,
+            after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+        ) -> Result<RoomMessageTransactionOutcome> {
+            let call_number = self.broadcast_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if self
+                .failed_broadcast_calls
+                .lock()
+                .await
+                .contains(&call_number)
+            {
+                anyhow::bail!("injected broadcast failure on call {call_number}");
+            }
+            if !before_send().await? {
+                return Ok(RoomMessageTransactionOutcome::HookRejected);
+            }
+            let message = recipient_messages
+                .first()
+                .and_then(|batch| batch.messages.first())
+                .expect("start transaction has a uniform first frame");
+            self.broadcasts.lock().await.push(BroadcastEvent {
+                room_id: *room_id,
+                message: message.as_ref().clone(),
+            });
+            let _ = after_first_phase(0);
+            let failed_frames = self.degraded_transaction_frames.swap(0, Ordering::AcqRel);
+            Ok(if failed_frames == 0 {
+                RoomMessageTransactionOutcome::Committed
+            } else {
+                RoomMessageTransactionOutcome::CommittedDegraded { failed_frames }
+            })
+        }
+
         async fn register_local_client(
             &self,
             _player_id: PlayerId,
@@ -1003,6 +1775,19 @@ mod tests {
             _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
             Ok(())
+        }
+
+        async fn unroute_local_client_with_tail<'a>(
+            &'a self,
+            _player_id: PlayerId,
+            _room_id: RoomId,
+            clear_assignment: Box<
+                dyn FnOnce() -> Option<(crate::coordination::ClientDeliveryHandle, u32, u64)>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<Option<(u32, u64)>> {
+            Ok(clear_assignment().map(|(_, epoch, final_seq)| (epoch, final_seq)))
         }
 
         async fn unregister_local_client(&self, _player_id: &PlayerId) -> Result<()> {
@@ -1027,6 +1812,7 @@ mod tests {
     }
 
     struct BlockingBroadcastMessageCoordinator {
+        room_events: Arc<RoomEventSequencer>,
         broadcast_started: Notify,
         release_broadcast: Notify,
     }
@@ -1034,6 +1820,7 @@ mod tests {
     impl BlockingBroadcastMessageCoordinator {
         fn new() -> Self {
             Self {
+                room_events: Arc::new(RoomEventSequencer::default()),
                 broadcast_started: Notify::new(),
                 release_broadcast: Notify::new(),
             }
@@ -1050,6 +1837,18 @@ mod tests {
 
     #[async_trait]
     impl MessageCoordinator for BlockingBroadcastMessageCoordinator {
+        async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
+            self.room_events.lock(*room_id).await
+        }
+
+        fn enqueue_room_event(
+            &self,
+            mutation_guard: RoomEventMutationGuard,
+            job: RoomEventJob,
+        ) -> RoomEventCompletion {
+            self.room_events.enqueue(mutation_guard, job)
+        }
+
         async fn send_to_player(
             &self,
             _player_id: &PlayerId,
@@ -1088,6 +1887,81 @@ mod tests {
             Ok(())
         }
 
+        async fn broadcast_to_room_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            before_send().await;
+            self.broadcast_to_room(room_id, message).await?;
+            Ok(true)
+        }
+
+        async fn broadcast_to_room_if_members_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            message: Arc<ServerMessage>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            self.broadcast_to_room_with_hook(room_id, message, before_send)
+                .await
+        }
+
+        async fn broadcast_to_room_except_if_with_hook<'a>(
+            &'a self,
+            room_id: &RoomId,
+            except_player: &PlayerId,
+            message: Arc<ServerMessage>,
+            should_send: &(dyn Fn() -> bool + Send + Sync),
+            drain: tokio::sync::watch::Receiver<bool>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<bool> {
+            if *drain.borrow() || !should_send() {
+                return Ok(false);
+            }
+            before_send().await;
+            self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+            Ok(true)
+        }
+
+        async fn commit_room_messages_if_members_with_hook<'a>(
+            &'a self,
+            _room_id: &RoomId,
+            _expected_members: &[PlayerId],
+            _recipient_messages: Vec<RoomRecipientMessages>,
+            before_send: Box<
+                dyn FnOnce() -> std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,
+                    > + Send
+                    + 'a,
+            >,
+            after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
+        ) -> Result<RoomMessageTransactionOutcome> {
+            self.broadcast_started.notify_one();
+            self.release_broadcast.notified().await;
+            if before_send().await? {
+                let _ = after_first_phase(0);
+                Ok(RoomMessageTransactionOutcome::Committed)
+            } else {
+                Ok(RoomMessageTransactionOutcome::HookRejected)
+            }
+        }
+
         async fn register_local_client(
             &self,
             _player_id: PlayerId,
@@ -1095,6 +1969,19 @@ mod tests {
             _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
             Ok(())
+        }
+
+        async fn unroute_local_client_with_tail<'a>(
+            &'a self,
+            _player_id: PlayerId,
+            _room_id: RoomId,
+            clear_assignment: Box<
+                dyn FnOnce() -> Option<(crate::coordination::ClientDeliveryHandle, u32, u64)>
+                    + Send
+                    + 'a,
+            >,
+        ) -> Result<Option<(u32, u64)>> {
+            Ok(clear_assignment().map(|(_, epoch, final_seq)| (epoch, final_seq)))
         }
 
         async fn unregister_local_client(&self, _player_id: &PlayerId) -> Result<()> {
@@ -1168,6 +2055,7 @@ mod tests {
             connected_at: chrono::Utc::now(),
             connection_info,
             epoch: None,
+            seq: None,
             region_id: "test-region".to_string(),
         }
     }
@@ -1300,6 +2188,64 @@ mod tests {
                 .expect("lock state can be read"),
             "authority request lock should be released before TTL expiry"
         );
+    }
+
+    #[tokio::test]
+    async fn aborting_lobby_transition_after_commit_does_not_strand_its_event() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(BlockingBroadcastMessageCoordinator::new());
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let room_coordinator = InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            lock.clone(),
+            database.clone(),
+            None,
+        );
+        let player_id = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc);
+        let room = database
+            .create_room(
+                "owned-lobby-transition".to_string(),
+                Some("OWN001".to_string()),
+                4,
+                true,
+                player_id,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+
+        let transition = {
+            let room_coordinator = room_coordinator.clone();
+            tokio::spawn(async move { room_coordinator.transition_room_to_lobby(&room.id).await })
+        };
+        coordinator.wait_for_broadcast_start().await;
+        assert_eq!(
+            database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("room lookup succeeds")
+                .expect("room remains present")
+                .lobby_state,
+            crate::protocol::LobbyState::Lobby,
+            "the durable transition happens before the queued broadcast"
+        );
+
+        transition.abort();
+        transition
+            .await
+            .expect_err("test aborts only the caller awaiting the owned transaction");
+        coordinator.release_broadcast();
+
+        let room_guard = timeout(
+            Duration::from_secs(1),
+            coordinator.lock_room_event_mutation(&room.id),
+        )
+        .await
+        .expect("owned event finishes and releases its room mutation guard");
+        drop(room_guard);
+        wait_until_unlocked(&lock, &format!("room_lobby_transition:{}", room.id)).await;
     }
 
     #[tokio::test]
@@ -1454,6 +2400,16 @@ mod tests {
             result.is_err(),
             "StartGame should propagate the GameStarting broadcast failure"
         );
+        let persisted = database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains present");
+        assert_eq!(
+            persisted.lobby_state,
+            crate::protocol::LobbyState::Lobby,
+            "a pre-commit publication failure must not finalize durable state"
+        );
         assert!(
             !lock
                 .is_locked(&format!("room_ready_state:{}", room.id))
@@ -1565,6 +2521,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aborted_start_request_still_finishes_publication_and_ready_cleanup() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(BlockingBroadcastMessageCoordinator::new());
+        let ready_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+            coordinator.clone(),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+            None,
+        ));
+        let player = PlayerId::from_u128(0x0a0b0c0d0e0f10111213141516171819);
+        let room = database
+            .create_room(
+                "aborted-start".to_string(),
+                Some("ABRT01".to_string()),
+                1,
+                false,
+                player,
+                "test-relay".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        database
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("room enters lobby");
+        ready_coordinator
+            .ready_players
+            .write()
+            .await
+            .entry(room.id)
+            .or_default()
+            .insert(player);
+
+        let start_task = {
+            let ready_coordinator = Arc::clone(&ready_coordinator);
+            tokio::spawn(
+                async move { ready_coordinator.handle_start_game(&room.id, &player).await },
+            )
+        };
+        coordinator.wait_for_broadcast_start().await;
+        start_task.abort();
+        coordinator.release_broadcast();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let finalized = database
+                    .get_room_by_id(&room.id)
+                    .await
+                    .expect("room lookup succeeds")
+                    .is_some_and(|room| room.lobby_state == crate::protocol::LobbyState::Finalized);
+                if finalized
+                    && ready_coordinator
+                        .current_ready_players(&room.id)
+                        .await
+                        .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached start transaction must outlive its canceled caller");
+    }
+
+    #[tokio::test]
+    async fn ready_membership_read_failure_does_not_mutate_or_publish_empty_state() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+            None,
+        );
+        let player = PlayerId::from_u128(0x9101);
+        let room = database
+            .create_room(
+                "ready-storage-failure".to_string(),
+                Some("RFAIL1".to_string()),
+                2,
+                false,
+                player,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        database.fail_get_room_players_for_test(true);
+
+        assert!(matches!(
+            coordinator
+                .handle_player_ready(&room.id, &player, None)
+                .await,
+            Err(PlayerReadyError::Internal(_))
+        ));
+        assert!(coordinator.current_ready_players(&room.id).await.is_empty());
+        assert!(messages.broadcasts().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_membership_read_failure_is_infrastructure_error_not_not_ready() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+            None,
+        );
+        let player = PlayerId::from_u128(0x9102);
+        let room = database
+            .create_room(
+                "start-storage-failure".to_string(),
+                Some("SFAIL1".to_string()),
+                2,
+                false,
+                player,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([player]));
+        database.fail_get_room_players_for_test(true);
+
+        assert!(coordinator
+            .handle_start_game(&room.id, &player)
+            .await
+            .is_err());
+        assert_eq!(
+            database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("room read succeeds")
+                .expect("room remains present")
+                .lobby_state,
+            LobbyState::Waiting
+        );
+        assert_eq!(
+            coordinator.current_ready_players(&room.id).await,
+            vec![player]
+        );
+        assert!(messages.broadcasts().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn handle_player_ready_does_not_wait_for_previous_ready_lock_ttl() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
@@ -1627,6 +2738,185 @@ mod tests {
                 .await
                 .expect("lock state can be read"),
             "final ready toggle should release the ready-state lock immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_game_rejects_until_database_and_published_membership_match() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let authority = PlayerId::from_u128(0xeeee_eeee_eeee_eeee_eeee_eeee_eeee_ee01);
+        let pending = PlayerId::from_u128(0xeeee_eeee_eeee_eeee_eeee_eeee_eeee_ee02);
+        let room = database
+            .create_room(
+                "published-start-game".to_string(),
+                None,
+                2,
+                true,
+                authority,
+                "test-relay".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(pending, "Pending", false, None),)
+            .await
+            .expect("pending DB membership succeeds"));
+
+        let (authority_sender, mut authority_receiver) = mpsc::channel(4);
+        messages
+            .register_local_client(
+                authority,
+                Some(room.id),
+                ClientDeliveryHandle::new(authority_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("publish authority route");
+        let coord = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+            None,
+        );
+        coord
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([authority, pending]));
+
+        let first_start = coord.handle_start_game(&room.id, &authority).await;
+        assert!(
+            first_start.is_err(),
+            "DB-only membership must reject rather than finalize a partial snapshot"
+        );
+        let unexpected = authority_receiver.try_recv();
+        assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
+        let before_publication = database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("read room after rejected start")
+            .expect("room remains present");
+        assert_ne!(before_publication.lobby_state, LobbyState::Finalized);
+
+        let (pending_sender, mut pending_receiver) = mpsc::channel(4);
+        messages
+            .register_local_client(
+                pending,
+                Some(room.id),
+                ClientDeliveryHandle::new(pending_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("publish pending route");
+
+        let finalized = match coord
+            .handle_start_game(&room.id, &authority)
+            .await
+            .expect("start succeeds once both snapshots match")
+        {
+            StartGameOutcome::Started(finalized) => finalized,
+            other => panic!("matching membership should start, got {other:?}"),
+        };
+        let mut finalized_ids: Vec<PlayerId> =
+            finalized.members.iter().map(|member| member.id).collect();
+        finalized_ids.sort_unstable();
+        let mut expected_ids = vec![authority, pending];
+        expected_ids.sort_unstable();
+        assert_eq!(finalized_ids, expected_ids);
+        for receiver in [&mut authority_receiver, &mut pending_receiver] {
+            match receiver
+                .recv()
+                .await
+                .expect("every published member receives GameStarting")
+                .as_ref()
+            {
+                ServerMessage::GameStarting { peer_connections } => {
+                    let mut peers: Vec<PlayerId> =
+                        peer_connections.iter().map(|peer| peer.player_id).collect();
+                    peers.sort_unstable();
+                    assert_eq!(peers, expected_ids);
+                }
+                other => panic!("expected GameStarting, got {other:?}"),
+            }
+        }
+        let persisted = database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("read finalized room")
+            .expect("room remains present");
+        assert_eq!(persisted.lobby_state, LobbyState::Finalized);
+    }
+
+    #[tokio::test]
+    async fn degraded_start_commit_still_publishes_state_and_clears_ready_snapshot() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+            None,
+        );
+        let player = PlayerId::from_u128(0xd301);
+        let room = database
+            .create_room(
+                "degraded-start".to_string(),
+                Some("DGRD01".to_string()),
+                1,
+                false,
+                player,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([player]));
+        messages.degrade_next_transaction(2);
+        let state_callbacks = Arc::new(AtomicUsize::new(0));
+        let callback_marker = Arc::clone(&state_callbacks);
+
+        let outcome = coordinator
+            .handle_start_game_with_publication(
+                &room.id,
+                &player,
+                Box::new(move |finalized, game_starting| StartGamePublication {
+                    recipient_messages: finalized
+                        .members
+                        .iter()
+                        .map(|member| RoomRecipientMessages {
+                            player_id: member.id,
+                            first_phase: 0,
+                            messages: vec![
+                                Arc::clone(&game_starting),
+                                Arc::new(ServerMessage::Pong),
+                            ],
+                        })
+                        .collect(),
+                    after_game_starting: Box::new(move || {
+                        callback_marker.fetch_add(1, Ordering::AcqRel);
+                    }),
+                }),
+            )
+            .await
+            .expect("durable start remains successful under degraded delivery");
+
+        assert!(matches!(outcome, StartGameOutcome::Started(_)));
+        assert_eq!(state_callbacks.load(Ordering::Acquire), 1);
+        assert!(coordinator.current_ready_players(&room.id).await.is_empty());
+        assert_eq!(
+            database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("room read succeeds")
+                .expect("room remains present")
+                .lobby_state,
+            LobbyState::Finalized
         );
     }
 
@@ -1976,9 +3266,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_start_game_finalizes_exactly_once() {
-        // Two concurrent StartGame calls: the shared `room_ready_state` lock plus
-        // the persist-before-broadcast ordering mean exactly one finalizes (one
-        // GameStarting) and the other sees AlreadyStarted (or loses the lock).
+        // Two concurrent StartGame calls: capacity is reserved before the
+        // durable CAS, so exactly one publishes and the CAS loser observes the
+        // normal AlreadyStarted outcome without a second GameStarting.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
@@ -2024,6 +3314,14 @@ mod tests {
             started, 1,
             "exactly one concurrent StartGame finalizes; got {r1:?} and {r2:?}"
         );
+        let already_started = [&r1, &r2]
+            .iter()
+            .filter(|result| matches!(result, Ok(StartGameOutcome::AlreadyStarted)))
+            .count();
+        assert_eq!(
+            already_started, 1,
+            "the CAS loser must report AlreadyStarted"
+        );
         let game_starts = coordinator
             .broadcasts()
             .await
@@ -2034,6 +3332,142 @@ mod tests {
             game_starts, 1,
             "GameStarting must be broadcast exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn independent_membership_change_while_capacity_waits_rejects_start_cas() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let message_coordinator = Arc::new(
+            crate::server::InMemoryMessageCoordinator::with_delivery_policy(
+                Duration::from_secs(1),
+                Arc::clone(&metrics),
+            ),
+        );
+        let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
+            message_coordinator.clone(),
+            Arc::new(NoopDistributedLock),
+            database.clone(),
+            None,
+        ));
+        let alice = PlayerId::from_u128(0xd101);
+        let bob = PlayerId::from_u128(0xd102);
+        let room = database
+            .create_room(
+                "membership-cas".to_string(),
+                Some("CAS001".to_string()),
+                2,
+                false,
+                alice,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(bob, "Bob", false, None))
+            .await
+            .expect("adding bob succeeds"));
+        database
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("room enters lobby");
+        coord
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([alice, bob]));
+
+        let (alice_tx, mut alice_rx) = mpsc::channel(2);
+        let (bob_tx, mut bob_rx) = mpsc::channel(2);
+        bob_tx.try_send(Arc::new(ServerMessage::Pong)).unwrap();
+        bob_tx.try_send(Arc::new(ServerMessage::Pong)).unwrap();
+        for (player, sender) in [(alice, alice_tx), (bob, bob_tx)] {
+            message_coordinator
+                .register_local_client(
+                    player,
+                    Some(room.id),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .expect("publish routed member");
+        }
+
+        let start = {
+            let coord = Arc::clone(&coord);
+            tokio::spawn(async move {
+                coord
+                    .handle_start_game_with_publication(
+                        &room.id,
+                        &alice,
+                        Box::new(|finalized, game_starting| StartGamePublication {
+                            recipient_messages: finalized
+                                .members
+                                .iter()
+                                .map(|member| RoomRecipientMessages {
+                                    player_id: member.id,
+                                    first_phase: 0,
+                                    messages: vec![
+                                        Arc::clone(&game_starting),
+                                        Arc::new(ServerMessage::Pong),
+                                    ],
+                                })
+                                .collect(),
+                            after_game_starting: Box::new(|| {}),
+                        }),
+                    )
+                    .await
+            })
+        };
+        for _ in 0..10_000 {
+            if metrics.websocket_delivery_attempts.load(Ordering::Relaxed) >= 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            metrics.websocket_delivery_attempts.load(Ordering::Relaxed) >= 3,
+            "the transaction must be waiting on Bob's reserved frame capacity"
+        );
+
+        // Models an independent lifecycle coordinator that shares storage but
+        // not this node's local event gate or routing map.
+        database
+            .remove_player_from_room(&room.id, &bob)
+            .await
+            .expect("independent membership mutation succeeds")
+            .expect("bob was present");
+        assert!(matches!(
+            bob_rx.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+        assert!(matches!(
+            bob_rx.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+
+        let result = start.await.expect("start task must not panic");
+        assert!(
+            result.is_err(),
+            "snapshot drift must reject the finalize CAS"
+        );
+        let persisted = database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains present");
+        assert_ne!(persisted.lobby_state, LobbyState::Finalized);
+        let unexpected_alice = alice_rx.try_recv();
+        assert!(matches!(
+            unexpected_alice,
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let unexpected_bob = bob_rx.try_recv();
+        assert!(matches!(
+            unexpected_bob,
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

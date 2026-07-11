@@ -79,7 +79,7 @@ pub enum Event {
     },
     /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
-    /// The single overall `TransportStatus` report was sent (Appendix G).
+    /// An overall `TransportStatus` state change was sent (Appendix G).
     TransportStatusSent {
         transport: Transport,
         connected: bool,

@@ -92,10 +92,10 @@ Key modules:
 On `/v3/ws` (the default v3 endpoint), the server negotiates a peer-to-peer
 session plan instead of pure relay: a two-axis ladder
 (`mesh+webrtc -> host+webrtc -> host+direct -> relay`) with a per-recipient
-`SessionPlan`, plus `NewPeer` and `Signal` messages for WebRTC signaling
-brokering and host-failover / late-join re-planning. A single v2 or relay-only
-member forces the whole room to the relay floor (no v3 session messages are
-emitted). The server also mints ephemeral coturn-REST TURN credentials for
+`SessionPlan` and `Signal` messages for WebRTC signaling brokering and
+host-failover / membership re-planning. A single v2 or relay-only member forces
+the whole room to the relay floor; each v3 member receives an explicit no-peer
+relay plan while v2 behavior stays byte-identical. The server also mints ephemeral coturn-REST TURN credentials for
 operator-configured external TURN URLs and advertises STUN; optional
 `ice_servers` are attached to `RoomJoined` / `Reconnected` for v3
 WebRTC-capable clients when ICE pre-gather is enabled.
@@ -217,8 +217,9 @@ Uses **Tokio** for async I/O and task scheduling.
 
 ### Message Passing
 
-- Bounded channels for player message queues
-- Backpressure via channel capacity limits
+- Bounded per-connection data and control queues
+- Class-aware data admission: reliable backpressure, loss-accounted v3 latest/volatile
+- Generation-scoped v3 control priority for peer lifecycle and exact accountability
 
 ### Locking Strategy
 
@@ -286,7 +287,7 @@ main.rs
        │    ├── server/relay_policy.rs
        │    ├── server/room_service.rs
        │    ├── server/session_policy.rs (Protocol v3 session-plan selection/emission/re-planning)
-       │    ├── server/signaling.rs (Protocol v3 WebRTC signal relay + late-join/NewPeer)
+       │    ├── server/signaling.rs (Protocol v3 signal relay + finalized membership refresh)
        │    ├── server/spectator_handlers.rs
        │    └── server/spectator_service.rs
        ├── protocol/
@@ -374,11 +375,14 @@ Current ADRs:
 ### Graceful Degradation
 
 - Handle partial failures
-- Apply backpressure instead of dropping data: message delivery waits on a
-  full per-connection outbound queue (`websocket.send_queue_capacity`) for up
-  to `websocket.slow_consumer_timeout_ms`, then disconnects the recipient as
-  a slow consumer (best-effort `SLOW_CONSUMER` error) rather than silently
-  dropping messages
+- Make delivery policy explicit: reliable data waits on the bounded data queue
+  and closes a slow recipient loudly; v3 `latest` and `volatile` data never
+  backpressure and record every omission in an exact prior `DeliveryReport`
+- Keep v3 control traffic on a bounded lane that has strict priority within the
+  active recipient generation; use barriers for the recipient's own room and
+  spectator transitions. If the server cannot publish exact accountability
+  before later data, or the oldest outbound item cannot complete its socket
+  write within `websocket.max_sojourn_ms`, fail closed with `4002 slow_consumer`
 - Timeout on slow operations
 
 ### Observable by Default

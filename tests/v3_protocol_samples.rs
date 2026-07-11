@@ -29,7 +29,7 @@
 //! by contrast, are fully-populated concrete frames and MUST deserialize.
 
 use serde_json::Value;
-use signal_fish_server::protocol::{ClientMessage, ServerMessage};
+use signal_fish_server::protocol::{ClientMessage, PlayerInfo, ServerMessage};
 
 /// Absolute path to a sample file, anchored at the crate manifest dir so the
 /// test is independent of the process working directory.
@@ -131,4 +131,47 @@ fn v3_server_message_samples_deserialize_into_server_message() {
     assert_samples_deserialize::<ServerMessage>(
         ".llm/code-samples/protocol/v3-server-messages.jsonl",
     );
+}
+
+fn assert_runtime_v3_snapshot_epochs(players: &[PlayerInfo], line_no: usize, kind: &str) {
+    for player in players {
+        assert!(
+            player.epoch.is_some_and(|epoch| epoch > 0),
+            "v3 sample line {line_no} has runtime-impossible {kind}.current_players epoch for {}: {:?}",
+            player.id,
+            player.epoch
+        );
+    }
+}
+
+/// Structural serde round trips cannot distinguish a legal optional wire field
+/// from one production always populates after v3 negotiation. Pin the runtime
+/// snapshot invariant explicitly so canonical v3 examples cannot omit epochs.
+#[test]
+fn v3_server_snapshot_samples_include_runtime_epochs() {
+    let relative = ".llm/code-samples/protocol/v3-server-messages.jsonl";
+    let mut saw_room_joined = false;
+
+    for (line_no, line) in numbered_nonblank_lines(relative) {
+        let message: ServerMessage = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("invalid server sample at {relative}:{line_no}: {error}")
+        });
+        match message {
+            ServerMessage::RoomJoined(payload) => {
+                saw_room_joined = true;
+                assert_runtime_v3_snapshot_epochs(&payload.current_players, line_no, "RoomJoined");
+            }
+            ServerMessage::SpectatorJoined(payload) => assert_runtime_v3_snapshot_epochs(
+                &payload.current_players,
+                line_no,
+                "SpectatorJoined",
+            ),
+            ServerMessage::Reconnected(payload) => {
+                assert_runtime_v3_snapshot_epochs(&payload.current_players, line_no, "Reconnected")
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_room_joined, "v3 server samples must include RoomJoined");
 }

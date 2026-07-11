@@ -241,9 +241,10 @@ every current player is ready, a member sends `StartGame` to finalize the
 lobby (`max_players` is a ceiling, so the room need not be full; the room's
 authority starts it if it has one, else any member). The lobby then
 transitions to `Finalized` and the server sends a `GameStarting` event with
-legacy peer metadata. Negotiated v3 non-relay rooms also receive per-recipient
-`SessionPlan` messages with topology, transport, peer, relay fallback, and ICE
-only when the selected transport is WebRTC.
+legacy peer metadata. Every negotiated v3 member then receives a per-recipient
+`SessionPlan` with topology, transport, peers, relay fallback, and ICE only when
+the selected transport is WebRTC. A relay-floor result is explicit
+`relay`/`relay` with no peers or ICE; v2 members receive no plan.
 
 After both clients have joined the room, send the ready signal:
 
@@ -300,9 +301,10 @@ Lobby state: finalized
 Game is starting!
 ```
 
-At this point the server has done its job: players are matched and ready; v2
-clients receive the legacy handoff, and negotiated v3 clients use `SessionPlan`
-for any non-relay data path.
+At this point the server has done its job: players are matched and ready. V2
+clients receive the legacy handoff. Negotiated v3 clients treat the latest
+`SessionPlan` as authoritative, including a relay plan that clears prior peer
+state after a finalized membership change.
 
 ## What's Next
 

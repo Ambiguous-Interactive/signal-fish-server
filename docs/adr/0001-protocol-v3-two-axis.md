@@ -60,9 +60,10 @@ and `#[serde(default)]` so existing v2 wire bytes are unchanged.
   `negotiated_version = clamp(client_max, min_protocol_version, max_protocol_version)`
   (defaults `min = 2`, `max = 3`; a client that omits its version is treated as
   `min_protocol_version`) and stores caps per connection.
-- A v3 plan is only **chosen** for a room when **all** members are v3-capable for
-  the required transport; otherwise the room is assigned `relay` and behaves
-  exactly like v2.
+- A non-relay v3 plan is only **chosen** for a room when **all** members are
+  v3-capable for the required transport; otherwise the room is assigned
+  `relay`. Each v3 member receives an explicit no-peer relay plan, while v2
+  members retain their byte-identical plan-free behavior.
 
 The v2 wire contract is **frozen**. Golden JSON and MessagePack snapshots
 (`tests/v2_wire_golden.rs`) lock the current bytes; any diff is a breaking change
@@ -93,9 +94,11 @@ stateless rule -- no perfect-negotiation dance:
   by lexicographic `PlayerId` UUID comparison. Exactly one of each pair offers.
 - **Host (star):** every non-host client offers to the `host`; the host offers to
   none and answers all. Clients never signal each other.
-- **Late join/reconnect:** both peers receive `NewPeer { peer_id, you_initiate }`
-  using the topology's offerer rule above -- the UUID compare in mesh (either side
-  may offer), the fixed client-offers-to-host direction in star.
+- **Late join/reconnect:** every current v3 member receives a complete,
+  per-recipient `SessionPlan` using the topology's offerer rule above -- the UUID
+  compare in mesh (either side may offer), the fixed client-offers-to-host
+  direction in star. The latest plan replaces prior peer state; `NewPeer`
+  remains a compatibility wire shape, not the current membership-delta contract.
 
 ### 6. Signaling integrity
 

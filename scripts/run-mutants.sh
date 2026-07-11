@@ -2,7 +2,7 @@
 # run-mutants.sh - Single source of truth for running cargo-mutants fast.
 #
 # WHY THIS SCRIPT EXISTS
-#   Mutation testing rebuilds the crate once per mutant (~227 mutants). Naively,
+#   Mutation testing rebuilds the crate once per mutant (319 mutants). Naively,
 #   cargo-mutants also recompiles every dependency from scratch in a /tmp scratch
 #   dir (it excludes ./target from its copy), so each CI shard paid a full cold
 #   dependency build -> every shard blew the 20-min timeout and was cancelled.
@@ -24,6 +24,8 @@
 #        job is the green-gate instead); requires an explicit --timeout.
 #   --in-place runs mutants serially (one source tree, so no -j parallelism); the
 #   shard count in mutation.yml is sized so each serial shard still finishes <5m.
+#   The per-mutant oracle is cargo-nextest (`test_tool` in mutants.toml): its
+#   dedicated profile terminates an individual mutation-induced hang after 10s.
 #
 # STANDING RULES (enforced by tests/ci_config_tests.rs + run_mutants_script_tests):
 #   - Never re-add --all-features to the oracle (.cargo/mutants.toml stays --lib).
@@ -35,7 +37,7 @@
 # Usage:
 #   bash scripts/run-mutants.sh --shard <k>/<N>       # run one shard (CI + local)
 #   bash scripts/run-mutants.sh --warm                # warm build + green-gate
-#   bash scripts/run-mutants.sh --shard 0/18 --print-cmd   # print, do not run
+#   bash scripts/run-mutants.sh --shard 0/32 --print-cmd   # print, do not run
 #
 # Env:
 #   MUTANTS_DRY_RUN   set to 1 for the same effect as --print-cmd
@@ -51,10 +53,11 @@ MUTANTS_TIMEOUT="120"
 # link-arg via RUSTFLAGS. This is deliberately NOT a bare `-C linker=clang` in
 # RUSTFLAGS: cargo-mutants re-encodes RUSTFLAGS (CARGO_ENCODED_RUSTFLAGS), which
 # would override a devcontainer's per-target linker and diverge the shard build
-# fingerprint from the `cargo test` --warm build — forcing a cold rebuild and
+# fingerprint from the `cargo nextest run` --warm build — forcing a cold rebuild and
 # defeating the whole warm-shared-cache scheme. Keeping the linker in the
-# per-target var means `cargo test` (warm) and `cargo mutants` (shards) resolve
-# the IDENTICAL linker + RUSTFLAGS content, so they share one cache fingerprint.
+# per-target var means `cargo nextest run` (warm) and `cargo mutants` (shards)
+# resolve the IDENTICAL linker + RUSTFLAGS content, so they share one cache
+# fingerprint.
 # In a devcontainer that already sets the per-target linker we leave it as-is.
 HOST_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || true)"
 if [ -n "$HOST_TRIPLE" ]; then
@@ -122,13 +125,14 @@ fi
 # Build the command for the selected mode.
 if [ "$MODE" = "warm" ]; then
     # Warm the cache AND act as the green-gate for --baseline=skip: a full
-    # `cargo test --lib` build+run with the mutation profile. This populates
-    # target/mutants/ with deps the shards reuse via --in-place.
-    CMD=(cargo test --lib --profile "$MUTANTS_PROFILE" --locked)
+    # unmutated run of the exact nextest oracle used by cargo-mutants. Both
+    # profile flags matter: --cargo-profile selects target/mutants/, while
+    # --profile selects nextest's per-test 10s termination policy.
+    CMD=(cargo nextest run --lib --cargo-profile "$MUTANTS_PROFILE" --profile "$MUTANTS_PROFILE" --locked)
 else
     # shard mode: validate the k/N form before doing anything expensive.
     if ! printf '%s' "$SHARD" | grep -Eq '^[0-9]+/[0-9]+$'; then
-        echo "ERROR: --shard must be <k>/<N> (e.g. 0/18), got: '${SHARD}'" >&2
+        echo "ERROR: --shard must be <k>/<N> (e.g. 0/32), got: '${SHARD}'" >&2
         exit 2
     fi
     # --in-place: build in ./target (warmed by rust-cache) so deps are reused, not

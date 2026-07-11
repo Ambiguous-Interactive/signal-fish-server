@@ -317,9 +317,19 @@ fn is_replayable_control_event(message: &ServerMessage) -> bool {
 }
 
 /// Reconnection manager
+#[derive(Default)]
+struct ReplayState {
+    disconnected_players: HashMap<PlayerId, ReconnectionRecord>,
+    event_buffers: HashMap<RoomId, EventBuffer>,
+    next_sequence: u64,
+}
+
 pub struct ReconnectionManager {
-    /// Disconnected players awaiting reconnection
-    disconnected_players: RwLock<HashMap<PlayerId, ReconnectionRecord>>,
+    /// Pending reconnectors, room replay gates, and global event sequencing.
+    /// Keeping these in one lock makes registration, capture, completion, and
+    /// cleanup atomic: no event can slip between a pending record and its room
+    /// buffer, and stale cleanup cannot delete a newly registered gate.
+    replay_state: RwLock<ReplayState>,
     /// Tokens minted at room join, BEFORE any disconnect (issue #136, F4):
     /// a token minted only at disconnect time can never legitimately reach
     /// the client it is for, making reconnection unusable in practice. One
@@ -327,16 +337,18 @@ pub struct ReconnectionManager {
     /// [`Self::register_disconnection`], discarded on voluntary leave /
     /// roomless teardown, and overwritten (rotated) by the next join.
     pre_issued: RwLock<HashMap<PlayerId, ReconnectionToken>>,
-    /// Event buffers per room
-    event_buffers: RwLock<HashMap<RoomId, EventBuffer>>,
     /// Reconnection window in seconds
     reconnection_window: i64,
     /// Event buffer size per room
     event_buffer_size: usize,
-    /// Next sequence number for events
-    next_sequence: RwLock<u64>,
     /// Metrics sink
     metrics: Arc<ServerMetrics>,
+    #[cfg(test)]
+    pause_record_room_event: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    record_room_event_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_record_room_event: tokio::sync::Notify,
 }
 
 impl ReconnectionManager {
@@ -347,14 +359,34 @@ impl ReconnectionManager {
         metrics: Arc<ServerMetrics>,
     ) -> Self {
         Self {
-            disconnected_players: RwLock::new(HashMap::new()),
+            replay_state: RwLock::new(ReplayState::default()),
             pre_issued: RwLock::new(HashMap::new()),
-            event_buffers: RwLock::new(HashMap::new()),
             reconnection_window: reconnection_window as i64,
             event_buffer_size,
-            next_sequence: RwLock::new(0),
             metrics,
+            #[cfg(test)]
+            pause_record_room_event: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            record_room_event_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_record_room_event: tokio::sync::Notify::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_record_room_event_for_test(&self) {
+        self.pause_record_room_event
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_record_room_event_for_test(&self) {
+        self.record_room_event_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_record_room_event_for_test(&self) {
+        self.release_record_room_event.notify_one();
     }
 
     /// Mint (or rotate) the reconnection token for a player joining `room_id`
@@ -385,24 +417,22 @@ impl ReconnectionManager {
     }
 
     pub async fn discard_pending_reconnection(&self, player_id: &PlayerId) -> bool {
-        let mut players = self.disconnected_players.write().await;
-        let removed = players.remove(player_id);
-        let room_to_clear = removed.as_ref().and_then(|record| {
+        let mut state = self.replay_state.write().await;
+        let removed = state.disconnected_players.remove(player_id);
+        if let Some(record) = &removed {
             let room_id = record.disconnected.room_id;
-            let others_waiting = players.values().any(|pending| {
-                pending.disconnected.player_id != record.disconnected.player_id
-                    && pending.disconnected.room_id == room_id
-            });
-            (!others_waiting).then_some(room_id)
-        });
-        drop(players);
-
+            let others_waiting = state
+                .disconnected_players
+                .values()
+                .any(|pending| pending.disconnected.room_id == room_id);
+            if !others_waiting {
+                state.event_buffers.remove(&room_id);
+            }
+        }
         if removed.is_some() {
             self.metrics.decrement_reconnection_sessions_active();
         }
-        if let Some(room_id) = room_to_clear {
-            self.event_buffers.write().await.remove(&room_id);
-        }
+        drop(state);
 
         removed.is_some()
     }
@@ -435,9 +465,8 @@ impl ReconnectionManager {
         // unclaimable by an honest client, exactly as before).
         let pre_issued = self.pre_issued.write().await.remove(&player_id);
 
-        let fresh_last_sequence = *self.next_sequence.read().await;
-
-        let mut players = self.disconnected_players.write().await;
+        let mut state = self.replay_state.write().await;
+        let fresh_last_sequence = state.next_sequence;
 
         // A same-room re-registration — the player registered a SECOND
         // disconnection for the same room while still pending, so it has NOT
@@ -446,7 +475,8 @@ impl ReconnectionManager {
         // fields up front (owned, so the later `players.insert` is
         // unencumbered). A record from a DIFFERENT room, or a genuinely new one,
         // takes fresh values instead.
-        let existing_same_room = players
+        let existing_same_room = state
+            .disconnected_players
             .get(&player_id)
             .filter(|existing| existing.disconnected.room_id == room_id)
             .map(|existing| PreservedPending {
@@ -545,7 +575,7 @@ impl ReconnectionManager {
             },
             claim: None,
         };
-        let previous = players.insert(player_id, record);
+        let previous = state.disconnected_players.insert(player_id, record);
         // A re-registration from a NEW room replaces the old pending record.
         // If this player was the old room's last pending reconnector, nothing
         // else ever releases that room's replay buffer (completion and expiry
@@ -558,15 +588,14 @@ impl ReconnectionManager {
             .map(|record| record.disconnected.room_id)
             .filter(|previous_room| *previous_room != room_id)
             .filter(|previous_room| {
-                !players
+                !state
+                    .disconnected_players
                     .values()
                     .any(|pending| pending.disconnected.room_id == *previous_room)
             });
-        drop(players);
 
         if let Some(orphaned_room) = orphaned_room {
-            let mut buffers = self.event_buffers.write().await;
-            buffers.remove(&orphaned_room);
+            state.event_buffers.remove(&orphaned_room);
         }
 
         // Gate ON: an (empty) buffer marks the room as having a pending
@@ -574,21 +603,21 @@ impl ReconnectionManager {
         // events. Skipped when the ring is disabled (`event_buffer_size` 0) —
         // replay is then reported `Unavailable` and nothing is captured.
         if self.event_buffer_size > 0 {
-            let mut buffers = self.event_buffers.write().await;
-            buffers
+            state
+                .event_buffers
                 .entry(room_id)
                 .or_insert_with(|| EventBuffer::new(room_id, self.event_buffer_size));
         }
+        if previous.is_none() {
+            self.metrics.increment_reconnection_sessions_active();
+        }
+        drop(state);
 
         // A reused pre-issued token was already counted at its join-time
         // mint; only a fresh fallback mint counts again.
         if minted_fresh {
             self.metrics.increment_reconnection_tokens_issued();
         }
-        if previous.is_none() {
-            self.metrics.increment_reconnection_sessions_active();
-        }
-
         tracing::info!(
             %player_id,
             %room_id,
@@ -609,9 +638,9 @@ impl ReconnectionManager {
         room_id: &RoomId,
         token: &str,
     ) -> Result<DisconnectedPlayer, ReconnectionError> {
-        let disconnected = self.disconnected_players.read().await;
+        let state = self.replay_state.read().await;
 
-        let Some(record) = disconnected.get(player_id) else {
+        let Some(record) = state.disconnected_players.get(player_id) else {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::NoRecord);
         };
@@ -648,9 +677,9 @@ impl ReconnectionManager {
         room_id: &RoomId,
         token: &str,
     ) -> Result<ClaimedReconnection, ReconnectionError> {
-        let mut disconnected = self.disconnected_players.write().await;
+        let mut state = self.replay_state.write().await;
 
-        let Some(record) = disconnected.get_mut(player_id) else {
+        let Some(record) = state.disconnected_players.get_mut(player_id) else {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::NoRecord);
         };
@@ -696,31 +725,23 @@ impl ReconnectionManager {
 
     /// Complete reconnection and remove from disconnected players
     pub async fn complete_reconnection(&self, player_id: &PlayerId) {
-        let mut players = self.disconnected_players.write().await;
-        let removed = players.remove(player_id);
-        let room_to_clear = removed.as_ref().and_then(|record| {
+        let mut state = self.replay_state.write().await;
+        let removed = state.disconnected_players.remove(player_id);
+        if let Some(record) = &removed {
             let room_id = record.disconnected.room_id;
-            let others_waiting = players.values().any(|p| {
-                p.disconnected.player_id != record.disconnected.player_id
-                    && p.disconnected.room_id == room_id
-            });
-            if others_waiting {
-                None
-            } else {
-                Some(room_id)
+            let others_waiting = state
+                .disconnected_players
+                .values()
+                .any(|pending| pending.disconnected.room_id == room_id);
+            if !others_waiting {
+                state.event_buffers.remove(&room_id);
             }
-        });
-        drop(players);
-
+        }
         if removed.is_some() {
             self.metrics.decrement_reconnection_sessions_active();
             self.metrics.increment_reconnection_completions();
         }
-
-        if let Some(room_id) = room_to_clear {
-            let mut buffers = self.event_buffers.write().await;
-            buffers.remove(&room_id);
-        }
+        drop(state);
 
         tracing::info!(%player_id, "Player reconnection completed");
     }
@@ -728,8 +749,11 @@ impl ReconnectionManager {
     /// Complete a reconnection record that was already reserved by
     /// [`Self::claim_reconnection`].
     pub async fn complete_claimed_reconnection(&self, claim: &ClaimedReconnection) -> bool {
-        let mut players = self.disconnected_players.write().await;
-        let Some(record) = players.get(&claim.disconnected.player_id) else {
+        let mut state = self.replay_state.write().await;
+        let Some(record) = state
+            .disconnected_players
+            .get(&claim.disconnected.player_id)
+        else {
             tracing::warn!(
                 player_id = %claim.disconnected.player_id,
                 "Claimed reconnection completion found no pending record"
@@ -748,7 +772,10 @@ impl ReconnectionManager {
             return false;
         }
 
-        let Some(record) = players.remove(&claim.disconnected.player_id) else {
+        let Some(record) = state
+            .disconnected_players
+            .remove(&claim.disconnected.player_id)
+        else {
             tracing::warn!(
                 player_id = %claim.disconnected.player_id,
                 "Claimed reconnection completion lost its pending record"
@@ -756,19 +783,16 @@ impl ReconnectionManager {
             return false;
         };
         let room_id = record.disconnected.room_id;
-        let others_waiting = players.values().any(|p| {
-            p.disconnected.player_id != record.disconnected.player_id
-                && p.disconnected.room_id == room_id
-        });
-        drop(players);
-
+        let others_waiting = state
+            .disconnected_players
+            .values()
+            .any(|pending| pending.disconnected.room_id == room_id);
+        if !others_waiting {
+            state.event_buffers.remove(&room_id);
+        }
         self.metrics.decrement_reconnection_sessions_active();
         self.metrics.increment_reconnection_completions();
-
-        if !others_waiting {
-            let mut buffers = self.event_buffers.write().await;
-            buffers.remove(&room_id);
-        }
+        drop(state);
 
         tracing::info!(
             player_id = %record.disconnected.player_id,
@@ -779,8 +803,11 @@ impl ReconnectionManager {
 
     /// Release a reserved reconnection record after a failed restore attempt.
     pub async fn release_reconnection_claim(&self, claim: &ClaimedReconnection) -> bool {
-        let mut players = self.disconnected_players.write().await;
-        let Some(record) = players.get_mut(&claim.disconnected.player_id) else {
+        let mut state = self.replay_state.write().await;
+        let Some(record) = state
+            .disconnected_players
+            .get_mut(&claim.disconnected.player_id)
+        else {
             tracing::warn!(
                 player_id = %claim.disconnected.player_id,
                 "Reconnection claim release found no pending record"
@@ -822,8 +849,8 @@ impl ReconnectionManager {
     /// removes it) — so absence means no replayable event occurred while
     /// anyone was pending: `events` empty, `truncated` false.
     pub async fn get_missed_events(&self, room_id: &RoomId, last_sequence: u64) -> MissedEvents {
-        let buffers = self.event_buffers.read().await;
-        match buffers.get(room_id) {
+        let state = self.replay_state.read().await;
+        match state.event_buffers.get(room_id) {
             Some(buffer) => MissedEvents {
                 events: buffer.get_events_after(last_sequence),
                 truncated: buffer
@@ -841,21 +868,22 @@ impl ReconnectionManager {
     ///
     /// The single entry point the server's uniform-broadcast sites call for
     /// every room-wide control message. Cheap when idle: a non-replayable
-    /// message (see `is_replayable_control_event`) or a room with no pending
-    /// reconnection (no buffer — one read-lock lookup) returns immediately,
-    /// so the hot broadcast path never clones or takes the write lock unless
-    /// someone is actually waiting to reconnect. Events are recorded even if
-    /// the subsequent broadcast partially fails, matching "what a connected
-    /// player would have been sent".
+    /// message (see `is_replayable_control_event`) returns immediately. For a
+    /// replayable event, one ReplayState write-lock lookup both tests the
+    /// pending-room gate and, when open, allocates the sequence and pushes the
+    /// event. Events are recorded even if the subsequent broadcast partially
+    /// fails, matching "what a connected player would have been sent".
     pub async fn record_room_event(&self, room_id: &RoomId, message: &ServerMessage) {
         if self.event_buffer_size == 0 || !is_replayable_control_event(message) {
             return;
         }
+        #[cfg(test)]
+        if self
+            .pause_record_room_event
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
-            let buffers = self.event_buffers.read().await;
-            if !buffers.contains_key(room_id) {
-                return;
-            }
+            self.record_room_event_reached.notify_one();
+            self.release_record_room_event.notified().await;
         }
         self.push_event(room_id, message.clone(), false).await;
     }
@@ -875,27 +903,26 @@ impl ReconnectionManager {
     /// [`Self::buffer_event`]: assigns the next global sequence number, pushes
     /// into the room's ring, and advances the buffered/evicted metrics.
     async fn push_event(&self, room_id: &RoomId, message: ServerMessage, create_if_missing: bool) {
-        let mut sequence = self.next_sequence.write().await;
-        *sequence += 1;
-        let seq = *sequence;
-        drop(sequence);
-
-        let mut buffers = self.event_buffers.write().await;
-        let evicted = if create_if_missing {
-            buffers
+        let mut state = self.replay_state.write().await;
+        if !create_if_missing && !state.event_buffers.contains_key(room_id) {
+            return;
+        }
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let sequence = state.next_sequence;
+        let buffer = if create_if_missing {
+            state
+                .event_buffers
                 .entry(*room_id)
                 .or_insert_with(|| EventBuffer::new(*room_id, self.event_buffer_size))
-                .push(message, seq)
         } else {
-            // The gate was checked without the write lock; the buffer may have
-            // been removed in between (reconnection completed) — then nobody
-            // is pending anymore and dropping the event is correct.
-            match buffers.get_mut(room_id) {
-                Some(buffer) => buffer.push(message, seq),
-                None => return,
-            }
+            let Some(buffer) = state.event_buffers.get_mut(room_id) else {
+                tracing::warn!(%room_id, "Replay buffer disappeared while holding its state lock");
+                return;
+            };
+            buffer
         };
-        drop(buffers);
+        let evicted = buffer.push(message, sequence);
+        drop(state);
 
         self.metrics.add_reconnection_events_buffered(1);
         self.metrics.add_reconnection_events_evicted(evicted as u64);
@@ -909,8 +936,63 @@ impl ReconnectionManager {
 
     /// Clear event buffer for a room (when room is deleted)
     pub async fn clear_room_buffer(&self, room_id: &RoomId) {
-        self.event_buffers.write().await.remove(room_id);
-        tracing::debug!(%room_id, "Event buffer cleared for room");
+        let mut state = self.replay_state.write().await;
+        let has_pending = state
+            .disconnected_players
+            .values()
+            .any(|record| record.disconnected.room_id == *room_id);
+        if !has_pending {
+            state.event_buffers.remove(room_id);
+            tracing::debug!(%room_id, "Event buffer cleared for room");
+        } else {
+            tracing::debug!(%room_id, "Retained event buffer for pending reconnection");
+        }
+    }
+
+    /// Snapshot expired, unclaimed reconnect records that require durable room
+    /// cleanup before their reservation can be discarded.
+    pub async fn expired_cleanup_candidates(&self) -> Vec<(PlayerId, RoomId)> {
+        self.replay_state
+            .read()
+            .await
+            .disconnected_players
+            .iter()
+            .filter(|(_, record)| {
+                record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window)
+            })
+            .map(|(player_id, record)| (*player_id, record.disconnected.room_id))
+            .collect()
+    }
+
+    /// Remove one record only if it is still expired and unclaimed after the
+    /// caller completed its durable cleanup. Returns whether it was removed.
+    pub async fn remove_expired_reconnection(&self, player_id: &PlayerId) -> bool {
+        let mut state = self.replay_state.write().await;
+        let removable = state
+            .disconnected_players
+            .get(player_id)
+            .is_some_and(|record| {
+                record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window)
+            });
+        if !removable {
+            return false;
+        }
+        let Some(record) = state.disconnected_players.remove(player_id) else {
+            return false;
+        };
+        let room_id = record.disconnected.room_id;
+        if !state
+            .disconnected_players
+            .values()
+            .any(|pending| pending.disconnected.room_id == room_id)
+        {
+            state.event_buffers.remove(&room_id);
+        }
+        let remaining = state.disconnected_players.len();
+        self.metrics
+            .set_reconnection_sessions_active(remaining as u64);
+        tracing::info!(%player_id, %room_id, "Removed durably cleaned expired reconnection record");
+        true
     }
 
     /// Clean up expired disconnections.
@@ -921,11 +1003,11 @@ impl ReconnectionManager {
     /// an expired-out room must stop capturing events immediately rather than
     /// waiting for room deletion to sweep the buffer.
     pub async fn cleanup_expired(&self) -> usize {
-        let mut disconnected = self.disconnected_players.write().await;
-        let initial_count = disconnected.len();
+        let mut state = self.replay_state.write().await;
+        let initial_count = state.disconnected_players.len();
         let mut expired_rooms = Vec::new();
 
-        disconnected.retain(|player_id, record| {
+        state.disconnected_players.retain(|player_id, record| {
             let expired =
                 record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window);
             if expired {
@@ -934,26 +1016,26 @@ impl ReconnectionManager {
             }
             !expired
         });
-        let removed = initial_count - disconnected.len();
-        let remaining = disconnected.len();
-        let rooms_still_pending: std::collections::HashSet<RoomId> = disconnected
+        let removed = initial_count - state.disconnected_players.len();
+        let remaining = state.disconnected_players.len();
+        let rooms_still_pending: std::collections::HashSet<RoomId> = state
+            .disconnected_players
             .values()
             .map(|record| record.disconnected.room_id)
             .collect();
-        drop(disconnected);
 
         expired_rooms.retain(|room_id| !rooms_still_pending.contains(room_id));
-        if !expired_rooms.is_empty() {
-            let mut buffers = self.event_buffers.write().await;
-            for room_id in expired_rooms {
-                buffers.remove(&room_id);
-            }
+        for room_id in expired_rooms {
+            state.event_buffers.remove(&room_id);
         }
+        if removed > 0 {
+            self.metrics
+                .set_reconnection_sessions_active(remaining as u64);
+        }
+        drop(state);
 
         if removed > 0 {
             tracing::info!(count = removed, "Cleaned up expired reconnection records");
-            self.metrics
-                .set_reconnection_sessions_active(remaining as u64);
         }
 
         removed
@@ -961,17 +1043,19 @@ impl ReconnectionManager {
 
     /// Check if a player has a pending disconnection
     pub async fn has_pending_reconnection(&self, player_id: &PlayerId) -> bool {
-        self.disconnected_players
+        self.replay_state
             .read()
             .await
+            .disconnected_players
             .contains_key(player_id)
     }
 
     /// Get all disconnected players for a room
     pub async fn get_disconnected_players_in_room(&self, room_id: &RoomId) -> Vec<PlayerId> {
-        self.disconnected_players
+        self.replay_state
             .read()
             .await
+            .disconnected_players
             .values()
             .filter(|p| p.disconnected.room_id == *room_id)
             .map(|p| p.disconnected.player_id)
@@ -990,9 +1074,10 @@ impl ReconnectionManager {
     /// the room to exist.
     pub async fn rooms_with_active_reconnections(&self) -> HashSet<RoomId> {
         let window = self.reconnection_window;
-        self.disconnected_players
+        self.replay_state
             .read()
             .await
+            .disconnected_players
             .values()
             .filter(|record| !record.disconnected.is_expired(window))
             .map(|record| record.disconnected.room_id)
@@ -1006,7 +1091,7 @@ mod tests {
     use crate::metrics::ServerMetrics;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
-    use tokio::sync::Barrier;
+    use tokio::sync::{Barrier, Notify};
 
     #[test]
     fn reconnection_error_maps_each_variant_to_its_client_code() {
@@ -1278,8 +1363,9 @@ mod tests {
             .register_disconnection(player_id, room_id, false, None, 0)
             .await;
         {
-            let mut players = manager.disconnected_players.write().await;
-            let record = players
+            let mut state = manager.replay_state.write().await;
+            let record = state
+                .disconnected_players
                 .get_mut(&player_id)
                 .expect("registered disconnection record exists");
             record.disconnected.disconnected_at = Utc::now() - Duration::seconds(5);
@@ -1319,6 +1405,8 @@ mod tests {
     fn control_event() -> ServerMessage {
         ServerMessage::PlayerLeft {
             player_id: Uuid::new_v4(),
+            epoch: None,
+            final_seq: None,
         }
     }
 
@@ -1415,7 +1503,12 @@ mod tests {
         // closes again.
         manager.complete_reconnection(&player_id).await;
         assert!(
-            !manager.event_buffers.read().await.contains_key(&room_id),
+            !manager
+                .replay_state
+                .read()
+                .await
+                .event_buffers
+                .contains_key(&room_id),
             "completing the last pending reconnection must release the room buffer"
         );
         manager.record_room_event(&room_id, &control_event()).await;
@@ -1424,6 +1517,126 @@ mod tests {
             .await
             .events
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn registration_and_first_room_event_are_one_ordered_replay_transition() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = Arc::new(ReconnectionManager::new(300, 100, metrics));
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        manager.pre_issue_token(player_id, room_id).await;
+
+        // Queue registration first and event capture second behind the one
+        // ReplayState write lock. Tokio's fair write-lock queue makes this a
+        // deterministic version of the old next-sequence/buffer-creation gap.
+        let state_guard = manager.replay_state.write().await;
+        let register_started = Arc::new(Notify::new());
+        let registration = {
+            let manager = Arc::clone(&manager);
+            let started = Arc::clone(&register_started);
+            tokio::spawn(async move {
+                started.notify_one();
+                manager
+                    .register_disconnection(player_id, room_id, false, None, 0)
+                    .await
+            })
+        };
+        register_started.notified().await;
+        tokio::task::yield_now().await;
+
+        let event_started = Arc::new(Notify::new());
+        let event = {
+            let manager = Arc::clone(&manager);
+            let started = Arc::clone(&event_started);
+            tokio::spawn(async move {
+                started.notify_one();
+                manager.record_room_event(&room_id, &control_event()).await;
+            })
+        };
+        event_started.notified().await;
+        tokio::task::yield_now().await;
+        drop(state_guard);
+
+        registration
+            .await
+            .expect("registration task should not panic");
+        event.await.expect("event task should not panic");
+        let last_sequence = manager.replay_state.read().await.disconnected_players[&player_id]
+            .disconnected
+            .last_sequence;
+        let missed = manager.get_missed_events(&room_id, last_sequence).await;
+        assert_eq!(
+            missed.events.len(),
+            1,
+            "an event ordered after registration must be included in replay"
+        );
+        assert!(!missed.truncated);
+    }
+
+    #[tokio::test]
+    async fn last_expiry_cleanup_cannot_delete_a_new_registration_gate() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = Arc::new(ReconnectionManager::new(1, 100, Arc::clone(&metrics)));
+        let expired_player = Uuid::new_v4();
+        let new_player = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        manager
+            .register_disconnection(expired_player, room_id, false, None, 0)
+            .await;
+
+        let mut state_guard = manager.replay_state.write().await;
+        state_guard
+            .disconnected_players
+            .get_mut(&expired_player)
+            .expect("expired player remains pending")
+            .disconnected
+            .disconnected_at = Utc::now() - Duration::seconds(5);
+
+        let cleanup_started = Arc::new(Notify::new());
+        let cleanup = {
+            let manager = Arc::clone(&manager);
+            let started = Arc::clone(&cleanup_started);
+            tokio::spawn(async move {
+                started.notify_one();
+                manager.cleanup_expired().await
+            })
+        };
+        cleanup_started.notified().await;
+        tokio::task::yield_now().await;
+
+        let registration_started = Arc::new(Notify::new());
+        let registration = {
+            let manager = Arc::clone(&manager);
+            let started = Arc::clone(&registration_started);
+            tokio::spawn(async move {
+                started.notify_one();
+                manager
+                    .register_disconnection(new_player, room_id, false, None, 0)
+                    .await
+            })
+        };
+        registration_started.notified().await;
+        tokio::task::yield_now().await;
+        drop(state_guard);
+
+        assert_eq!(cleanup.await.expect("cleanup task should not panic"), 1);
+        registration
+            .await
+            .expect("registration task should not panic");
+        manager.record_room_event(&room_id, &control_event()).await;
+        let state = manager.replay_state.read().await;
+        assert!(state.disconnected_players.contains_key(&new_player));
+        assert_eq!(
+            state.event_buffers[&room_id].events.len(),
+            1,
+            "new registration must retain a live replay gate after old cleanup"
+        );
+        assert_eq!(
+            metrics.reconnection_sessions_active.load(Ordering::Relaxed),
+            1,
+            "active-session gauge must match the one surviving registration"
+        );
     }
 
     /// Issue #136 (F4): the token surfaced at join is the SAME string the
@@ -1531,6 +1744,7 @@ mod tests {
             connected_at: Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: "test".to_string(),
         };
 
@@ -1624,8 +1838,10 @@ mod tests {
         // Both events must still replay — neither is silently excluded — and
         // the replay is honestly complete.
         let missed = manager.get_missed_events(&room, {
-            let players = manager.disconnected_players.read().await;
-            players[&player].disconnected.last_sequence
+            let state = manager.replay_state.read().await;
+            state.disconnected_players[&player]
+                .disconnected
+                .last_sequence
         });
         let missed = missed.await;
         assert_eq!(
@@ -1665,7 +1881,12 @@ mod tests {
             .register_disconnection(player, room_b, false, None, 0)
             .await;
         assert!(
-            !manager.event_buffers.read().await.contains_key(&room_a),
+            !manager
+                .replay_state
+                .read()
+                .await
+                .event_buffers
+                .contains_key(&room_a),
             "re-registering the last pending player from a new room must \
              release the old room's buffer"
         );
@@ -1688,7 +1909,12 @@ mod tests {
             .register_disconnection(player, room_b, false, None, 0)
             .await;
         assert!(
-            manager.event_buffers.read().await.contains_key(&room_a),
+            manager
+                .replay_state
+                .read()
+                .await
+                .event_buffers
+                .contains_key(&room_a),
             "the old room's buffer must survive while another player pends there"
         );
         assert_eq!(manager.get_missed_events(&room_a, 0).await.events.len(), 1);
@@ -1704,12 +1930,18 @@ mod tests {
             .register_disconnection(player_id, room_id, false, None, 0)
             .await;
         assert!(
-            manager.event_buffers.read().await.contains_key(&room_id),
+            manager
+                .replay_state
+                .read()
+                .await
+                .event_buffers
+                .contains_key(&room_id),
             "registering a disconnection opens the room's replay gate"
         );
         {
-            let mut players = manager.disconnected_players.write().await;
-            players
+            let mut state = manager.replay_state.write().await;
+            state
+                .disconnected_players
                 .get_mut(&player_id)
                 .expect("registered disconnection record exists")
                 .disconnected
@@ -1718,7 +1950,12 @@ mod tests {
 
         assert_eq!(manager.cleanup_expired().await, 1);
         assert!(
-            !manager.event_buffers.read().await.contains_key(&room_id),
+            !manager
+                .replay_state
+                .read()
+                .await
+                .event_buffers
+                .contains_key(&room_id),
             "expiring the last pending player must release the room buffer"
         );
         manager.record_room_event(&room_id, &control_event()).await;
@@ -1752,6 +1989,7 @@ mod tests {
             connected_at: Utc::now(),
             connection_info: None,
             epoch: None,
+            seq: None,
             region_id: "test".to_string(),
         };
         let spectator = SpectatorInfo {
@@ -1765,7 +2003,11 @@ mod tests {
             ServerMessage::PlayerJoined {
                 player: player_info,
             },
-            ServerMessage::PlayerLeft { player_id },
+            ServerMessage::PlayerLeft {
+                player_id,
+                epoch: None,
+                final_seq: None,
+            },
             ServerMessage::PlayerReconnected {
                 player_id,
                 epoch: None,
@@ -1806,6 +2048,8 @@ mod tests {
                 data: serde_json::json!({ "tick": 1 }),
                 seq: None,
                 epoch: None,
+                class: None,
+                key: None,
             },
             ServerMessage::GameStarting {
                 peer_connections: Vec::new(),

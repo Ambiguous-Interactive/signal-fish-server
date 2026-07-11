@@ -52,8 +52,7 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use test_helpers::create_test_server_with_config;
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::assert_message_conservation;
 
@@ -79,23 +78,9 @@ const STALL_PADDING_BYTES: usize = 16 * 1_024;
 /// expected wait — the happy path finishes far sooner.
 const TEST_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(120);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> (WsSink, WsReceiver) {
@@ -187,7 +172,7 @@ async fn drain_healthy_peer(mut receiver: WsReceiver, index: usize, stalled_id: 
                 );
                 received += 1;
             }
-            ServerMessage::PlayerLeft { player_id } => {
+            ServerMessage::PlayerLeft { player_id, .. } => {
                 assert_eq!(
                     player_id, stalled_id,
                     "healthy peer {index} observed a PlayerLeft for a NON-stalled member \
@@ -219,7 +204,8 @@ async fn slow_consumer_eviction_does_not_cascade_to_healthy_peers() {
     server_config.websocket_config.slow_consumer_timeout_ms = 500;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     // Join order: the healthy peers first (so each is an established room member
     // that will observe the stalled peer's later join and eviction), then the
@@ -256,6 +242,8 @@ async fn slow_consumer_eviction_does_not_cascade_to_healthy_peers() {
         let padding = "x".repeat(STALL_PADDING_BYTES);
         for seq in 0..MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": seq, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -337,4 +325,5 @@ async fn slow_consumer_eviction_does_not_cascade_to_healthy_peers() {
     // Everything has quiesced (flood delivered, one eviction, stalled socket
     // closed): the conservation counters must balance.
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }

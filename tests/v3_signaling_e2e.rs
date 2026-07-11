@@ -4,12 +4,12 @@
 //! byte-preserved, exercising axum's WebSocket framing on the unchanged
 //! `handle_signal` path.
 //!
-//! Initial pairing is no longer emitted as `NewPeer` during lobby fill (it is
-//! delivered by `SessionPlan` at finalize, and `NewPeer` is reserved for joins
-//! into an already-active session — PLAN §P3, Appendix L). Over-the-wire pairing
-//! is therefore covered by `tests/v3_session_plan_e2e.rs` (SessionPlan) and the
-//! handler-level unit tests in `src/server/signaling_tests.rs`; this file does
-//! not depend on `NewPeer`.
+//! Initial pairing is delivered by `SessionPlan` at finalize. Finalized-room
+//! membership changes also publish complete authoritative plans; `NewPeer`
+//! remains a compatibility wire shape. Over-the-wire pairing is therefore
+//! covered by `tests/v3_session_plan_e2e.rs` (SessionPlan) and the handler-level
+//! unit tests in `src/server/signaling_tests.rs`; this file does not depend on
+//! additive peer directives.
 
 mod test_helpers;
 mod websocket_test_helpers;
@@ -23,8 +23,7 @@ use signal_fish_server::protocol::{
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::Arc;
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     next_matching_server_message_within, next_server_message_within, WsStream,
@@ -44,17 +43,17 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
-async fn start_auth_server() -> std::net::SocketAddr {
+async fn start_auth_server() -> RunningTestServer {
     start_auth_server_with_handle().await.0
 }
 
-async fn start_auth_server_with_handle() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+async fn start_auth_server_with_handle() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     start_auth_server_with_config(test_server_config()).await
 }
 
 async fn start_auth_server_with_config(
     mut server_config: ServerConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     server_config.auth_enabled = true;
 
     let mut protocol_config = test_protocol_config();
@@ -76,36 +75,21 @@ async fn start_auth_server_with_config(
     .await
     .expect("server builds");
 
-    let addr = start_server(game_server.clone()).await;
-    (addr, game_server)
+    let running_server = start_server(game_server.clone()).await;
+    (running_server, game_server)
 }
 
-async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
     use axum::routing::get;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
 
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -207,7 +191,8 @@ async fn next_signal(ws: &mut WsStream) -> (PlayerId, serde_json::Value) {
 
 #[tokio::test]
 async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
 
     // Peer 1 creates the room (capacity 2).
     let mut peer1 = connect(addr).await;
@@ -261,11 +246,13 @@ async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
     let (from, signal) = next_signal(&mut peer2).await;
     assert_eq!(from, peer1_id);
     assert_eq!(signal, ice, "ICE payload must be byte-preserved");
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
-    let (addr, game_server) = start_auth_server_with_handle().await;
+    let (running_server, game_server) = start_auth_server_with_handle().await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3(&mut peer1).await;
@@ -345,6 +332,7 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
         "post-reconnect signal must be routed under the restored player id"
     );
     assert_eq!(relayed_signal, ice);
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -352,7 +340,8 @@ async fn oversized_signal_is_rejected_over_the_wire_and_small_signal_still_relay
     // Cap the serialized `signal` payload at 256 bytes (`security.max_signal_bytes`).
     let mut server_config = test_server_config();
     server_config.max_signal_bytes = 256;
-    let (addr, _server) = start_auth_server_with_config(server_config).await;
+    let (running_server, _server) = start_auth_server_with_config(server_config).await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3(&mut peer1).await;
@@ -399,4 +388,5 @@ async fn oversized_signal_is_rejected_over_the_wire_and_small_signal_still_relay
         relayed, small,
         "small signal must relay after a size rejection"
     );
+    running_server.shutdown().await;
 }

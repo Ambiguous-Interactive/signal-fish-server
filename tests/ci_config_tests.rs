@@ -14703,11 +14703,9 @@ fn test_workflow_files_use_two_space_indentation() {
 
 /// Required jobs in ci-safety.yml: (job_key, display_name, description)
 ///
-/// These jobs are **staged (non-blocking)** — they use `continue-on-error: true`
-/// and are NOT listed in `REQUIRED_WORKFLOW_NAMES` or `REQUIRED_CHECK_NAMES`.
-/// They will be promoted to required checks once stability criteria are met
-/// (see PLAN.md Phase 3, Promotion Policy).
-const STAGED_SAFETY_JOBS: &[(&str, &str, &str)] = &[
+/// These jobs are not branch-protection required checks. Their workflow-level
+/// failure policy is pinned separately below.
+const SAFETY_JOBS: &[(&str, &str, &str)] = &[
     (
         "miri",
         "Miri",
@@ -14720,9 +14718,11 @@ const STAGED_SAFETY_JOBS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+const SAFETY_JOB_CONTINUE_ON_ERROR: &[(&str, bool)] = &[("miri", true), ("asan", false)];
+
 #[test]
 fn test_ci_safety_workflow_has_required_jobs() {
-    // Validates that the advanced safety workflow has all staged safety jobs
+    // Validates that the advanced safety workflow has all safety jobs
     // with correct job keys AND display names. Uses the shared helper
     // `validate_workflow_has_required_jobs` for consistency with ci.yml and
     // doc-validation.yml validation tests.
@@ -14737,67 +14737,40 @@ fn test_ci_safety_workflow_has_required_jobs() {
          See PLAN.md Phase 3 / Ticket G for details."
     );
 
-    validate_workflow_has_required_jobs(&workflow_path, STAGED_SAFETY_JOBS, "Advanced Safety");
+    validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
 }
 
 #[test]
-fn test_ci_safety_workflow_jobs_are_staged() {
-    // Validates that all advanced safety jobs use continue-on-error: true.
-    // This is critical because these checks run on nightly Rust and may
-    // break due to toolchain instability. They must not block merges until
-    // promoted to required status.
+fn test_ci_safety_workflow_failure_policy_is_explicit() {
+    // Miri is staged while ASan must propagate failures to the workflow.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
+    let documents = Yaml::load_from_str(&content).expect("ci-safety.yml must parse as YAML");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci-safety.yml must define a jobs mapping");
 
-    for (job_key, display_name, _description) in STAGED_SAFETY_JOBS {
-        // Find the job section and check for continue-on-error.
-        // A job key in YAML appears as a line starting with exactly 2 spaces
-        // followed by the key name and a colon (e.g., "  miri:").
-        let job_key_pattern = format!("\n  {job_key}:");
-        let job_start = content.find(&job_key_pattern).unwrap_or_else(|| {
-            panic!(
-                "Job '{job_key}' not found in ci-safety.yml.\n\
-                 Expected YAML key: '  {job_key}:'"
-            )
-        });
-
-        // Extract the job section: from this job key to the next top-level
-        // job key (a line matching "\n  <word>:") or end of file.
-        let after_key = &content[job_start + job_key_pattern.len()..];
-        let next_job_offset = after_key
-            .lines()
-            .skip(1) // skip the rest of the current key's line
-            .position(|line| {
-                // A top-level job key: exactly 2 leading spaces, then a word char
-                line.len() > 2
-                    && line.starts_with("  ")
-                    && !line.starts_with("   ")
-                    && line.as_bytes()[2] != b' '
-                    && line.as_bytes()[2] != b'#'
-            });
-
-        let job_text = match next_job_offset {
-            Some(pos) => {
-                // Calculate byte offset for the matched line
-                let mut byte_offset = 0;
-                for (i, line) in after_key.lines().skip(1).enumerate() {
-                    if i == pos {
-                        break;
-                    }
-                    byte_offset += line.len() + 1; // +1 for newline
-                }
-                &content[job_start..job_start + job_key_pattern.len() + byte_offset]
-            }
-            None => &content[job_start..],
-        };
-
+    for (job_key, expected_continue_on_error) in SAFETY_JOB_CONTINUE_ON_ERROR {
+        let job = jobs
+            .as_mapping_get(job_key)
+            .unwrap_or_else(|| panic!("Job '{job_key}' not found in ci-safety.yml"));
         assert!(
-            job_text.contains("continue-on-error: true"),
-            "Job '{job_key}' (\"{display_name}\") must have 'continue-on-error: true'.\n\
-             Advanced safety jobs are staged and must not block merges.\n\
-             See PLAN.md Phase 3, Promotion Policy for when to change this."
+            matches!(job, Yaml::Mapping(_)),
+            "Job '{job_key}' must be a YAML mapping"
+        );
+        let configured = match job.as_mapping_get("continue-on-error") {
+            Some(value) => value.as_bool().unwrap_or_else(|| {
+                panic!("Job '{job_key}' continue-on-error must be a YAML boolean")
+            }),
+            None => false,
+        };
+        assert_eq!(
+            configured, *expected_continue_on_error,
+            "Job '{job_key}' continue-on-error policy drifted: expected \
+             continue-on-error={expected_continue_on_error}"
         );
     }
 }
@@ -15197,8 +15170,8 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
 #[test]
 fn test_ci_safety_workflow_uploads_artifacts() {
     // Validates that both safety jobs upload their output as artifacts.
-    // Artifacts are critical for diagnosing safety findings even when
-    // the job passes (continue-on-error: true may mask real issues).
+    // Artifacts are critical for diagnosing safety findings, including Miri
+    // findings softened by its staged continue-on-error policy.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
@@ -15229,8 +15202,8 @@ fn test_ci_safety_workflow_uploads_artifacts() {
 #[test]
 fn test_ci_safety_jobs_not_in_required_check_names() {
     // Validates that ci-safety.yml jobs are NOT in the required check names.
-    // These are staged checks and must not be listed as branch-protection
-    // required checks until promoted. This test ensures the staging contract.
+    // Branch-protection configuration is independent of whether a job-level
+    // failure propagates to the workflow.
 
     let safety_workflow_name = "Advanced Safety";
 
@@ -15238,7 +15211,7 @@ fn test_ci_safety_jobs_not_in_required_check_names() {
         assert!(
             !check_name.starts_with(&format!("{safety_workflow_name} /")),
             "Found '{check_name}' in REQUIRED_CHECK_NAMES, but ci-safety.yml \
-             jobs are staged (non-blocking) and must NOT be required checks.\n\
+             jobs are not yet branch-protection required checks.\n\
              Remove from REQUIRED_CHECK_NAMES until promotion criteria are met.\n\
              See PLAN.md Phase 3, Promotion Policy."
         );
@@ -15886,6 +15859,17 @@ fn test_nextest_config_exists_and_is_valid() {
          File: {}",
         nextest_config.display()
     );
+
+    let normalized = content.replace("\r\n", "\n");
+    assert!(
+        normalized.contains("powershell-subprocess = { max-threads = 1 }")
+            && normalized.contains(
+                "filter = 'test(/when_pwsh_available/)'\n\
+test-group = 'powershell-subprocess'",
+            ),
+        ".config/nextest.toml must serialize direct PowerShell integration tests across \
+         nextest's per-test processes. Keep those tests named `*_when_pwsh_available`."
+    );
 }
 
 #[test]
@@ -16365,7 +16349,8 @@ fn test_powershell_native_process_helpers_do_not_pollute_pipeline() {
 }
 
 #[test]
-fn test_powershell_native_bytes_helper_returns_single_result_object_when_available() {
+#[serial_test::serial]
+fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
         .args([
@@ -16427,6 +16412,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_availab
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -16504,6 +16490,7 @@ fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh_available() {
     let root = repo_root();
     let hook = root.join("scripts/hooks/pre-commit.ps1");
@@ -16597,6 +16584,7 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_push_workflow_direct_script_detector_matches_assignment_edge_cases_when_pwsh_available()
 {
     let root = repo_root();
@@ -16669,6 +16657,7 @@ jobs:
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_rust_panic_classifier_handles_test_contexts_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -16784,6 +16773,7 @@ fn after_lifetime_helper() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
@@ -21328,11 +21318,11 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // Total mutants generated by `cargo mutants --list` over the scoped modules in
 // .cargo/mutants.toml. Re-measure (and update mutation.yml's shard count if
 // needed) whenever the scope or the mutated code changes materially.
-const MUTATION_TOTAL_MUTANTS: u32 = 227;
-// LOCAL-measured per-mutant budget (~22s wall-clock for in-place + slice +
-// lib-only incremental rebuild + relink + lib test run). A small ceiling above
-// the measurement absorbs runner variance. Update ONLY after re-measuring.
-const MUTATION_PER_MUTANT_BUDGET_SECS: u32 = 23;
+const MUTATION_TOTAL_MUTANTS: u32 = 319;
+// CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
+// 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
+// the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
+const MUTATION_PER_MUTANT_BUDGET_SECS: u32 = 29;
 // Soft target: each shard should finish in under 5 minutes.
 const MUTATION_TARGET_SECS: u32 = 300;
 // Allowed band for the mutants job `timeout-minutes`. The floor stops anyone
@@ -21521,14 +21511,23 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     );
 
     let mut violations = Vec::new();
+    let baseline_block = extract_yaml_mapping_block(&workflow_live, "baseline", 2);
+    let mutants_block = extract_yaml_mapping_block(&workflow_live, "mutants", 2);
 
     // (1) The mutants job must run the mutation via the script, not a raw inline
     //     `cargo mutants` whose flags would bypass the locked-in speed levers.
-    if !workflow_live.contains("bash scripts/run-mutants.sh --shard") {
+    if !mutants_block
+        .as_deref()
+        .into_iter()
+        .flat_map(str::lines)
+        .any(|line| {
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/32"
+        })
+    {
         violations.push(
-            "mutation.yml mutants job must run mutation via `bash scripts/run-mutants.sh --shard \
-             ...`, not an inline `cargo mutants` command (inline flags bypass the single source \
-             of truth)."
+            "mutation.yml mutants job must run mutation via the exact `bash \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/32` command, not an inline or \
+             differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
     }
@@ -21539,6 +21538,33 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         violations.push(
             "mutation.yml must not inline a `run: cargo mutants ...` step; route it through \
              scripts/run-mutants.sh instead."
+                .to_string(),
+        );
+    }
+    if !baseline_block
+        .as_deref()
+        .into_iter()
+        .flat_map(str::lines)
+        .any(|line| line.trim() == "run: bash scripts/run-mutants.sh --warm")
+    {
+        violations.push(
+            "mutation.yml baseline job must run `bash scripts/run-mutants.sh --warm` so its \
+             green gate cannot drift from the shard oracle."
+                .to_string(),
+        );
+    }
+
+    let exact_warm_command =
+        "CMD=(cargo nextest run --lib --cargo-profile \"$MUTANTS_PROFILE\" --profile \
+         \"$MUTANTS_PROFILE\" --locked)";
+    if !script_live
+        .lines()
+        .any(|line| line.trim() == exact_warm_command)
+    {
+        violations.push(
+            "scripts/run-mutants.sh warm command must be exactly `cargo nextest run --lib \
+             --cargo-profile mutants --profile mutants --locked`: --cargo-profile selects the \
+             Cargo build profile while --profile selects nextest's 10s per-test policy."
                 .to_string(),
         );
     }
@@ -21579,8 +21605,6 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
                 && l.contains("clang")
         }) || body.to_lowercase().contains("setup-mold")
     };
-    let baseline_block = extract_yaml_mapping_block(&workflow_live, "baseline", 2);
-    let mutants_block = extract_yaml_mapping_block(&workflow_live, "mutants", 2);
     match &baseline_block {
         Some(block) if installs_mold_and_clang(block) => {}
         _ => violations.push(
@@ -21597,6 +21621,49 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
                 .to_string(),
         ),
     }
+    let installs_cargo_tool = |body: &str, tool: &str| -> bool {
+        let tool_line = format!("tool: {tool}");
+        let mut uses_install_action = false;
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.starts_with("- name:") {
+                uses_install_action = false;
+            } else if line.starts_with("uses:") {
+                uses_install_action = line.starts_with("uses: taiki-e/install-action@");
+            } else if uses_install_action && line == tool_line {
+                return true;
+            }
+        }
+
+        false
+    };
+    for (job_key, block) in [
+        ("baseline", baseline_block.as_deref()),
+        ("mutants", mutants_block.as_deref()),
+    ] {
+        for tool in ["cargo-mutants", "cargo-nextest"] {
+            if !block.is_some_and(|body| installs_cargo_tool(body, tool)) {
+                violations.push(format!(
+                    "mutation.yml `{job_key}` job must install {tool} through a \
+                     `taiki-e/install-action` step; both jobs need the same mutation tooling, \
+                     and cargo-nextest applies the dedicated profile's 10s per-test termination."
+                ));
+            }
+        }
+    }
+    match &baseline_block {
+        Some(block)
+            if block.contains(
+                "cargo test --locked --test ci_config_tests \
+                 test_mutation_total_mutants_constant_matches_list",
+            ) => {}
+        _ => violations.push(
+            "mutation.yml `baseline` job must run the measured-inventory integration test; \
+             otherwise that guard skips in every ordinary CI lane."
+                .to_string(),
+        ),
+    }
 
     assert!(
         violations.is_empty(),
@@ -21605,7 +21672,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/18 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/32 --print-cmd",
         violations.join("\n")
     );
 }
@@ -21613,14 +21680,15 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
 #[test]
 fn test_mutation_workflow_uses_optimized_build_profile() {
     // Mutation rebuilds the crate once per mutant, so the build profile is a
-    // first-order speed lever. Lock: the script passes `--profile mutants`, and
+    // first-order speed lever. Lock: the script selects the Cargo `mutants`
+    // profile (`--profile` for cargo-mutants and `--cargo-profile` for nextest), and
     // Cargo.toml defines [profile.mutants] with debug=0, incremental=true, and
     // inherits = "dev" (explicitly NOT "ci", whose incremental=false would force
     // a near-clean rebuild every mutant).
 
     let script = read_run_mutants_script();
-    // Live view: the script's header comments name `--profile mutants`, so assert
-    // the flag is really wired, not merely mentioned in prose.
+    // Live view: the script's header comments name both profile flags, so assert
+    // the flags are really wired, not merely mentioned in prose.
     let script_live = strip_comment_lines(&script);
     let cargo_toml = read_file(&repo_root().join("Cargo.toml"));
 
@@ -21630,6 +21698,13 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
         "scripts/run-mutants.sh must build with `--profile mutants` (the trimmed mutation \
          profile).\n\
          Fix: keep MUTANTS_PROFILE=\"mutants\" and `--profile \"$MUTANTS_PROFILE\"` in the script.\n\
+         File: scripts/run-mutants.sh"
+    );
+    assert!(
+        script_live.contains("--cargo-profile mutants")
+            || script_live.contains("--cargo-profile \"$MUTANTS_PROFILE\""),
+        "scripts/run-mutants.sh warm command must build with `--cargo-profile mutants`; nextest's \
+         plain `--profile` selects its runtime policy, not Cargo's target profile.\n\
          File: scripts/run-mutants.sh"
     );
     // Also confirm the profile name is literally "mutants" so it maps to the
@@ -21692,7 +21767,7 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
     assert!(
         violations.is_empty(),
         "Mutation-testing build-profile policy violations:\n\n{}\n\n\
-         Why this matters: the per-mutant build/relink cost dominates the ~227-mutant run; this \
+         Why this matters: the per-mutant build/relink cost dominates the 319-mutant run; this \
          profile (see .llm/skills/mutation-testing-performance.md) trims it. \n\
          Fix: restore the listed fields to [profile.mutants] in Cargo.toml.\n\
          Verify: cargo test --test ci_config_tests test_mutation_workflow_uses_optimized_build_profile",
@@ -21897,6 +21972,7 @@ fn test_mutation_oracle_does_not_use_all_features() {
     // Vacuous-pass guard: additional_cargo_args must actually parse, or the
     // --lib assertion below could pass against an empty parse.
     let cargo_args = parse_toml_string_array(&mutants_toml, "additional_cargo_args");
+    let cargo_test_args = parse_toml_string_array(&mutants_toml, "additional_cargo_test_args");
     assert!(
         !cargo_args.is_empty(),
         "Could not parse a non-empty `additional_cargo_args` from .cargo/mutants.toml.\n\
@@ -21926,13 +22002,46 @@ fn test_mutation_oracle_does_not_use_all_features() {
         );
     }
 
-    // The oracle key must be present and correctly named: additional_cargo_args
-    // must contain `--lib`.
-    if !cargo_args.iter().any(|a| a == "--lib") {
+    // The oracle key must be present, correctly named, and exactly scoped to the
+    // library target. Extra target/feature flags silently expand every mutant build.
+    if cargo_args != ["--lib"] {
         violations.push(format!(
-            "`additional_cargo_args` in .cargo/mutants.toml must contain `--lib` (the fast \
-             unit-test oracle applied to BOTH build and test). Parsed: {cargo_args:?}."
+            "`additional_cargo_args` in .cargo/mutants.toml must be exactly `[\"--lib\"]` (the \
+             fast unit-test oracle applied to BOTH build and test). Parsed: {cargo_args:?}."
         ));
+    }
+    let test_tool_assignments: Vec<_> = mutants_toml_active
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("test_tool"))
+        .collect();
+    if test_tool_assignments != ["test_tool = \"nextest\""] {
+        violations.push(format!(
+            ".cargo/mutants.toml must contain exactly one `test_tool = \"nextest\"` \
+                 assignment: process isolation keeps a progress-removing mutant from hanging \
+                 the monolithic lib-test process. Parsed: {test_tool_assignments:?}."
+        ));
+    }
+    if cargo_test_args != ["--profile", "mutants"] {
+        violations.push(format!(
+            "`additional_cargo_test_args` in .cargo/mutants.toml must be exactly \
+             `[\"--profile\", \"mutants\"]` so cargo-mutants selects nextest's dedicated 10s \
+             per-test policy. Parsed: {cargo_test_args:?}."
+        ));
+    }
+
+    let nextest_config = read_file(&repo_root().join(".config/nextest.toml"));
+    match extract_toml_section(&nextest_config, "profile.mutants") {
+        Some(section)
+            if strip_comment_lines(&section).lines().any(|line| {
+                line.trim() == "slow-timeout = { period = \"10s\", terminate-after = 1 }"
+            }) => {}
+        _ => violations.push(
+            ".config/nextest.toml must define the exact `slow-timeout = { period = \"10s\", \
+             terminate-after = 1 }` inside [profile.mutants], so a hanging mutant is terminated \
+             per test instead of consuming the outer 120s scenario budget."
+                .to_string(),
+        ),
     }
 
     assert!(
@@ -21942,8 +22051,8 @@ fn test_mutation_oracle_does_not_use_all_features() {
          keeps the oracle to fast in-crate unit tests and avoids building ~20 integration-test \
          binaries per mutant; --all-features would only add heavy optional deps with no signal. \
          See .llm/skills/mutation-testing-performance.md.\n\
-         Fix: keep `additional_cargo_args = [\"--lib\"]` and remove any --all-features from \
-         .cargo/mutants.toml and scripts/run-mutants.sh.\n\
+         Fix: keep `additional_cargo_args = [\"--lib\"]`, `test_tool = \"nextest\"`, and \
+         remove any --all-features from .cargo/mutants.toml and scripts/run-mutants.sh.\n\
          Verify: cargo test --test ci_config_tests test_mutation_oracle_does_not_use_all_features",
         violations.join("\n")
     );

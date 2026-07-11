@@ -24,8 +24,8 @@ functions; the e2e suites prove the bytes on the actual WebSocket.
 ### TLC — the protocol state machine
 
 `SignalFishSession.tla` models the v3 session lifecycle (finalize-time selection,
-per-recipient `SessionPlan` emission, late-join / seat-fill pairing, host-failover
-re-planning). Each TLA+ action models one membership-touching event **atomically**
+authoritative per-recipient `SessionPlan` publication, late-join / seat-fill
+membership refreshes, host-failover re-planning). Each TLA+ action models one membership-touching event **atomically**
 — the event handler plus all of its session side effects as one step. That is a
 deliberate sequential abstraction: the server runs one event's side effects on one
 task but does not serialize distinct events on the same room against each other
@@ -35,8 +35,11 @@ for what the abstraction proves and what the heal-on-next-event mechanism covers
 instead). TLC then enumerates **every** reachable state of the bounded model and
 checks the named invariants and action properties in each one:
 
-- `V2Gating` — no `SessionPlan` / `NewPeer` ever reaches (or names) a sub-v3
-  member (Appendix K back-compat);
+- `V2Gating` — no `SessionPlan` ever reaches a sub-v3 member (Appendix K
+  back-compat);
+- `EmissionMatchesSessionState` / `PublicationCoverage` — every publication
+  reaches exactly all current v3 members and either matches the stored sticky
+  decision or explicitly resets them to the relay floor;
 - `HostValid` — a stored `host` plan always names a current, capable host, in
   _every_ reachable state of the model (a theorem of the atomic-event
   abstraction; the running system's contract is eventually-healed validity);
@@ -59,8 +62,8 @@ The script downloads a version-pinned, SHA256-verified `tla2tools.jar` (needs a
 JRE 11+) and exits nonzero on any violation. The four models cover the five
 capability profiles, both desired ceilings, the WebRTC-disabled (host+direct)
 path, and the all-transports-disabled relay floor (`RelayFloorOnly`: nothing is
-ever stored or emitted); observed state spaces are ~4k–57k distinct states,
-~1–2 s each. CI runs the same script via
+stored and every v3 publication is an explicit relay reset); observed state spaces are
+~17k–151k distinct states, ~2–7 s each. CI runs the same script via
 `.github/workflows/formal-verification.yml`.
 
 ### proptest — real-code invariants

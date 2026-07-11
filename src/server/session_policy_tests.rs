@@ -4,8 +4,8 @@
 //! the selection ladder, host election, and per-recipient peer/initiate shaping;
 //! emission tests build a real server (with a chosen `SessionConfig`), register
 //! v3 clients, hand-build a [`FinalizedRoom`], call `emit_session_plan`, and
-//! assert on each client's mpsc receiver — including that a relay-resolved room
-//! sends nothing (Appendix K).
+//! assert on each client's mpsc receiver — including an explicit no-peer relay
+//! plan for v3 members and no plan for v2 members (Appendix K).
 
 use crate::config::{
     AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
@@ -14,7 +14,7 @@ use crate::config::{
 use crate::coordination::FinalizedRoom;
 use crate::database::DatabaseConfig;
 use crate::protocol::{
-    IceServer, LobbyState, PlayerId, PlayerInfo, Room, ServerMessage, Topology, Transport,
+    IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, Topology, Transport,
 };
 use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
@@ -27,7 +27,8 @@ use tokio::time::{timeout, Duration};
 
 use super::session_policy::{
     choose_session_plan, desired_topology_for, elect_host, ice_pregather_eligible, is_valid_pair,
-    ActiveSessionPlan, SessionMember, SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
+    membership_session_decision, ActiveSessionPlan, SessionMember, SessionPlanDecision,
+    RELAY_FLOOR, UPGRADE_LADDER,
 };
 
 const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
@@ -651,17 +652,17 @@ fn ladder_is_the_documented_adr_waterfall() {
     assert!(!is_valid_pair(Topology::Relay, Transport::Direct));
 }
 
-/// Pins the two emission gates' truth table across all four legal pairs, derived
+/// Pins the relay and WebRTC classifiers across all four legal pairs, derived
 /// from the single source of truth ([`UPGRADE_LADDER`] plus [`RELAY_FLOOR`]) so a
 /// ladder edit reshapes it automatically (mirrors [`is_valid_pair`]).
 ///
 /// Distinct from `selection_only_ever_yields_a_legal_pair`, which reads the
 /// `topology` / `transport` fields and so cannot catch an inverted accessor body:
 /// this calls `is_relay()` / `uses_webrtc_signaling()` directly. It pins the
-/// discriminator the doc drift hinged on — `Host + Direct` is non-relay yet
-/// non-WebRTC (it gets a `SessionPlan` but no `NewPeer`).
+/// discriminator the doc drift hinged on: `Host + Direct` is non-relay yet
+/// non-WebRTC (it gets a `SessionPlan` without ICE or WebRTC signaling).
 #[test]
-fn emission_gates_track_relay_topology_and_webrtc_transport() {
+fn plan_classifiers_track_relay_topology_and_webrtc_transport() {
     let mut non_relay_non_webrtc = Vec::new();
 
     for (topology, transport) in UPGRADE_LADDER
@@ -692,15 +693,14 @@ fn emission_gates_track_relay_topology_and_webrtc_transport() {
         }
     }
 
-    // The whole point of two separate gates: a non-relay plan does NOT imply
-    // WebRTC signaling. `Host + Direct` is the discriminating rung — gating
-    // late-join `NewPeer` on `is_relay()` (instead of `uses_webrtc_signaling()`)
-    // would wrongly push a LAN session into WebRTC negotiation.
+    // A non-relay plan does NOT imply WebRTC signaling. `Host + Direct` is the
+    // discriminating rung: using `is_relay()` as the WebRTC gate would attach
+    // ICE and allow signaling for a LAN-only session.
     assert_eq!(
         non_relay_non_webrtc,
         vec![(Topology::Host, Transport::Direct)],
         "exactly one legal pair is non-relay yet non-WebRTC: Host + Direct (a \
-         SessionPlan is emitted but no NewPeer/Signal)",
+         SessionPlan is emitted without WebRTC signaling)",
     );
 }
 
@@ -1132,6 +1132,80 @@ fn host_invalid_flags_absent_and_unpairable_hosts() {
     assert!(!mesh.host_invalid(&[]));
 }
 
+#[test]
+fn membership_decision_preserves_or_replaces_host_by_session_path() {
+    let incumbent = PlayerId::new_v4();
+    let departed = PlayerId::new_v4();
+    let early = PlayerId::new_v4();
+    let authority = PlayerId::new_v4();
+
+    let host_plan = |host| ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::WebRtc,
+        host: Some(host),
+    };
+    let mut early_member = v3_full(early, "Early");
+    early_member.joined_at = base_time();
+    let mut authority_member = v3_full(authority, "Authority");
+    authority_member.joined_at = base_time() + chrono::Duration::seconds(1);
+
+    let cases = vec![
+        (
+            "valid incumbent host remains sticky",
+            host_plan(incumbent),
+            vec![v3_full(incumbent, "Incumbent"), authority_member.clone()],
+            Some(incumbent),
+            false,
+        ),
+        (
+            "invalid host is replaced by capable authority",
+            host_plan(departed),
+            vec![early_member.clone(), authority_member.clone()],
+            Some(authority),
+            true,
+        ),
+        (
+            "incapable authority cannot displace capable fallback",
+            host_plan(departed),
+            vec![
+                early_member.clone(),
+                relay_only_member(authority, "Authority"),
+            ],
+            Some(early),
+            true,
+        ),
+        (
+            "non-host topology remains hostless",
+            ActiveSessionPlan {
+                topology: Topology::Mesh,
+                transport: Transport::WebRtc,
+                host: None,
+            },
+            vec![early_member, authority_member],
+            None,
+            false,
+        ),
+    ];
+
+    for (name, stored, members, expected_host, expected_replan) in cases {
+        let resolved = membership_session_decision(Some(stored), Some(authority), members);
+        let expected_update = expected_replan
+            .then(|| Some(host_plan(expected_host.expect("a replan elects a host"))));
+        assert_eq!(
+            resolved.decision.host, expected_host,
+            "{name}: published host identity"
+        );
+        assert_eq!(
+            resolved.active_plan_update, expected_update,
+            "{name}: persisted sticky-plan update"
+        );
+        assert_eq!(
+            resolved.is_replan, expected_replan,
+            "{name}: replan classification"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ice_servers gating.
 // ---------------------------------------------------------------------------
@@ -1287,6 +1361,7 @@ fn player_info(id: PlayerId, name: &str, is_authority: bool) -> PlayerInfo {
         connected_at: base_time(),
         connection_info: None,
         epoch: None,
+        seq: None,
         region_id: "region-a".to_string(),
     }
 }
@@ -1301,6 +1376,114 @@ fn finalized(
         authority_player: authority,
         members,
     }
+}
+
+async fn emit_session_plan_for_published_members(
+    server: &EnhancedGameServer,
+    room_id: &RoomId,
+    finalized: &FinalizedRoom,
+) {
+    let members: Vec<PlayerId> = finalized.members.iter().map(|member| member.id).collect();
+    publish_room_members(server, room_id, &members).await;
+    server.emit_session_plan(room_id, finalized).await;
+}
+
+async fn publish_room_members(server: &EnhancedGameServer, room_id: &RoomId, members: &[PlayerId]) {
+    for member in members {
+        if server.get_client_room(member).await != Some(*room_id) {
+            server.assign_client_to_room(member, *room_id).await;
+        }
+    }
+}
+
+async fn unpublish_room_member(server: &EnhancedGameServer, player_id: &PlayerId) {
+    let delivery = server
+        .connection_manager
+        .clear_room_assignment(player_id)
+        .expect("fixture member remains connected");
+    server
+        .message_coordinator
+        .register_local_client(*player_id, None, delivery)
+        .await
+        .expect("fixture route removal succeeds");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn start_game_builder_gates_each_plan_by_that_exact_members_version() {
+    let server = create_server_with_session(mesh_config()).await;
+    let (v3_member, _v3_rx) = register_client(&server).await;
+    let (v2_member, _v2_rx) = register_client(&server).await;
+    server.set_client_protocol(&v3_member, v3_webrtc());
+
+    let room_id = RoomId::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(v3_member, "V3", false),
+            player_info(v2_member, "V2", false),
+        ],
+        None,
+    );
+    let publication = (server.start_game_publication_builder(room_id))(
+        &finalized,
+        Arc::new(ServerMessage::GameStarting {
+            peer_connections: Vec::new(),
+        }),
+    );
+
+    let message_counts: Vec<_> = publication
+        .recipient_messages
+        .iter()
+        .map(|batch| (batch.player_id, batch.messages.len()))
+        .collect();
+    assert_eq!(
+        message_counts,
+        vec![(v3_member, 2), (v2_member, 1)],
+        "only the exact v3 recipient gets GameStarting plus SessionPlan"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn start_game_builder_accumulates_turn_credentials_for_every_recipient() {
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let mut members = Vec::new();
+    for name in ["A", "B"] {
+        let (id, _rx) = register_client(&server).await;
+        server.set_client_protocol(&id, v3_webrtc());
+        members.push(player_info(id, name, false));
+    }
+
+    let room_id = RoomId::new_v4();
+    let finalized = finalized("mesh-game", members, None);
+    let before = selection_counters(&server);
+    let publication = (server.start_game_publication_builder(room_id))(
+        &finalized,
+        Arc::new(ServerMessage::GameStarting {
+            peer_connections: Vec::new(),
+        }),
+    );
+
+    assert_eq!(publication.recipient_messages.len(), 2);
+    assert_eq!(
+        selection_counters(&server),
+        before,
+        "metrics remain deferred until GameStarting commits"
+    );
+
+    (publication.after_game_starting)();
+    let after = selection_counters(&server);
+    assert_eq!(
+        after.turn_credentials_issued,
+        before.turn_credentials_issued + 2,
+        "the deferred hook accumulates one mint from every recipient"
+    );
+    assert_eq!(
+        after.session_plans_emitted,
+        before.session_plans_emitted + 1
+    );
 }
 
 #[tokio::test]
@@ -1322,7 +1505,7 @@ async fn emit_all_v3_mesh_room_sends_one_plan_each_with_correct_initiate() {
         None,
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
     let alice_plan = match recv(&mut alice_rx).await.as_ref() {
         ServerMessage::SessionPlan(plan) => plan.clone(),
@@ -1355,33 +1538,6 @@ async fn emit_all_v3_mesh_room_sends_one_plan_each_with_correct_initiate() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn emit_relay_resolved_room_sends_no_plan() {
-    // One v3 + one default v2 (relay-only) member => relay floor => no SessionPlan.
-    let server = create_server_with_session(mesh_config()).await;
-    let (alice, mut alice_rx) = register_client(&server).await;
-    let (legacy, mut legacy_rx) = register_client(&server).await;
-    server.set_client_protocol(&alice, v3_webrtc());
-    // legacy stays on the default v2 / relay-only protocol.
-
-    let room_id = uuid::Uuid::new_v4();
-    let finalized = finalized(
-        "mesh-game",
-        vec![
-            player_info(alice, "Alice", false),
-            player_info(legacy, "Legacy", false),
-        ],
-        None,
-    );
-
-    server.emit_session_plan(&room_id, &finalized).await;
-
-    // Neither member receives a SessionPlan (the room runs on the relay floor).
-    assert_silent(&mut alice_rx).await;
-    assert_silent(&mut legacy_rx).await;
-}
-
-#[tokio::test]
-#[cfg_attr(miri, ignore)]
 async fn emit_host_room_pairs_clients_with_host() {
     let server = create_server_with_session(host_config()).await;
     let (host, mut host_rx) = register_client(&server).await;
@@ -1402,7 +1558,7 @@ async fn emit_host_room_pairs_clients_with_host() {
         Some(host),
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
     // Host receives a plan listing both clients, all initiate=false.
     let host_plan = match recv(&mut host_rx).await.as_ref() {
@@ -1433,9 +1589,7 @@ async fn emit_host_room_pairs_clients_with_host() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn emit_default_relay_config_sends_no_plan_even_for_v3_room() {
-    // Default SessionConfig keeps the relay floor, so even an all-v3 room gets no
-    // SessionPlan — the v2-equivalent behavior.
+async fn emit_default_relay_config_sends_explicit_no_peer_plan_to_v3_room() {
     let server = create_server_with_session(SessionConfig::default()).await;
     let (alice, mut alice_rx) = register_client(&server).await;
     let (bob, mut bob_rx) = register_client(&server).await;
@@ -1452,10 +1606,19 @@ async fn emit_default_relay_config_sends_no_plan_even_for_v3_room() {
         None,
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
-    assert_silent(&mut alice_rx).await;
-    assert_silent(&mut bob_rx).await;
+    for receiver in [&mut alice_rx, &mut bob_rx] {
+        match recv(receiver).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => {
+                assert_eq!(plan.topology, Topology::Relay);
+                assert_eq!(plan.transport, Transport::Relay);
+                assert!(plan.peers.is_empty());
+            }
+            other => panic!("expected explicit relay plan, got {other:?}"),
+        }
+        assert_silent(receiver).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,7 +1669,7 @@ async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() 
         None,
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
     let alice_plan = match recv(&mut alice_rx).await.as_ref() {
         ServerMessage::SessionPlan(plan) => plan.clone(),
@@ -1574,7 +1737,7 @@ async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
         None,
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
     for rx in [&mut alice_rx, &mut bob_rx] {
         let plan = match recv(rx).await.as_ref() {
@@ -1611,7 +1774,7 @@ async fn emit_webrtc_room_prepends_static_ice_then_turn() {
         None,
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
     let alice_plan = match recv(&mut alice_rx).await.as_ref() {
         ServerMessage::SessionPlan(plan) => plan.clone(),
@@ -1669,7 +1832,7 @@ async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
         Some(host),
     );
 
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
 
     for rx in [&mut host_rx, &mut client_rx] {
         let plan = match recv(rx).await.as_ref() {
@@ -1735,7 +1898,7 @@ async fn emit_mesh_webrtc_finalize_increments_topology_transport_and_session_pla
     );
 
     let before = selection_counters(&server);
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
     // Drain the two plans so the receivers stay alive for the duration.
     let _ = recv(&mut alice_rx).await;
     let _ = recv(&mut bob_rx).await;
@@ -1746,7 +1909,7 @@ async fn emit_mesh_webrtc_finalize_increments_topology_transport_and_session_pla
     assert_eq!(
         after.session_plans_emitted,
         before.session_plans_emitted + 1,
-        "exactly one non-relay SessionPlan finalize event"
+        "exactly one v3 SessionPlan finalize event"
     );
     // No TURN block configured (mesh_config + turn_off) => no credentials minted.
     assert_eq!(
@@ -1782,7 +1945,7 @@ async fn emit_mesh_webrtc_with_turn_counts_one_credential_per_recipient() {
     );
 
     let before = selection_counters(&server);
-    server.emit_session_plan(&room_id, &finalized).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
     let _ = recv(&mut alice_rx).await;
     let _ = recv(&mut bob_rx).await;
     let after = selection_counters(&server);
@@ -1802,7 +1965,7 @@ async fn emit_mesh_webrtc_with_turn_counts_one_credential_per_recipient() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn emit_relay_resolved_finalize_counts_relay_but_not_session_plan() {
+async fn emit_relay_resolved_finalize_sends_explicit_plan_only_to_v3() {
     // One v3 + one default v2 (relay-only) member => relay floor.
     let server = create_server_with_session(mesh_config()).await;
     let (alice, mut alice_rx) = register_client(&server).await;
@@ -1821,9 +1984,16 @@ async fn emit_relay_resolved_finalize_counts_relay_but_not_session_plan() {
     );
 
     let before = selection_counters(&server);
-    server.emit_session_plan(&room_id, &finalized).await;
-    // No plan is sent on the relay floor.
-    assert_silent(&mut alice_rx).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
+    match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.topology, Topology::Relay);
+            assert_eq!(plan.transport, Transport::Relay);
+            assert!(plan.peers.is_empty());
+            assert!(plan.ice_servers.is_empty());
+        }
+        other => panic!("v3 member expected explicit relay plan, got {other:?}"),
+    }
     assert_silent(&mut legacy_rx).await;
     let after = selection_counters(&server);
 
@@ -1838,89 +2008,12 @@ async fn emit_relay_resolved_finalize_counts_relay_but_not_session_plan() {
         "a relay-resolved finalize counts the relay transport"
     );
     assert_eq!(
-        after.session_plans_emitted, before.session_plans_emitted,
-        "a relay-resolved room emits NO SessionPlan => session_plans_emitted unchanged"
+        after.session_plans_emitted,
+        before.session_plans_emitted + 1,
+        "one explicit v3 relay-plan publication is counted"
     );
     assert_eq!(after.topology_mesh, before.topology_mesh);
     assert_eq!(after.transport_webrtc, before.transport_webrtc);
-}
-
-#[tokio::test]
-#[cfg_attr(miri, ignore)]
-async fn late_join_does_not_double_count_selection_metrics() {
-    // emit_session_plan counts the topology/transport selection once per
-    // finalize; a subsequent late-join (which consults the STORED decision and
-    // never re-runs the ladder) must NOT bump any selection counter, nor
-    // session_plans_emitted. (Its own session_plans_late_join counter is
-    // asserted separately below.)
-    let server = create_server_with_session(mesh_config()).await;
-    let (alice, mut alice_rx) = register_client(&server).await;
-    let (bob, mut bob_rx) = register_client(&server).await;
-    server.set_client_protocol(&alice, v3_webrtc());
-    server.set_client_protocol(&bob, v3_webrtc());
-
-    let room_id = uuid::Uuid::new_v4();
-    let members = vec![
-        player_info(alice, "Alice", false),
-        player_info(bob, "Bob", false),
-    ];
-    let finalized = finalized("mesh-game", members.clone(), None);
-
-    server.emit_session_plan(&room_id, &finalized).await;
-    let _ = recv(&mut alice_rx).await;
-    let _ = recv(&mut bob_rx).await;
-    let after_finalize = selection_counters(&server);
-    let late_join_plans_before = server
-        .metrics
-        .session_plans_late_join
-        .load(Ordering::Relaxed);
-
-    // A late join into the already-finalized room reads the stored decision but
-    // must not count any selection again.
-    let mut room = crate::protocol::Room::new(
-        "mesh-game".to_string(),
-        "ROOMAB".to_string(),
-        4,
-        false,
-        "matchbox".to_string(),
-    );
-    // The stored decision is keyed by the room id emit_session_plan saw.
-    room.id = room_id;
-    room.lobby_state = crate::protocol::LobbyState::Finalized;
-    server
-        .handle_active_session_late_join(&room, &bob, &members)
-        .await;
-    // The joiner (bob) receives its tailored SessionPlan; the existing member
-    // (alice) receives the NewPeer delta. Consume (and verify) both so the
-    // receivers stay drained — this also proves the late-join path ran (the
-    // double-count guard is non-vacuous).
-    match recv(&mut bob_rx).await.as_ref() {
-        ServerMessage::SessionPlan(plan) => {
-            assert_eq!(plan.topology, Topology::Mesh);
-            assert_eq!(plan.transport, Transport::WebRtc);
-        }
-        other => panic!("joiner expected SessionPlan from late-join, got {other:?}"),
-    }
-    match recv(&mut alice_rx).await.as_ref() {
-        ServerMessage::NewPeer { peer_id, .. } => assert_eq!(*peer_id, bob),
-        other => panic!("existing member expected NewPeer from late-join, got {other:?}"),
-    }
-    assert_silent(&mut alice_rx).await;
-    assert_silent(&mut bob_rx).await;
-
-    let after_late_join = selection_counters(&server);
-    assert_eq!(
-        after_finalize, after_late_join,
-        "late-join must not double-count any selection metric"
-    );
-    assert_eq!(
-        server
-            .metrics
-            .session_plans_late_join
-            .load(Ordering::Relaxed),
-        late_join_plans_before + 1,
-        "the late-join plan is counted on its own dedicated counter"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1952,7 +2045,7 @@ async fn emit_session_plan_stores_active_plan_for_non_relay_decisions() {
         server.active_session_plan(&room_id).is_none(),
         "no decision is stored before finalize"
     );
-    server.emit_session_plan(&room_id, &finalized_room).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
     let _ = recv(&mut alice_rx).await;
     let _ = recv(&mut bob_rx).await;
     assert_eq!(
@@ -1980,8 +2073,7 @@ async fn emit_session_plan_stores_active_plan_for_non_relay_decisions() {
         ],
         Some(host),
     );
-    host_server
-        .emit_session_plan(&host_room_id, &finalized_host_room)
+    emit_session_plan_for_published_members(&host_server, &host_room_id, &finalized_host_room)
         .await;
     let _ = recv(&mut host_rx).await;
     let _ = recv(&mut client_rx).await;
@@ -2025,9 +2117,16 @@ async fn emit_session_plan_relay_resolution_removes_stale_stored_entry() {
         ],
         None,
     );
-    server.emit_session_plan(&room_id, &finalized_room).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
 
-    assert_silent(&mut alice_rx).await;
+    match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.topology, Topology::Relay);
+            assert_eq!(plan.transport, Transport::Relay);
+            assert!(plan.peers.is_empty());
+        }
+        other => panic!("expected explicit relay reset, got {other:?}"),
+    }
     assert_silent(&mut legacy_rx).await;
     assert!(
         server.active_session_plan(&room_id).is_none(),
@@ -2123,9 +2222,16 @@ async fn finalized_db_room_with(
             .await
             .expect("toggle ready");
     }
+    let start_snapshot = server
+        .database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("room lookup")
+        .expect("room exists before finalize");
+    let expectation = crate::database::FinalizeRoomGameExpectation::from_room(&start_snapshot);
     server
         .database
-        .finalize_room_game(&room.id)
+        .finalize_room_game(&room.id, &expectation)
         .await
         .expect("finalize room");
     let stored = server
@@ -2180,7 +2286,7 @@ async fn host_departure_reemits_fresh_plans_with_reelected_host() {
         .await
         .expect("room players");
     let finalized_room = finalized("host-game", members, Some(host));
-    server.emit_session_plan(&room_id, &finalized_room).await;
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
     for (rx, who) in [
         (&mut host_rx, "host"),
         (&mut client_a_rx, "client_a"),
@@ -2200,6 +2306,7 @@ async fn host_departure_reemits_fresh_plans_with_reelected_host() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     let replans_before = server
         .metrics
         .session_replans_emitted
@@ -2286,9 +2393,8 @@ async fn host_departure_replan_mints_fresh_turn_credentials_per_recipient() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server
-        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
-        .await;
+    let finalized_room = finalized("host-game", members, Some(host));
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
     for (rx, who) in [
         (&mut host_rx, "host"),
         (&mut client_a_rx, "client_a"),
@@ -2302,6 +2408,7 @@ async fn host_departure_replan_mints_fresh_turn_credentials_per_recipient() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     let creds_before = server
         .metrics
         .turn_credentials_issued
@@ -2363,6 +2470,7 @@ async fn host_departure_replan_skips_v2_members() {
         &[(v3_client, "V3Client"), (legacy, "Legacy")],
     )
     .await;
+    publish_room_members(&server, &room_id, &[host, v3_client, legacy]).await;
     // Hand-store the running decision (a real finalize with a v2 member would
     // have resolved to relay; the v2 member is modeled as a post-finalize
     // seat-filler).
@@ -2380,6 +2488,7 @@ async fn host_departure_replan_skips_v2_members() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     server
         .handle_session_member_departure(&room_id, &host)
         .await;
@@ -2431,6 +2540,7 @@ async fn host_departure_election_skips_relay_only_authority() {
         ],
     )
     .await;
+    publish_room_members(&server, &room_id, &[host, relay_authority, webrtc_member]).await;
     // The running session is host+webrtc (the relay-only member is modeled as
     // a post-finalize seat-filler; a real finalize with it present would have
     // resolved to the relay floor and stored nothing).
@@ -2450,6 +2560,7 @@ async fn host_departure_election_skips_relay_only_authority() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     assert!(server
         .database
         .update_room_authority(&room_id, Some(relay_authority))
@@ -2542,6 +2653,7 @@ async fn host_failover_replan_filters_peer_lists_to_session_capable_members() {
         ],
     )
     .await;
+    publish_room_members(&server, &room_id, &[host, relay_only, capable_a, capable_b]).await;
     // The running session is host+webrtc (the relay-only member is modeled as
     // a post-finalize seat-filler; a real finalize with it present would have
     // resolved to the relay floor and stored nothing).
@@ -2559,6 +2671,7 @@ async fn host_failover_replan_filters_peer_lists_to_session_capable_members() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     server
         .handle_session_member_departure(&room_id, &host)
         .await;
@@ -2642,6 +2755,7 @@ async fn host_departure_with_no_electable_member_drops_plan_without_replan() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     let replans_before = server
         .metrics
         .session_replans_emitted
@@ -2687,6 +2801,7 @@ async fn non_host_departure_heals_already_missing_host() {
     }
 
     let room_id = finalized_db_room_with(&server, owner, &[(member_b, "B"), (member_c, "C")]).await;
+    publish_room_members(&server, &room_id, &[owner, member_b, member_c]).await;
     // Wedged entry: the recorded host was never (or is no longer) a member.
     let ghost_host = PlayerId::new_v4();
     server.active_session_plans.insert(
@@ -2704,6 +2819,7 @@ async fn non_host_departure_heals_already_missing_host() {
         .remove_player_from_room(&room_id, &member_c)
         .await
         .expect("remove member_c");
+    unpublish_room_member(&server, &member_c).await;
     let replans_before = server
         .metrics
         .session_replans_emitted
@@ -2773,6 +2889,7 @@ async fn non_host_departure_heals_present_but_unpairable_host() {
         &[(capable, "Capable"), (departing, "Departing")],
     )
     .await;
+    publish_room_members(&server, &room_id, &[host, capable, departing]).await;
     // The running session still names the (now-downgraded) host.
     server.active_session_plans.insert(
         room_id,
@@ -2789,6 +2906,7 @@ async fn non_host_departure_heals_present_but_unpairable_host() {
         .remove_player_from_room(&room_id, &departing)
         .await
         .expect("remove departing");
+    unpublish_room_member(&server, &departing).await;
     let replans_before = server
         .metrics
         .session_replans_emitted
@@ -2870,6 +2988,7 @@ async fn departure_with_unpairable_host_and_no_qualifier_drops_plan() {
         .remove_player_from_room(&room_id, &legacy)
         .await
         .expect("remove legacy");
+    unpublish_room_member(&server, &legacy).await;
     let replans_before = server
         .metrics
         .session_replans_emitted
@@ -2919,9 +3038,8 @@ async fn non_host_departures_do_not_replan() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server
-        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
-        .await;
+    let finalized_room = finalized("host-game", members, Some(host));
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
     let _ = expect_plan(&mut host_rx, "host").await;
     let _ = expect_plan(&mut client_a_rx, "client_a").await;
     let stored_before = server.active_session_plan(&room_id);
@@ -2935,6 +3053,7 @@ async fn non_host_departures_do_not_replan() {
         .remove_player_from_room(&room_id, &client_b)
         .await
         .expect("remove client_b");
+    unpublish_room_member(&server, &client_b).await;
     server
         .handle_session_member_departure(&room_id, &client_b)
         .await;
@@ -2969,9 +3088,8 @@ async fn non_host_departures_do_not_replan() {
         .get_room_players(&mesh_room_id)
         .await
         .expect("room players");
-    mesh_server
-        .emit_session_plan(&mesh_room_id, &finalized("mesh-game", mesh_members, None))
-        .await;
+    let finalized_room = finalized("mesh-game", mesh_members, None);
+    emit_session_plan_for_published_members(&mesh_server, &mesh_room_id, &finalized_room).await;
     let _ = expect_plan(&mut alice_rx, "alice").await;
     let _ = expect_plan(&mut carol_rx, "carol").await;
     let mesh_stored_before = mesh_server.active_session_plan(&mesh_room_id);
@@ -2985,6 +3103,7 @@ async fn non_host_departures_do_not_replan() {
         .remove_player_from_room(&mesh_room_id, &bob)
         .await
         .expect("remove bob");
+    unpublish_room_member(&mesh_server, &bob).await;
     mesh_server
         .handle_session_member_departure(&mesh_room_id, &bob)
         .await;
@@ -3024,6 +3143,7 @@ async fn departure_from_relay_floor_room_does_nothing() {
         .remove_player_from_room(&room_id, &legacy)
         .await
         .expect("remove legacy");
+    unpublish_room_member(&server, &legacy).await;
     server
         .handle_session_member_departure(&room_id, &legacy)
         .await;
@@ -3084,6 +3204,7 @@ async fn departure_from_non_finalized_room_does_nothing() {
         .remove_player_from_room(&room.id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     server
         .handle_session_member_departure(&room.id, &host)
         .await;
@@ -3114,9 +3235,8 @@ async fn last_member_departure_removes_stored_entry() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server
-        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
-        .await;
+    let finalized_room = finalized("host-game", members, Some(host));
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
     let _ = expect_plan(&mut host_rx, "host").await;
     let _ = expect_plan(&mut client_rx, "client").await;
 
@@ -3126,6 +3246,7 @@ async fn last_member_departure_removes_stored_entry() {
         .remove_player_from_room(&room_id, &client)
         .await
         .expect("remove client");
+    unpublish_room_member(&server, &client).await;
     server
         .handle_session_member_departure(&room_id, &client)
         .await;
@@ -3138,6 +3259,7 @@ async fn last_member_departure_removes_stored_entry() {
         .remove_player_from_room(&room_id, &host)
         .await
         .expect("remove host");
+    unpublish_room_member(&server, &host).await;
     server
         .handle_session_member_departure(&room_id, &host)
         .await;
@@ -3257,9 +3379,8 @@ async fn leave_room_host_disconnect_triggers_failover_replan() {
         .get_room_players(&room_id)
         .await
         .expect("room players");
-    server
-        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
-        .await;
+    let finalized_room = finalized("host-game", members, Some(host));
+    emit_session_plan_for_published_members(&server, &room_id, &finalized_room).await;
     let _ = expect_plan(&mut client_a_rx, "client_a").await;
     let _ = expect_plan(&mut client_b_rx, "client_b").await;
 
@@ -3271,7 +3392,7 @@ async fn leave_room_host_disconnect_triggers_failover_replan() {
         (&mut client_b_rx, "client_b"),
     ] {
         match recv(rx).await.as_ref() {
-            ServerMessage::PlayerLeft { player_id } => assert_eq!(*player_id, host),
+            ServerMessage::PlayerLeft { player_id, .. } => assert_eq!(*player_id, host),
             other => panic!("{who} expected PlayerLeft first, got {other:?}"),
         }
         let plan = expect_plan(rx, who).await;
@@ -4246,8 +4367,11 @@ async fn replan_prefers_electable_authority_over_earliest_joiner() {
     let server = create_server_with_session(host_config()).await;
     let room_id = uuid::Uuid::new_v4();
 
-    let early = PlayerId::new_v4();
-    let authority = PlayerId::new_v4();
+    let (early, _early_rx) = register_client(&server).await;
+    let (authority, _authority_rx) = register_client(&server).await;
+    server.set_client_protocol(&early, v3_webrtc());
+    server.set_client_protocol(&authority, v3_webrtc());
+    publish_room_members(&server, &room_id, &[early, authority]).await;
 
     let mut early_member = v3_full(early, "Early");
     early_member.joined_at = base_time(); // earliest joiner
@@ -4262,12 +4386,18 @@ async fn replan_prefers_electable_authority_over_earliest_joiner() {
     };
     server.active_session_plans.insert(room_id, stored);
 
+    let room_event_guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+
     server
         .replan_host_session(
             &room_id,
             stored,
             Some(authority),
             vec![early_member, authority_member],
+            room_event_guard,
         )
         .await;
 

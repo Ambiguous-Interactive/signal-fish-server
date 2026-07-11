@@ -6,7 +6,11 @@ use super::{EnhancedGameServer, TransportStatusUpdate};
 
 impl EnhancedGameServer {
     /// Handle incoming client message with enhanced coordination.
-    pub async fn handle_client_message(&self, player_id: &PlayerId, message: ClientMessage) {
+    pub async fn handle_client_message(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        message: ClientMessage,
+    ) {
         // EVERY inbound message is liveness, not just `Ping`: the activity
         // reaper (`server.ping_timeout`) must never disconnect a client that
         // is actively streaming GameData/Signal traffic but not heartbeating.
@@ -52,8 +56,8 @@ impl EnhancedGameServer {
             ClientMessage::LeaveRoom => {
                 self.leave_room(player_id).await;
             }
-            ClientMessage::GameData { data } => {
-                self.handle_game_data(player_id, data).await;
+            ClientMessage::GameData { data, class, key } => {
+                self.handle_game_data(player_id, data, class, key).await;
             }
             ClientMessage::Signal { to, signal } => {
                 self.handle_signal(player_id, to, signal).await;
@@ -135,6 +139,18 @@ impl EnhancedGameServer {
     ) {
         use crate::protocol::Transport;
 
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         match self.set_client_transport_status(player_id, transport, connected) {
             TransportStatusUpdate::Changed => {}
             TransportStatusUpdate::Duplicate => {
@@ -197,6 +213,16 @@ impl EnhancedGameServer {
             return;
         };
 
+        // Keep membership and connection generations fixed while resolving and
+        // dispatching this room-wide status event. The sender lifecycle lock is
+        // already held, so this follows the same lifecycle -> room ordering as
+        // join/leave/reconnect and prevents a stale database member or
+        // replacement v2 connection from receiving a v3-only frame.
+        let _room_event_guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+
         // Cheap non-consuming preflight before the fallible/O(room) membership
         // snapshot below. The consuming check still happens after recipient
         // resolution, immediately before dispatch, so failed lookups and empty
@@ -217,32 +243,53 @@ impl EnhancedGameServer {
             return;
         }
 
-        let members = match self.database.get_room_players(&room_id).await {
-            Ok(members) => members,
+        // Resolve the exact live v3 recipients before charging the sender's
+        // control-plane budget. Production exposes coordinator routing; the
+        // database fallback keeps lightweight/distributed test coordinators
+        // compatible without weakening the production source-route check.
+        let recipients: Vec<PlayerId> = match self
+            .message_coordinator
+            .routed_player_ids(&room_id)
+            .await
+        {
+            Ok(Some(routed)) => {
+                if !routed.contains(player_id) {
+                    tracing::debug!(%player_id, %room_id, "Skipping TransportStatus from an unrouted sender");
+                    return;
+                }
+                routed
+                    .into_iter()
+                    .filter(|recipient| {
+                        *recipient != *player_id && self.client_supports_v3(recipient)
+                    })
+                    .collect()
+            }
+            Ok(None) => match self.database.get_room_players(&room_id).await {
+                Ok(members) => members
+                    .into_iter()
+                    .filter(|member| member.id != *player_id && self.client_supports_v3(&member.id))
+                    .map(|member| member.id)
+                    .collect(),
+                Err(err) => {
+                    tracing::warn!(
+                        %player_id,
+                        %room_id,
+                        error = %err,
+                        "Failed to load room members for PeerTransportStatus fan-out"
+                    );
+                    return;
+                }
+            },
             Err(err) => {
                 tracing::warn!(
                     %player_id,
                     %room_id,
                     error = %err,
-                    "Failed to load room members for PeerTransportStatus fan-out"
+                    "Failed to resolve routed members for PeerTransportStatus fan-out"
                 );
                 return;
             }
         };
-
-        // Resolve the exact v3 recipients before charging the sender's
-        // control-plane budget. A failed membership lookup, sender-only room,
-        // or room with only legacy recipients is not a fan-out event.
-        let recipients: Vec<PlayerId> = members
-            .iter()
-            .filter_map(|member| {
-                if member.id != *player_id && self.client_supports_v3(&member.id) {
-                    Some(member.id)
-                } else {
-                    None
-                }
-            })
-            .collect();
 
         if recipients.is_empty() {
             tracing::trace!(
@@ -289,25 +336,18 @@ impl EnhancedGameServer {
             transport,
             connected,
         });
-        for recipient in recipients {
-            // Deliver only to peers that negotiated v3 (defense-in-depth,
-            // Appendix K — the same per-recipient guard `Signal` / `NewPeer` /
-            // `SessionPlan` apply: a v2 member must never observe a v3-only
-            // message). Deliberately NOT gated on the recipient's own transport
-            // capabilities — weaker than the full session-pairing predicate
-            // (`SessionPlanDecision::recipient_pairable`) — because this is
-            // informational status about a PEER's data path, useful to any v3
-            // client (a relay-only member still wants to know the host fell
-            // back to the relay), not an instruction to use that transport. The
-            // filtering happened above before the sender's budget was charged.
-            // Best-effort delivery, mirroring `Signal` / `NewPeer`: a
-            // backpressured peer may miss the notice; the relay floor (and the
-            // next state change) is unaffected.
-            let _ = self
-                .message_coordinator
-                .send_to_player(&recipient, Arc::clone(&message))
-                .await;
-        }
+        // Deliver to all peers concurrently: one slow room member costs this
+        // event one slow-consumer window, never `(N - 1)` windows. Recipient
+        // filtering above is v3-only but deliberately transport-agnostic: a
+        // relay-only client still needs to know that a peer fell back.
+        futures_util::future::join_all(recipients.iter().map(|recipient| {
+            self.message_coordinator.send_to_player_in_room(
+                recipient,
+                &room_id,
+                Arc::clone(&message),
+            )
+        }))
+        .await;
 
         // One fan-out EVENT per accepted in-room state change — not per
         // recipient (see `ServerMetrics::record_transport_status_fanout`).

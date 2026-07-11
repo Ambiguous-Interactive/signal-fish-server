@@ -506,9 +506,19 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("1024"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY",
+        path: "websocket.control_queue_capacity",
+        default: Some("128"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS",
         path: "websocket.slow_consumer_timeout_ms",
         default: Some("5000"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS",
+        path: "websocket.max_sojourn_ms",
+        default: Some("15000"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS",
@@ -1009,6 +1019,28 @@ fn test_config_example_includes_all_rate_limit_fields() {
         .turn
         .validate()
         .expect("config.example.json turn block must validate");
+
+    let websocket = value
+        .get("websocket")
+        .and_then(serde_json::Value::as_object)
+        .expect("config.example.json must include a websocket object");
+    for key in [
+        "send_queue_capacity",
+        "control_queue_capacity",
+        "slow_consumer_timeout_ms",
+        "max_sojourn_ms",
+    ] {
+        assert!(
+            websocket.contains_key(key),
+            "config.example.json websocket must document `{key}`"
+        );
+    }
+    assert_eq!(config.websocket.control_queue_capacity, 128);
+    assert_eq!(config.websocket.max_sojourn_ms, 15_000);
+    config
+        .websocket
+        .validate()
+        .expect("config.example.json websocket block must validate");
 }
 
 #[test]
@@ -1325,7 +1357,9 @@ fn test_config_websocket_section() {
             "enable_batching": true,
             "batch_size": 64,
             "batch_interval_ms": 50,
-            "auth_timeout_secs": 15
+            "auth_timeout_secs": 15,
+            "control_queue_capacity": 32,
+            "max_sojourn_ms": 1000
         }
     }"#;
 
@@ -1335,6 +1369,8 @@ fn test_config_websocket_section() {
     assert_eq!(config.websocket.batch_size, 64);
     assert_eq!(config.websocket.batch_interval_ms, 50);
     assert_eq!(config.websocket.auth_timeout_secs, 15);
+    assert_eq!(config.websocket.control_queue_capacity, 32);
+    assert_eq!(config.websocket.max_sojourn_ms, 1000);
 }
 
 // ===========================================================================

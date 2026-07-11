@@ -44,8 +44,7 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{
     await_ready_count, expect_finalize_plan, ready, send, start_game, SERVER_MESSAGE_TIMEOUT,
@@ -89,7 +88,7 @@ fn mesh_session_config() -> SessionConfig {
 /// rather than receiving it over the wire, like `tests/v3_multipeer_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
@@ -114,9 +113,6 @@ async fn start_server_with_session(
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
@@ -124,16 +120,8 @@ async fn start_server_with_session(
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -425,7 +413,8 @@ async fn v2_transport_status_report_is_ignored() {
     // `TransportStatus` (a v3-only message). The server must drop it
     // (`UnsupportedProtocolVersion`): no `PeerTransportStatus` fan-out to the v3
     // members, and the v2 sender neither crashes nor receives a v3 frame.
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-v2-ignored";
     let legacy_who = "legacy (v2)";
 
@@ -465,6 +454,7 @@ async fn v2_transport_status_report_is_ignored() {
         matches!(message, ServerMessage::Pong).then_some(())
     })
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +466,8 @@ async fn unsupported_transport_report_is_ignored() {
     // The reporter negotiated WebRTC only (server still appends `relay`), so
     // `direct` is NOT in its negotiated set. A `{direct, true}` report must be
     // dropped (`UnsupportedTransport`): no fan-out to the other v3 member.
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-unsupported-transport";
 
     let mut reporter = connect(addr).await;
@@ -519,6 +510,7 @@ async fn unsupported_transport_report_is_ignored() {
         true,
     )
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +519,8 @@ async fn unsupported_transport_report_is_ignored() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn duplicate_report_fans_out_once() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-dup";
 
     let mut reporter = connect(addr).await;
@@ -559,6 +552,7 @@ async fn duplicate_report_fans_out_once() {
     report_transport_status(&mut reporter, Transport::WebRtc, true).await;
     expect_no_server_message_within(&mut observer, SILENCE_WINDOW, "observer after duplicate")
         .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +561,8 @@ async fn duplicate_report_fans_out_once() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn state_transitions_each_fan_out_once() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-transitions";
 
     let mut reporter = connect(addr).await;
@@ -607,6 +602,7 @@ async fn state_transitions_each_fan_out_once() {
         "observer after three transitions",
     )
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -621,7 +617,8 @@ async fn reconnect_clears_stored_transport_status() {
     // reconnect cleared the stored per-connection state
     // (`connection_manager::reassign_connection` sets `transport_status: None`).
     // If suppressed, the dedup gate is leaking pre-reconnect state -> RED.
-    let (addr, server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-reconnect";
 
     let mut observer = connect(addr).await;
@@ -671,7 +668,7 @@ async fn reconnect_clears_stored_transport_status() {
         SERVER_MESSAGE_TIMEOUT,
         "PlayerLeft(reporter)",
         |message| match message {
-            ServerMessage::PlayerLeft { player_id } if player_id == reporter_id => Some(()),
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == reporter_id => Some(()),
             _ => None,
         },
     )
@@ -748,6 +745,7 @@ async fn reconnect_clears_stored_transport_status() {
         true,
     )
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +761,8 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
     //     recipient's own transport caps — it is informational about a PEER's
     //     data path), AND
     //   - MUST NOT reach the v2 member (v3-gated per recipient, Appendix K).
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-gating";
     let legacy_who = "legacy (v2)";
 
@@ -814,6 +813,7 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
         matches!(message, ServerMessage::Pong).then_some(())
     })
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -823,7 +823,8 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn reporter_excluded_and_roomless_report_is_noop() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-exclusion";
 
     // --- Room-less reporter: recorded but fans out nothing, never panics. ---
@@ -879,6 +880,7 @@ async fn reporter_excluded_and_roomless_report_is_noop() {
         .is_none(),
         "the reporter must never receive its own PeerTransportStatus"
     );
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +908,8 @@ async fn finalization_race_single_plan_per_member() {
     // consistent (each lists the other as its sole peer with a glare-correct,
     // antisymmetric initiate flag). A double finalize would surface as a second
     // plan in either silence window below.
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "tstatus-finalize-race";
 
     let mut peer_a = connect(addr).await;
@@ -986,4 +989,5 @@ async fn finalization_race_single_plan_per_member() {
         plan_a.peers[0].initiate, plan_b.peers[0].initiate,
         "exactly one side of the pair offers (antisymmetric glare)"
     );
+    running_server.shutdown().await;
 }

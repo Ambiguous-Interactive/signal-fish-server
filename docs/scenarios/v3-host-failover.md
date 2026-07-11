@@ -1,7 +1,7 @@
 # v3: Host Failover
 
 This scenario continues from the [host topology](v3-host-topology.md) session: a running `host + webrtc` star loses
-its host. The server signals the departure with the unchanged `PlayerLeft`, re-elects a host over the remaining
+its host. The server signals the departure with `PlayerLeft`, re-elects a host over the remaining
 members, and sends every survivor a fresh `SessionPlan` with the new host and fresh per-recipient ICE.
 
 Starting state — a finalized `host + webrtc` session:
@@ -26,17 +26,23 @@ If Alice left cleanly she sent:
 }
 ```
 
-The server signals the departure to the survivors with the unchanged `PlayerLeft` (this is the same message v2
-uses; it is not v3-specific):
+The server signals the departure to v3 survivors with `PlayerLeft` plus Alice's
+terminal relay watermark:
 
 ```json
 {
   "type": "PlayerLeft",
   "data": {
-    "player_id": "00000000-0000-0000-0000-00000000000a"
+    "player_id": "00000000-0000-0000-0000-00000000000a",
+    "epoch": 1,
+    "final_seq": 0
   }
 }
 ```
+
+Here Alice sent no relayed game data in this incarnation, so `final_seq: 0`
+lets each client retire her accounting cursor immediately. V2 recipients see
+the frozen `player_id`-only projection.
 
 Both Carol and Dave receive this `PlayerLeft`.
 

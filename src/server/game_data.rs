@@ -1,4 +1,6 @@
-use crate::protocol::{ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage};
+use crate::protocol::{
+    DeliveryClass, ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage,
+};
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -47,20 +49,53 @@ impl EnhancedGameServer {
     }
 
     /// Handle JSON game data fan-out with coordination.
-    pub async fn handle_game_data(&self, player_id: &PlayerId, data: serde_json::Value) {
+    pub async fn handle_game_data(
+        &self,
+        player_id: &PlayerId,
+        data: serde_json::Value,
+        class: Option<DeliveryClass>,
+        key: Option<u32>,
+    ) {
+        let valid = if self.client_supports_v3(player_id) {
+            matches!(
+                (class, key),
+                (
+                    None | Some(DeliveryClass::Reliable | DeliveryClass::Volatile),
+                    None
+                ) | (Some(DeliveryClass::Latest), Some(_))
+            )
+        } else {
+            class.is_none() && key.is_none()
+        };
+        if !valid {
+            let _ = self
+                .send_error_to_player(
+                    player_id,
+                    "Invalid delivery class: latest requires a key; reliable and volatile forbid one"
+                        .to_string(),
+                    Some(ErrorCode::InvalidDeliveryClass),
+                )
+                .await;
+            return;
+        }
+
         if let Some(room_id) = self.get_client_room(player_id).await {
             let connection_manager = &self.connection_manager;
+            let expected_room = room_id;
             self.broadcast_game_data_with(
                 player_id,
                 &room_id,
                 Box::new(move || {
-                    let stamp = connection_manager.next_relay_stamp(player_id);
-                    ServerMessage::GameData {
+                    let stamp =
+                        connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
+                    Some(ServerMessage::GameData {
                         from_player: *player_id,
                         data,
-                        seq: stamp.map(|s| s.seq),
-                        epoch: stamp.map(|s| s.epoch),
-                    }
+                        seq: Some(stamp.seq),
+                        epoch: Some(stamp.epoch),
+                        class,
+                        key,
+                    })
                 }),
             )
             .await;
@@ -103,18 +138,20 @@ impl EnhancedGameServer {
 
         if let Some(room_id) = self.get_client_room(player_id).await {
             let connection_manager = &self.connection_manager;
+            let expected_room = room_id;
             self.broadcast_game_data_with(
                 player_id,
                 &room_id,
                 Box::new(move || {
-                    let stamp = connection_manager.next_relay_stamp(player_id);
-                    ServerMessage::GameDataBinary {
+                    let stamp =
+                        connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
+                    Some(ServerMessage::GameDataBinary {
                         from_player: *player_id,
                         encoding,
                         payload,
-                        seq: stamp.map(|s| s.seq),
-                        epoch: stamp.map(|s| s.epoch),
-                    }
+                        seq: Some(stamp.seq),
+                        epoch: Some(stamp.epoch),
+                    })
                 }),
             )
             .await;
@@ -139,7 +176,7 @@ impl EnhancedGameServer {
         &'a self,
         player_id: &'a PlayerId,
         room_id: &RoomId,
-        build_message: Box<dyn FnOnce() -> ServerMessage + Send + 'a>,
+        build_message: Box<dyn FnOnce() -> Option<ServerMessage> + Send + 'a>,
     ) {
         // Count every GameData message accepted for relay. This is the sole
         // increment site for the `game_data_messages` metric (both the JSON and
@@ -157,7 +194,7 @@ impl EnhancedGameServer {
             .broadcast_to_room_except_with_message(
                 room_id,
                 player_id,
-                Box::new(move || Arc::new(build_message())),
+                Box::new(move || build_message().map(Arc::new)),
             )
             .await
         {

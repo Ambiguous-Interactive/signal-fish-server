@@ -21,7 +21,6 @@ use super::types::{
 // [*] --> Waiting: Room Created
 //
 // Waiting --> Lobby: First player present (max_players is a ceiling, not a gate)
-// Lobby --> Waiting: Room empties before finalize
 // Lobby --> Finalized: Explicit StartGame (all current players ready)
 //
 // Finalized --> [*]: Game Started (Room Cleanup)
@@ -61,10 +60,9 @@ use super::types::{
 //   - `game_finalized_at` timestamp recorded
 //   - `GameStarting` message sent with legacy peer metadata
 //   - Room typically cleaned up shortly after
-//   - No further state transitions possible: Finalized is terminal. A player
-//     departure does NOT regress the room (only Lobby → Waiting exists), and
-//     post-finalize `PlayerReady` toggles are rejected with
-//     `INVALID_ROOM_STATE`
+//   - No further state transitions possible: Finalized is terminal. Departures
+//     never regress room state, and post-finalize `PlayerReady` toggles are
+//     rejected with `INVALID_ROOM_STATE`
 //   - A Finalized room with an open seat (a member departed) still accepts
 //     joins — `add_player_to_room` gates only on fullness — so seat-filling
 //     late joins enter the running session without replaying the lobby cycle
@@ -77,12 +75,6 @@ use super::types::{
 // - **Condition**: `should_enter_lobby()` returns true (Waiting and non-empty)
 // - **Action**: Calls `enter_lobby()`, sets `lobby_started_at` timestamp
 // - **Message**: Broadcasts `LobbyStateChanged` with `lobby_state: "lobby"`
-//
-// ### Lobby → Waiting
-// - **Trigger**: A lobby-phase departure regresses the room (e.g. it empties
-//   before finalize); a Finalized room never regresses
-// - **Action**: Revert to Waiting state, clear `ready_players` list
-// - **Messages**: Broadcasts `PlayerLeft` and `LobbyStateChanged`
 //
 // ### Lobby → Finalized
 // - **Trigger**: An explicit `StartGame` from the authority — or any member when
@@ -124,7 +116,7 @@ use super::types::{
 // - `PlayerReady`: Toggle player ready state in lobby
 // - `StartGame`: Finalize the lobby (authority, or any member if none set); the
 //   server requires every current player ready, then broadcasts `GameStarting`
-// - `LeaveRoom`: Leave a room (may trigger Lobby → Waiting transition)
+// - `LeaveRoom`: Leave a room without regressing its lifecycle state
 // - `Reconnect`: Reconnect to a room after disconnection
 //
 // ## Related Server Messages
@@ -142,8 +134,9 @@ use super::types::{
 //   The player readies and sends `StartGame`; the server permits a solo start
 //   (min 1 ready), finalizing the room.
 //
-// - **Player Disconnection in Lobby**: A lobby-phase disconnect that regresses
-//   the room reverts it to Waiting state and clears all ready states.
+// - **Player Disconnection in Lobby**: The room remains in Lobby. The departing
+//   player is removed from readiness; remaining members keep their ready state
+//   and may still start once every current member is ready.
 //
 // - **Authority Player Leaves**: If the authority player disconnects, authority
 //   is cleared (`authority_player = None`) with no automatic reassignment.
@@ -540,6 +533,7 @@ mod tests {
                 connected_at: chrono::Utc::now(),
                 connection_info: None,
                 epoch: None,
+                seq: None,
                 region_id: "us-east-1".to_string(),
             },
         );

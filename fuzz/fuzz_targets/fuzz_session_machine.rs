@@ -34,7 +34,7 @@ use signal_fish_server::config::{
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
 use signal_fish_server::database::DatabaseConfig;
-use signal_fish_server::protocol::{ClientMessage, RoomId, ServerMessage};
+use signal_fish_server::protocol::{ClientMessage, DeliveryClass, RoomId, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -75,6 +75,8 @@ enum Op {
     GameData {
         client: u8,
         value: u8,
+        class: u8,
+        key: Option<u32>,
     },
     /// Reconnect-token claim with an arbitrary (never-valid) token against an
     /// arbitrary target/room — the rejection surface of the claim flow.
@@ -299,14 +301,27 @@ impl Harness {
                     .handle_client_message(&player_id, ClientMessage::StartGame)
                     .await;
             }
-            Op::GameData { client, value } => {
+            Op::GameData {
+                client,
+                value,
+                class,
+                key,
+            } => {
                 let client = client as usize % CLIENTS;
                 let player_id = self.ensure_registered(client).await;
+                let class = match class % 4 {
+                    0 => None,
+                    1 => Some(DeliveryClass::Reliable),
+                    2 => Some(DeliveryClass::Latest),
+                    _ => Some(DeliveryClass::Volatile),
+                };
                 self.server
                     .handle_client_message(
                         &player_id,
                         ClientMessage::GameData {
                             data: serde_json::json!({ "v": value }),
+                            class,
+                            key,
                         },
                     )
                     .await;

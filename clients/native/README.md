@@ -50,7 +50,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--join-code <CODE>` | — | Join an existing room by code |
 | `--peers <N>` | `2` | Expected member count incl. self; `PlayerReady` is sent once N members are seated AND the room is in the Lobby state. Also sets the room capacity (`max_players`) when creating |
 | `--expect-total-peers <N>` | `--peers` | Distinct members (incl. self, cumulative across departures) that must have been OBSERVED before a successful exit. Late-join incumbents set this above `--peers` so they outlive the session until the joiner arrives; room capacity stays `--peers` |
-| `--leave-on-game-start` | off | Exit 0 as soon as `GameStarting` arrives WITHOUT ever pairing (a received `SessionPlan` is logged, not acted on). Used to vacate a seat in a finalized room — the server only finalizes full rooms, so late joins are seat fills |
+| `--leave-on-game-start` | off | Exit 0 after `GameStarting` and its authoritative `SessionPlan` WITHOUT pairing (the plan is logged, not acted on). Used to vacate a seat in a finalized room — the server only finalizes full rooms, so late joins are seat fills |
 | `--game-name <NAME>` | `reference-native` | Game name for room create/join |
 | `--player-name <NAME>` | `RefNative` | Display name |
 | `--app-id <ID>` | `reference-native-app` | `Authenticate.app_id` (interop servers run with WebSocket auth disabled) |
@@ -66,6 +66,35 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |
 | `--runtime <FLAVOR>` | `multi` | Tokio runtime flavor: `multi` (multi-threaded) or `current` (single current-thread runtime — the shape most susceptible to being starved by a blocking game loop) |
 | `--tick-stall-ms <MS>` | `0` | **Fault injection**: block the orchestrator's executor thread for this many ms after each processed input (`std::thread::sleep`, deliberately not async), simulating a game loop that hogs the runtime instead of continuously driving it. Used by the starved-runtime conformance matrix to pin the server's slow-consumer contract and the docs' "continuously drive your runtime" requirement (`docs/protocol.md`, Delivery reliability and backpressure) |
+
+## Delivery accountability
+
+The v3 receive loop enforces the same exact-gap contract as the server's
+conformance auditor. It validates cumulative `DeliveryReport` counters, requires
+each loss-counter delta to equal the current report's exact range units, and
+retains ranges across reports (one frame carries at most 256) until their
+non-overlapping union covers a later sequence hole. Aggregate counters,
+`RelayStats`, and supplemental errors never authorize a gap. RelayStats
+snapshots are checked for a positive stable interval and monotonic cumulative
+counters. V2 mode rejects all v3 stamps/reports and remains reliable FIFO; raw
+binary game data is always reliable. This runtime negotiates
+`game_data_format: "json"`, so an incoming binary frame or text
+`GameDataBinary` is a protocol error. The strict MessagePack decoder remains a
+tested protocol utility for binary-capable clients.
+
+Peer lifecycle control has priority and may overtake already-queued old-epoch
+data. The client therefore keeps the old cursor long enough to validate that
+tail, but suppresses its payload from the application after `PlayerLeft` or a
+newer incarnation announcement. A future epoch must have been announced exactly
+by `PlayerJoined` or `PlayerReconnected`; after data advances, older epochs are
+rejected. `RoomJoined` / `SpectatorJoined` snapshots establish exact paired
+`PlayerInfo.(epoch, seq)` baselines. The recipient's own room/spectator transition clears room cursors but
+retains connection counters; `Reconnected.sender_watermarks` replaces cursors
+and starts a new physical connection accounting lifetime.
+
+Consequently, `game_data_received` is emitted only for the current application
+incarnation. A trailing stale frame can be valid for wire accountability without
+becoming a JSONL application event.
 
 ## JSONL event contract
 
@@ -84,8 +113,8 @@ process continues to its normal bounded exit.
 | `peer_joined` | `player_id` | Another player joined |
 | `player_left` | `player_id` | Another player left |
 | `game_starting` | `is_authority` | Lobby finalized (this client's own authority flag); never re-broadcast to late joiners |
-| `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The per-recipient v3 session directive |
-| `new_peer` | `peer_id`, `you_initiate` | Late-join pairing delta (existing members only) |
+| `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The full authoritative per-recipient v3 directive; Relay/Relay carries no peers |
+| `new_peer` | `peer_id`, `you_initiate` | Compatible incremental pairing directive (the universal server uses full plans) |
 | `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`other`) |
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
@@ -93,10 +122,10 @@ process continues to its normal bounded exit.
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
-| `transport_status_sent` | `transport`, `connected` | The single overall `TransportStatus` report went out (Appendix G) |
+| `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
 | `peer_transport_status` | `peer`, `transport`, `connected` | A same-room peer's reported state changed (server fan-out) |
 | `game_data_sent` | — | The `--relay-payload` GameData was sent |
-| `game_data_received` | `from`, `payload` | A relayed GameData payload arrived over the WebSocket |
+| `game_data_received` | `from`, `payload` | A validated, application-current relayed GameData payload arrived; lifecycle-overtaken stale tails are accounted but suppressed |
 | `fallback_engaged` | — | The P2P window resolved with ZERO connected pairs; the relay floor carries the session |
 | `error` | `message` | Non-fatal or fatal error (fatal ones are followed by `exiting`) |
 | `exiting` | `code` | Final event before process exit |
@@ -135,13 +164,12 @@ string (interop with minimal clients).
 
 ## Transport-status semantics
 
-- The overall WebRTC status resolves **exactly once** per run (Appendix G): early, when every currently expected
-  pair is connected (a departure that removes the last unconnected expected pair counts), or at
-  `--p2p-timeout-secs`. `connected: true` iff **at least one** pair is connected at resolution; a zero-pair
-  resolution also emits `fallback_engaged`.
-- Pairs that connect **after** resolution (late-join `NewPeer`) do not re-send the report: the state did not
-  change, and the server deduplicates repeat `(transport, connected)` states anyway — re-sending would fan out
-  nothing (see `PeerTransportStatus` in [`docs/protocol.md`](../../docs/protocol.md)).
+- The overall WebRTC status resolves when every currently expected pair is connected or at
+  `--p2p-timeout-secs`. `connected: true` iff **at least one** pair is connected; a zero-pair resolution also
+  emits `fallback_engaged`.
+- Membership churn reports later real `true`/`false` state changes. Unchanged states are suppressed, matching
+  the server's `(transport, connected)` deduplication (see `PeerTransportStatus` in
+  [`docs/protocol.md`](../../docs/protocol.md)).
 - **Peer-status wait (deliberate deviation):** when a WebRTC session is expected, the success criteria
   additionally require a `peer_transport_status` from every expected pair peer before exit. Without it a fast
   client could disconnect before slower siblings' reports fan out, making multi-process assertions racy. This
@@ -160,7 +188,7 @@ client processes (loopback only; the interop server config disables TURN with ze
 | Mesh N=3 full WebRTC + live relay floor | ✅ `mesh_n3_full_webrtc_session_with_live_relay_floor` | ✅ `mixed_mesh_n3_full_webrtc_with_browser` |
 | Host star N=3 | ✅ `host_star_n3_webrtc` | ✅ `host_star_n3_browser_client` |
 | Crippled-ICE relay fallback | ✅ `mesh_n3_partial_ice_cripple_relay_fallback` | ✅ `mesh_n3_browser_crippled_ice_fallback` |
-| Late join (`NewPeer` seat fill) | ✅ `late_join_newpeer_real_webrtc_n3` | — (native-only cell) |
+| Late join (authoritative full-plan seat fill) | ✅ `late_join_authoritative_replan_real_webrtc_n3` | — (native-only cell) |
 | Mixed v2/v3 relay floor | ✅ `mixed_v2_v3_n3_relay_floor_with_reference_client` | ✅ `mixed_v2_browser_v3_native_relay_floor` |
 | Browser ↔ browser mesh (Chromium↔Chromium pair) | n/a | ✅ `browser_pair_mesh_n3` |
 | mDNS `.local` obfuscation trap | n/a | ✅ `mesh_n3_browser_mdns_obfuscation` |

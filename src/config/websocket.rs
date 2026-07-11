@@ -2,8 +2,9 @@
 
 use super::defaults::{
     default_auth_timeout_secs, default_batch_interval_ms, default_batch_size,
-    default_delivery_stats_interval_secs, default_enable_batching, default_idle_timeout_secs,
-    default_send_queue_capacity, default_slow_consumer_timeout_ms,
+    default_control_queue_capacity, default_delivery_stats_interval_secs, default_enable_batching,
+    default_idle_timeout_secs, default_max_sojourn_ms, default_send_queue_capacity,
+    default_slow_consumer_timeout_ms,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,12 @@ pub struct WebSocketConfig {
     /// only pointer-sized per slot until messages actually queue.
     #[serde(default = "default_send_queue_capacity")]
     pub send_queue_capacity: usize,
+    /// Per-connection control-plane queue capacity.
+    ///
+    /// The dedicated control lane is drained before game data so lifecycle,
+    /// error, and heartbeat traffic cannot starve behind a data backlog.
+    #[serde(default = "default_control_queue_capacity")]
+    pub control_queue_capacity: usize,
     /// How long (milliseconds) delivery may wait for space in a full outbound
     /// queue before the recipient is disconnected as a slow consumer.
     ///
@@ -49,6 +56,11 @@ pub struct WebSocketConfig {
     /// notified through the normal disconnect flow.
     #[serde(default = "default_slow_consumer_timeout_ms")]
     pub slow_consumer_timeout_ms: u64,
+    /// Maximum time any outbound item may remain unresolved, including queue
+    /// wait and socket write time, before the connection is closed as stale.
+    /// Expressed in milliseconds and must be nonzero.
+    #[serde(default = "default_max_sojourn_ms")]
+    pub max_sojourn_ms: u64,
     /// How often (seconds) each connection that negotiated protocol v3+ is
     /// sent a `RelayStats` frame with its cumulative delivery statistics
     /// (`sent_to_you` / `dropped_for_you` / `backpressure_events`); `0`
@@ -69,7 +81,9 @@ impl Default for WebSocketConfig {
             auth_timeout_secs: default_auth_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             send_queue_capacity: default_send_queue_capacity(),
+            control_queue_capacity: default_control_queue_capacity(),
             slow_consumer_timeout_ms: default_slow_consumer_timeout_ms(),
+            max_sojourn_ms: default_max_sojourn_ms(),
             delivery_stats_interval_secs: default_delivery_stats_interval_secs(),
         }
     }
@@ -114,6 +128,33 @@ impl WebSocketConfig {
             anyhow::bail!(
                 "websocket.send_queue_capacity must be at least 1 (configured: 0); \
                  it bounds the per-connection outbound message queue"
+            );
+        }
+        // A game-start transaction reserves `GameStarting` plus the optional
+        // tailored `SessionPlan` before finalizing durable room state. Two
+        // slots are therefore the minimum that can always make progress while
+        // the first reservation is intentionally held until atomic commit.
+        if self.control_queue_capacity < 2 {
+            anyhow::bail!(
+                "websocket.control_queue_capacity must be at least 2 (configured: {}); \
+                 atomic game-start publication reserves two control frames",
+                self.control_queue_capacity
+            );
+        }
+        if self.max_sojourn_ms == 0 {
+            anyhow::bail!(
+                "websocket.max_sojourn_ms must be greater than 0; \
+                 it bounds how long an outbound item may remain unresolved"
+            );
+        }
+        // A sojourn ceiling at or below the normal batch-flush interval
+        // could evict a healthy connection before its first scheduled flush.
+        if self.enable_batching && self.max_sojourn_ms <= self.batch_interval_ms {
+            anyhow::bail!(
+                "websocket.max_sojourn_ms ({}) must be greater than \
+                 websocket.batch_interval_ms ({}) when websocket.enable_batching is true",
+                self.max_sojourn_ms,
+                self.batch_interval_ms
             );
         }
         // A zero timeout would disconnect a peer the instant its queue fills,
@@ -214,6 +255,58 @@ mod tests {
                 expect_error_containing: "",
             },
             Case {
+                name: "zero control queue capacity",
+                mutate: |config| config.control_queue_capacity = 0,
+                expect_ok: false,
+                expect_error_containing: "control_queue_capacity must be at least 2",
+            },
+            Case {
+                name: "single-slot control queue cannot reserve a game-start transaction",
+                mutate: |config| config.control_queue_capacity = 1,
+                expect_ok: false,
+                expect_error_containing: "control_queue_capacity must be at least 2",
+            },
+            Case {
+                name: "two-slot control queue is the floor",
+                mutate: |config| config.control_queue_capacity = 2,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "zero sojourn ceiling",
+                mutate: |config| config.max_sojourn_ms = 0,
+                expect_ok: false,
+                expect_error_containing: "max_sojourn_ms must be greater than 0",
+            },
+            Case {
+                name: "sojourn ceiling below batching interval",
+                mutate: |config| config.max_sojourn_ms = config.batch_interval_ms - 1,
+                expect_ok: false,
+                expect_error_containing: "max_sojourn_ms",
+            },
+            Case {
+                name: "sojourn ceiling equals batching interval",
+                mutate: |config| config.max_sojourn_ms = config.batch_interval_ms,
+                expect_ok: false,
+                expect_error_containing: "max_sojourn_ms",
+            },
+            Case {
+                name: "sojourn ceiling one millisecond above batching interval",
+                mutate: |config| config.max_sojourn_ms = config.batch_interval_ms + 1,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "batching-disabled sojourn ignores batch interval",
+                mutate: |config| {
+                    config.enable_batching = false;
+                    config.batch_interval_ms = 100;
+                    config.max_sojourn_ms = 1;
+                },
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
                 name: "zero slow-consumer timeout",
                 mutate: |config| config.slow_consumer_timeout_ms = 0,
                 expect_ok: false,
@@ -281,7 +374,9 @@ mod tests {
         assert_eq!(config.auth_timeout_secs, 10);
         assert_eq!(config.idle_timeout_secs, 300);
         assert_eq!(config.send_queue_capacity, 1024);
+        assert_eq!(config.control_queue_capacity, 128);
         assert_eq!(config.slow_consumer_timeout_ms, 5_000);
+        assert_eq!(config.max_sojourn_ms, 15_000);
         assert_eq!(
             config.delivery_stats_interval_secs, 0,
             "RelayStats emission is disabled by default"

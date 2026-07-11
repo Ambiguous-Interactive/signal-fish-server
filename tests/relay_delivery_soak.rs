@@ -34,8 +34,7 @@ use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{ClientMessage, ErrorCode, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
-use test_helpers::create_test_server_with_config;
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::delivery_ledger::{
     extract, DeliveryLedger, DisconnectReason, LedgerPayload, ReceiverExpectation,
@@ -70,23 +69,9 @@ const SLOW_RECEIVER_RECV_BUFFER_BYTES: u32 = 4_096;
 /// only a genuine wedge (lost messages, missed eviction) can spend it.
 const SOAK_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(90);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> (WsSink, WsReceiver) {
@@ -294,6 +279,8 @@ async fn paced_sender(mut sink: WsSink, mut payload: LedgerPayload, count: u64) 
     for _ in 0..count {
         ticker.tick().await;
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.next(),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -338,7 +325,8 @@ async fn soak_backpressure_survives_oscillating_drain() {
     let server =
         create_test_server_with_config(soak_config(5_000), ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let soak = async {
         let (mut sender_one_sink, mut sender_one_rx) = connect(addr).await;
@@ -469,6 +457,7 @@ async fn soak_backpressure_survives_oscillating_drain() {
         ],
     );
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// Same shape, but the slow receiver's stall OUTLASTS the grace window: it
@@ -498,7 +487,8 @@ async fn soak_stalled_drain_is_evicted_loudly() {
 
     let server = create_test_server_with_config(soak_config(500), ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let soak = async {
         let (mut sender_one_sink, mut sender_one_rx) = connect(addr).await;
@@ -610,6 +600,8 @@ async fn soak_stalled_drain_is_evicted_loudly() {
                 loop {
                     ticker.tick().await;
                     let message = ClientMessage::GameData {
+                        class: None,
+                        key: None,
                         data: payload.next(),
                     };
                     let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -695,4 +687,5 @@ async fn soak_stalled_drain_is_evicted_loudly() {
         ],
     );
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }

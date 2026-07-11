@@ -62,6 +62,7 @@ enum Op {
         player: u8,
         room: u8,
         was_authority: bool,
+        last_epoch: u32,
     },
     Validate {
         player: u8,
@@ -111,8 +112,8 @@ struct Plan {
 /// Reference bookkeeping for the time-robust invariants.
 #[derive(Default)]
 struct Reference {
-    /// player -> (room, real token, has active claim)
-    pending: HashMap<Uuid, (Uuid, String, bool)>,
+    /// player -> (room, real token, has active claim, preserved last epoch)
+    pending: HashMap<Uuid, (Uuid, String, bool, u32)>,
 }
 
 /// A claim this input collected, plus whether we already spent it
@@ -133,6 +134,8 @@ fn room_id(index: u8) -> Uuid {
 fn control_event() -> ServerMessage {
     ServerMessage::PlayerLeft {
         player_id: Uuid::from_u128(0xF0DD_0001),
+        epoch: Some(1),
+        final_seq: Some(0),
     }
 }
 
@@ -156,17 +159,25 @@ async fn run(plan: Plan) {
                 player,
                 room,
                 was_authority,
+                last_epoch,
             } => {
                 let player = player_id(player);
                 let room = room_id(room);
                 let token = manager
-                    // `last_epoch = 0`: this fuzzer exercises token accept/reject
-                    // paths, not the v3 incarnation-epoch stream, so "no prior v3
-                    // stream to preserve" is the correct provisional value.
-                    .register_disconnection(player, room, was_authority, None, 0)
+                    .register_disconnection(player, room, was_authority, None, last_epoch)
                     .await;
-                // Re-registration replaces the record (and any active claim).
-                reference.pending.insert(player, (room, token, false));
+                // Same-room re-registration preserves the highest captured
+                // incarnation; a new room replaces the record wholesale.
+                let preserved_epoch = reference
+                    .pending
+                    .get(&player)
+                    .filter(|(existing_room, _, _, _)| *existing_room == room)
+                    .map_or(last_epoch, |(_, _, _, existing_epoch)| {
+                        (*existing_epoch).max(last_epoch)
+                    });
+                reference
+                    .pending
+                    .insert(player, (room, token, false, preserved_epoch));
             }
             Op::Validate {
                 player,
@@ -179,7 +190,7 @@ async fn run(plan: Plan) {
                     TokenChoice::Real => reference
                         .pending
                         .get(&player)
-                        .map(|(_, token, _)| token.clone())
+                        .map(|(_, token, _, _)| token.clone())
                         .unwrap_or_default(),
                     TokenChoice::Arbitrary(raw) => raw.clone(),
                 };
@@ -187,7 +198,7 @@ async fn run(plan: Plan) {
                     .validate_reconnection(&player, &room, &token_string)
                     .await;
                 if result.is_ok() {
-                    let (real_room, real_token, _) = reference
+                    let (real_room, real_token, _, _) = reference
                         .pending
                         .get(&player)
                         .expect("a successful validation implies a pending record");
@@ -214,7 +225,7 @@ async fn run(plan: Plan) {
                     TokenChoice::Real => reference
                         .pending
                         .get(&player)
-                        .map(|(_, token, _)| token.clone())
+                        .map(|(_, token, _, _)| token.clone())
                         .unwrap_or_default(),
                     TokenChoice::Arbitrary(raw) => raw.clone(),
                 };
@@ -223,7 +234,7 @@ async fn run(plan: Plan) {
                     .await;
                 match result {
                     Ok(claimed) => {
-                        let (real_room, real_token, claim_active) = reference
+                        let (real_room, real_token, claim_active, last_epoch) = reference
                             .pending
                             .get_mut(&player)
                             .expect("a successful claim implies a pending record");
@@ -236,6 +247,10 @@ async fn run(plan: Plan) {
                             "claim accepted a token that is not the stored one"
                         );
                         assert_eq!(*real_room, room, "claim accepted the wrong room binding");
+                        assert_eq!(
+                            claimed.disconnected.last_epoch, *last_epoch,
+                            "claim must preserve the reconnect incarnation baseline"
+                        );
                         *claim_active = true;
                         claims.push(HeldClaim {
                             claim: claimed,
@@ -249,7 +264,7 @@ async fn run(plan: Plan) {
                         if reference
                             .pending
                             .get(&player)
-                            .is_some_and(|(_, _, active)| *active)
+                            .is_some_and(|(_, _, active, _)| *active)
                         {
                             assert_eq!(
                                 error,
@@ -298,7 +313,7 @@ async fn run(plan: Plan) {
                 } else {
                     claims[index].spent = true;
                     if released {
-                        if let Some((_, _, active)) =
+                        if let Some((_, _, active, _)) =
                             reference.pending.get_mut(&claimed.disconnected.player_id)
                         {
                             *active = false;
@@ -338,7 +353,7 @@ async fn run(plan: Plan) {
             Op::CleanupExpired => {
                 manager.cleanup_expired().await;
                 // Claimed records are exempt from expiry cleanup.
-                for (player, (_, _, active)) in &reference.pending {
+                for (player, (_, _, active, _)) in &reference.pending {
                     if *active {
                         assert!(
                             manager.has_pending_reconnection(player).await,
@@ -362,7 +377,7 @@ async fn run(plan: Plan) {
             let reference_pending = reference
                 .pending
                 .values()
-                .any(|(pending_room, _, _)| *pending_room == room);
+                .any(|(pending_room, _, _, _)| *pending_room == room);
             if !reference_pending {
                 let missed = manager.get_missed_events(&room, 0).await;
                 assert!(

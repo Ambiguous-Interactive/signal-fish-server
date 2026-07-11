@@ -280,7 +280,10 @@ size and flush interval.
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
     "send_queue_capacity": 1024,
-    "slow_consumer_timeout_ms": 5000
+    "control_queue_capacity": 128,
+    "slow_consumer_timeout_ms": 5000,
+    "max_sojourn_ms": 15000,
+    "delivery_stats_interval_secs": 0
   }
 }
 ```
@@ -291,6 +294,10 @@ Environment equivalent:
 export SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING=true
 export SIGNAL_FISH__WEBSOCKET__BATCH_SIZE=10
 export SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS=16
+export SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY=1024
+export SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY=128
+export SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS=5000
+export SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS=15000
 ```
 
 When to use: the defaults (`batch_size=10`, `batch_interval_ms=16`, about one
@@ -303,18 +310,31 @@ per-flush delay matters more than syscall amortization. Keep `idle_timeout_secs`
 positive in production — it reclaims zombie sockets (`0` disables it);
 `auth_timeout_secs` must be between 5 and 60.
 
-High-rate game data (rollback netcode): the server never silently drops a
-relayed message — a recipient whose outbound queue fills paces its senders via
-backpressure instead of losing messages. Size `send_queue_capacity` for your
-worst-case burst headroom: the default `1024` messages is roughly 17 seconds of
-buffering at 60 messages/second from a sending peer, and queue slots hold
-pointers, so a generous capacity costs almost nothing until messages actually
-queue. `slow_consumer_timeout_ms` (default `5000`) trades tolerance for pacing:
-higher values ride out longer client stalls (GC pauses, Wi-Fi hiccups) but let
-one unresponsive recipient slow its room's senders for longer; lower values
-evict slow consumers sooner. A dead recipient costs senders at most one timeout
-window before it is disconnected with a `SLOW_CONSUMER` error (see
-[delivery semantics](protocol.md#delivery-semantics)).
+High-rate game data (rollback netcode): choose the v3 JSON delivery class by
+meaning. Keep commands and critical events `reliable`; send frequently replaced
+state as `latest` with a stable per-stream key; use `volatile` only when an
+omission is acceptable. Raw binary frames are always reliable. Reliable traffic
+waits when `send_queue_capacity` fills, while `latest` and `volatile` never pace
+the sender and account for every omission in a prior exact `DeliveryReport`.
+
+Size `send_queue_capacity` for burst headroom, but keep it consistent with
+`max_sojourn_ms`: the default closes a connection once its oldest outbound item
+cannot complete its socket write within 15 seconds, even if the client keeps
+pinging. The age check spans every queue lane plus batched/in-flight work.
+`slow_consumer_timeout_ms`
+(default `5000`) controls how long reliable delivery may wait for capacity;
+higher values ride out longer stalls but let one recipient pace reliable senders
+longer. The authoritative failure signal is close code `4002 slow_consumer`;
+the final `SLOW_CONSUMER` error is best effort.
+
+Keep `control_queue_capacity` large enough for bursts of lifecycle and exact
+accountability traffic. V3 drains this lane before data within the active room
+generation; the recipient's own room/spectator transitions are generation
+barriers that drain old-room data first. The connection fails closed if it
+cannot publish a required gap report before a successor. Setting
+`delivery_stats_interval_secs=0` disables periodic aggregate snapshots only;
+gap-bearing `DeliveryReport` frames remain event-driven. See
+[delivery semantics](protocol.md#delivery-semantics).
 
 ## Rate limits
 

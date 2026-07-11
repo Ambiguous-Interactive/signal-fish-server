@@ -28,6 +28,7 @@ fn make_player(player_id: Uuid) -> PlayerInfo {
         connected_at: chrono::Utc::now(),
         connection_info: None,
         epoch: None,
+        seq: None,
         region_id: "us-east-1".to_string(),
     }
 }
@@ -846,7 +847,7 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
                 pid,
                 Some(room_id),
                 signal_fish_server::coordination::ClientDeliveryHandle {
-                    sender: tx,
+                    sender: tx.into(),
                     close: signal_fish_server::coordination::ConnectionCloseSignal::detached(),
                 },
             )
@@ -918,7 +919,7 @@ async fn test_concurrent_broadcast_and_register_no_deadlock() {
                         pid,
                         Some(room_id),
                         signal_fish_server::coordination::ClientDeliveryHandle {
-                            sender: tx,
+                            sender: tx.into(),
                             close:
                                 signal_fish_server::coordination::ConnectionCloseSignal::detached(),
                         },
@@ -1014,7 +1015,7 @@ async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is
             existing_recipient_id,
             Some(room_id),
             ClientDeliveryHandle {
-                sender: existing_tx,
+                sender: existing_tx.into(),
                 close: ConnectionCloseSignal::detached(),
             },
         )
@@ -1043,12 +1044,14 @@ async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is
                                 .recv()
                                 .expect("test should release the broadcast builder");
                         });
-                        Arc::new(ServerMessage::GameData {
+                        Some(Arc::new(ServerMessage::GameData {
                             from_player: sender_id,
                             data: serde_json::json!({ "kind": "blocked-broadcast" }),
                             seq: Some(1),
                             epoch: Some(1),
-                        })
+                            class: None,
+                            key: None,
+                        }))
                     }),
                 )
                 .await
@@ -1078,7 +1081,7 @@ async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is
                     reconnecting_id,
                     room_id,
                     ClientDeliveryHandle {
-                        sender: reconnect_tx,
+                        sender: reconnect_tx.into(),
                         close: ConnectionCloseSignal::detached(),
                     },
                     Box::new(move || {

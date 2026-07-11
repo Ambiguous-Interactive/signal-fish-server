@@ -6,6 +6,18 @@ use super::EnhancedGameServer;
 impl EnhancedGameServer {
     /// Handle authority request with distributed coordination.
     pub async fn handle_authority_request(&self, player_id: &PlayerId, become_authority: bool) {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         tracing::info!(%player_id, %become_authority, "Server handling authority request");
 
         let Some(room_id) = self.get_client_room(player_id).await else {
@@ -41,29 +53,6 @@ impl EnhancedGameServer {
         {
             Ok((granted, reason)) => {
                 tracing::info!(%player_id, %granted, ?reason, "Authority request processed");
-
-                if let Err(e) = self
-                    .message_coordinator
-                    .send_to_player(
-                        player_id,
-                        Arc::new(ServerMessage::AuthorityResponse {
-                            granted,
-                            reason: reason.clone(),
-                            error_code: if granted {
-                                None
-                            } else {
-                                Some(ErrorCode::AuthorityConflict)
-                            },
-                        }),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        %player_id,
-                        "Failed to send authority response via coordinator: {}",
-                        e
-                    );
-                }
             }
             Err(e) => {
                 tracing::error!("Authority request failed: {}", e);

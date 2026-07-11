@@ -21,33 +21,28 @@ depends on.
 ## Client transport / fallback state machine
 
 A v3 client drives its data-path transport from the per-recipient `SessionPlan` it
-receives at lobby finalization (alongside the unchanged `GameStarting`). A room
-that resolves to the relay floor emits **no** `SessionPlan`, so a relay-only client
-simply keeps using the WebSocket relay exactly as in v2.
+receives after the unchanged `GameStarting`. A room that resolves to the relay
+floor emits an explicit no-peer `relay`/`relay` plan to v3 members; v2 members
+receive no plan and keep using the WebSocket relay exactly as before.
 
 A `SessionPlan` is not necessarily a once-per-session event: the server re-issues
 it mid-session on **host failover** (the host of a `host`-topology session is
 gone — departed, detected missing on a later membership event, or seated but no
-longer capable of the session after a capability-downgrading reconnect; every
-remaining **v3** member gets a fresh plan naming the re-elected host — delivery
-is v3-gated, like every plan emission) and to a **late joiner / reconnector**
-entering an active non-relay session (the joiner alone gets its
-tailored view with fresh ICE; existing members get a `NewPeer` delta instead —
-unless the join itself healed an invalid host, in which case the failover re-plan
-to every v3 member replaces both). Re-issued and late-join plan peer lists name
+longer capable of the session after a capability-downgrading reconnect) and on
+every finalized-room **join / reconnect**. Each event refreshes every current
+v3 member with a complete plan; delivery remains version-gated. Re-issued plan peer lists name
 only peers that can run the session — that negotiated the session's topology and
 transport: a member that did not (for example a v3 relay-only client that
 seat-filled a `mesh + webrtc` room) receives its plan with an **empty** `peers`
 list — truthful, it has no P2P peers; the relay floor is its data path — and
-never appears in other members' `peers`, nor in any `NewPeer` pairing (the
-`NewPeer` gating applies this same predicate). (At
+never appears in other members' `peers`. (At
 finalization this filter is vacuous: a plan is only selected when every member
 supports it.) Topology and transport never change across re-issues —
 they are sticky for the session lifetime — so the client rule is simple: **the
 latest `SessionPlan` wins**. Re-run the `on SessionPlan` logic below against the
 new `peers` / `host` / `ice_servers`, tearing down peer connections that are no
 longer listed (e.g. the departed host) and connecting per the new `initiate`
-flags. On `NewPeer`, additively connect to that one peer.
+flags.
 
 ```text
 on SessionPlan(plan):
@@ -73,7 +68,7 @@ on SessionPlan(plan):
             resume GameData over the WebSocket relay
             emit ClientMessage::TransportStatus { transport, connected: false }
 
-server: always relays GameData regardless of P2P state (the floor never closes)
+server: P2P state never disables GameData relay (delivery failures may close the socket loudly)
 ```
 
 Key points:
@@ -103,11 +98,13 @@ The server's responsibilities are deliberately narrow:
   fans the accepted state change out to the reporter's room as
   `PeerTransportStatus` (v3 recipients only — see below).
 
-It never tears down the relay path for a peer, and it never requires a peer to be
-P2P-connected. `TransportStatus` is **purely informational**: it drives metrics
-and the `PeerTransportStatus` peer notification (and, in the future, targeted
-relay for stuck peers), but reporting `connected: false` does not change how the
-server relays for that client.
+It never tears down the relay path solely because of a peer's P2P state, and it
+never requires a peer to be P2P-connected. `TransportStatus` is **purely
+informational**: it drives metrics and the `PeerTransportStatus` peer
+notification (and, in the future, targeted relay for stuck peers), but reporting
+`connected: false` does not change how the server relays for that client. The
+physical WebSocket can still close loudly for slow-consumer timeout, maximum
+sojourn, or failure to preserve exact accountability.
 
 ## Data-channel configuration recommendation
 
@@ -118,8 +115,12 @@ For game traffic, a client should open **two** WebRTC data channels:
   — for movement and frequently-overwritten state, where the latest value matters
   more than guaranteed delivery.
 
-This split works browser-to-native and native-to-native. The relay floor carries
-all `GameData` reliably, so the unreliable channel is purely a P2P optimization.
+This split works browser-to-native and native-to-native. The v2 relay floor,
+unclassified JSON `GameData`, and all raw binary game data are reliable. A v3
+client can mirror the unreliable channel's intent over relay by using JSON
+`class: "latest"` (with a key) or `class: "volatile"`; every resulting omission
+is authorized by an exact prior `DeliveryReport`. Delivery class changes queue
+policy, never whether the relay path remains available.
 
 ## `TransportStatus` message (v3 only)
 
@@ -167,7 +168,7 @@ Appendix K) but deliberately **not** gated on the recipient's own transport
 capabilities — it is informational status about a _peer_, useful to any v3
 client, not an instruction to use that transport. Like the report it relays, it
 never changes how the server relays `GameData`. Delivery is best-effort (like
-`Signal` / `NewPeer`): a backpressured peer may miss a notice and re-syncs on
+`Signal`): a backpressured peer may miss a notice and re-syncs on
 the next state change.
 
 ## Metrics exposed
@@ -175,15 +176,14 @@ the next state change.
 The server exposes Prometheus counters for the v3 transport surface so dashboards
 can see how often the relay floor is upgraded to a peer-to-peer path:
 
-- `signal_fish_transport_session_plans_emitted_total` — non-relay `SessionPlan`s
-  emitted (one per finalized non-relay room; re-plans and late-join plans are
-  counted separately below).
+- `signal_fish_transport_session_plans_emitted_total` — finalization-time v3
+  plan publications, including explicit relay-floor plans (one per finalized
+  room with at least one v3 recipient; later refreshes are counted separately).
 - `signal_fish_transport_session_replans_emitted_total` — mid-session host
   re-plan events (departure failover or late-join self-heal; one per event, not
   per recipient).
-- `signal_fish_transport_session_plans_late_join_total` — `SessionPlan`s
-  delivered to late joiners / reconnectors of already-active sessions (one per
-  joiner that received a plan).
+- `signal_fish_transport_session_plans_late_join_total` — finalized-room join /
+  reconnect plan-refresh publications (one per joining actor, not per recipient).
 - `signal_fish_transport_topology_mesh_selected_total`,
   `signal_fish_transport_topology_host_selected_total`,
   `signal_fish_transport_topology_relay_selected_total` — chosen topology per

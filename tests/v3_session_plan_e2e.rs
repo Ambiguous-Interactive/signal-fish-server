@@ -3,7 +3,8 @@
 //! each v3 client must receive `GameStarting` THEN a per-recipient `SessionPlan`
 //! (mesh + webrtc, fallback relay, naming the other peer with the single-offerer
 //! `initiate`). A mixed room (one v3 + one relay-only client) resolves to the
-//! relay floor and neither member receives a `SessionPlan` (Appendix K).
+//! relay floor: the v3 member receives an explicit no-peer `relay` plan while
+//! the v2 member receives no v3-only frame.
 //!
 //! Models the harness in `tests/v3_signaling_e2e.rs` but injects a chosen
 //! `SessionConfig` so finalization can pick a non-relay plan.
@@ -19,8 +20,7 @@ use signal_fish_server::protocol::{
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::Arc;
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     deadline_after, maybe_next_matching_server_message_with_skipped_until,
@@ -73,7 +73,7 @@ fn mesh_session_config() -> SessionConfig {
 /// Start a server with the given `SessionConfig` and the **default** `[turn]`
 /// block (TURN disabled, but the default public STUN advertised), exercising the
 /// production default ICE wiring end to end.
-async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAddr {
+async fn start_server_with_session(session: SessionConfig) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
     server_config.auth_enabled = true;
 
@@ -99,32 +99,17 @@ async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAd
     start_server(game_server).await
 }
 
-async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
     use axum::routing::get;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
 
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -317,7 +302,8 @@ async fn read_finalization(ws: &mut WsStream) -> Finalization {
 
 #[tokio::test]
 async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
-    let addr = start_server_with_session(mesh_session_config()).await;
+    let running_server = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3_mesh(&mut peer1).await;
@@ -378,11 +364,13 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
     assert_eq!(plan2.peers[0].player_id, peer1_id);
     assert_ne!(plan1.peers[0].initiate, plan2.peers[0].initiate);
     assert_eq!(plan1.peers[0].initiate, peer1_id < peer2_id);
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
-async fn mixed_v2_v3_room_finalization_sends_no_session_plan() {
-    let addr = start_server_with_session(mesh_session_config()).await;
+async fn mixed_v2_v3_room_finalization_sends_relay_plan_only_to_v3() {
+    let running_server = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
 
     // Peer 1 is v3 mesh; peer 2 authenticates as pure v2 (relay-only) on /v3/ws.
     let mut peer1 = connect(addr).await;
@@ -405,17 +393,20 @@ async fn mixed_v2_v3_room_finalization_sends_no_session_plan() {
     send(&mut peer1, &ClientMessage::StartGame).await;
 
     // Both receive GameStarting (reaching past read_finalization proves it,
-    // in order), exactly like v2. The room resolved to the relay floor, so
-    // NEITHER receives a SessionPlan.
+    // in order). The room resolved to the relay floor, so the v3 member gets
+    // an explicit authoritative reset while the v2 member remains plan-free.
     let (plan1, plan2) = tokio::join!(read_finalization(&mut peer1), read_finalization(&mut peer2));
-    assert!(
-        plan1.session_plan.is_none(),
-        "v3 peer must not receive a SessionPlan in a relay-resolved room; skipped after GameStarting: {}",
-        plan1.skipped_after_game_starting
-    );
+    let plan1 = plan1.expect_session_plan("v3 peer in relay-resolved room");
+    assert_eq!(plan1.topology, Topology::Relay);
+    assert_eq!(plan1.transport, Transport::Relay);
+    assert_eq!(plan1.host, None);
+    assert!(plan1.peers.is_empty());
+    assert!(plan1.ice_servers.is_empty());
+    assert_eq!(plan1.fallback, Transport::Relay);
     assert!(
         plan2.session_plan.is_none(),
         "v2 peer must never receive a SessionPlan; skipped after GameStarting: {}",
         plan2.skipped_after_game_starting
     );
+    running_server.shutdown().await;
 }

@@ -1,6 +1,7 @@
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use super::delivery::{DeliveryClass, DeliveryReportPayload};
 use super::error_codes::ErrorCode;
 use super::room_state::LobbyState;
 use super::types::{
@@ -60,8 +61,25 @@ pub enum ClientMessage {
     },
     /// Leave the current room
     LeaveRoom,
-    /// Send game data to other players in the room
-    GameData { data: serde_json::Value },
+    /// Send game data to other players in the room.
+    GameData {
+        data: serde_json::Value,
+        /// Protocol-v3 delivery policy. Omission preserves the reliable v2
+        /// contract; `latest` requires `key`, while the other classes forbid it.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_optional",
+            skip_serializing_if = "Option::is_none"
+        )]
+        class: Option<DeliveryClass>,
+        /// Sender-defined coalescing key, present exactly for `class: latest`.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_optional",
+            skip_serializing_if = "Option::is_none"
+        )]
+        key: Option<u32>,
+    },
     /// Relay an opaque WebRTC signal to a specific peer in the same room (v3 only).
     ///
     /// The `signal` payload is never parsed by the server — it is forwarded
@@ -88,9 +106,10 @@ pub enum ClientMessage {
     /// sender must be permitted to start: if the room has a designated authority
     /// player, only that authority may start; if no authority is set, **any**
     /// player in the room may start. On success the server transitions the room
-    /// to `Finalized` and broadcasts `GameStarting` (and, for a negotiated v3
-    /// non-relay room, the per-recipient `SessionPlan`). A room with a single
-    /// ready player may start (solo is allowed).
+    /// to `Finalized` and broadcasts `GameStarting`. Every negotiated-v3 member
+    /// then receives a per-recipient `SessionPlan`, including an explicit
+    /// `relay`/`relay` plan with no peers when the room stays on the floor. A
+    /// room with a single ready player may start (solo is allowed).
     StartGame,
     /// Provide legacy, self-declared v2/back-compat connection metadata.
     ///
@@ -311,58 +330,64 @@ pub enum ServerMessage {
     RoomLeft,
     /// Another player joined the room
     PlayerJoined { player: PlayerInfo },
-    /// Another player left the room
-    PlayerLeft { player_id: PlayerId },
+    /// Another player left the room. Protocol-v3 recipients also receive the
+    /// terminal relay watermark for the departed player's final incarnation;
+    /// these fields are stripped from the frozen v2 wire representation.
+    PlayerLeft {
+        player_id: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_seq: Option<u64>,
+    },
     /// Game data from another player
     GameData {
         from_player: PlayerId,
         data: serde_json::Value,
         /// Server-stamped relay sequence number (v3 only). Per-(sender, room),
-        /// starts at 1, and is strictly contiguous per sender for as long as
-        /// the recipient stays connected. A gap therefore always has an
-        /// EXPLICIT, observable cause — the recipient was told — and never an
-        /// unexplained relay loss:
+        /// it starts at 1 and is strictly increasing within an `epoch`.
+        /// Lossy delivery classes may create gaps on one continuing recipient;
+        /// each such gap is legal only after an exact, causally prior
+        /// [`ServerMessage::DeliveryReport`] range for the same sender and
+        /// epoch. Aggregate counters and supplemental `Error` frames are not
+        /// gap authorization. A loud close instead terminates this physical
+        /// connection's observable stream.
         ///
-        /// - a message the server abandoned together with a disconnect the
-        ///   recipient was told about (its own `SLOW_CONSUMER` eviction, or
-        ///   the sender's `PlayerLeft`), or the recipient's own reconnect;
-        /// - a per-recipient undeliverable payload: if a binary
-        ///   [`ServerMessage::GameDataBinary`] cannot be converted for this
-        ///   recipient's negotiated format, it is replaced in-stream by an
-        ///   `Error` with code `UNSUPPORTED_GAME_DATA_FORMAT` (the connection
-        ///   stays open), so this recipient skips that one `seq` while others
-        ///   receive it. The error frame IS the explanation for that gap.
-        ///
-        /// The counter RESTARTS at 1 when the sender leaves/rejoins a room or
-        /// reconnects, so recipients must treat `PlayerLeft`+`PlayerJoined` /
-        /// `PlayerReconnected` for the sender as a seq reset. Stamped at relay
-        /// time in `server::game_data`; stripped per recipient in
-        /// `websocket::sending` — `None` and absent from the wire for pre-v3
-        /// recipients, keeping their bytes byte-identical. Client→server
-        /// `GameData` is unchanged (stamping is purely server-side).
+        /// The counter restarts at 1 in a new incarnation, identified directly
+        /// by the accompanying `epoch`. Stamped at relay time in
+        /// `server::game_data`; stripped per recipient in `websocket::sending`
+        /// for pre-v3 recipients, keeping their bytes byte-identical.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
         /// Server-tracked incarnation epoch (v3 only), stamped beside `seq`. It
         /// increments once per `(sender, room)` incarnation — a join-after-leave
         /// or a reconnect — and `seq` restarts at 1 within each epoch, so
-        /// `(epoch, seq)` is strictly lexicographically increasing per sender as
-        /// observed by any single recipient. This makes the `seq` restart
-        /// SELF-DESCRIBING: a recipient attributes a backwards `seq` jump to the
-        /// epoch bump directly, rather than inferring it from a separately
-        /// ordered `PlayerLeft`/`PlayerJoined`/`PlayerReconnected` (which a
-        /// future control-plane/data split may reorder relative to data). Gated
-        /// exactly like `seq`: stamped from the sender's counter, present only
-        /// for v3 recipients, absent (bytes byte-identical to pre-v3) below.
+        /// `(epoch, seq)` is strictly lexicographically increasing across data
+        /// frames from one sender on one physical recipient connection. Priority
+        /// lifecycle control for a newer epoch may overtake already-queued data
+        /// from the prior epoch; clients tolerate that trailing data until the
+        /// first newer-epoch data frame, while suppressing it from application
+        /// state after the lifecycle announcement. This makes the `seq` restart
+        /// self-describing instead of inferred from separately ordered control.
+        /// Gated exactly like `seq`: present only for v3 recipients and absent
+        /// (bytes byte-identical to pre-v3) below.
         /// Precedent: Aeron image sessionId, Kafka producer epoch (KIP-98).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u32>,
+        /// Echoed protocol-v3 delivery class when the sender supplied one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<DeliveryClass>,
+        /// Echoed sender-defined coalescing key for `class: latest`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<u32>,
     },
     /// Binary game data payload from another player.
     ///
-    /// This is an in-memory broadcast carrier. Negotiated MessagePack clients
-    /// receive a bare binary WebSocket frame from `websocket::sending`, not this
-    /// enum variant serialized through the `{type, data}` envelope. Uses `Bytes`
-    /// for zero-copy cloning during broadcast.
+    /// This is an in-memory broadcast carrier. Every v3 binary recipient
+    /// receives a MessagePack metadata envelope from `websocket::sending`, not
+    /// this enum variant serialized through the `{type, data}` envelope. The
+    /// envelope leaves `payload` opaque and uses `encoding` only to tag those
+    /// bytes. Uses `Bytes` for zero-copy cloning during broadcast.
     GameDataBinary {
         from_player: PlayerId,
         encoding: GameDataEncoding,
@@ -370,19 +395,19 @@ pub enum ServerMessage {
         payload: Bytes,
         /// Server-stamped relay sequence number (v3 only): the same counter,
         /// semantics, and per-recipient gating as [`ServerMessage::GameData::seq`]
-        /// — text and binary relay share one per-(sender, room) stream. On the
-        /// bare binary wire frame the stamp is carried as the optional `seq`
-        /// map key of `BinaryGameDataFrame` (see `websocket::sending`), present
-        /// only for v3 recipients.
+        /// — text and binary relay share one per-(sender, room) stream. This
+        /// in-memory field is optional for v2 recipient projection; on a v3
+        /// binary wire frame, `V3BinaryGameDataFrame` (see
+        /// `websocket::sending`) carries `seq` as a mandatory non-zero key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
         /// Server-tracked incarnation epoch (v3 only): the same per-(sender,
         /// room) counter, semantics, and per-recipient gating as
         /// [`ServerMessage::GameData::epoch`] — text and binary relay share the
-        /// one epoch on the sender's `ClientConnection`. On the bare binary wire
-        /// frame it rides beside `seq` as an optional `epoch` map key of
-        /// `BinaryGameDataFrame` (see `websocket::sending`), present only for v3
-        /// recipients.
+        /// one epoch on the sender's `ClientConnection`. This in-memory field is
+        /// optional for v2 recipient projection; on a v3 binary wire frame,
+        /// `V3BinaryGameDataFrame` carries `epoch` beside `seq` as a mandatory
+        /// non-zero key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u32>,
     },
@@ -435,12 +460,13 @@ pub enum ServerMessage {
     },
     /// Per-recipient session directive emitted at lobby finalization (v3 only).
     ///
-    /// Sent alongside the unchanged [`ServerMessage::GameStarting`] (and only to
-    /// v3-capable members) when a room negotiates a non-relay plan. It carries
-    /// the chosen topology/transport, the host (for `host` topology), the
-    /// recipient's peer list with per-recipient `initiate` flags, ICE servers,
-    /// and the relay `fallback`. A relay-only room emits no `SessionPlan`, so v2
-    /// clients never observe it (boxed to keep the enum small, mirroring
+    /// Sent after the unchanged [`ServerMessage::GameStarting`] to every
+    /// v3-capable member. It carries the chosen topology/transport, the host
+    /// (for `host` topology), the recipient's peer list with per-recipient
+    /// `initiate` flags, ICE servers, and the relay `fallback`. Relay-resolved
+    /// rooms send an explicit `relay`/`relay` plan with no host, peers, or ICE so
+    /// the latest plan is always an authoritative reset. Protocol-v2 clients
+    /// never observe this variant (boxed to keep the enum small, mirroring
     /// [`ServerMessage::RoomJoined`]).
     SessionPlan(Box<SessionPlanPayload>),
     /// Pong response to ping
@@ -518,11 +544,6 @@ pub enum ServerMessage {
     /// own transport capabilities, because this is informational status about a
     /// peer, not an instruction to use that transport. Like the report itself it
     /// is purely informational: the relay floor never closes.
-    ///
-    /// NOTE: appended at the END of the enum (after `Error`) so any future
-    /// positional/discriminant-sensitive encoding (e.g. the rkyv path sketched
-    /// in `src/broadcast.rs`) keeps prior discriminants stable. The current wire
-    /// encodings (`serde_json`, `rmp_serde::to_vec_named`) are name-based.
     PeerTransportStatus {
         peer_id: PlayerId,
         transport: Transport,
@@ -535,17 +556,12 @@ pub enum ServerMessage {
     /// default 0 = disabled — enforcement happens at emission, so a pre-v3
     /// recipient can never observe this message). Counters are CUMULATIVE
     /// since the connection registered, so a frame skipped under load loses
-    /// nothing — the next one carries the totals. Pairs with the
-    /// `GameData.seq` gap-detection contract: a recipient that sees a seq gap
-    /// can attribute it via `dropped_for_you` / `backpressure_events` instead
-    /// of guessing.
+    /// nothing — the next one carries the totals. These aggregates are
+    /// diagnostic only: they cannot authorize or identify a `GameData.seq`
+    /// gap; only an exact prior `DeliveryReport` can do that.
     ///
     /// The frame itself is advisory: it is enqueued best-effort on the
     /// connection's own queue and never counted in the statistics it reports.
-    ///
-    /// NOTE: appended at the END of the enum (after `PeerTransportStatus`) so
-    /// any future positional/discriminant-sensitive encoding keeps prior
-    /// discriminants stable; the current wire encodings are name-based.
     RelayStats {
         /// The configured emission interval in milliseconds
         /// (`websocket.delivery_stats_interval_secs * 1000`).
@@ -554,16 +570,14 @@ pub enum ServerMessage {
         /// connection since it registered. Excludes the advisory `RelayStats`
         /// frames themselves.
         sent_to_you: u64,
-        /// Messages the server abandoned for this connection since it
-        /// registered (undeliverable-encoding replacements and messages
-        /// dropped with a slow-consumer eviction). Nonzero while connected
-        /// only for undeliverable payloads — every other drop coincides with
-        /// a loud disconnect of this connection.
+        /// Messages omitted for this connection since it registered, including
+        /// class-policy loss, undeliverable-encoding replacements, and messages
+        /// abandoned by a slow-consumer close. This is an aggregate legacy
+        /// diagnostic; `DeliveryReport` carries the exact v3 causes.
         dropped_for_you: u64,
-        /// Deliveries that had to WAIT (true backpressure) on this
-        /// connection's momentarily full outbound queue since it registered.
-        /// A rising value means this connection is not draining fast enough
-        /// and is pacing its room's senders.
+        /// Deliveries that had to wait (true backpressure) on this connection's
+        /// momentarily full outbound queue since it registered. V3 lossy
+        /// classes never wait; reliable traffic (and all pre-v3 traffic) may.
         backpressure_events: u64,
     },
     /// Server shutdown advisory (v3 only).
@@ -574,10 +588,6 @@ pub enum ServerMessage {
     /// `4000` (`server_shutdown`) at or before `deadline_ms`. Pre-v3
     /// recipients never receive this message; every recipient still receives
     /// the semantic close frame.
-    ///
-    /// NOTE: appended at the END of the enum (after `RelayStats`) so any
-    /// future positional/discriminant-sensitive encoding keeps prior
-    /// discriminants stable; the current wire encodings are name-based.
     GoingAway {
         /// Unix epoch millisecond deadline when the server will force-close
         /// remaining sockets with close code 4000.
@@ -586,6 +596,22 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_secs: Option<u64>,
     },
+    /// Exact protocol-v3 accountability for data omitted on this connection.
+    ///
+    /// Gap-bearing reports are queued atomically with the corresponding lossy
+    /// operation on the priority control lane, before any later data can expose
+    /// the sequence gap. Counter-only reports may be emitted periodically.
+    DeliveryReport(Box<DeliveryReportPayload>),
+}
+
+/// Deserialize an optional wire field while distinguishing omission from an
+/// explicit `null`. The v3 schema makes class/key optional but non-nullable.
+fn deserialize_present_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Custom serde module for `bytes::Bytes` serialization

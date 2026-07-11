@@ -120,7 +120,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_websocket_slow_consumer_disconnects_total",
-        "Connections force-closed because their outbound queue stayed full past websocket.slow_consumer_timeout_ms",
+        "Connections force-closed because outbound delivery could not make accountable progress",
         snapshot.connections.websocket_slow_consumer_disconnects,
     );
     // Delivery conservation counters: together with the drop counter above,
@@ -151,6 +151,34 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Conditional delivery attempts canceled before enqueue because the commit condition no longer held: shutdown drain, caller predicate, or recipient snapshot (not a delivery fault)",
         snapshot.connections.websocket_deliveries_canceled,
     );
+    let _ = writeln!(
+        buf,
+        "# HELP signal_fish_websocket_delivery_class_outcomes_total Per-class accountable game-data outcomes; at quiescence attempted equals the sum of terminal outcomes for each class"
+    );
+    let _ = writeln!(
+        buf,
+        "# TYPE signal_fish_websocket_delivery_class_outcomes_total counter"
+    );
+    for (class, metrics) in [
+        ("reliable", &snapshot.connections.delivery_by_class.reliable),
+        ("latest", &snapshot.connections.delivery_by_class.latest),
+        ("volatile", &snapshot.connections.delivery_by_class.volatile),
+    ] {
+        for (outcome, value) in [
+            ("attempted", metrics.attempted),
+            ("delivered", metrics.delivered),
+            ("superseded", metrics.superseded),
+            ("dropped_full", metrics.dropped_full),
+            ("dropped", metrics.dropped),
+            ("abandoned", metrics.abandoned),
+            ("unsupported_format", metrics.unsupported_format),
+        ] {
+            let _ = writeln!(
+                buf,
+                "signal_fish_websocket_delivery_class_outcomes_total{{class=\"{class}\",outcome=\"{outcome}\"}} {value}"
+            );
+        }
+    }
 
     counter(
         &mut buf,
@@ -484,7 +512,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_transport_session_plans_emitted_total",
-        "Non-relay v3 SessionPlans emitted (one per finalized non-relay room)",
+        "Finalization-time v3 SessionPlan publications, including relay-floor plans (one per room with v3 recipients)",
         snapshot.transport.session_plans_emitted,
     );
     counter(
@@ -726,6 +754,17 @@ mod tests {
         metrics.increment_websocket_deliveries_canceled();
         metrics.increment_websocket_messages_dropped();
 
+        use crate::protocol::DeliveryClass;
+        metrics.increment_delivery_class_attempted(DeliveryClass::Reliable);
+        metrics.increment_delivery_class_unsupported_format(DeliveryClass::Reliable);
+        for _ in 0..2 {
+            metrics.increment_delivery_class_attempted(DeliveryClass::Latest);
+        }
+        metrics.increment_delivery_class_delivered(DeliveryClass::Latest);
+        metrics.increment_delivery_class_superseded();
+        metrics.increment_delivery_class_attempted(DeliveryClass::Volatile);
+        metrics.increment_delivery_class_dropped(DeliveryClass::Volatile);
+
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
 
@@ -768,6 +807,21 @@ mod tests {
                 rendered.contains(&format!("{name} {value}")),
                 "missing value line `{name} {value}`"
             );
+        }
+
+        for (class, outcome, value) in [
+            ("reliable", "attempted", 1),
+            ("reliable", "unsupported_format", 1),
+            ("latest", "attempted", 2),
+            ("latest", "delivered", 1),
+            ("latest", "superseded", 1),
+            ("volatile", "attempted", 1),
+            ("volatile", "dropped", 1),
+        ] {
+            let sample = format!(
+                "signal_fish_websocket_delivery_class_outcomes_total{{class=\"{class}\",outcome=\"{outcome}\"}} {value}"
+            );
+            assert!(rendered.contains(&sample), "missing sample `{sample}`");
         }
     }
 
@@ -860,7 +914,7 @@ mod tests {
         let expectations = [
             (
                 "signal_fish_transport_session_plans_emitted_total",
-                "Non-relay v3 SessionPlans emitted (one per finalized non-relay room)",
+                "Finalization-time v3 SessionPlan publications, including relay-floor plans (one per room with v3 recipients)",
                 1u64,
             ),
             (

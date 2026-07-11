@@ -1,3 +1,6 @@
+use crate::coordination::outbound_queue::{
+    self, OutboundReceiver, OutboundSender, TryEnqueueError, TryReceiveError,
+};
 use crate::coordination::{
     deliver_or_disconnect, ClientDeliveryHandle, CloseReason, ConnectionCloseListener,
     ConnectionCloseSignal, DeliveryOutcome,
@@ -11,13 +14,14 @@ use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError}
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tokio::time::Instant;
 
-use super::batching::{send_batch, MessageBatcher};
-use super::sending::{send_immediate_server_message, send_single_message};
+use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError};
+use super::sending::send_immediate_server_message;
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
 
@@ -38,18 +42,15 @@ pub(super) const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
 /// Used for control messages (auth responses, protocol info, timeout errors)
 /// that are sent outside the message coordinator.
 async fn enqueue_connection_message(
-    tx: &mpsc::Sender<Arc<ServerMessage>>,
+    tx: &OutboundSender,
     close_signal: &ConnectionCloseSignal,
     server: &Arc<EnhancedGameServer>,
     slow_consumer_timeout: Duration,
     player_id: &PlayerId,
     message: ServerMessage,
     context: &'static str,
-) {
-    let handle = ClientDeliveryHandle {
-        sender: tx.clone(),
-        close: close_signal.clone(),
-    };
+) -> bool {
+    let handle = ClientDeliveryHandle::classified(tx.clone(), close_signal.clone());
     let metrics = server.metrics();
     let outcome = deliver_or_disconnect(
         &metrics,
@@ -67,6 +68,7 @@ async fn enqueue_connection_message(
             "Connection control message was not delivered"
         );
     }
+    outcome == DeliveryOutcome::Delivered
 }
 
 /// Best-effort enqueue of a pre-close farewell on this connection's own queue.
@@ -76,21 +78,25 @@ async fn enqueue_connection_message(
 /// lifecycle reason) is the authoritative, loud signal — this frame is
 /// advisory. The send task's final drain flushes it when the queue has room.
 fn enqueue_farewell_message(
-    tx: &mpsc::Sender<Arc<ServerMessage>>,
+    tx: &OutboundSender,
     player_id: &PlayerId,
     message: ServerMessage,
     context: &'static str,
 ) {
-    match tx.try_send(Arc::new(message)) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => {
+    match tx.try_enqueue_control(Arc::new(message)) {
+        Ok(_) => {}
+        Err(TryEnqueueError::Full(_)) => {
             tracing::debug!(
                 %player_id,
                 context,
                 "Farewell not enqueued: outbound queue full on a closing connection"
             );
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
+        Err(
+            TryEnqueueError::Closed(_)
+            | TryEnqueueError::AccountabilityUnavailable(_)
+            | TryEnqueueError::InvalidMetadata(_),
+        ) => {
             tracing::debug!(%player_id, context, "Farewell not enqueued: connection already closed");
         }
     }
@@ -137,12 +143,19 @@ where
 ///   just before unregistering), then close.
 async fn finalize_closed_connection(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    rx: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    rx: &mut OutboundReceiver,
     batcher: &mut MessageBatcher,
     reason: Option<CloseReason>,
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
 ) {
+    // Freeze the producer set before inspecting or draining queued state. A
+    // stale routing snapshot may still hold a sender clone, but it can no
+    // longer enqueue behind the teardown's final accounting snapshot.
+    rx.close();
+
     match reason {
         Some(CloseReason::SlowConsumer) => {
             // `send_batch` pops messages one at a time, so a cancelled
@@ -150,6 +163,7 @@ async fn finalize_closed_connection(
             // the count below misses at most the single message that was
             // actively (partially) on the wire when the close fired.
             let abandoned = rx.len() + batcher.len();
+            record_abandoned_by_class(rx, batcher);
             server
                 .metrics()
                 .add_websocket_messages_dropped(abandoned as u64);
@@ -161,9 +175,10 @@ async fn finalize_closed_connection(
 
             let farewell = ServerMessage::Error {
                 message: format!(
-                    "Disconnected as a slow consumer: this connection's outbound queue \
-                     stayed full for more than {} ms",
-                    server.config().websocket_config.slow_consumer_timeout_ms
+                    "Disconnected because outbound delivery could not make accountable progress \
+                     (backpressure limit {} ms; maximum sojourn {} ms)",
+                    server.config().websocket_config.slow_consumer_timeout_ms,
+                    server.config().websocket_config.max_sojourn_ms,
                 ),
                 error_code: Some(ErrorCode::SlowConsumer),
             };
@@ -201,34 +216,56 @@ async fn finalize_closed_connection(
             let flush = registered_close_write_timeout(
                 RegisteredConnectionCloseStep::FlushQueuedMessages,
                 async {
+                    if !batcher.is_empty() {
+                        send_batch(
+                            sender,
+                            batcher,
+                            rx,
+                            player_id,
+                            server,
+                            close_signal,
+                            max_sojourn,
+                        )
+                        .await?;
+                    }
                     // Not a `while let`: the repo-wide try_recv policy
                     // (tests/async_timeout_policy_scan.rs) requires both terminal
                     // channel states to be matched explicitly.
-                    #[allow(clippy::while_let_loop)]
                     loop {
                         match rx.try_recv() {
-                            Ok(message) => batcher.queue(message),
-                            Err(
-                                mpsc::error::TryRecvError::Empty
-                                | mpsc::error::TryRecvError::Disconnected,
-                            ) => break,
+                            Ok(message) => {
+                                send_queued(
+                                    sender,
+                                    message,
+                                    None,
+                                    rx,
+                                    player_id,
+                                    server,
+                                    close_signal,
+                                    max_sojourn,
+                                )
+                                .await?;
+                            }
+                            Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
+                            Err(TryReceiveError::AccountabilityFailed) => {
+                                return Err(QueueWriteError::AccountabilityFailed);
+                            }
                         }
                     }
-                    if batcher.is_empty() {
-                        return Ok(());
-                    }
-                    send_batch(sender, batcher, player_id, server).await
+                    Ok(())
                 },
             )
             .await;
             let flush_timed_out = flush.is_err();
             match flush {
                 Ok(Ok(())) => {}
-                Ok(Err(())) | Err(_) => {
+                Ok(Err(_)) | Err(_) => {
                     // Whatever the flush could not deliver dies with the
-                    // connection; keep the drop counter honest (misses at
-                    // most the single frame that was actively on the wire).
+                    // connection. `SendAccounting::drop` already accounts for
+                    // the one item owned by an interrupted socket write; this
+                    // snapshot covers only the queued and batched remainder.
                     let abandoned = rx.len() + batcher.len();
+                    record_abandoned_by_class(rx, batcher);
                     server
                         .metrics()
                         .add_websocket_messages_dropped(abandoned as u64);
@@ -283,6 +320,17 @@ async fn finalize_closed_connection(
         }
         Err(_elapsed) => {
             tracing::debug!(%player_id, "Timed out closing WebSocket sink");
+        }
+    }
+}
+
+fn record_abandoned_by_class(rx: &OutboundReceiver, batcher: &MessageBatcher) {
+    let queued = rx.count_by_class();
+    let batched = batcher.count_by_class();
+    for ((class, queued_count), (_, batched_count)) in queued.into_iter().zip(batched) {
+        let count = queued_count.saturating_add(batched_count);
+        if count > 0 {
+            rx.record_abandoned(class, count);
         }
     }
 }
@@ -349,6 +397,14 @@ pub(super) async fn handle_socket(
     let (mut sender, mut receiver) = socket.split();
     // Validated >= 1 at startup; clamp anyway because `mpsc::channel` panics on 0.
     let queue_capacity = server.config().websocket_config.send_queue_capacity.max(1);
+    // Validated >= 2 at startup: StartGame reserves GameStarting plus the
+    // optional SessionPlan before its durable CAS. Clamp direct library
+    // construction too so it cannot create a self-deadlocking one-slot queue.
+    let control_queue_capacity = server
+        .config()
+        .websocket_config
+        .control_queue_capacity
+        .max(2);
     let slow_consumer_timeout = Duration::from_millis(
         server
             .config()
@@ -356,7 +412,11 @@ pub(super) async fn handle_socket(
             .slow_consumer_timeout_ms
             .max(1),
     );
-    let (tx, mut rx) = mpsc::channel::<Arc<ServerMessage>>(queue_capacity);
+    let (tx, mut rx) = outbound_queue::channel_with_metrics(
+        queue_capacity,
+        control_queue_capacity,
+        server.metrics(),
+    );
 
     // One close signal per connection: the delivery layer requests closes
     // through its registered handle (slow consumer) or via unregistration;
@@ -372,7 +432,7 @@ pub(super) async fn handle_socket(
 
     // Register client with server
     let player_id = match server
-        .register_client_with_close(tx, close_signal.clone(), addr)
+        .register_classified_client_with_close(tx.clone(), close_signal.clone(), addr)
         .await
     {
         Ok(player_id) => {
@@ -467,6 +527,11 @@ pub(super) async fn handle_socket(
     let mut authenticated = !server.config().auth_enabled; // Auto-authenticated if auth disabled
     let mut authenticate_processed = false;
     let mut received_application_message = false;
+    // Capability publication can precede the two handshake responses in the
+    // auth-disabled endpoint-default path. Delivery advisories must wait until
+    // both responses are queued; clients cannot interpret v3 accountability
+    // before ProtocolInfo establishes the negotiated mode.
+    let protocol_handshake_complete = Arc::new(AtomicBool::new(false));
 
     // When auth is disabled, legacy clients may skip Authenticate entirely. In
     // that mode the endpoint default still applies, so `/v3/ws` starts as v3
@@ -492,6 +557,10 @@ pub(super) async fn handle_socket(
     let auth_timeout = Duration::from_secs(server.config().websocket_config.auth_timeout_secs);
 
     let effective_player_id = Arc::new(RwLock::new(player_id));
+    let Some(connection_lifecycle) = server.client_lifecycle(&player_id) else {
+        tracing::warn!(%player_id, "Registered connection disappeared before socket tasks started");
+        return;
+    };
 
     // Periodic per-connection RelayStats emission (protocol v3, opt-in via
     // `websocket.delivery_stats_interval_secs`; default 0 = disabled, so no
@@ -507,6 +576,7 @@ pub(super) async fn handle_socket(
         let server_for_stats = server.clone();
         let stats_tx = tx_clone.clone();
         let effective_player_id_for_stats = Arc::clone(&effective_player_id);
+        let protocol_handshake_complete_for_stats = Arc::clone(&protocol_handshake_complete);
         let mut stats_task_close = stats_task_close;
         tokio::spawn(async move {
             let mut ticker =
@@ -522,6 +592,9 @@ pub(super) async fn handle_socket(
                         break;
                     }
                     _ = ticker.tick() => {
+                        if !protocol_handshake_complete_for_stats.load(Ordering::Acquire) {
+                            continue;
+                        }
                         let current_player_id = *effective_player_id_for_stats.read().await;
                         if !server_for_stats.client_supports_v3(&current_player_id) {
                             continue;
@@ -532,7 +605,6 @@ pub(super) async fn handle_socket(
                         else {
                             continue;
                         };
-                        use std::sync::atomic::Ordering;
                         let message = ServerMessage::RelayStats {
                             interval_ms: delivery_stats_interval_secs * 1_000,
                             sent_to_you: stats.sent_to_you.load(Ordering::Relaxed),
@@ -546,15 +618,30 @@ pub(super) async fn handle_socket(
                         // load loses nothing — never wait on (or escalate
                         // over) a full queue, and never count the frame in
                         // the statistics it reports.
-                        match stats_tx.try_send(Arc::new(message)) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Queue both atomically with the report trailing. With
+                        // one available slot only the report is queued; with
+                        // two, RelayStats precedes it. Exact future gaps can
+                        // therefore append without an advisory causing a
+                        // healthy connection to fail closed.
+                        match stats_tx.try_enqueue_delivery_advisories(Arc::new(message)) {
+                            Ok(true) => {}
+                            Ok(false) => {
                                 tracing::debug!(
                                     %current_player_id,
-                                    "RelayStats frame skipped: outbound queue full"
+                                    "RelayStats skipped: preserving causal report capacity"
                                 );
                             }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            Err(TryEnqueueError::Full(_)) => {
+                                tracing::debug!(
+                                    %current_player_id,
+                                    "Delivery advisories skipped: control queue full"
+                                );
+                            }
+                            Err(
+                                TryEnqueueError::Closed(_)
+                                | TryEnqueueError::AccountabilityUnavailable(_)
+                                | TryEnqueueError::InvalidMetadata(_),
+                            ) => break,
                         }
                     }
                 }
@@ -569,11 +656,14 @@ pub(super) async fn handle_socket(
     // Spawn task to handle outgoing messages
     let server_clone = server.clone();
     let effective_player_id_for_send = Arc::clone(&effective_player_id);
+    let lifecycle_for_send = Arc::clone(&connection_lifecycle);
+    let send_task_close_signal = close_signal.clone();
     let mut send_task = tokio::spawn(async move {
         let config = server_clone.config();
         let batching_enabled = config.websocket_config.enable_batching;
         let batch_size = config.websocket_config.batch_size;
         let batch_interval_ms = config.websocket_config.batch_interval_ms;
+        let max_sojourn = Duration::from_millis(config.websocket_config.max_sojourn_ms);
 
         let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
 
@@ -588,91 +678,115 @@ pub(super) async fn handle_socket(
             reason = send_task_close.closed() => Some(reason),
             () = async {
                 if batching_enabled {
-                    // Batching mode: collect multiple messages and send together.
-                    // Clamp to a 1ms floor: `batch_interval_ms` is validated `> 0`
-                    // (when batching is enabled) at startup, but
-                    // `tokio::time::interval` panics on a zero period, so guard
-                    // the timer regardless of how this config was constructed.
-                    let mut flush_interval =
-                        tokio::time::interval(Duration::from_millis(batch_interval_ms.max(1)));
-                    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+                    let batch_interval =
+                        Duration::from_millis(batch_interval_ms.max(1));
                     loop {
-                        tokio::select! {
-                            // Receive new message from channel
-                            message_opt = rx.recv() => {
-                                if let Some(message) = message_opt {
-                                    batcher.queue(message);
-
-                                    // Flush if batch is full or time threshold exceeded
-                                    if batcher.should_flush()
-                                        && {
-                                            let current_player_id =
-                                                *effective_player_id_for_send.read().await;
-                                            send_batch(
-                                                &mut sender,
-                                                &mut batcher,
-                                                &current_player_id,
-                                                &server_clone,
-                                            )
-                                            .await
-                                            .is_err()
-                                        }
-                                    {
-                                        break;
-                                    }
-                                } else {
-                                    // Channel closed, flush remaining messages and exit
-                                    if !batcher.is_empty() {
-                                        let current_player_id =
-                                            *effective_player_id_for_send.read().await;
-                                        let _ = send_batch(
-                                            &mut sender,
-                                            &mut batcher,
-                                            &current_player_id,
-                                            &server_clone,
-                                        )
-                                        .await;
-                                    }
-                                    break;
-                                }
-                            }
-                            // Periodic flush based on time interval
-                            _ = flush_interval.tick() => {
-                                if !batcher.is_empty()
-                                    && batcher.should_flush()
-                                    && {
-                                        let current_player_id =
-                                            *effective_player_id_for_send.read().await;
-                                        send_batch(
-                                            &mut sender,
-                                            &mut batcher,
-                                            &current_player_id,
-                                            &server_clone,
-                                        )
-                                        .await
-                                        .is_err()
-                                    }
+                        match rx.recv_batched(batch_size, batch_interval).await {
+                            Ok(Some(message)) if message.is_control() => {
+                                let current_player_id =
+                                    *effective_player_id_for_send.read().await;
+                                if send_queued(
+                                    &mut sender,
+                                    message,
+                                    None,
+                                    &rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
+                                    max_sojourn,
+                                )
+                                .await
+                                .is_err()
                                 {
                                     break;
                                 }
                             }
+                            Ok(Some(message)) => {
+                                // The receiver holds a batch in the shared queue
+                                // until it is ready, then releases one item at a
+                                // time. Never stage multiple undelivered data
+                                // messages outside the queue: keyed-latest
+                                // coalescing and exact gap reporting must still
+                                // see every item not actively being written.
+                                batcher.queue(message);
+                                let current_player_id =
+                                    *effective_player_id_for_send.read().await;
+                                if send_batch(
+                                    &mut sender,
+                                    &mut batcher,
+                                    &mut rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
+                                    max_sojourn,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(TryReceiveError::AccountabilityFailed) => {
+                                if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
+                                    server_clone
+                                        .metrics()
+                                        .increment_websocket_slow_consumer_disconnects();
+                                }
+                                break;
+                            }
+                            Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
                         }
                     }
                 } else {
-                    // Non-batching mode: send each message immediately (legacy behavior)
-                    while let Some(message) = rx.recv().await {
-                        let current_player_id = *effective_player_id_for_send.read().await;
-                        if send_single_message(
-                            &mut sender,
-                            message,
-                            &current_player_id,
-                            &server_clone,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
+                    loop {
+                        match rx.recv().await {
+                            Ok(Some(message)) if message.is_control() => {
+                                let current_player_id = *effective_player_id_for_send.read().await;
+                                if send_queued(
+                                    &mut sender,
+                                    message,
+                                    None,
+                                    &rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
+                                    max_sojourn,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(Some(message)) => {
+                                batcher.queue(message);
+                                let current_player_id = *effective_player_id_for_send.read().await;
+                                if send_batch(
+                                    &mut sender,
+                                    &mut batcher,
+                                    &mut rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
+                                    max_sojourn,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(TryReceiveError::AccountabilityFailed) => {
+                                if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
+                                    server_clone
+                                        .metrics()
+                                        .increment_websocket_slow_consumer_disconnects();
+                                }
+                                break;
+                            }
+                            Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
                         }
                     }
                 }
@@ -708,18 +822,22 @@ pub(super) async fn handle_socket(
             reason,
             &current_player_id,
             &server_clone,
+            &send_task_close_signal,
+            max_sojourn,
         )
         .await;
 
         // Cleanup when send task ends
-        let current_player_id = *effective_player_id_for_send.read().await;
-        server_clone.unregister_client(&current_player_id).await;
+        server_clone
+            .unregister_client_with_lifecycle(lifecycle_for_send)
+            .await;
     });
 
     // Handle incoming messages
     let token_binding_for_receive = token_binding.clone();
     let server_clone = server.clone();
     let effective_player_id_for_receive = Arc::clone(&effective_player_id);
+    let lifecycle_for_receive = Arc::clone(&connection_lifecycle);
     let auth_timeout_secs = server.config().websocket_config.auth_timeout_secs;
     let close_signal_for_receive = close_signal.clone();
     let mut receive_task = tokio::spawn(async move {
@@ -956,7 +1074,7 @@ pub(super) async fn handle_socket(
                                                 error = %error_message,
                                                 "SDK compatibility check failed"
                                             );
-                                            enqueue_connection_message(
+                                            let _ = enqueue_connection_message(
                                                 &tx_clone,
                                                 &close_signal,
                                                 &server_clone,
@@ -1002,7 +1120,7 @@ pub(super) async fn handle_socket(
                                                 "Client requested unsupported game_data_format"
                                             );
                                             // Send error message to client about capability mismatch
-                                            enqueue_connection_message(
+                                            let _ = enqueue_connection_message(
                                                 &tx_clone,
                                                 &close_signal,
                                                 &server_clone,
@@ -1117,7 +1235,7 @@ pub(super) async fn handle_socket(
                                             transports: response_transports,
                                         });
 
-                                    enqueue_connection_message(
+                                    let auth_response_queued = enqueue_connection_message(
                                         &tx_clone,
                                         &close_signal,
                                         &server_clone,
@@ -1127,7 +1245,7 @@ pub(super) async fn handle_socket(
                                         "authentication success response",
                                     )
                                     .await;
-                                    enqueue_connection_message(
+                                    let protocol_info_queued = enqueue_connection_message(
                                         &tx_clone,
                                         &close_signal,
                                         &server_clone,
@@ -1137,6 +1255,9 @@ pub(super) async fn handle_socket(
                                         "protocol info response",
                                     )
                                     .await;
+                                    if auth_response_queued && protocol_info_queued {
+                                        protocol_handshake_complete.store(true, Ordering::Release);
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!(%active_player_id, %app_id, "Authentication failed: {:?}", e);
@@ -1208,17 +1329,16 @@ pub(super) async fn handle_socket(
                                     auth_token,
                                 } => {
                                     if server_clone
-                                        .handle_reconnect(
+                                        .handle_reconnect_with_identity(
                                             &active_player_id,
                                             &reconnect_player_id,
                                             &room_id,
                                             &auth_token,
+                                            Arc::clone(&effective_player_id_for_receive),
                                         )
                                         .await
                                     {
                                         active_player_id = reconnect_player_id;
-                                        *effective_player_id_for_receive.write().await =
-                                            reconnect_player_id;
                                     }
                                 }
                                 other => {
@@ -1226,6 +1346,9 @@ pub(super) async fn handle_socket(
                                         .handle_client_message(&active_player_id, other)
                                         .await;
                                 }
+                            }
+                            if !server_clone.config().auth_enabled && !authenticate_processed {
+                                protocol_handshake_complete.store(true, Ordering::Release);
                             }
                         }
                     }
@@ -1261,6 +1384,9 @@ pub(super) async fn handle_socket(
                                 Some(ErrorCode::InvalidInput),
                             )
                             .await;
+                        if !server_clone.config().auth_enabled && !authenticate_processed {
+                            protocol_handshake_complete.store(true, Ordering::Release);
+                        }
                         continue;
                     }
 
@@ -1268,6 +1394,9 @@ pub(super) async fn handle_socket(
                     server_clone
                         .handle_game_data_binary(&active_player_id, encoding, payload)
                         .await;
+                    if !server_clone.config().auth_enabled && !authenticate_processed {
+                        protocol_handshake_complete.store(true, Ordering::Release);
+                    }
                 }
                 Message::Close(_) => {
                     tracing::info!(%active_player_id, "WebSocket connection closed");
@@ -1286,7 +1415,9 @@ pub(super) async fn handle_socket(
         }
 
         // Cleanup when receive task ends
-        server_clone.unregister_client(&active_player_id).await;
+        server_clone
+            .unregister_client_with_lifecycle(lifecycle_for_receive)
+            .await;
     });
 
     enum CompletedSocketTask {
@@ -1318,7 +1449,9 @@ pub(super) async fn handle_socket(
     // shutdown drain waits on this handler lifetime so code 4000 has a chance
     // to hit the wire before process exit.
     let current_player_id = *effective_player_id.read().await;
-    server.unregister_client(&current_player_id).await;
+    server
+        .unregister_client_with_lifecycle(connection_lifecycle)
+        .await;
 
     match completed_socket_task {
         CompletedSocketTask::Send => {

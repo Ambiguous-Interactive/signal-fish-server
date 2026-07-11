@@ -12,9 +12,11 @@ Throughout this page:
 - Alice, id `00000000-0000-0000-0000-00000000000a`, still in the room.
 - Room `11111111-1111-1111-1111-111111111111`, code `ABC123`.
 
-Bob is mid-game (already joined and ready) when his network drops. The reconnection flow is identical for v2 and v3
-clients; a v3 client that reconnects into an active non-relay session additionally receives a fresh `SessionPlan`
-(noted at the end).
+Bob is mid-game (already joined and ready) when his network drops. The lifecycle
+is the same for v2 and v3, but the v3 `Reconnected` wire also carries replay
+status, complete `sender_watermarks`, and a new physical-connection accounting
+lifetime. A v3 client that reconnects into an active non-relay session
+additionally receives a fresh `SessionPlan` (noted at the end).
 
 ## 1. Bob disconnects
 
@@ -123,11 +125,13 @@ The game resumes after that application-level resync.
 
 ## 3. v3 note — reconnecting into an active session
 
-If the room is running a non-relay v3 session, Bob's `Reconnected` is followed by a fresh, per-recipient
-`SessionPlan` describing the running session (its current peers, `initiate` flags, `host`, and fresh ICE). The
-existing members receive a `NewPeer` delta for the rejoined Bob instead of a full plan. Bob's `Reconnected`
-carries no `ice_servers` of its own in that case — the fresh ICE arrives in the `SessionPlan`. See the
-[mesh](v3-mesh-webrtc.md) and [host failover](v3-host-failover.md) scenarios for the `SessionPlan` shape.
+Bob's `Reconnected` is followed by a fresh, per-recipient `SessionPlan`, and
+every current v3 incumbent receives its own complete refresh after
+`PlayerReconnected`. For a non-relay session those plans carry current peers,
+`initiate` flags, `host`, and fresh ICE. For a relay-floor room they are explicit
+empty-peer `relay`/`relay` resets. `Reconnected` carries no `ice_servers` of its
+own in a finalized WebRTC session; fresh ICE arrives in the plan. See the
+[mesh](v3-mesh-webrtc.md) and [host failover](v3-host-failover.md) scenarios.
 
 ## Failure case — invalid reconnection token
 

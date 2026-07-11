@@ -94,8 +94,7 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::Arc;
 use std::time::Duration;
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio::sync::Barrier;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
@@ -140,7 +139,7 @@ fn app_entry() -> AppAuthEntry {
 async fn start_server(
     window: Duration,
     cleanup_interval: Duration,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
@@ -167,9 +166,6 @@ async fn start_server(
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     // Live cleanup task: with a 3600s interval it fires one immediate startup
     // tick (nothing pending yet ⇒ harmless) and then not again for an hour, so
     // any reconnection record registered during the test survives untouched —
@@ -186,16 +182,8 @@ async fn start_server(
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -367,7 +355,8 @@ async fn contended_reconnect(
 
 #[tokio::test]
 async fn reconnect_inside_window_succeeds() {
-    let (addr, game_server) = start_server(WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let (running_server, game_server) = start_server(WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let addr = running_server.addr();
 
     let mut anchor = connect(addr).await;
     authenticate_v3(&mut anchor).await;
@@ -411,6 +400,7 @@ async fn reconnect_inside_window_succeeds() {
 
     drop(dropper);
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +410,8 @@ async fn reconnect_inside_window_succeeds() {
 
 #[tokio::test]
 async fn reconnect_after_window_expires_is_rejected_by_the_handler_not_cleanup() {
-    let (addr, game_server) = start_server(WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let (running_server, game_server) = start_server(WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let addr = running_server.addr();
 
     let mut anchor = connect(addr).await;
     authenticate_v3(&mut anchor).await;
@@ -485,6 +476,7 @@ async fn reconnect_after_window_expires_is_rejected_by_the_handler_not_cleanup()
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +485,9 @@ async fn reconnect_after_window_expires_is_rejected_by_the_handler_not_cleanup()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_duplicate_reconnect_has_exactly_one_winner() {
-    let (addr, game_server) = start_server(DUPLICATE_CLAIM_WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let (running_server, game_server) =
+        start_server(DUPLICATE_CLAIM_WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let addr = running_server.addr();
 
     let mut anchor = connect(addr).await;
     authenticate_v3(&mut anchor).await;
@@ -563,4 +557,5 @@ async fn concurrent_duplicate_reconnect_has_exactly_one_winner() {
     );
 
     assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
 }

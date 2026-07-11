@@ -48,7 +48,7 @@ Options:
   --peers <N>                   Expected member count incl. self [default: 2]
   --expect-total-peers <N>      Distinct members observed before a successful
                                 exit [default: --peers]
-  --leave-on-game-start         Exit 0 at GameStarting without ever pairing
+  --leave-on-game-start         Exit 0 after GameStarting + plan, without pairing
   --game-name <NAME>            Game name [default: reference-browser]
   --player-name <NAME>          Display name [default: RefBrowser]
   --app-id <ID>                 Authenticate app_id [default: reference-browser-app]

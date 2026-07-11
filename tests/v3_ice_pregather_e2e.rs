@@ -31,8 +31,7 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     deadline_after, maybe_next_matching_server_message_with_skipped_until,
@@ -108,7 +107,7 @@ fn stun_only_turn_config() -> TurnConfig {
 async fn start_server_with(
     session: SessionConfig,
     turn: TurnConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let mut server_config: ServerConfig = test_server_config();
     server_config.auth_enabled = true;
 
@@ -131,36 +130,21 @@ async fn start_server_with(
     .await
     .expect("server builds");
 
-    let addr = start_server(game_server.clone()).await;
-    (addr, game_server)
+    let running_server = start_server(game_server.clone()).await;
+    (running_server, game_server)
 }
 
-async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
     use axum::routing::get;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
 
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -520,7 +504,9 @@ async fn register_reconnect_token(
 
 #[tokio::test]
 async fn v3_webrtc_join_carries_composed_ice_servers_with_minted_turn_credential() {
-    let (addr, game_server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, game_server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_mesh(&mut peer).await;
@@ -562,6 +548,7 @@ async fn v3_webrtc_join_carries_composed_ice_servers_with_minted_turn_credential
     let metrics = game_server.metrics();
     assert_eq!(metrics.ice_pregather_emitted.load(Ordering::Relaxed), 1);
     assert_eq!(metrics.turn_credentials_issued.load(Ordering::Relaxed), 1);
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +557,9 @@ async fn v3_webrtc_join_carries_composed_ice_servers_with_minted_turn_credential
 
 #[tokio::test]
 async fn v2_client_room_joined_raw_json_has_no_ice_servers_key() {
-    let (addr, _server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, _server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v2(&mut peer).await;
@@ -580,11 +569,14 @@ async fn v2_client_room_joined_raw_json_has_no_ice_servers_key() {
         &raw,
         "v2 RoomJoined must stay byte-identical (no ice_servers key)",
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v3_relay_only_transport_client_gets_no_ice_servers_key() {
-    let (addr, _server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, _server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_relay_only_transport(&mut peer).await;
@@ -594,11 +586,14 @@ async fn v3_relay_only_transport_client_gets_no_ice_servers_key() {
         &raw,
         "a relay-only transport set cannot use ICE; no key expected",
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v3_relay_only_topology_client_gets_no_ice_servers_key() {
-    let (addr, _server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, _server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_relay_only_topology(&mut peer).await;
@@ -608,6 +603,7 @@ async fn v3_relay_only_topology_client_gets_no_ice_servers_key() {
         &raw,
         "a topology set missing the desired one can never seat the desired WebRTC rung; no key expected",
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -616,7 +612,8 @@ async fn pregather_kill_switch_suppresses_ice_servers_key() {
         enable_ice_pregather: false,
         ..mesh_session_config()
     };
-    let (addr, _server) = start_server_with(session, enabled_turn_config()).await;
+    let (running_server, _server) = start_server_with(session, enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_mesh(&mut peer).await;
@@ -626,6 +623,7 @@ async fn pregather_kill_switch_suppresses_ice_servers_key() {
         &raw,
         "enable_ice_pregather=false is the kill switch; no key expected",
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -634,7 +632,8 @@ async fn webrtc_disabled_suppresses_ice_servers_key() {
         enable_webrtc: false,
         ..mesh_session_config()
     };
-    let (addr, _server) = start_server_with(session, enabled_turn_config()).await;
+    let (running_server, _server) = start_server_with(session, enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_mesh(&mut peer).await;
@@ -644,11 +643,14 @@ async fn webrtc_disabled_suppresses_ice_servers_key() {
         &raw,
         "with WebRTC disabled no WebRTC plan can ever be selected; no key expected",
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn relay_desired_game_gets_no_ice_servers_key() {
-    let (addr, _server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, _server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_mesh(&mut peer).await;
@@ -659,6 +661,7 @@ async fn relay_desired_game_gets_no_ice_servers_key() {
         &raw,
         "a relay-desired game can never select a WebRTC plan; no key expected",
     );
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +674,8 @@ async fn turn_disabled_with_stun_urls_yields_stun_only_pregather() {
         ice_servers: Vec::new(),
         ..mesh_session_config()
     };
-    let (addr, game_server) = start_server_with(session, stun_only_turn_config()).await;
+    let (running_server, game_server) = start_server_with(session, stun_only_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer = connect(addr).await;
     authenticate_v3_mesh(&mut peer).await;
@@ -700,16 +704,19 @@ async fn turn_disabled_with_stun_urls_yields_stun_only_pregather() {
         0,
         "nothing is minted for a STUN-only pre-gather"
     );
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
 // 9. Late join into an ACTIVE session: pre-gather is OFF (Finalized); the
-//    late-join SessionPlan is the single issuance site for that event.
+//    authoritative plan refresh issues one credential per v3 recipient.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn late_join_into_active_session_mints_only_via_the_session_plan() {
-    let (addr, game_server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, game_server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3_mesh(&mut peer1).await;
@@ -778,11 +785,37 @@ async fn late_join_into_active_session_mints_only_via_the_session_plan() {
         "the SessionPlan credential embeds the joiner's id: {turn_username}"
     );
 
-    // One logical join event => exactly ONE minted credential (the
-    // SessionPlan's) and NO pre-gather emission.
+    // Finalized membership changes refresh every v3 member, so the incumbent
+    // also receives a plan with a recipient-bound credential.
+    let incumbent_plan = next_matching_server_message_within(
+        &mut peer1,
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent late-join SessionPlan refresh",
+        |message| match message {
+            ServerMessage::SessionPlan(plan)
+                if plan.peers.iter().any(|peer| peer.player_id == joiner_id) =>
+            {
+                Some(plan)
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let incumbent_username = incumbent_plan
+        .ice_servers
+        .iter()
+        .find_map(|server| server.username.as_deref())
+        .expect("incumbent refresh carries a minted TURN credential");
+    assert!(
+        incumbent_username.ends_with(&format!(":{peer1_id}")),
+        "the incumbent SessionPlan credential embeds its recipient id: {incumbent_username}"
+    );
+
+    // One logical join event => one fresh credential per v3 plan recipient and
+    // no pre-gather emission.
     assert_counter_eventually(
         || metrics.turn_credentials_issued.load(Ordering::Relaxed),
-        creds_before + 1,
+        creds_before + 2,
         "late-join TURN issuance",
     )
     .await;
@@ -791,6 +824,7 @@ async fn late_join_into_active_session_mints_only_via_the_session_plan() {
         emitted_before,
         "pre-gather must not fire for a join into a Finalized room"
     );
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -800,7 +834,9 @@ async fn late_join_into_active_session_mints_only_via_the_session_plan() {
 
 #[tokio::test]
 async fn reconnect_while_room_in_lobby_carries_pregathered_ice_servers() {
-    let (addr, game_server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, game_server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3_mesh(&mut peer1).await;
@@ -852,17 +888,20 @@ async fn reconnect_while_room_in_lobby_carries_pregathered_ice_servers() {
         username.ends_with(&format!(":{}", joined1.player_id)),
         "credential embeds the reconnector's restored id: {username}"
     );
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice() {
-    let (addr, game_server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let (running_server, game_server) =
+        start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3_mesh(&mut peer1).await;
     let mut peer2 = connect(addr).await;
     authenticate_v3_mesh(&mut peer2).await;
-    let (room_id, _room_code, _peer1_id, peer2_id) =
+    let (room_id, _room_code, peer1_id, peer2_id) =
         finalize_two_player_room(&mut peer1, &mut peer2, "mesh-game").await;
 
     let token = register_reconnect_token(&game_server, peer2_id, room_id).await;
@@ -914,11 +953,37 @@ async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice()
         "fresh credential embeds the reconnector's id: {username}"
     );
 
-    // One logical reconnect event => one minted credential (the SessionPlan's),
+    // The incumbent receives the same authoritative membership refresh with a
+    // credential bound to its own player id.
+    let incumbent_plan = next_matching_server_message_within(
+        &mut peer1,
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent reconnect SessionPlan refresh",
+        |message| match message {
+            ServerMessage::SessionPlan(plan)
+                if plan.peers.iter().any(|peer| peer.player_id == peer2_id) =>
+            {
+                Some(plan)
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let incumbent_username = incumbent_plan
+        .ice_servers
+        .iter()
+        .find_map(|server| server.username.as_deref())
+        .expect("incumbent reconnect refresh carries fresh TURN credentials");
+    assert!(
+        incumbent_username.ends_with(&format!(":{peer1_id}")),
+        "incumbent credentials must be bound to the incumbent: {incumbent_username}"
+    );
+
+    // One logical reconnect event => one credential per v3 plan recipient and
     // zero pre-gather emissions.
     assert_counter_eventually(
         || metrics.turn_credentials_issued.load(Ordering::Relaxed),
-        creds_before + 1,
+        creds_before + 2,
         "reconnect TURN issuance",
     )
     .await;
@@ -927,4 +992,5 @@ async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice()
         emitted_before,
         "pre-gather must not fire for a reconnect into a Finalized room"
     );
+    running_server.shutdown().await;
 }

@@ -165,6 +165,8 @@ pub struct PlayerInfo {
     pub connected_at: DateTime<Utc>,
     #[serde(default)]
     pub epoch: Option<u32>,
+    #[serde(default)]
+    pub seq: Option<u64>,
 }
 
 /// v3 reconnect baseline for one current room member.
@@ -1309,6 +1311,8 @@ pub struct PlayerInfo {
     pub connected_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub epoch: Option<u32>,
+    #[serde(default)]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -25,9 +25,8 @@ use signal_fish_server::config::{defaults, ProtocolConfig};
 use signal_fish_server::protocol::ErrorCode;
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
-use tokio::net::TcpListener;
 
-use test_helpers::{create_test_server_with_config, test_server_config};
+use test_helpers::{create_test_server_with_config, test_server_config, RunningTestServer};
 use websocket_test_helpers::room16::{authenticate, connect, join_n_players, try_join};
 
 const GAME: &str = "admission_game";
@@ -53,21 +52,9 @@ fn admission_protocol_config() -> ProtocolConfig {
     config
 }
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 /// H11+H12: 16 clients from ONE IP all connect and join one room at the default
@@ -86,7 +73,8 @@ async fn sixteen_players_admit_at_default_ip_cap() {
     let server =
         create_test_server_with_config(default_admission_config(), admission_protocol_config())
             .await;
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     // Room created (first joiner) with max_players = 16, so the per-room ceiling
     // is not the constraint under test here — the per-IP cap is. `join_n_players`
@@ -111,6 +99,7 @@ async fn sixteen_players_admit_at_default_ip_cap() {
         last.room_player_count, 16,
         "the final joiner must observe all 16 players co-located in one room"
     );
+    running_server.shutdown().await;
 }
 
 /// H12: the per-room `max_players` default is 8, so a room created without an
@@ -127,7 +116,8 @@ async fn ninth_join_fails_at_default_room_cap() {
     let server =
         create_test_server_with_config(default_admission_config(), admission_protocol_config())
             .await;
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     // First `default_cap` joins create + fill the room (no explicit max_players,
     // so it defaults to 8); the next join must be refused as RoomFull.
@@ -161,4 +151,5 @@ async fn ninth_join_fails_at_default_room_cap() {
         Some(ErrorCode::RoomFull),
         "overflow join must be refused as RoomFull"
     );
+    running_server.shutdown().await;
 }

@@ -343,6 +343,35 @@ See [Handoff & Topologies](architecture/handoff-and-topologies.md),
 [Transport Fallback](architecture/transport-fallback.md), and
 [TURN Deployment](deployment-turn.md) for the full design.
 
+## Delivery Classes and Exact Accountability (Protocol v3)
+
+Negotiated-v3 JSON `GameData` supports three per-recipient queue policies:
+
+- `reliable` (or omitted) preserves every message or closes a slow recipient
+  loudly.
+- `latest` requires a `u32` key and keeps the newest queued value for each
+  `(sender, room, key)` stream.
+- `volatile` delivers opportunistically and never waits for data-queue space.
+
+Class policy is not a room-wide P2P upgrade. In a mixed room, the same
+classified send may use latest/volatile policy for a v3 recipient while a v2
+recipient gets reliable FIFO with all v3 metadata stripped. Raw WebSocket
+binary game data is always reliable.
+
+Every intentional v3 omission is named by a causally prior `DeliveryReport`.
+One report carries at most 256 exact inclusive ranges; additional ranges roll
+into further priority reports. A client accepts a continuing-stream sequence
+hole only when the non-overlapping union of all prior ranges covers every
+missing sequence for the same sender and epoch. Cumulative counters and
+`RelayStats` are diagnostics, not gap authorization.
+
+Within an active recipient generation, report and peer-lifecycle control has
+priority over data. Lifecycle control can therefore overtake queued old-epoch
+payloads: clients keep accounting for that tail but suppress it from application
+state after the lifecycle change. The recipient's own room/spectator transitions
+are generation barriers. See [Delivery semantics](protocol.md#delivery-semantics)
+for conservation, close behavior, and reconnect rules.
+
 ## Message Batching
 
 Batch outbound messages for improved throughput.
@@ -457,7 +486,12 @@ Room and connection counters live under `serverMetrics.connections`
 (`created` / `joined` / `deleted`). The endpoint accepts two optional query
 parameters: `?time_range=<range>` selects the dashboard window (echoed back as
 `timeRange`, default `1h`), and `?includeSnapshot=true` adds a `metricsSnapshot`
-object with the raw counter snapshot.
+object with the raw counter snapshot. Delivery-class counters are at
+`metricsSnapshot.connections.delivery_by_class.{reliable,latest,volatile}`.
+Each class exposes `attempted`, `delivered`, `superseded`, `dropped_full`,
+`dropped`, `abandoned`, and `unsupported_format`; impossible outcomes for a
+class remain zero. At quiescence, `attempted` equals the sum of that class's
+terminal outcomes.
 
 ### Prometheus Metrics
 
@@ -467,7 +501,16 @@ curl http://localhost:3536/metrics/prom
 
 ```
 
-Returns Prometheus text format for scraping.
+Returns Prometheus text format for scraping. Per-class delivery outcomes use:
+
+```text
+signal_fish_websocket_delivery_class_outcomes_total{class="latest",outcome="superseded"}
+```
+
+`class` is `reliable`, `latest`, or `volatile`; `outcome` is `attempted`,
+`delivered`, `superseded`, `dropped_full`, `dropped`, `abandoned`, or
+`unsupported_format`. Apply the same quiescent conservation rule as the JSON
+snapshot.
 
 ### Metrics Authentication
 
@@ -540,11 +583,12 @@ Enable MessagePack encoding for game data:
 
 Game data messages can be sent in MessagePack format for reduced bandwidth.
 
-Negotiated binary frames are delivered as a `GameDataBinary` carrier whose
-`encoding` field tags the wire format (`json` | `message_pack`). The server
-advertises its accepted formats in `ProtocolInfo.game_data_formats`; requesting
-an unsupported format yields `UNSUPPORTED_GAME_DATA_FORMAT` and falls back to
-JSON.
+Negotiated-v3 binary frames use a MessagePack metadata envelope containing
+`from_player`, opaque `payload`, mandatory `seq` / `epoch`, and an `encoding`
+tag for the payload bytes. The server advertises its accepted formats in
+`ProtocolInfo.game_data_formats`; requesting an unsupported format yields
+`UNSUPPORTED_GAME_DATA_FORMAT` and falls back to JSON. V2 binary wire shapes
+remain byte-identical and unstamped.
 
 ## CORS Support
 

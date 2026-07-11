@@ -2,8 +2,11 @@ use super::{EnhancedGameServer, MaxRoomsPerGameExceededError};
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
-    ErrorCode, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload, ServerMessage,
+    ErrorCode, LobbyState, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload,
+    ServerMessage,
 };
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -58,18 +61,89 @@ impl JoinRoomError {
 }
 
 impl EnhancedGameServer {
+    async fn rollback_unpublished_player_admission(
+        &self,
+        room_id: RoomId,
+        player_id: PlayerId,
+        reason: &'static str,
+    ) {
+        match self
+            .database
+            .remove_player_from_room(&room_id, &player_id)
+            .await
+        {
+            Ok(_) => {
+                self.pending_durable_player_detaches
+                    .remove(&(room_id, player_id));
+            }
+            Err(error) => {
+                self.pending_durable_player_detaches
+                    .insert((room_id, player_id), ());
+                tracing::error!(%player_id, %room_id, %error, reason, "Failed to roll back unpublished room admission; queued durable detach retry");
+            }
+        }
+        // Admission already moved `players_joined`, but no RoomJoined reached
+        // the client. Balance that logical membership immediately; eventual
+        // storage repair must not move activity metrics a second time.
+        self.metrics.increment_players_left();
+    }
+
     /// Enhanced room joining with distributed coordination
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_join_room(
-        &self,
+        self: &Arc<Self>,
         player_id: &PlayerId,
         game_name: String,
         room_code: Option<String>,
         player_name: String,
         max_players: Option<u8>,
         supports_authority: Option<bool>,
-        _relay_transport: Option<RelayTransport>, // Reserved for future transport selection
+        relay_transport: Option<RelayTransport>,
     ) {
+        let server = Arc::clone(self);
+        let player_id = *player_id;
+        let task = tokio::spawn(async move {
+            server
+                .handle_join_room_owned(
+                    player_id,
+                    game_name,
+                    room_code,
+                    player_name,
+                    max_players,
+                    supports_authority,
+                    relay_transport,
+                )
+                .await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%player_id, %error, "Owned room join transaction failed");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_join_room_owned(
+        self: Arc<Self>,
+        player_id: PlayerId,
+        game_name: String,
+        room_code: Option<String>,
+        player_name: String,
+        max_players: Option<u8>,
+        supports_authority: Option<bool>,
+        _relay_transport: Option<RelayTransport>,
+    ) {
+        let player_id = &player_id;
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         let requested_room_code = room_code.clone();
         let room_join_span = tracing::info_span!(
             "room.join",
@@ -83,7 +157,6 @@ impl EnhancedGameServer {
             instance_id = %self.instance_id,
             is_room_creation = room_code.is_none()
         );
-        let _span_guard = room_join_span.enter();
 
         let is_room_creation = room_code.is_none();
         if self
@@ -170,14 +243,21 @@ impl EnhancedGameServer {
 
         let supports_authority = supports_authority.unwrap_or(true);
 
-        // Check if player is already in a room
-        if self.get_client_room(player_id).await.is_some() {
+        // One physical connection has exactly one room role. Spectator
+        // membership lives outside ConnectionManager, so check both registries
+        // before any seated-room mutation or delivery-generation advance.
+        let is_spectating = self.spectator_service.is_spectating(player_id);
+        if self.get_client_room(player_id).await.is_some() || is_spectating {
             let _ = self
                 .message_coordinator
                 .send_to_player(
                     player_id,
                     Arc::new(ServerMessage::RoomJoinFailed {
-                        reason: "Already in a room".to_string(),
+                        reason: if is_spectating {
+                            "Already participating in a room as a spectator".to_string()
+                        } else {
+                            "Already in a room".to_string()
+                        },
                         error_code: Some(crate::protocol::ErrorCode::AlreadyInRoom),
                     }),
                 )
@@ -221,77 +301,199 @@ impl EnhancedGameServer {
             .await;
 
         match room_join_result {
-            Ok(room) => {
+            Ok((room, room_event_guard)) => {
                 room_join_span.record("room_id", tracing::field::display(room.id));
-                self.connection_manager
-                    .assign_client_to_room(player_id, room.id)
-                    .await;
-
-                // Get current players from database
-                let mut current_players = match self.database.get_room_players(&room.id).await {
-                    Ok(players) => players,
-                    Err(e) => {
-                        tracing::error!("Failed to get room players: {}", e);
-                        Vec::new()
-                    }
-                };
-
-                // The live ready set is held by the coordinator (the room record
-                // only syncs `ready_players` / `is_ready` at finalize), so read it
-                // from there to report an accurate ready set to a player joining a
-                // lobby that already has ready members; reflect it on each player's
-                // `is_ready` too.
-                let ready_players = self.room_coordinator.current_ready_players(&room.id).await;
-                // v3 room snapshot: give a v3 joiner each member's current
-                // incarnation epoch so it can baseline the per-sender (epoch,
-                // seq) stream before the first relayed frame. Single recipient
-                // (the joiner), so gate on its version at construction — a pre-v3
-                // (v2) joiner keeps every epoch `None` and byte-identical v2 bytes.
-                let recipient_is_v3 = self.connection_manager.supports_v3(player_id);
-                for player in current_players.iter_mut() {
-                    player.is_ready = ready_players.contains(&player.id);
-                    player.epoch = if recipient_is_v3 {
-                        self.connection_manager.game_data_epoch(&player.id)
-                    } else {
-                        None
-                    };
-                }
-
-                // Send success response
-                let is_authority = room.authority_player == Some(*player_id);
-                let _ = self
-                    .message_coordinator
-                    .send_to_player(
-                        player_id,
-                        Arc::new(ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
-                            room_id: room.id,
-                            room_code: room.code.clone(),
-                            player_id: *player_id,
-                            game_name: room.game_name.clone(),
-                            max_players: room.max_players,
-                            supports_authority: room.supports_authority,
-                            current_players: current_players.clone(),
-                            is_authority,
-                            lobby_state: room.lobby_state.clone(),
-                            ready_players: ready_players.clone(),
-                            relay_type: room.relay_type.clone(),
-                            current_spectators: room.get_spectators(),
-                            // v3 ICE pre-gather (deferred refinement):
-                            // empty — and skipped on the wire — unless this
-                            // joiner passes the pre-gather gate, so v2 bytes
-                            // are untouched. A join into a Finalized room gets
-                            // its ICE from the late-join SessionPlan below
-                            // instead (never both).
-                            ice_servers: self.pregather_ice_servers(&room, player_id),
-                            // Minted at join so an unexpected disconnect is
-                            // recoverable with a token the client actually
-                            // holds (v3+ only; None keeps v2 bytes frozen).
-                            reconnection_token: self
-                                .pre_issue_reconnection_token_for(player_id, room.id)
-                                .await,
-                        }))),
+                let Some((delivery, membership_stamp)) = self
+                    .connection_manager
+                    .prepare_client_to_room(player_id, room.id)
+                else {
+                    self.rollback_unpublished_player_admission(
+                        room.id,
+                        *player_id,
+                        "missing_prepared_connection",
                     )
                     .await;
+                    return;
+                };
+
+                let recipient_is_v3 = self.connection_manager.supports_v3(player_id);
+                let server = Arc::clone(&self);
+                let response_player_id = *player_id;
+                let response_room_id = room.id;
+                let baseline_room = Arc::new(std::sync::Mutex::new(None));
+                let baseline_room_in_builder = Arc::clone(&baseline_room);
+                let initial_delivery = self
+                    .message_coordinator
+                    .register_local_client_with_initial_message_async(
+                        *player_id,
+                        room.id,
+                        delivery,
+                        Box::new(move |routed_player_ids| {
+                            Box::pin(async move {
+                                let routed_player_ids: HashSet<PlayerId> =
+                                    routed_player_ids.into_iter().collect();
+                                let current_room = server
+                                    .database
+                                    .get_room_by_id(&response_room_id)
+                                    .await
+                                    .map_err(|error| {
+                                        anyhow::anyhow!(
+                                            "failed to fetch joined room baseline: {error}"
+                                        )
+                                    })?
+                                    .ok_or_else(|| anyhow::anyhow!("joined room disappeared"))?;
+                                let mut current_players = server
+                                    .database
+                                    .get_room_players(&response_room_id)
+                                    .await
+                                    .map_err(|error| {
+                                        anyhow::anyhow!(
+                                            "failed to fetch joined player baseline: {error}"
+                                        )
+                                    })?;
+                                current_players
+                                    .retain(|player| routed_player_ids.contains(&player.id));
+                                if !current_players
+                                    .iter()
+                                    .any(|player| player.id == response_player_id)
+                                {
+                                    return Err(anyhow::anyhow!(
+                                        "joiner missing from routed room baseline"
+                                    ));
+                                }
+
+                                let mut ready_players = server
+                                    .room_coordinator
+                                    .current_ready_players(&response_room_id)
+                                    .await;
+                                for player in &mut current_players {
+                                    player.is_ready = ready_players.contains(&player.id);
+                                    player.epoch = None;
+                                    player.seq = None;
+                                }
+                                if recipient_is_v3 {
+                                    current_players.retain_mut(|player| {
+                                        let Some(stamp) =
+                                            server.connection_manager.current_relay_stamp_in_room(
+                                                &player.id,
+                                                &response_room_id,
+                                            )
+                                        else {
+                                            return false;
+                                        };
+                                        player.epoch = Some(stamp.epoch);
+                                        player.seq = Some(stamp.seq);
+                                        true
+                                    });
+                                }
+                                ready_players.retain(|ready_player_id| {
+                                    current_players
+                                        .iter()
+                                        .any(|player| player.id == *ready_player_id)
+                                });
+                                if server.should_retain_room_publication_snapshot() {
+                                    *baseline_room_in_builder
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                        Some(current_room.clone());
+                                }
+
+                                Ok(Arc::new(ServerMessage::RoomJoined(Box::new(
+                                    RoomJoinedPayload {
+                                        room_id: current_room.id,
+                                        room_code: current_room.code.clone(),
+                                        player_id: response_player_id,
+                                        game_name: current_room.game_name.clone(),
+                                        max_players: current_room.max_players,
+                                        supports_authority: current_room.supports_authority,
+                                        current_players,
+                                        is_authority: current_room.authority_player
+                                            == Some(response_player_id),
+                                        lobby_state: current_room.lobby_state.clone(),
+                                        ready_players,
+                                        relay_type: current_room.relay_type.clone(),
+                                        current_spectators: current_room.get_spectators(),
+                                        ice_servers: server.pregather_ice_servers(
+                                            &current_room,
+                                            &response_player_id,
+                                        ),
+                                        reconnection_token: server
+                                            .pre_issue_reconnection_token_for(
+                                                &response_player_id,
+                                                current_room.id,
+                                            )
+                                            .await,
+                                    },
+                                ))))
+                            })
+                        }),
+                    )
+                    .await;
+
+                if !matches!(
+                    initial_delivery,
+                    Ok(crate::coordination::DeliveryOutcome::Delivered)
+                ) {
+                    tracing::warn!(%player_id, room_id = %room.id, ?initial_delivery, "Room join baseline could not be queued atomically");
+                    self.rollback_unpublished_player_admission(
+                        room.id,
+                        *player_id,
+                        "undeliverable_room_join_baseline",
+                    )
+                    .await;
+                    self.discard_pre_issued_reconnection_token(player_id).await;
+                    self.connection_manager.rollback_prepared_room_assignment(
+                        player_id,
+                        room.id,
+                        membership_stamp.epoch,
+                    );
+                    return;
+                }
+
+                let Some(current_room) = baseline_room
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                else {
+                    tracing::error!(%player_id, room_id = %room.id, "Delivered room baseline did not retain its source snapshot");
+                    let mut player_snapshot =
+                        room.players
+                            .get(player_id)
+                            .cloned()
+                            .unwrap_or_else(|| PlayerInfo {
+                                id: *player_id,
+                                name: player_name.clone(),
+                                is_authority: room.authority_player == Some(*player_id),
+                                is_ready: false,
+                                connected_at: chrono::Utc::now(),
+                                connection_info: None,
+                                epoch: None,
+                                seq: None,
+                                region_id: room.region_id.clone(),
+                            });
+                    player_snapshot.epoch = Some(membership_stamp.epoch);
+                    player_snapshot.seq = Some(membership_stamp.seq);
+                    let opening = Arc::new(ServerMessage::PlayerJoined {
+                        player: player_snapshot.clone(),
+                    });
+                    self.terminate_room_generation_after_publication_failure(
+                        *player_id,
+                        room.id,
+                        membership_stamp.epoch,
+                        player_snapshot,
+                        room.authority_player == Some(*player_id),
+                        "join_baseline_snapshot",
+                    )
+                    .await;
+                    if let Err(error) = self
+                        .publish_join_lifecycle_fallback(room.id, *player_id, opening)
+                        .await
+                    {
+                        tracing::error!(%player_id, room_id = %room.id, %error, "Failed to publish opening lifecycle before terminating inconsistent join");
+                    }
+                    return;
+                };
+                let is_authority = current_room.authority_player == Some(*player_id);
 
                 // Notify other players. This is a v3 wire snapshot, so it
                 // carries the joiner's current incarnation epoch (Some after the
@@ -304,36 +506,80 @@ impl EnhancedGameServer {
                     is_ready: false,
                     connected_at: chrono::Utc::now(),
                     connection_info: None,
-                    epoch: self.connection_manager.game_data_epoch(player_id),
+                    epoch: Some(membership_stamp.epoch),
+                    seq: Some(membership_stamp.seq),
                     region_id: self.region_id().to_string(),
                 };
-                // Recorded for reconnection replay BEFORE delivery (buffered
-                // even if the broadcast partially fails, matching "what a
-                // connected player would have been sent").
-                let player_joined = ServerMessage::PlayerJoined {
-                    player: player_info,
+                let committed = if current_room.lobby_state == LobbyState::Finalized {
+                    self.publish_finalized_join_membership(
+                        &current_room,
+                        *player_id,
+                        player_info,
+                        room_event_guard,
+                    )
+                    .await
+                } else {
+                    let player_joined = Arc::new(ServerMessage::PlayerJoined {
+                        player: player_info,
+                    });
+                    let replay_message = Arc::clone(&player_joined);
+                    let committed = Arc::new(AtomicBool::new(false));
+                    let committed_in_hook = Arc::clone(&committed);
+                    let room_id_for_replay = room.id;
+                    let joiner_id = *player_id;
+                    let expected_epoch = membership_stamp.epoch;
+                    let coordinator = Arc::clone(&self.message_coordinator);
+                    let connection_manager = Arc::clone(&self.connection_manager);
+                    let reconnection_manager = self.reconnection_manager.clone();
+                    let drain = self.shutdown_drain_receiver();
+                    let completion = self.message_coordinator.enqueue_room_event(
+                        room_event_guard,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                let membership_is_current = || {
+                                    connection_manager
+                                        .current_relay_stamp_in_room(
+                                            &joiner_id,
+                                            &room_id_for_replay,
+                                        )
+                                        .is_some_and(|stamp| stamp.epoch == expected_epoch)
+                                };
+                                coordinator
+                                    .broadcast_to_room_except_if_with_hook(
+                                        &room_id_for_replay,
+                                        &joiner_id,
+                                        player_joined,
+                                        &membership_is_current,
+                                        drain,
+                                        Box::new(move || {
+                                            Box::pin(async move {
+                                                if let Some(reconnection_manager) =
+                                                    reconnection_manager
+                                                {
+                                                    reconnection_manager
+                                                        .record_room_event(
+                                                            &room_id_for_replay,
+                                                            replay_message.as_ref(),
+                                                        )
+                                                        .await;
+                                                }
+                                                committed_in_hook.store(true, Ordering::Release);
+                                            })
+                                        }),
+                                    )
+                                    .await
+                            })
+                        }),
+                    );
+                    let _ = completion.await;
+                    committed.load(Ordering::Acquire)
                 };
-                self.record_replayable_room_event(&room.id, &player_joined)
-                    .await;
-                let _ = self
-                    .message_coordinator
-                    .broadcast_to_room_except(&room.id, player_id, Arc::new(player_joined))
-                    .await;
-
-                // Bring the joiner into an ACTIVE (finalized) v3 session (PLAN
-                // §P3, Appendix E/L): the joiner receives a tailored
-                // `SessionPlan` for the room's stored running session and
-                // existing members receive the additive `NewPeer` delta. A room
-                // reaches `Finalized` only while full, but a departure can
-                // reopen a seat (`add_player_to_room` gates only on fullness),
-                // so this fires for seat-filling joins into live sessions.
-                // Purely additive and gated to v3 (+ WebRTC for `NewPeer`), so
-                // v2 message ordering and bytes are untouched.
-                self.handle_active_session_late_join(&room, player_id, &current_players)
-                    .await;
+                if !committed {
+                    return;
+                }
 
                 // Check if room should transition to lobby state
-                if room.should_enter_lobby() {
+                if current_room.should_enter_lobby() {
                     if let Err(e) = self
                         .room_coordinator
                         .transition_room_to_lobby(&room.id)
@@ -371,7 +617,38 @@ impl EnhancedGameServer {
     }
 
     /// Leave room with coordination
-    pub async fn leave_room(&self, player_id: &PlayerId) {
+    pub async fn leave_room(self: &Arc<Self>, player_id: &PlayerId) {
+        let server = Arc::clone(self);
+        let player_id = *player_id;
+        let task = tokio::spawn(async move {
+            server.leave_room_owned(player_id, true).await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%player_id, %error, "Owned room leave transaction failed");
+        }
+    }
+
+    async fn leave_room_owned(self: Arc<Self>, player_id: PlayerId, notify_player: bool) {
+        let player_id = &player_id;
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            self.leave_room_locked(player_id, notify_player).await;
+            return;
+        };
+        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let effective_player_id = lifecycle.player_id();
+        if effective_player_id != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(&effective_player_id, &lifecycle)
+        {
+            return;
+        }
+        self.leave_room_locked(&effective_player_id, notify_player)
+            .await;
+    }
+
+    /// Room departure after the caller acquired the connection lifecycle gate.
+    pub(super) async fn leave_room_locked(&self, player_id: &PlayerId, notify_player: bool) {
         let leave_span = tracing::info_span!(
             "room.leave",
             player_id = %player_id,
@@ -384,20 +661,57 @@ impl EnhancedGameServer {
             return;
         };
         leave_span.record("room_id", tracing::field::display(room_id));
+        let room_event_guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
 
         // Remove player from room in database
-        let player_removed = match self
+        match self
             .database
             .remove_player_from_room(&room_id, player_id)
             .await
         {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(e) => {
-                tracing::error!("Failed to remove player from room: {}", e);
-                false
+            Ok(Some(_)) => {
+                self.pending_durable_player_detaches
+                    .remove(&(room_id, *player_id));
             }
-        };
+            Ok(None) => {
+                // Persistence is authoritative. A stale local assignment can
+                // survive a prior cross-instance removal, so converge routing
+                // and publish the terminal event below even though this call
+                // did not perform the durable removal itself.
+                tracing::warn!(%player_id, %room_id, "Player persistence entry was already absent during leave");
+                self.pending_durable_player_detaches
+                    .remove(&(room_id, *player_id));
+            }
+            Err(e) => {
+                if notify_player {
+                    // A live caller can retry safely, so preserve its complete
+                    // role when the durable outcome is unknown.
+                    tracing::error!(%player_id, %room_id, error = %e, "Failed to remove player from room");
+                    return;
+                }
+
+                // A physically dead socket cannot retain a local assignment:
+                // that would prevent connection removal and make its pending
+                // reconnect claim unclaimable. Publish the terminal route
+                // transition below while leaving the durable member in place.
+                // The generic durable-detach backlog retries removal whether or
+                // not reconnect support is enabled; reconnect claims clear that
+                // backlog before publishing a restored generation.
+                tracing::warn!(%player_id, %room_id, error = %e, "Storage removal failed during disconnect; forcing local terminal teardown");
+                self.pending_durable_player_detaches
+                    .insert((room_id, *player_id), ());
+                if let Err(authority_error) = self
+                    .database
+                    .request_room_authority(&room_id, player_id, false)
+                    .await
+                {
+                    tracing::warn!(%player_id, %room_id, error = %authority_error, "Failed to clear disconnected authority after storage removal error");
+                }
+            }
+        }
 
         // The player is out of the room: its pre-issued reconnection token
         // must not stay claimable. On the DISCONNECT path this is a no-op
@@ -407,23 +721,38 @@ impl EnhancedGameServer {
         // currently-joined players.
         self.discard_pre_issued_reconnection_token(player_id).await;
 
-        if !player_removed {
-            return;
-        }
-
+        // Capture the terminal stamp and remove room routing atomically with
+        // respect to relay allocation and recipient snapshots.
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let departed_player = *player_id;
+        let terminal_tail = match self
+            .message_coordinator
+            .unroute_local_client_with_tail(
+                departed_player,
+                room_id,
+                Box::new(move || {
+                    connection_manager
+                        .clear_room_assignment_with_tail(&departed_player)
+                        .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
+                }),
+            )
+            .await
+        {
+            Ok(Some(tail)) => tail,
+            Ok(None) => {
+                tracing::error!(%player_id, %room_id, "Terminal unroute found no relay watermark; suppressing incomplete PlayerLeft");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(%player_id, %room_id, %error, "Failed to atomically unroute departing player");
+                return;
+            }
+        };
+        // `players_left` measures the logical membership transition observed
+        // by clients, not whether this invocation deleted a storage row. Count
+        // exactly once at the successful terminal unroute; later durable
+        // repair is storage bookkeeping only.
         self.metrics.increment_players_left();
-
-        // Update client connection and coordinator
-        let existing_delivery = self.connection_manager.clear_room_assignment(player_id);
-
-        if let Some(delivery) = existing_delivery {
-            let _ = self
-                .message_coordinator
-                .register_local_client(*player_id, None, delivery)
-                .await;
-        } else {
-            tracing::warn!(%player_id, "Could not find existing delivery handle for player when leaving room");
-        }
 
         if self.is_draining() {
             tracing::info!(
@@ -434,59 +763,74 @@ impl EnhancedGameServer {
             return;
         }
 
-        let should_send = || !self.is_draining();
-
-        // First send confirmation to the leaving player
-        let _ = self
-            .message_coordinator
-            .send_to_player_if(
-                player_id,
-                Arc::new(ServerMessage::RoomLeft),
-                &should_send,
-                self.shutdown_drain_receiver(),
-            )
-            .await;
-
-        if self.is_draining() {
-            tracing::info!(
-                %player_id,
-                %room_id,
-                "Skipping peer leave broadcast because shutdown drain started"
-            );
-            return;
-        }
-
-        // Then notify other players (excluding the player who left). For this
-        // drain-sensitive path, replay is recorded only after conditional
-        // delivery is not canceled by shutdown drain.
+        // Queue the directed acknowledgement and room lifecycle delta as one
+        // owned FIFO job before releasing the mutation gate. Once persistence
+        // and routing say the member left, canceling this request cannot strand
+        // peers without PlayerLeft. An unexpected disconnect deliberately skips
+        // RoomLeft; the terminal close is that socket's observable transition.
         let player_left = ServerMessage::PlayerLeft {
             player_id: *player_id,
+            epoch: Some(terminal_tail.0),
+            final_seq: Some(terminal_tail.1),
         };
         let player_left = Arc::new(player_left);
         let replay_message = Arc::clone(&player_left);
-        let server = self;
         let room_id_for_replay = room_id;
         let drain = self.shutdown_drain_receiver();
-        let _ = self
-            .message_coordinator
-            .broadcast_to_room_except_if_with_hook(
-                &room_id,
-                player_id,
-                player_left,
-                &should_send,
-                drain,
-                Box::new(move || {
-                    Box::pin(async move {
-                        server
-                            .record_replayable_room_event(
-                                &room_id_for_replay,
-                                replay_message.as_ref(),
+        let acknowledgement_predicate_drain = drain.clone();
+        let acknowledgement_delivery_drain = drain.clone();
+        let broadcast_predicate_drain = drain.clone();
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let reconnection_manager = self.reconnection_manager.clone();
+        let committed = Arc::new(AtomicBool::new(false));
+        let committed_in_hook = Arc::clone(&committed);
+        let completion = self.message_coordinator.enqueue_room_event(
+            room_event_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    if notify_player {
+                        let should_acknowledge = || !*acknowledgement_predicate_drain.borrow();
+                        let _ = coordinator
+                            .send_to_player_if(
+                                &departed_player,
+                                Arc::new(ServerMessage::RoomLeft),
+                                &should_acknowledge,
+                                acknowledgement_delivery_drain,
                             )
                             .await;
-                    })
-                }),
-            )
-            .await;
+                    }
+
+                    let should_broadcast = || !*broadcast_predicate_drain.borrow();
+                    coordinator
+                        .broadcast_to_room_except_if_with_hook(
+                            &room_id_for_replay,
+                            &departed_player,
+                            player_left,
+                            &should_broadcast,
+                            drain,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(reconnection_manager) = reconnection_manager {
+                                        reconnection_manager
+                                            .record_room_event(
+                                                &room_id_for_replay,
+                                                replay_message.as_ref(),
+                                            )
+                                            .await;
+                                    }
+                                    committed_in_hook.store(true, Ordering::Release);
+                                })
+                            }),
+                        )
+                        .await
+                })
+            }),
+        );
+        let _ = completion.await;
+        if !committed.load(Ordering::Acquire) {
+            tracing::debug!(%player_id, %room_id, "Skipping departure follow-up because PlayerLeft did not commit");
+            return;
+        }
 
         if self.is_draining() {
             tracing::info!(
@@ -590,17 +934,28 @@ impl EnhancedGameServer {
         player_name: &str,
         max_players: u8,
         supports_authority: bool,
-    ) -> Result<Room, JoinRoomError> {
+    ) -> Result<(Room, crate::coordination::RoomEventMutationGuard), JoinRoomError> {
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let lock_handle = self
             .distributed_lock
             .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
             .await?;
         let mut game_cap_lock: Option<LockHandle> = None;
+        let mut room_event_guard = None;
 
         // Try to join existing room or create new one
         let result = match self.database.get_room(game_name, room_code).await {
             Ok(Some(mut room)) => {
+                // Admission, routing publication, the directed RoomJoined
+                // baseline, and PlayerJoined enqueue share one room mutation
+                // transaction. Returning this owned guard to the handler keeps
+                // a second join/leave/ready transition from observing the DB
+                // member before its route and lifecycle event are published.
+                room_event_guard = Some(
+                    self.message_coordinator
+                        .lock_room_event_mutation(&room.id)
+                        .await,
+                );
                 let client_app_id = self.client_app_id(player_id);
                 // Validate player name uniqueness
                 if let Err(reason) =
@@ -619,6 +974,7 @@ impl EnhancedGameServer {
                         // not a wire snapshot: the v3 epoch is filled at
                         // snapshot-send time, so this stays `None`.
                         epoch: None,
+                        seq: None,
                         region_id: room.region_id.clone(),
                     };
 
@@ -724,6 +1080,16 @@ impl EnhancedGameServer {
                                     Err(JoinRoomError::ServerDraining)
                                 }
                                 Ok(mut room) => {
+                                    // The database generates a new room id, so no
+                                    // other room-scoped publisher can address its
+                                    // lane before creation. Claim that lane as
+                                    // soon as the id exists and retain it through
+                                    // routing + lifecycle publication.
+                                    room_event_guard = Some(
+                                        self.message_coordinator
+                                            .lock_room_event_mutation(&room.id)
+                                            .await,
+                                    );
                                     self.release_game_cap_lock(&game_cap_lock).await;
                                     self.metrics.increment_rooms_created();
                                     self.metrics.increment_players_joined();
@@ -764,7 +1130,11 @@ impl EnhancedGameServer {
         };
 
         let _ = self.distributed_lock.release(&lock_handle).await;
-        result
+        let room = result?;
+        let guard = room_event_guard.ok_or_else(|| {
+            anyhow::anyhow!("successful room admission lost its room publication guard")
+        })?;
+        Ok((room, guard))
     }
 
     async fn release_game_cap_lock(&self, game_cap_lock: &Option<LockHandle>) {

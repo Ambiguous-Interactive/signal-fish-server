@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod chaos_proxy;
+pub mod conformance;
 pub mod delivery_ledger;
 pub mod prometheus_scrape;
 pub mod room16;
@@ -365,5 +366,6 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
         ServerMessage::RelayStats { .. } => "RelayStats",
         ServerMessage::GoingAway { .. } => "GoingAway",
+        ServerMessage::DeliveryReport(_) => "DeliveryReport",
     }
 }

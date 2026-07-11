@@ -12,6 +12,18 @@ impl EnhancedGameServer {
     /// `all_ready`); finalization is driven by an explicit `StartGame`
     /// ([`Self::handle_start_game`]).
     pub async fn handle_player_ready(&self, player_id: &PlayerId) {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
                 .message_coordinator
@@ -69,10 +81,22 @@ impl EnhancedGameServer {
     ///
     /// `max_players` is a ceiling, not a required count, so a partially-full
     /// room may start. Authorization: a designated authority may start;
-    /// otherwise any member may. On success the coordinator has already
-    /// broadcast `GameStarting`, so we only emit the per-recipient v3
-    /// `SessionPlan` (gated to v3 clients) here.
+    /// otherwise any member may. The coordinator commits `GameStarting`, the
+    /// sticky v3 session decision, and all tailored `SessionPlan`s as one
+    /// cancellation-independent exact-membership transaction.
     pub async fn handle_start_game(&self, player_id: &PlayerId) {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
                 .message_coordinator
@@ -87,14 +111,13 @@ impl EnhancedGameServer {
             return;
         };
 
+        let publication = self.start_game_publication_builder(room_id);
         match self
             .room_coordinator
-            .handle_start_game(&room_id, player_id)
+            .handle_start_game_with_publication(&room_id, player_id, publication)
             .await
         {
-            Ok(StartGameOutcome::Started(finalized)) => {
-                self.emit_session_plan(&room_id, &finalized).await;
-            }
+            Ok(StartGameOutcome::Started(_)) => {}
             Ok(rejection) => {
                 let (message, error_code) = match rejection {
                     StartGameOutcome::NotReady => (

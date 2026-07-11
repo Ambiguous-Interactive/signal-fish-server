@@ -30,14 +30,12 @@ use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{ClientMessage, PlayerId, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
-use test_helpers::{create_test_server, create_test_server_with_config};
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server, create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use websocket_test_helpers::assert_message_conservation;
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
+use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
 use websocket_test_helpers::delivery_ledger::{
-    extract, DeliveryLedger, DisconnectReason, LedgerPayload, ReceiverExpectation,
-    SenderExpectation,
+    LedgerPayload, ReceiverExpectation, SenderExpectation,
 };
 
 type WsStream =
@@ -49,23 +47,9 @@ type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 /// convergence). Generous: only a genuine wedge spends it.
 const EVENT_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 /// Connect a websocket client to `addr` — the server directly, or a
@@ -121,19 +105,11 @@ async fn join_room(
 
 /// Record one text frame into the ledger for `receiver_name`; returns any
 /// `PlayerLeft` id observed instead. Server errors fail loudly.
-fn record_frame(ledger: &DeliveryLedger, receiver_name: &str, text: &str) -> Option<PlayerId> {
-    let message: ServerMessage = serde_json::from_str(text).expect("valid ServerMessage");
+fn record_frame(auditor: &ConformanceAuditor, receiver_name: &str, text: &str) -> Option<PlayerId> {
+    let message = auditor.record_text_frame(receiver_name, text);
     match message {
-        ServerMessage::GameData { data, .. } => {
-            let (sender, seq) = extract(&data).unwrap_or_else(|| {
-                panic!("{receiver_name}: GameData without ledger fields: {data}")
-            });
-            // `server_seq: None` until the server stamps per-connection
-            // delivery sequences (see the ledger's cross-check hook).
-            ledger.record(receiver_name, &sender, seq, None);
-            None
-        }
-        ServerMessage::PlayerLeft { player_id } => Some(player_id),
+        ServerMessage::GameData { .. } => None,
+        ServerMessage::PlayerLeft { player_id, .. } => Some(player_id),
         ServerMessage::Error {
             message,
             error_code,
@@ -146,6 +122,8 @@ fn record_frame(ledger: &DeliveryLedger, receiver_name: &str, text: &str) -> Opt
 async fn send_burst(sink: &mut WsSink, payload: &mut LedgerPayload, count: u64) {
     for _ in 0..count {
         let message = ClientMessage::GameData {
+            class: None,
+            key: None,
             data: payload.next(),
         };
         let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -197,7 +175,8 @@ async fn rst_during_relay_heals_room_and_conserves() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
 
     let chaos = async {
@@ -205,11 +184,13 @@ async fn rst_during_relay_heals_room_and_conserves() {
         let (mut watcher_sink, mut watcher_rx) = connect(addr).await;
         let (mut victim_sink, mut victim_rx) = connect(proxy.addr()).await;
 
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let watcher_id = join_room(&mut watcher_sink, &mut watcher_rx, ROOM, "Watcher").await;
         let victim_id = join_room(&mut victim_sink, &mut victim_rx, ROOM, "Victim").await;
 
-        let ledger = Arc::new(DeliveryLedger::new());
+        let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
+        ledger.record_consumed_v2_room_snapshot("Watcher", &[sender_id, watcher_id]);
+        ledger.record_consumed_v2_room_snapshot("Victim", &[sender_id, watcher_id, victim_id]);
 
         // The victim drains through the proxy until the RST severs it, then
         // records its own (gap-free-prefix) disconnect.
@@ -224,10 +205,7 @@ async fn rst_during_relay_heals_room_and_conserves() {
                     Some(Ok(_)) => continue,
                 }
             }
-            victim_ledger.note_receiver_disconnected(
-                "Victim",
-                DisconnectReason::InjectedFault("tcp-rst mid-relay".to_string()),
-            );
+            victim_ledger.note_injected_fault("Victim", "tcp-rst mid-relay");
         });
 
         let mut payload = LedgerPayload::new("Sender", PAYLOAD_PADDING_BYTES);
@@ -276,14 +254,16 @@ async fn rst_during_relay_heals_room_and_conserves() {
         0,
         "a reset connection is a disconnect race, never a slow-consumer eviction"
     );
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[
-            expectation("Watcher", &[("Sender", total_sent)]),
-            expectation("Victim", &[("Sender", total_sent)]),
-        ],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[
+                expectation("Watcher", &[("Sender", total_sent)]),
+                expectation("Victim", &[("Sender", total_sent)]),
+            ],
+        )
+        .await;
+    running_server.shutdown().await;
 }
 
 /// A consumer drip-fed through a throttled link repeatedly fills the (small)
@@ -313,7 +293,8 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
     server_config.websocket_config.slow_consumer_timeout_ms = 5_000;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
     proxy.throttle(Direction::ServerToClient, Some(DRIP_BYTES_PER_SEC));
 
@@ -321,10 +302,11 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
         let (mut sender_sink, mut sender_rx) = connect(addr).await;
         let (mut dripped_sink, mut dripped_rx) = connect(proxy.addr()).await;
 
-        let _sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
-        let _dripped_id = join_room(&mut dripped_sink, &mut dripped_rx, ROOM, "Dripped").await;
+        let sender_id = join_room(&mut sender_sink, &mut sender_rx, ROOM, "Sender").await;
+        let dripped_id = join_room(&mut dripped_sink, &mut dripped_rx, ROOM, "Dripped").await;
 
-        let ledger = Arc::new(DeliveryLedger::new());
+        let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
+        ledger.record_consumed_v2_room_snapshot("Dripped", &[sender_id, dripped_id]);
         let (totals_tx, mut totals_rx) = tokio::sync::watch::channel::<Option<u64>>(None);
 
         // The dripped consumer drains as fast as the throttle feeds it.
@@ -404,11 +386,13 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
     // runner). The zero-loss intent is carried exactly by the three checks
     // around it: zero evictions, the ledger's gap-free completeness, and the
     // conservation law.
-    ledger.assert_zero_loss_or_loud_disconnect(
-        &metrics,
-        &[expectation("Dripped", &[("Sender", total_sent)])],
-    );
-    assert_message_conservation(&metrics).await;
+    ledger
+        .assert_conformance(
+            &metrics,
+            &[expectation("Dripped", &[("Sender", total_sent)])],
+        )
+        .await;
+    running_server.shutdown().await;
 }
 
 /// Connect/relay/kill churn must leak nothing: after eight clients join
@@ -427,14 +411,16 @@ async fn reconnect_churn_leaks_nothing() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
-    let ledger = Arc::new(DeliveryLedger::new());
+    let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
     let chaos = async {
         let (mut persistent_sink, mut persistent_rx) = connect(addr).await;
-        let _persistent_id =
+        let persistent_id =
             join_room(&mut persistent_sink, &mut persistent_rx, ROOM, "Persistent").await;
+        ledger.record_consumed_v2_room_snapshot("Persistent", &[persistent_id]);
 
         // Baselines AFTER the persistent client is established: churn must
         // return the process to exactly this state.
@@ -447,6 +433,7 @@ async fn reconnect_churn_leaks_nothing() {
             let proxy = ChaosProxy::spawn(addr).await;
             let (mut churn_sink, mut churn_rx) = connect(proxy.addr()).await;
             let churn_id = join_room(&mut churn_sink, &mut churn_rx, ROOM, &churn_name).await;
+            ledger.record_consumed_v2_room_snapshot(&churn_name, &[persistent_id, churn_id]);
 
             // Churn -> persistent relay.
             let mut churn_payload = LedgerPayload::new(&churn_name, PAYLOAD_PADDING_BYTES);
@@ -490,10 +477,7 @@ async fn reconnect_churn_leaks_nothing() {
             // Kill the link and require the room to heal: PlayerLeft reaches
             // the persistent client, and the gauge returns to baseline.
             proxy.rst_all();
-            ledger.note_receiver_disconnected(
-                &churn_name,
-                DisconnectReason::InjectedFault("tcp-rst churn kill".to_string()),
-            );
+            ledger.note_injected_fault(&churn_name, "tcp-rst churn kill");
             let mut saw_churn_leave = false;
             while !saw_churn_leave {
                 let frame = tokio::time::timeout(EVENT_DEADLINE, persistent_rx.next())
@@ -544,8 +528,8 @@ async fn reconnect_churn_leaks_nothing() {
         .await
         .expect("reconnect-churn chaos test exceeded its deadline");
 
-    ledger.assert_zero_loss_or_loud_disconnect(&metrics, &expectations);
-    assert_message_conservation(&metrics).await;
+    ledger.assert_conformance(&metrics, &expectations).await;
+    running_server.shutdown().await;
 }
 
 /// Count this process's open file descriptors via `/proc/self/fd`. The

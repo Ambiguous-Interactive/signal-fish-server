@@ -32,21 +32,21 @@
 //!    once and engages the relay fallback, the asymmetric status fan-out is
 //!    observed by everyone, and the relay floor carries every member's
 //!    payload (the crippled one is fully served by the floor).
-//! 4. `late_join_newpeer_real_webrtc_n3` — a seat-holder departs a finalized
-//!    3-seat mesh room (the server only finalizes FULL rooms, so late join is
-//!    always a seat fill); a new client then joins the running session:
-//!    `RoomJoined` reports `finalized`, the joiner's pairing arrives as a
-//!    fresh `SessionPlan` (never `NewPeer`), each incumbent gets exactly one
-//!    antisymmetric `NewPeer`, and all 3 live pairs connect with the full
+//! 4. `late_join_authoritative_replan_real_webrtc_n3` — a seat-holder departs
+//!    a finalized 3-seat mesh room (the server only finalizes FULL rooms, so a
+//!    late join is always a seat fill); a new client then joins the running session:
+//!    `RoomJoined` reports `finalized`, then every v3 member receives a fresh
+//!    authoritative `SessionPlan` with antisymmetric pairing roles, and all 3
+//!    live pairs connect with the full
 //!    12-message channel matrix. The joiner's `--relay-payload` probe is
 //!    armed on ENTRY (the GameStarting trigger pre-dates the join) and
 //!    reaches both incumbents, while the joiner itself observes zero
 //!    replayed traffic (no peer statuses, no pre-join GameData).
 //! 5. `mixed_v2_v3_n3_relay_floor_with_reference_client` — two v3 members
 //!    plus one pure-v2 member (on `/v2/ws`) in a mesh-PREFERRING room: the v2
-//!    member forces the relay floor, nobody observes any
-//!    `SessionPlan`/`NewPeer`/`Signal` or WebRTC activity, and the GameData
-//!    relay matrix completes for all three.
+//!    member forces the relay floor, each v3 member receives an explicit
+//!    Relay/Relay empty `SessionPlan`, the v2 member receives none, no
+//!    signaling/WebRTC activity occurs, and the GameData relay matrix completes.
 //!
 //! Scenarios are serialized behind a mutex (each spawns 4+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
@@ -303,6 +303,32 @@ fn session_plan<'a>(
     plan
 }
 
+/// Assert the universal v3 relay-floor plan: explicit and pairing-free.
+fn relay_session_plan<'a>(events: &'a [Value], who: &str) -> &'a Value {
+    let plan = single_event(events, "session_plan", who);
+    assert_eq!(str_field(plan, "topology"), "relay", "{who} plan topology");
+    assert_eq!(
+        str_field(plan, "transport"),
+        "relay",
+        "{who} plan transport"
+    );
+    assert_eq!(str_field(plan, "fallback"), "relay", "{who} plan fallback");
+    assert!(
+        plan.get("host").is_some_and(Value::is_null),
+        "{who}: relay plan must not name a host: {plan}"
+    );
+    assert!(
+        plan_peers(plan, who).is_empty(),
+        "{who}: relay plan must have no peers"
+    );
+    assert_eq!(
+        plan.get("ice_servers_count").and_then(Value::as_u64),
+        Some(0),
+        "{who}: relay plan must not carry ICE servers"
+    );
+    plan
+}
+
 /// The `(player_id, initiate)` peer entries of a `session_plan` event.
 fn plan_peers(plan: &Value, who: &str) -> Vec<(String, bool)> {
     plan.get("peers")
@@ -411,19 +437,37 @@ fn assert_exchange_sent_to(events: &[Value], who: &str, recipients: &BTreeSet<&s
     }
 }
 
-/// Assert the single overall `TransportStatus{webrtc, true}` report (pass the
-/// FULL log: exactly-once and never-fallback must hold beyond the window).
+/// Assert that the overall WebRTC status initially resolves `true` and every
+/// later report is a real state transition. A sibling may exit after the
+/// exchange criteria are met, producing a legitimate `true -> false` report
+/// before this process drains; teardown ordering is not part of the session
+/// success contract.
 fn assert_transport_status_true(full_log: &[Value], who: &str) {
-    let status = single_event(full_log, "transport_status_sent", who);
-    assert_eq!(str_field(status, "transport"), "webrtc", "{who} transport");
+    let statuses = events_named(full_log, "transport_status_sent");
+    assert!(!statuses.is_empty(), "{who}: no transport status was sent");
+    let connected: Vec<bool> = statuses
+        .iter()
+        .map(|status| {
+            assert_eq!(str_field(status, "transport"), "webrtc", "{who} transport");
+            status
+                .get("connected")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| panic!("{who}: status lacks connected flag: {status}"))
+        })
+        .collect();
     assert_eq!(
-        status.get("connected").and_then(Value::as_bool),
-        Some(true),
-        "{who}: overall webrtc status must resolve connected"
+        connected.first(),
+        Some(&true),
+        "{who}: overall webrtc status must initially resolve connected: {connected:?}"
     );
     assert!(
-        events_named(full_log, "fallback_engaged").is_empty(),
-        "{who}: a fully connected session must not engage the fallback"
+        connected.windows(2).all(|states| states[0] != states[1]),
+        "{who}: transport reports must be deduplicated state transitions: {connected:?}"
+    );
+    assert_eq!(
+        events_named(full_log, "fallback_engaged").len(),
+        connected.iter().filter(|&&state| !state).count(),
+        "{who}: every disconnected transition must engage the relay fallback"
     );
 }
 
@@ -783,7 +827,7 @@ fn uuid_of(id: &str) -> Uuid {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn late_join_newpeer_real_webrtc_n3() {
+async fn late_join_authoritative_replan_real_webrtc_n3() {
     let _serial = acquire_serial().await;
     let server = spawn_server("mesh").await;
     let server_url = server.v3_ws_url();
@@ -931,10 +975,10 @@ async fn late_join_newpeer_real_webrtc_n3() {
     .collect();
     assert_eq!(distinct.len(), 4, "all four player ids must be distinct");
 
-    // Seat-holder: it saw the start and produced ZERO pairing traffic — no
-    // pairs, no channels, no outbound signals, no status report, and (being
-    // an EXISTING member that left before the join) no NewPeer.
+    // Seat-holder: it saw the start and authoritative plan, then produced ZERO
+    // pairing traffic — no pairs, channels, outbound signals, or status report.
     single_event(&leaver.events, "game_starting", "leaver");
+    session_plan(&leaver.events, "leaver", "mesh", 2);
     for name in [
         "p2p_pair_connected",
         "channel_open",
@@ -1013,45 +1057,68 @@ async fn late_join_newpeer_real_webrtc_n3() {
         "joiner: GameData fanned out before the join is never replayed"
     );
 
-    // Incumbents: exactly one finalize-time plan (mesh departures and late
-    // joins re-issue nothing), exactly one antisymmetric NewPeer for the
-    // joiner, pairs + full matrix with {other incumbent, joiner} only, a
-    // single true status, and fan-outs from exactly those two.
+    // Incumbents: one finalize-time plan and one authoritative late-join
+    // replacement plan (never an additive NewPeer), then pairs + the full
+    // matrix with {other incumbent, joiner} only, a single true status, and
+    // fan-outs from exactly those two.
     for (index, incumbent) in [(0_usize, &inc0), (1_usize, &inc1)] {
         let who = ["inc0", "inc1"][index];
         let my_id = inc_ids[index].as_str();
         let other_id = inc_ids[1 - index].as_str();
 
-        let plan = session_plan(&incumbent.events, who, "mesh", 2);
-        let plan_ids: BTreeSet<String> = plan_peers(plan, who)
+        let plans = events_named(&incumbent.events, "session_plan");
+        assert_eq!(
+            plans.len(),
+            2,
+            "{who}: finalize and late join each require one plan"
+        );
+        for plan in &plans {
+            assert_eq!(str_field(plan, "topology"), "mesh", "{who} plan topology");
+            assert_eq!(
+                str_field(plan, "transport"),
+                "webrtc",
+                "{who} plan transport"
+            );
+            assert_eq!(str_field(plan, "fallback"), "relay", "{who} plan fallback");
+            assert_eq!(
+                plan_peers(plan, who).len(),
+                2,
+                "{who}: each plan has two peers"
+            );
+        }
+        let initial_plan_ids: BTreeSet<String> = plan_peers(plans[0], who)
             .into_iter()
             .map(|(id, _initiate)| id)
             .collect();
-        let plan_ids: BTreeSet<&str> = plan_ids.iter().map(String::as_str).collect();
+        let initial_plan_ids: BTreeSet<&str> =
+            initial_plan_ids.iter().map(String::as_str).collect();
         assert_eq!(
-            plan_ids,
+            initial_plan_ids,
             BTreeSet::from([other_id, leaver_id.as_str()]),
             "{who}: the finalize-time plan lists the other incumbent and the seat-holder"
         );
 
-        let new_peer = single_event(&incumbent.events, "new_peer", who);
-        assert_eq!(
-            str_field(new_peer, "peer_id"),
-            joiner_id,
-            "{who}: the NewPeer delta must name the joiner"
+        assert!(
+            events_named(&incumbent.events, "new_peer").is_empty(),
+            "{who}: authoritative plans replace additive NewPeer deltas"
         );
-        let you_initiate = new_peer
-            .get("you_initiate")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| panic!("{who}: new_peer missing you_initiate: {new_peer}"));
+        let refreshed_pairs: BTreeMap<String, bool> =
+            plan_peers(plans[1], who).into_iter().collect();
+        let refreshed_ids: BTreeSet<&str> = refreshed_pairs.keys().map(String::as_str).collect();
         assert_eq!(
-            you_initiate,
+            refreshed_ids,
+            BTreeSet::from([other_id, joiner_id.as_str()]),
+            "{who}: refreshed plan must replace the departed seat-holder with the joiner"
+        );
+        let initiate_joiner = refreshed_pairs[&joiner_id];
+        assert_eq!(
+            initiate_joiner,
             uuid_of(my_id) < uuid_of(&joiner_id),
-            "{who}: you_initiate must follow the UUID glare rule"
+            "{who}: refreshed plan must follow the UUID glare rule"
         );
         assert_eq!(
-            you_initiate, !joiner_pairs[my_id],
-            "{who}: you_initiate must be antisymmetric to the joiner's plan flag"
+            initiate_joiner, !joiner_pairs[my_id],
+            "{who}: refreshed plan must be antisymmetric to the joiner's flag"
         );
 
         let live_pairs: BTreeSet<&str> = BTreeSet::from([other_id, joiner_id.as_str()]);
@@ -1145,11 +1212,20 @@ async fn mixed_v2_v3_n3_relay_floor_with_reference_client() {
             "{who}: negotiated protocol version"
         );
 
-        // A relay-floor room emits NO v3 session traffic and no WebRTC
-        // activity ever happens — assert zero across the FULL logs (not just
-        // the scenario window): a relay room can never re-plan either.
+        // Finalization is explicit for v3 even on the relay floor: v3 members
+        // receive one authoritative Relay/Relay empty plan; v2 remains frozen.
+        if index == V2_MEMBER {
+            assert!(
+                events_named(full_log, "session_plan").is_empty(),
+                "{who}: v2 must never observe SessionPlan"
+            );
+        } else {
+            relay_session_plan(full_log, who);
+        }
+
+        // No pairing or WebRTC activity ever happens — assert zero across the
+        // FULL logs (not just the scenario window).
         for name in [
-            "session_plan",
             "new_peer",
             "signal_sent",
             "signal_received",

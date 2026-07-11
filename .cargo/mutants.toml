@@ -16,24 +16,29 @@
 # Run:  cargo mutants            (uses this config)
 #       cargo mutants --list     (enumerate mutants without testing)
 # CI:   .github/workflows/mutation.yml (scheduled + workflow_dispatch)
+#       The baseline runs the exact unmutated oracle with:
+#       cargo nextest run --lib --cargo-profile mutants --profile mutants --locked
 
-# Only the in-crate unit tests are the oracle — fast and deterministic. A mutant
-# in code reachable ONLY from WebSocket e2e tests is out of this config's scope
-# by design (the e2e suites are the regression net there); keep mutation focused
-# where unit tests give a tight, quick verdict.
-test_tool = "cargo"
+# Only the in-crate unit tests are the oracle — fast and deterministic. Nextest
+# isolates them into processes, and the dedicated `mutants` nextest profile
+# terminates any individual test that a progress-removing mutation hangs after
+# 10 seconds. This turns nontermination into a caught mutant instead of a
+# 120-second outer timeout. Code reachable ONLY from WebSocket e2e tests remains
+# out of scope.
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile", "mutants"]
 # Oracle = the in-crate `--lib` unit tests ONLY, passed via `additional_cargo_args`
 # (NOT `additional_cargo_test_args`). The distinction is a major speed lever:
 # `additional_cargo_test_args` applies `--lib` to the TEST run only, so the
 # preceding `cargo test --no-run` BUILD still compiles ALL ~20 integration-test
 # binaries (each relinks the whole lib) on every mutant. `additional_cargo_args`
-# applies `--lib` to BOTH the build and the test, so each mutant only rebuilds the
-# lib + its unit-test binary — the integration suites are never built or run here.
+# applies `--lib` to BOTH the build and nextest run, so each mutant only rebuilds
+# the lib + its unit-test binary — integration suites are never built or run.
 #
 # We also deliberately do NOT pass `--all-features`: the scoped modules below
 # contain ZERO `#[cfg(feature = ...)]` (default features = []), so enabling `tls`
 # (rustls/axum-server) and `legacy-fullmesh` (matchbox_signaling) changes neither
-# the generated mutant set (`cargo mutants --list` stays 227) nor the catch
+# the generated mutant set (`cargo mutants --list` stays 319) nor the catch
 # outcome — it only drags those heavy deps into every per-mutant build/relink.
 #
 # Standing rules (enforced by tests/ci_config_tests.rs::

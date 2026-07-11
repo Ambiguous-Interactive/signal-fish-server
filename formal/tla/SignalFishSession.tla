@@ -1,8 +1,8 @@
 ------------------------------ MODULE SignalFishSession ------------------------------
 (***************************************************************************************)
 (* Formal model of the Signal Fish Protocol v3 per-room session lifecycle:            *)
-(* finalize-time plan selection, per-recipient SessionPlan emission, late-join /      *)
-(* seat-fill pairing, and host-failover re-planning.                                  *)
+(* finalize-time plan selection, authoritative per-recipient SessionPlan refreshes,   *)
+(* late-join / seat-fill membership publication, and host-failover re-planning.        *)
 (*                                                                                    *)
 (* The spec mirrors the IMPLEMENTATION, not an idealization. Every operator maps to   *)
 (* a concrete function in the Rust code (file references below and in                 *)
@@ -28,13 +28,14 @@
 (*   Finalize emission               <-> EnhancedGameServer::emit_session_plan        *)
 (*   DepartureEffects                <-> handle_session_member_departure              *)
 (*                                       (run from room_service.rs leave_room)        *)
-(*   LateJoinEffects / NewPeersFor   <-> src/server/signaling.rs                      *)
-(*                                       handle_active_session_late_join             *)
+(*   LateJoinResult                 <-> src/server/signaling.rs                       *)
+(*                                      publish_finalized_join_membership             *)
 (*   Join fullness gate              <-> src/database/mod.rs add_player_to_room       *)
 (*   Depart authority clearing       <-> src/database/mod.rs remove_player_from_room  *)
 (*                                                                                    *)
 (* Intentionally NOT modeled (rationale in formal/README.md): rate limits, the        *)
-(* opaque Signal/NewPeer payload relay (transport-only plumbing), reconnection        *)
+(* opaque Signal relay and the NewPeer compatibility shape (transport-only plumbing), *)
+(* reconnection                                                                       *)
 (* tokens, TURN/ICE minting, multi-room state, storage errors, and                    *)
 (* capability-downgrading reconnects (capabilities are per-player constants).         *)
 (***************************************************************************************)
@@ -92,14 +93,13 @@ VARIABLES
     storedPlan,
     \* Per player, the LAST SessionPlan view delivered to it, or NoDelivery.
     \* Deliberately never cleared: real clients keep their last plan after the
-    \* server drops the room's entry (the relay floor carries them), so stale
-    \* client-held plans are honest model state. Server-side soundness is
-    \* expressed over lastEmission instead (EmissionRequiresStoredPlan).
+    \* server drops the room's entry after a departure (the relay floor carries
+    \* them), so stale client-held plans are honest model state. A later
+    \* membership publication replaces them with an explicit relay plan.
     delivered,
     \* What the LAST action emitted: NoEmission, or a record
     \* [kind : {"finalize","replan","latejoin"},
-    \*  plans : per-recipient plan views (a function),
-    \*  newPeers : set of [to, peer, youInitiate]].
+    \*  plans : per-recipient plan views (a function)].
     \* This is auxiliary observation state for emission-time invariants
     \* (fresh peer lists are exact w.r.t. CURRENT members; stale delivered
     \* plans legitimately are not).
@@ -134,8 +134,6 @@ StoredPlans ==
     [topology  : TopologySet,
      transport : TransportSet,
      host      : PLAYERS \cup {NoPlayer}]
-
-NewPeerMsgs == [to : PLAYERS, peer : PLAYERS, youInitiate : BOOLEAN]
 
 EmissionKinds == {"finalize", "replan", "latejoin"}
 
@@ -172,7 +170,7 @@ HostScenarioCaps ==
     (1 :> ProfileV3Full) @@ (2 :> ProfileV3Full) @@
     (3 :> ProfileV3HostWebRtcOnly) @@ (4 :> ProfileV2)
 \* Host+Direct scenario (webrtc disabled): reaches the host+direct rung and
-\* checks that no NewPeer pairing ever fires for a non-WebRTC session.
+\* checks that authoritative refreshes preserve its non-WebRTC transport.
 HostDirectScenarioCaps ==
     (1 :> ProfileV3HostDirect) @@ (2 :> ProfileV3Full) @@
     (3 :> ProfileV3Full) @@ (4 :> ProfileV3RelayOnly)
@@ -187,8 +185,8 @@ SeqMembers(seq) == {seq[i] : i \in DOMAIN seq}
 Version(p) == Caps[p].version
 
 \* SessionMember::supports_session — the single capability predicate shared by
-\* selection (all_support), host re-election, plan peer lists, and NewPeer
-\* gating: protocol v3 plus both axes of the pair.
+\* selection (all_support), host re-election, and plan peer lists: protocol v3
+\* plus both axes of the pair.
 SupportsSession(p, topology, transport) ==
     /\ Version(p) >= 3
     /\ topology \in Caps[p].topologies
@@ -208,6 +206,7 @@ UpgradeLadder ==
 
 \* session_policy.rs RELAY_FLOOR.
 RelayPair == [topology |-> "relay", transport |-> "relay"]
+RelayPlan == [topology |-> "relay", transport |-> "relay", host |-> NoPlayer]
 
 \* session_policy.rs topology_rank: Relay < Host < Mesh.
 TopologyRank(topology) ==
@@ -268,7 +267,7 @@ HostInvalid(plan, S) ==
 \*  - Host: the host answers every pairable client (initiate FALSE); a client
 \*    offers to the host only (initiate TRUE). The hostless and host-missing
 \*    arms mirror plan_for's defensive branches.
-\*  - Relay: never emitted; defensively empty.
+\*  - Relay: explicit authoritative reset with an empty peer list.
 PlanFor(plan, mseq, r) ==
     LET S == SeqMembers(mseq)
         peers ==
@@ -284,34 +283,11 @@ PlanFor(plan, mseq, r) ==
                 ELSE IF plan.host \in S THEN
                     {[peer |-> plan.host, initiate |-> TRUE]}
                 ELSE {}                          \* host not seated: no fabricated pairs
-            ELSE {}                              \* relay: never emitted
+            ELSE {}                              \* relay: explicit no-peer reset
     IN [topology  |-> plan.topology,
         transport |-> plan.transport,
         host      |-> plan.host,
         peers     |-> peers]
-
-\* signaling.rs announce_webrtc_peer_to_members / announce_webrtc_peer_in_star:
-\* the NewPeer deltas sent to EXISTING members when `j` (re)joins an active
-\* session. Gated on the WebRTC transport and the FULL session predicate on
-\* both sides; one side of each pair is designated offerer (mesh: glare rule;
-\* host: clients offer, the host answers).
-NewPeersFor(plan, mseq, j) ==
-    LET S == SeqMembers(mseq) IN
-    IF plan.transport # "webrtc" \/ ~Pairable(plan, j) THEN {}
-    ELSE IF plan.topology = "mesh" THEN
-        {[to |-> q, peer |-> j, youInitiate |-> q < j] :
-            q \in {q \in S \ {j} : Pairable(plan, q)}}
-    ELSE IF plan.topology = "host" THEN
-        IF plan.host = NoPlayer THEN {}          \* defensive (unreachable after heal)
-        ELSE IF j = plan.host THEN
-            \* The host (re)joined: every pairable client offers to it.
-            {[to |-> q, peer |-> j, youInitiate |-> TRUE] :
-                q \in {q \in S \ {j} : Pairable(plan, q)}}
-        ELSE IF plan.host \in S /\ Pairable(plan, plan.host) THEN
-            \* A client (re)joined: the (capable, seated) host answers it.
-            {[to |-> plan.host, peer |-> j, youInitiate |-> FALSE]}
-        ELSE {}
-    ELSE {}                                      \* relay+webrtc: illegal pair
 
 ---------------------------------------------------------------------------------------
 (* Emission helpers. Delivery is v3-gated PER RECIPIENT
@@ -327,6 +303,15 @@ PlansForAll(plan, mseq) ==
 \* Fold an emission's plans into the persistent per-player delivery state.
 MergeDelivered(old, plans) ==
     [p \in PLAYERS |-> IF p \in DOMAIN plans THEN plans[p] ELSE old[p]]
+
+\* Build one authoritative plan publication. A room with no v3 recipients has
+\* no v3 session effect, so its observation remains NoEmission.
+PlanPublication(retained, plan, mseq, oldDelivered, kind) ==
+    LET plans == PlansForAll(plan, mseq)
+    IN [stored    |-> retained,
+        delivered |-> MergeDelivered(oldDelivered, plans),
+        emission  |-> IF DOMAIN plans = {} THEN NoEmission
+                     ELSE [kind |-> kind, plans |-> plans]]
 
 \* replan_host_session: capability-filtered re-election (the authority
 \* preference passes the SAME capability gate), entry drop + silence when no
@@ -344,30 +329,28 @@ ReplanResult(stored, mseq, auth, oldDelivered) ==
                plans   == PlansForAll(updated, mseq)
            IN [stored    |-> updated,
                delivered |-> MergeDelivered(oldDelivered, plans),
-               emission  |-> [kind |-> "replan", plans |-> plans, newPeers |-> {}]]
+               emission  |-> [kind |-> "replan", plans |-> plans]]
 
-\* signaling.rs handle_active_session_late_join, for joiner j with the
-\* POST-join membership mseq:
-\*   1. Finalized gate, 2. stored-plan gate, 3. heal (host invalid => replan,
-\*   suppressing the per-joiner emission), 4. joiner SessionPlan (v3-gated),
-\*   5. NewPeer deltas to existing members (WebRTC + full-predicate gated).
+\* signaling.rs publish_finalized_join_membership, with the POST-join
+\* membership mseq:
+\*   1. Finalized gate, 2. derive the explicit relay floor when no plan is
+\*   stored, 3. heal an invalid host, 4. publish a complete per-recipient plan
+\*   to EVERY current v3 member. The latest SessionPlan replaces prior state.
 \* In this atomic model the heal arm is structurally unreachable (departures
 \* always repaired the host in their own step), but it is modeled because the
 \* code path exists; see formal/README.md.
-LateJoinResult(j, mseq) ==
-    IF lobbyState # "finalized" \/ storedPlan = NoPlan THEN
+LateJoinResult(mseq) ==
+    IF lobbyState # "finalized" THEN
         [stored |-> storedPlan, delivered |-> delivered, emission |-> NoEmission]
+    ELSE IF storedPlan = NoPlan THEN
+        PlanPublication(NoPlan, RelayPlan, mseq, delivered, "latejoin")
     ELSE IF HostInvalid(storedPlan, SeqMembers(mseq)) THEN
-        ReplanResult(storedPlan, mseq, authority, delivered)
+        LET result == ReplanResult(storedPlan, mseq, authority, delivered)
+        IN IF result.stored = NoPlan
+           THEN PlanPublication(NoPlan, RelayPlan, mseq, delivered, "latejoin")
+           ELSE result
     ELSE
-        LET plans == IF Version(j) >= 3
-                     THEN [p \in {j} |-> PlanFor(storedPlan, mseq, j)]
-                     ELSE [p \in {} |-> NoDelivery]
-        IN [stored    |-> storedPlan,
-            delivered |-> MergeDelivered(delivered, plans),
-            emission  |-> [kind     |-> "latejoin",
-                           plans    |-> plans,
-                           newPeers |-> NewPeersFor(storedPlan, mseq, j)]]
+        PlanPublication(storedPlan, storedPlan, mseq, delivered, "latejoin")
 
 \* handle_session_member_departure with the POST-removal membership mseq and
 \* post-removal authority: stored-plan gate -> Finalized gate -> last-member
@@ -410,7 +393,7 @@ Join(p) ==
     /\ p \notin MemberSet
     /\ Len(members) < MAX_PLAYERS
     /\ members' = Append(members, p)
-    /\ LET result == LateJoinResult(p, Append(members, p))
+    /\ LET result == LateJoinResult(Append(members, p))
        IN /\ storedPlan' = result.stored
           /\ delivered' = result.delivered
           /\ lastEmission' = result.emission
@@ -451,9 +434,8 @@ GrantAuthority(p) ==
 
 \* Lobby finalization (coordinator handle_start_game -> emit_session_plan):
 \* runs the ladder ONCE over the current room, stores a non-relay decision
-\* (the relay floor stores and emits nothing — v3 relay-only and v2 members
-\* observe pure v2 behavior), and delivers per-recipient plans to every v3
-\* member.
+\* (the relay floor stores nothing), and delivers a per-recipient plan to every
+\* v3 member. Relay is an explicit no-peer reset; v2 members receive no plan.
 \*
 \* TRIGGER (changed): finalization is now driven by an EXPLICIT StartGame, not
 \* by the room becoming full. The OLD `Len(members) = MAX_PLAYERS` fullness
@@ -477,23 +459,17 @@ Finalize ==
     /\ members # <<>>
     /\ lobbyState' = "finalized"
     /\ LET pair == ChoosePair(MemberSet)
-       IN IF pair = RelayPair THEN
-              /\ storedPlan' = NoPlan
-              /\ delivered' = delivered
-              /\ lastEmission' = NoEmission
-          ELSE
-              LET host == IF pair.topology = "host"
-                          THEN ElectHost(authority, members)
-                          ELSE NoPlayer
-                  plan == [topology |-> pair.topology,
-                           transport |-> pair.transport,
-                           host |-> host]
-                  plans == PlansForAll(plan, members)
-              IN /\ storedPlan' = plan
-                 /\ delivered' = MergeDelivered(delivered, plans)
-                 /\ lastEmission' = [kind |-> "finalize",
-                                     plans |-> plans,
-                                     newPeers |-> {}]
+           host == IF pair.topology = "host"
+                   THEN ElectHost(authority, members)
+                   ELSE NoPlayer
+           plan == [topology |-> pair.topology,
+                    transport |-> pair.transport,
+                    host |-> host]
+           retained == IF pair = RelayPair THEN NoPlan ELSE plan
+           result == PlanPublication(retained, plan, members, delivered, "finalize")
+       IN /\ storedPlan' = result.stored
+          /\ delivered' = result.delivered
+          /\ lastEmission' = result.emission
     /\ UNCHANGED <<members, authority, churn>>
 
 \* Explicit termination stutter once the churn budget is exhausted, so the
@@ -529,7 +505,6 @@ TypeOK ==
        \/ /\ lastEmission.kind \in EmissionKinds
           /\ DOMAIN lastEmission.plans \subseteq PLAYERS
           /\ \A p \in DOMAIN lastEmission.plans : lastEmission.plans[p] \in PlanViews
-          /\ lastEmission.newPeers \subseteq NewPeerMsgs
 
 \* I2. The authority is always a current member or absent —
 \* remove_player_from_room clears it when its holder departs.
@@ -537,7 +512,7 @@ AuthorityIsCurrentMember ==
     authority \in MemberSet \cup {NoPlayer}
 
 \* I3. PlanLegality: a stored decision is always one of the three ladder
-\* rungs; the relay floor is never stored (emit_session_plan early-returns)
+\* rungs; the relay floor is never stored
 \* and illegal pairs (mesh+direct, host+relay, ...) are unrepresentable
 \* (session_policy.rs is_valid_pair / the choose_session_plan debug_assert).
 PlanLegality ==
@@ -546,15 +521,10 @@ PlanLegality ==
         /\ storedPlan.topology # "relay"
 
 \* I4. V2Gating (Appendix K): no SessionPlan is ever delivered to a sub-v3
-\* player (send_session_plan_to's gate), and no NewPeer ever targets or names
-\* one (the full session predicate implies v3). Quantified over the
-\* PERSISTENT delivery state, so it covers all of history, not just the last
-\* action.
+\* player (send_session_plan_to's gate). Quantified over the PERSISTENT
+\* delivery state, so it covers all of history, not just the last action.
 V2Gating ==
-    /\ \A p \in PLAYERS : delivered[p] # NoDelivery => Version(p) >= 3
-    /\ lastEmission # NoEmission =>
-        \A m \in lastEmission.newPeers :
-            Version(m.to) >= 3 /\ Version(m.peer) >= 3
+    \A p \in PLAYERS : delivered[p] # NoDelivery => Version(p) >= 3
 
 \* I5. HostValid: a stored host-topology plan always names a CURRENT member
 \* capable of the session pair. In the model, healing (replan_host_session)
@@ -637,20 +607,21 @@ StarProperty ==
                 THEN pv.peers = {[peer |-> q, initiate |-> FALSE] : q \in capable}
                 ELSE pv.peers = {[peer |-> pv.host, initiate |-> TRUE]}
 
-\* I11. EmissionRequiresStoredPlan (relay-floor soundness): the server only
-\* ever CREATES plan deliveries while a matching stored decision exists, and
-\* every fresh view carries exactly the stored pair and host. (Deliberate
-\* modeling decision: clients KEEP stale plans after the entry is dropped —
-\* the server does not retract them, the relay floor carries those clients —
-\* so the soundness claim is about emission, not about client-held state;
-\* `delivered` is therefore never cleared.)
-EmissionRequiresStoredPlan ==
+\* I11. EmissionMatchesSessionState: every fresh view carries the retained
+\* sticky decision, or an explicit relay/relay no-peer reset when no decision
+\* is stored. Clients may retain a stale non-relay delivery after a departure
+\* drops the entry; the next membership publication replaces it with relay.
+EmissionMatchesSessionState ==
     lastEmission # NoEmission =>
-        /\ storedPlan # NoPlan
-        /\ \A r \in DOMAIN lastEmission.plans :
-            /\ lastEmission.plans[r].topology = storedPlan.topology
-            /\ lastEmission.plans[r].transport = storedPlan.transport
-            /\ lastEmission.plans[r].host = storedPlan.host
+        \A r \in DOMAIN lastEmission.plans :
+            IF storedPlan = NoPlan
+            THEN /\ lastEmission.plans[r].topology = "relay"
+                 /\ lastEmission.plans[r].transport = "relay"
+                 /\ lastEmission.plans[r].host = NoPlayer
+                 /\ lastEmission.plans[r].peers = {}
+            ELSE /\ lastEmission.plans[r].topology = storedPlan.topology
+                 /\ lastEmission.plans[r].transport = storedPlan.transport
+                 /\ lastEmission.plans[r].host = storedPlan.host
 
 \* I12. NoEmissionWithoutQualifier: a replan emission implies a re-elected
 \* host that is a current, session-capable member (replan_host_session's
@@ -663,39 +634,36 @@ NoEmissionWithoutQualifier ==
         /\ Pairable(storedPlan, storedPlan.host)
         /\ DOMAIN lastEmission.plans = V3Members(MemberSet)
 
-\* I13. NewPeerSoundness: every NewPeer announcement pairs two DISTINCT
-\* current members that BOTH satisfy the full session predicate, only ever
-\* for a stored WebRTC-transport session (host+direct and the relay floor
-\* announce nothing), with the offerer designation matching the topology:
-\* glare rule for mesh; star edge (touching the stored host) for host —
-\* clients offer to the host, the host answers.
-NewPeerSoundness ==
+\* I13. PublicationCoverage: every plan publication is a complete snapshot for
+\* exactly the current v3 membership. In particular, finalized joins/reconnects
+\* refresh incumbents as well as the actor; there is no additive delta seam.
+PublicationCoverage ==
     lastEmission # NoEmission =>
-        \A m \in lastEmission.newPeers :
-            /\ storedPlan # NoPlan
-            /\ storedPlan.transport = "webrtc"
-            /\ m.to # m.peer
-            /\ m.to \in MemberSet
-            /\ m.peer \in MemberSet
-            /\ Pairable(storedPlan, m.to)
-            /\ Pairable(storedPlan, m.peer)
-            /\ storedPlan.topology = "mesh" => m.youInitiate = (m.to < m.peer)
-            /\ storedPlan.topology = "host" =>
-                /\ storedPlan.host \in {m.to, m.peer}
-                /\ m.youInitiate = (m.peer = storedPlan.host)
+        DOMAIN lastEmission.plans = V3Members(MemberSet)
 
 \* I14. RelayFloorOnly — listed ONLY by the Floor model, where both upgrade
 \* transports are config-disabled (WEBRTC_ENABLED = DIRECT_ENABLED = FALSE).
 \* Pins the transport_enabled denial path end-to-end: however capable the
 \* members, no ladder rung can clear the config gate, so ChoosePair always
-\* returns the relay floor and the room never stores, delivers, or emits
-\* anything (emit_session_plan's relay early-return; v3 relay-floor rooms
-\* observe pure v2 behavior). Deliberately FALSE in the other models — they
+\* returns the relay floor and the room never stores a decision. V3 members
+\* receive explicit relay/relay plans while v2 members receive none.
+\* Deliberately FALSE in the other models — they
 \* exist to reach the rungs — so only SignalFishSession_Floor.cfg checks it.
 RelayFloorOnly ==
     /\ storedPlan = NoPlan
-    /\ lastEmission = NoEmission
-    /\ \A p \in PLAYERS : delivered[p] = NoDelivery
+    /\ \/ lastEmission = NoEmission
+       \/ \A r \in DOMAIN lastEmission.plans :
+            /\ lastEmission.plans[r].topology = "relay"
+            /\ lastEmission.plans[r].transport = "relay"
+            /\ lastEmission.plans[r].host = NoPlayer
+            /\ lastEmission.plans[r].peers = {}
+    /\ \A p \in PLAYERS :
+        delivered[p] = NoDelivery \/
+            /\ Version(p) >= 3
+            /\ delivered[p].topology = "relay"
+            /\ delivered[p].transport = "relay"
+            /\ delivered[p].host = NoPlayer
+            /\ delivered[p].peers = {}
 
 ---------------------------------------------------------------------------------------
 (* TEMPORAL (action) PROPERTIES.                                              *)

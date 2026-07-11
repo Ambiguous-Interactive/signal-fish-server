@@ -359,6 +359,15 @@ curl http://localhost:3536/metrics/prom
 
 ```
 
+Protocol-v3 delivery outcomes are exported as
+`signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`. The
+corresponding raw JSON snapshot is available with
+`/metrics?includeSnapshot=true` at
+`metricsSnapshot.connections.delivery_by_class`. At quiescence, each class's
+`attempted` count equals the sum of its terminal outcomes; sustained
+`abandoned`, `dropped_full`, or `unsupported_format` values deserve operator
+attention, while `superseded` and `dropped` may be intentional class policy.
+
 ### Prometheus Configuration
 
 ```yaml

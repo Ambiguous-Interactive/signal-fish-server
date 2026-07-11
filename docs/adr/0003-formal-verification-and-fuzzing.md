@@ -9,12 +9,14 @@ ADR-0003 - Accepted (amended — see [Update: production-readiness additions](#u
 Protocol v3 ([ADR-0001](0001-protocol-v3-two-axis.md)) added a small but
 safety-critical state machine to the server: per-room session-plan selection (the
 `mesh+webrtc → host+webrtc → host+direct → relay` ladder), per-recipient
-`SessionPlan` emission, late-join / seat-fill pairing, and host-failover
+authoritative `SessionPlan` publication, late-join / seat-fill membership
+refreshes, and host-failover
 re-planning. Its correctness rests on cross-cutting invariants that example-based
 tests can demonstrate but not exhaust:
 
-- a v2 (or v3 relay-only) member must **never** observe a v3 control message
-  (Appendix K back-compat);
+- a v2 member must **never** observe a v3 control message, while a v3 member on
+  the relay floor must receive an explicit no-peer relay plan (Appendix K
+  back-compat plus authoritative reset semantics);
 - a stored `host` plan must **always** name a current, session-capable host (the
   self-heal contract);
 - topology/transport are **sticky** once stored; only the host is re-elected;

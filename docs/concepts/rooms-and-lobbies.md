@@ -203,9 +203,10 @@ otherwise). On finalization the server:
 
 - Records a finalization timestamp.
 - Sends a `GameStarting` message to every player with legacy peer metadata.
-- For negotiated v3 non-relay rooms, follows with per-recipient `SessionPlan`
-  messages that describe topology, transport, peers, relay fallback, and ICE
-  only when the selected transport is WebRTC.
+- For every negotiated-v3 member, follows with a per-recipient `SessionPlan`
+  that describes topology, transport, peers, relay fallback, and ICE only when
+  the selected transport is WebRTC. The relay floor is an explicit no-peer
+  `relay`/`relay` plan; v2 members receive no plan.
 
 ```json
 {

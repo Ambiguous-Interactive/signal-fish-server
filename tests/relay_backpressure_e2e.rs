@@ -31,8 +31,7 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use test_helpers::{create_test_server, create_test_server_with_config};
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server, create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{assert_message_conservation, connect_with_small_recv_buffer};
 
@@ -58,23 +57,9 @@ const READER_START_DELAY: tokio::time::Duration = tokio::time::Duration::from_mi
 /// Generous whole-test deadline (oversubscribed CI runners included).
 const BURST_TEST_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(120);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> (WsSink, WsReceiver) {
@@ -189,7 +174,8 @@ fn assert_complete_and_ordered(seqs: &[u64], expected: usize, who: &str) {
 async fn game_data_burst_is_relayed_completely_and_in_order() {
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let (mut sender_sink, mut sender_rx) = connect(addr).await;
     let (mut receiver_a_sink, mut receiver_a_rx) = connect(addr).await;
@@ -207,6 +193,8 @@ async fn game_data_burst_is_relayed_completely_and_in_order() {
         let padding = "x".repeat(PAYLOAD_PADDING_BYTES);
         for seq in 0..BURST_MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": seq as u64, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -249,6 +237,7 @@ async fn game_data_burst_is_relayed_completely_and_in_order() {
     // Both receivers observed the full burst, so every delivery has resolved:
     // the conservation counters must balance.
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// A recipient that stops draining its socket entirely must be disconnected
@@ -267,7 +256,8 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
     server_config.websocket_config.slow_consumer_timeout_ms = 300;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     // Join order matters for the observers below: the healthy receiver joins
     // first so it sees PlayerJoined for the stalled client (capturing its id
@@ -288,6 +278,8 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
         let padding = "x".repeat(STALL_PADDING_BYTES);
         for seq in 0..MESSAGE_COUNT {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": seq as u64, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -322,7 +314,7 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
                         .expect("GameData payload carries a numeric seq");
                     seqs.push(seq);
                 }
-                ServerMessage::PlayerLeft { player_id } => left_players.push(player_id),
+                ServerMessage::PlayerLeft { player_id, .. } => left_players.push(player_id),
                 ServerMessage::Error {
                     message,
                     error_code,
@@ -398,6 +390,7 @@ async fn slow_consumer_is_disconnected_loudly_and_room_keeps_flowing() {
     // Everything has quiesced (burst delivered, stalled socket closed):
     // attempts must balance against enqueues, disconnect races, and drops.
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// A stalled recipient whose kernel receive window is already full must be
@@ -447,7 +440,8 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
     server_config.websocket_config.slow_consumer_timeout_ms = 300;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     // Healthy receiver and sender join first: their connections (and fds)
     // define the pre-stall baseline that eviction must restore.
@@ -481,6 +475,8 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
             && sent < FLOOD_MESSAGE_CAP
         {
             let message = ClientMessage::GameData {
+                class: None,
+                key: None,
                 data: serde_json::json!({ "seq": sent, "padding": padding.as_str() }),
             };
             let json = serde_json::to_string(&message).expect("serialize GameData");
@@ -508,7 +504,7 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
             let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
             match message {
                 ServerMessage::GameData { .. } => game_data_received += 1,
-                ServerMessage::PlayerLeft { player_id } if player_id == stalled_player_id => {
+                ServerMessage::PlayerLeft { player_id, .. } if player_id == stalled_player_id => {
                     return (game_data_received, healthy_rx);
                 }
                 ServerMessage::Error {
@@ -609,6 +605,7 @@ async fn wedged_socket_write_is_preempted_and_fd_released() {
     // Everything has quiesced (flood finished, eviction completed, stalled
     // socket torn down): the conservation counters must balance.
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// Count this process's open file descriptors via `/proc/self/fd`.
@@ -665,6 +662,8 @@ async fn backpressure_delivers_every_message_in_order_without_disconnecting() {
                 .handle_client_message(
                     &sender_id,
                     ClientMessage::GameData {
+                        class: None,
+                        key: None,
                         data: serde_json::json!({ "seq": seq as u64 }),
                     },
                 )
@@ -773,6 +772,8 @@ async fn unresponsive_recipient_is_pruned_without_blocking_senders() {
                 .handle_client_message(
                     &sender_id,
                     ClientMessage::GameData {
+                        class: None,
+                        key: None,
                         data: serde_json::json!({ "seq": seq }),
                     },
                 )

@@ -5,9 +5,9 @@ send or handle. Every config key below exists in the server's configuration — 
 [Configuration Reference](../configuration.md) for defaults and environment-variable overrides, and
 [Protocol v2 vs v3](../concepts/protocol-versions.md) for the version model.
 
-"Both" in the protocol column means the feature works on a v2 (relay-only) and a v3 connection alike. v3 features
-additionally require the all-members-v3 invariant for any room-wide upgrade (see
-[the two invariants](../concepts/protocol-versions.md#the-two-invariants)).
+"Both" in the protocol column means the feature works on a v2 (relay-only) and a v3 connection alike. Only
+room-wide P2P upgrades require the all-members-v3 invariant; recipient-gated v3 features such as delivery classes
+do not (see [the two invariants](../concepts/protocol-versions.md#the-two-invariants)).
 
 | Feature | Protocol version | Server config required | Client support required |
 | --- | --- | --- | --- |
@@ -15,13 +15,15 @@ additionally require the all-members-v3 invariant for any room-wide upgrade (see
 | Reconnection | both | `server.enable_reconnection` (default `true`); `server.reconnection_window`, `server.event_buffer_size` tune it | Store `player_id` / `room_id` / `auth_token`; send `Reconnect`; handle `Reconnected` / `ReconnectionFailed` |
 | Spectators | both | none (always available) | Send `JoinAsSpectator` / `LeaveSpectator`; handle `SpectatorJoined` and related events |
 | Authority | both | none; room created with `supports_authority` (via `JoinRoom`) | Send `AuthorityRequest`; handle `AuthorityChanged` / `AuthorityResponse` |
-| Mesh topology | v3 | `session.default_topology` / `session.game_topology_mappings` set to `mesh`; `session.enable_webrtc` (default `true`) | `Authenticate` with `supported_topologies` including `mesh` and `supported_transports` including `webrtc`; handle `SessionPlan`, `Signal`, `NewPeer` |
-| Host topology | v3 | `session.default_topology` / `session.game_topology_mappings` set to `host`; `session.enable_webrtc` and/or `session.enable_direct` | `Authenticate` with `supported_topologies` including `host`; `supported_transports` with `webrtc` and/or `direct`; handle `SessionPlan` (+ `Signal` / `NewPeer` for WebRTC) |
+| Classified JSON delivery | v3, per recipient | none; queue behavior is tuned by `websocket.send_queue_capacity`, `websocket.control_queue_capacity`, `websocket.slow_consumer_timeout_ms`, and `websocket.max_sojourn_ms` | Send well-formed `GameData.class` / `key`; handle `DeliveryReport`, stamped `epoch` / `seq`, lifecycle overtaking, and reconnect baselines. Does **not** require an all-members-v3 room upgrade; v2 recipients remain reliable FIFO |
+| Delivery diagnostics | v3 | `websocket.delivery_stats_interval_secs` enables periodic `RelayStats` and counter-only `DeliveryReport` snapshots; exact gap reports are always event-driven | Treat `RelayStats` and counters as diagnostics only; authorize a hole from the union of prior exact ranges (at most 256 ranges per report) |
+| Mesh topology | v3 | `session.default_topology` / `session.game_topology_mappings` set to `mesh`; `session.enable_webrtc` (default `true`) | `Authenticate` with `supported_topologies` including `mesh` and `supported_transports` including `webrtc`; replace peer state from each `SessionPlan`; exchange `Signal` |
+| Host topology | v3 | `session.default_topology` / `session.game_topology_mappings` set to `host`; `session.enable_webrtc` and/or `session.enable_direct` | `Authenticate` with `supported_topologies` including `host`; `supported_transports` with `webrtc` and/or `direct`; replace peer state from each `SessionPlan` (+ `Signal` for WebRTC) |
 | Direct transport | v3 | `session.enable_direct` (default `true`); requires a non-`relay` desired topology (`host`) | `Authenticate` with `supported_transports` including `direct`; handle `SessionPlan`; establish direct host/client path |
-| WebRTC transport | v3 | `session.enable_webrtc` (default `true`) | `Authenticate` with `supported_transports` including `webrtc`; handle `SessionPlan`; exchange `Signal` (`Offer` / `Answer` / `IceCandidate`); handle `NewPeer` |
+| WebRTC transport | v3 | `session.enable_webrtc` (default `true`) | `Authenticate` with `supported_transports` including `webrtc`; replace peer state from each `SessionPlan`; exchange `Signal` (`Offer` / `Answer` / `IceCandidate`) |
 | TURN / ICE | v3 | STUN via `turn.stun_urls`; ephemeral TURN via `turn.enabled` + `turn.static_auth_secret` + `turn.urls` (+ `turn.credential_ttl_secs`); static servers via `session.ice_servers` | Apply `ice_servers` from `SessionPlan` (and pre-gather) when establishing WebRTC |
 | ICE pre-gather | v3 | `session.enable_ice_pregather` (default `true`) **and** `session.enable_webrtc`; non-relay desired topology; non-`Finalized` room | Negotiate `webrtc` transport + the game's desired topology; read optional `ice_servers` on `RoomJoined` / `Reconnected`; prefer the latest set (`SessionPlan` supersedes) |
-| Metrics | both | `/metrics` and `/metrics/prom` always exposed; protect with `security.require_metrics_auth` + `security.metrics_auth_token` | None (scrape the HTTP endpoint; `TransportStatus` reports feed v3 transport counters) |
+| Metrics | both | `/metrics` and `/metrics/prom` always exposed; protect with `security.require_metrics_auth` + `security.metrics_auth_token` | Scrape `metricsSnapshot.connections.delivery_by_class` or `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`; `TransportStatus` reports feed v3 transport counters |
 | Batching | both | `websocket.enable_batching` (default `true`); `websocket.batch_size`, `websocket.batch_interval_ms` | None (transparent to clients) |
 | TLS | both | `security.transport.tls.enabled` + `security.transport.tls.certificate_path` + `security.transport.tls.private_key_path` (optional `client_ca_cert_path`, `client_auth`) | Connect over `wss://`; present a client cert if `client_auth` requires it |
 | Token binding | both | `security.transport.token_binding.enabled` (+ `required`, `require_client_fingerprint`, `subprotocol`, `scheme`) | Negotiate the token-binding subprotocol; send token-bound frames (and an mTLS fingerprint if required) |
@@ -35,9 +37,10 @@ additionally require the all-members-v3 invariant for any room-wide upgrade (see
 - **`desired` topology is a ceiling.** `session.default_topology` (and per-game `session.game_topology_mappings`)
   set the richest plan a game may select. The server still falls back down the ladder, and ultimately to the
   relay floor, whenever a richer rung is disabled or not supported by every member.
-- **All-members-v3 gate.** Every v3 upgrade row above additionally requires that _every_ room member negotiated
-  v3 and supports the chosen topology and transport; otherwise the room stays on the relay floor and emits no
-  `SessionPlan`.
+- **All-members-v3 gate.** Every room-wide topology/transport upgrade row above requires that _every_ room member
+  negotiated v3 and supports the chosen topology and transport; otherwise the room stays on the relay floor and
+  sends each v3 member an explicit no-peer `relay`/`relay` `SessionPlan`. V2
+  members receive no plan. Classified delivery is independently selected for each recipient.
 - **TURN is self-hosted only.** `turn.static_auth_secret` is the coturn `--static-auth-secret`; it is
   server-only and never sent to clients — only short-lived per-player username/credential pairs derived from it
   reach a client.

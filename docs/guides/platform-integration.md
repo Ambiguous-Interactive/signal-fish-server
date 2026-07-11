@@ -40,7 +40,7 @@ contract.
 - **Two data channels per peer.** The recommended game-traffic layout is one **reliable + ordered** channel
   (commands, chat, critical events) and one **unreliable + unordered** channel (`{ordered: false,
   maxRetransmits: 0}`) for movement and frequently-overwritten state. This layout interoperates browser ↔ native.
-- **Glare is resolved statelessly.** The `SessionPlan` (and late-join `NewPeer`) tells each side whether it
+- **Glare is resolved statelessly.** The `SessionPlan` tells each side whether it
   `initiate`s the offer to a given peer, so there is no perfect-negotiation dance. The client just obeys the flag.
 
 If your platform can open a `wss://` WebSocket and run a DTLS+SCTP WebRTC data channel, it can be a full v3 client.
@@ -71,7 +71,8 @@ denominator that every other platform must interoperate with.
   to 3, but advertising it explicitly is good practice. Send `Authenticate` with `protocol_version: 3`,
   `supported_transports: ["relay", "webrtc"]`, and `supported_topologies` matching your game (`["relay", "mesh"]`
   or `["relay", "host"]`).
-- **Handshake.** On `SessionPlan` (or `NewPeer`), create an `RTCPeerConnection` per peer using the plan's
+- **Handshake.** On each `SessionPlan`, reconcile the current peer set, create an `RTCPeerConnection` per peer using
+  the plan's
   `ice_servers`. For each peer where `initiate` is true, `createOffer()`, set it locally, and send
   `Signal {to, signal: {Offer: pc.localDescription.sdp}}`. On an incoming `Offer`, set it remotely, `createAnswer()`,
   and reply with `{Answer: ...}`. Forward each `onicecandidate` as `{IceCandidate: JSON.stringify(candidate)}` and

@@ -22,6 +22,12 @@ of the codes documented below. The `error_code` field is optional in
 some message types, but when present it is always a `SCREAMING_SNAKE_CASE`
 string.
 
+For v3 delivery gaps, `Error` is not the accounting record. An unsupported
+payload is preceded by an exact `DeliveryReport` range; that prior report is
+what authorizes the missing sequence. On a congested connection a final error
+can be lost, so WebSocket close codes such as `4002 slow_consumer` are
+authoritative.
+
 ### Example Error Message
 
 ```json
@@ -71,10 +77,10 @@ establishment.
 | `MISSING_APP_ID` | Application ID is required but was not provided in the request. |
 | `AUTHENTICATION_TIMEOUT` | Authentication took too long to complete. |
 | `CONNECTION_IDLE_TIMEOUT` | The connection was closed because no messages were received within the idle timeout (`websocket.idle_timeout_secs`). Send periodic `Ping` messages to keep the connection alive. |
-| `SLOW_CONSUMER` | The connection could not keep up with the messages sent to it -- its outbound queue stayed full past `websocket.slow_consumer_timeout_ms` -- so the server closed it instead of silently dropping data. Drain messages faster (or reconnect) and consider pacing senders. |
+| `SLOW_CONSUMER` | The delivery contract failed closed: reliable queue capacity timed out, the oldest outbound item/write exceeded `websocket.max_sojourn_ms`, or the server could not preserve exact report/control ordering. The best-effort error is followed by authoritative close code `4002 slow_consumer`. |
 | `ACTIVITY_TIMEOUT` | The server's activity reaper (`server.ping_timeout`) evicted the connection because no messages of any kind were received within the window. Distinct from `CONNECTION_IDLE_TIMEOUT` (the socket-level `websocket.idle_timeout_secs` close). Send periodic `Ping` messages (or any traffic) to stay connected. |
 | `SDK_VERSION_UNSUPPORTED` | The SDK version is no longer supported. Upgrade to the latest version. |
-| `UNSUPPORTED_GAME_DATA_FORMAT` | The requested game data format is not supported by this server. |
+| `UNSUPPORTED_GAME_DATA_FORMAT` | A payload could not be represented in the recipient's negotiated format. For v3, an exact `DeliveryReport` gap with reason `unsupported_format` is written first; this supplemental error is best effort, and a failed error write disconnects without exposing a successor. |
 
 ### Validation Errors (2xxx)
 
@@ -89,6 +95,7 @@ violations.
 | `INVALID_PLAYER_NAME` | The player name is invalid. Must be non-empty and meet length requirements. |
 | `INVALID_MAX_PLAYERS` | The maximum player count is invalid. Must be a positive number within limits. |
 | `MESSAGE_TOO_LARGE` | The message size exceeds the maximum allowed limit. |
+| `INVALID_DELIVERY_CLASS` | A well-typed delivery class/key pairing is illegal: `latest` requires a `u32` key; reliable/default and volatile forbid a key; connections below v3 must omit both fields. Malformed metadata is `INVALID_INPUT` instead. |
 
 ### Room Errors (3xxx)
 
@@ -269,6 +276,18 @@ Check that:
 - `room_code` follows the expected format
 - `max_players` is a positive number within allowed limits
 - The overall message size does not exceed the server's limit
+- Delivery metadata uses a known class token, a non-null value, and a `u32` key
+  when present
+
+### Invalid delivery class (`INVALID_DELIVERY_CLASS`)
+
+Delivery metadata is valid only on negotiated-v3 JSON `GameData`. Use no key
+with an omitted or `reliable` class, a required `u32` key with `latest`, or no
+key with `volatile`. Raw binary frames and pre-v3 messages cannot carry delivery
+metadata. A recognized, well-typed but illegal pairing reaches
+`INVALID_DELIVERY_CLASS`; an unknown class token, wrong type, out-of-range key,
+or explicit `null` fails decoding as `INVALID_INPUT`. The invalid message is
+not relayed.
 
 ### Authentication failures (`UNAUTHORIZED`, `INVALID_APP_ID`)
 
