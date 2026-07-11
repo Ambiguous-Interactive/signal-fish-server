@@ -1011,12 +1011,13 @@ pub(crate) fn record_queue_outcome(
     connection_stats: Option<&Arc<crate::metrics::ConnectionDeliveryStats>>,
     outcome: QueueEnqueueOutcome,
 ) -> DeliveryOutcome {
-    if outcome.losses > 0 {
-        metrics.add_websocket_messages_dropped(outcome.losses);
+    if let Some(losses) = std::num::NonZeroU64::new(outcome.losses) {
+        let losses = losses.get();
+        metrics.add_websocket_messages_dropped(losses);
         if let Some(stats) = connection_stats {
             stats
                 .dropped_for_you
-                .fetch_add(outcome.losses, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(losses, std::sync::atomic::Ordering::Relaxed);
         }
     }
     if outcome.enqueued {
@@ -1426,7 +1427,8 @@ pub struct MembershipUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::ServerMetrics;
+    use crate::metrics::{ConnectionDeliveryStats, ServerMetrics};
+    use crate::protocol::{DeliveryClass, GameDataEncoding, LobbyState, SpectatorJoinedPayload};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -1450,6 +1452,51 @@ mod tests {
 
     fn test_player() -> PlayerId {
         PlayerId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E57ED)
+    }
+
+    fn game_data_message(
+        seq: Option<u64>,
+        epoch: Option<u32>,
+        class: Option<DeliveryClass>,
+        key: Option<u32>,
+    ) -> Arc<ServerMessage> {
+        Arc::new(ServerMessage::GameData {
+            from_player: test_player(),
+            data: serde_json::json!({"state": 1}),
+            seq,
+            epoch,
+            class,
+            key,
+        })
+    }
+
+    fn binary_game_data_message(seq: Option<u64>, epoch: Option<u32>) -> Arc<ServerMessage> {
+        Arc::new(ServerMessage::GameDataBinary {
+            from_player: test_player(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: bytes::Bytes::from_static(b"payload"),
+            seq,
+            epoch,
+        })
+    }
+
+    #[test]
+    fn room_recipient_messages_maps_offset_phases_exactly() {
+        let messages = vec![test_message(), Arc::new(ServerMessage::RoomLeft)];
+        let batch = RoomRecipientMessages::from_first_phase(test_player(), 2, messages.clone());
+
+        assert_eq!(batch.phase_count(), 4);
+        for (phase, expected_index) in [(0, None), (1, None), (2, Some(0)), (3, Some(1)), (4, None)]
+        {
+            let actual = batch.message_in_phase(phase);
+            match expected_index {
+                Some(index) => assert!(
+                    actual.is_some_and(|message| Arc::ptr_eq(message, &messages[index])),
+                    "phase {phase} must map to message {index}"
+                ),
+                None => assert!(actual.is_none(), "phase {phase} must be outside the batch"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -1543,6 +1590,7 @@ mod tests {
 
     struct FallbackCoordinator {
         room_events: Arc<RoomEventSequencer>,
+        routed_player_ids: Option<Vec<PlayerId>>,
         sends: Mutex<Vec<(PlayerId, ServerMessage)>>,
         broadcasts_except: Mutex<Vec<(RoomId, PlayerId, ServerMessage)>>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
@@ -1554,6 +1602,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 room_events: Arc::new(RoomEventSequencer::default()),
+                routed_player_ids: None,
                 sends: Mutex::default(),
                 broadcasts_except: Mutex::default(),
                 registrations: Mutex::default(),
@@ -1587,6 +1636,13 @@ mod tests {
                 .await
                 .push((*player_id, (*message).clone()));
             Ok(())
+        }
+
+        async fn routed_player_ids(
+            &self,
+            _room_id: &RoomId,
+        ) -> anyhow::Result<Option<Vec<PlayerId>>> {
+            Ok(self.routed_player_ids.clone())
         }
 
         async fn try_send_to_player(
@@ -1863,15 +1919,279 @@ mod tests {
     }
 
     #[test]
-    fn classified_sender_identity_includes_delivery_generation() {
+    fn sender_identity_includes_channel_kind_and_delivery_generation() {
+        let (legacy_sender, _legacy_receiver) = tokio::sync::mpsc::channel(1);
+        let legacy = DeliverySender::from(legacy_sender);
+        let same_legacy = legacy.clone();
+        let (other_legacy_sender, _other_legacy_receiver) = tokio::sync::mpsc::channel(1);
+        let other_legacy = DeliverySender::from(other_legacy_sender);
+
+        assert!(legacy.same_channel(&same_legacy));
+        assert!(!legacy.same_channel(&other_legacy));
+
         let (sender, _receiver) = outbound_queue::channel(1, 1);
         let generation_zero = DeliverySender::classified(sender);
         let same_generation = generation_zero.clone();
         let generation_one = generation_zero.next_generation();
+        let (other_sender, _other_receiver) = outbound_queue::channel(1, 1);
+        let other_classified = DeliverySender::classified(other_sender);
 
         assert!(generation_zero.same_channel(&same_generation));
         assert!(!generation_zero.same_channel(&generation_one));
         assert!(generation_zero.same_channel(&generation_one.previous_generation()));
+        assert!(!generation_zero.same_channel(&other_classified));
+        assert!(!legacy.same_channel(&generation_zero));
+    }
+
+    #[test]
+    fn classified_sender_forwards_negotiated_game_data_format() {
+        let (sender, receiver) = outbound_queue::channel(1, 1);
+        let sender = DeliverySender::classified(sender);
+
+        sender.set_game_data_format(GameDataEncoding::MessagePack);
+
+        assert_eq!(receiver.game_data_format(), GameDataEncoding::MessagePack);
+    }
+
+    #[test]
+    fn outbound_classification_effective_class_respects_sender_mode() {
+        for (context, protocol_version, message, expected) in [
+            (
+                "legacy lossy request",
+                None,
+                game_data_message(None, None, Some(DeliveryClass::Latest), Some(7)),
+                Some(DeliveryClass::Reliable),
+            ),
+            (
+                "v2 lossy request",
+                Some(2),
+                game_data_message(None, None, Some(DeliveryClass::Volatile), None),
+                Some(DeliveryClass::Reliable),
+            ),
+            (
+                "v3 latest request",
+                Some(3),
+                game_data_message(None, None, Some(DeliveryClass::Latest), Some(7)),
+                Some(DeliveryClass::Latest),
+            ),
+            (
+                "v3 binary data",
+                Some(3),
+                binary_game_data_message(None, None),
+                Some(DeliveryClass::Reliable),
+            ),
+            ("non-data control", Some(3), test_message(), None),
+        ] {
+            let sender = if let Some(version) = protocol_version {
+                let (sender, _receiver) = outbound_queue::channel(1, 1);
+                let sender = DeliverySender::classified(sender);
+                sender.set_protocol_version(version);
+                sender
+            } else {
+                let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+                DeliverySender::from(sender)
+            };
+
+            assert_eq!(
+                sender.effective_data_class(message.as_ref()),
+                expected,
+                "{context}"
+            );
+        }
+    }
+
+    #[test]
+    fn outbound_classification_requires_complete_valid_metadata() {
+        #[derive(Debug)]
+        enum ExpectedClassification {
+            Stamped(DataDeliveryMetadata),
+            Unstamped,
+            Rejected,
+        }
+
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5702);
+        let stamped_json = DataDeliveryMetadata {
+            class: DeliveryClass::Latest,
+            key: Some(9),
+            from_player: test_player(),
+            room_id,
+            epoch: 3,
+            seq: 11,
+        };
+        let stamped_binary = DataDeliveryMetadata {
+            class: DeliveryClass::Reliable,
+            key: None,
+            from_player: test_player(),
+            room_id,
+            epoch: 4,
+            seq: 12,
+        };
+        let cases = [
+            (
+                "stamped JSON",
+                game_data_message(Some(11), Some(3), Some(DeliveryClass::Latest), Some(9)),
+                Some(room_id),
+                ExpectedClassification::Stamped(stamped_json),
+            ),
+            (
+                "stamped binary",
+                binary_game_data_message(Some(12), Some(4)),
+                Some(room_id),
+                ExpectedClassification::Stamped(stamped_binary),
+            ),
+            (
+                "unstamped reliable",
+                game_data_message(None, None, None, None),
+                None,
+                ExpectedClassification::Unstamped,
+            ),
+            (
+                "unstamped latest without key",
+                game_data_message(None, None, Some(DeliveryClass::Latest), None),
+                None,
+                ExpectedClassification::Rejected,
+            ),
+            (
+                "unstamped reliable with key",
+                game_data_message(None, None, Some(DeliveryClass::Reliable), Some(9)),
+                None,
+                ExpectedClassification::Rejected,
+            ),
+            (
+                "partial stamp",
+                game_data_message(Some(11), None, None, None),
+                Some(room_id),
+                ExpectedClassification::Rejected,
+            ),
+            (
+                "stamped without room",
+                game_data_message(Some(11), Some(3), None, None),
+                None,
+                ExpectedClassification::Rejected,
+            ),
+        ];
+
+        for (context, message, room_id, expected) in cases {
+            let original = Arc::clone(&message);
+            match (classify_outbound_data(message, room_id), expected) {
+                (Ok(data), ExpectedClassification::Stamped(metadata)) => {
+                    assert!(Arc::ptr_eq(&data.message, &original), "{context}");
+                    assert_eq!(data.metadata, Some(metadata), "{context}");
+                }
+                (Ok(data), ExpectedClassification::Unstamped) => {
+                    assert!(Arc::ptr_eq(&data.message, &original), "{context}");
+                    assert_eq!(data.metadata, None, "{context}");
+                }
+                (Err(returned), ExpectedClassification::Rejected) => {
+                    assert!(Arc::ptr_eq(&returned, &original), "{context}");
+                }
+                (actual, expected) => {
+                    panic!("{context}: got {actual:?}, expected {expected:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn outbound_classification_distinguishes_delivery_transitions() {
+        for (context, message, expected) in [
+            ("room departure", ServerMessage::RoomLeft, true),
+            ("ordinary control", ServerMessage::Pong, false),
+        ] {
+            assert_eq!(is_delivery_transition(&message), expected, "{context}");
+        }
+    }
+
+    #[test]
+    fn queue_outcome_accounting_distinguishes_enqueued_loss_and_cancellation() {
+        for (context, outcome, expected, enqueued, canceled, losses, sent) in [
+            (
+                "delivered without loss",
+                QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 0,
+                },
+                DeliveryOutcome::Delivered,
+                1,
+                0,
+                0,
+                1,
+            ),
+            (
+                "delivered after replacement",
+                QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 2,
+                },
+                DeliveryOutcome::Delivered,
+                1,
+                0,
+                2,
+                1,
+            ),
+            (
+                "accounted drop",
+                QueueEnqueueOutcome {
+                    enqueued: false,
+                    losses: 2,
+                },
+                DeliveryOutcome::AccountedDrop,
+                0,
+                0,
+                2,
+                0,
+            ),
+            (
+                "canceled without loss",
+                QueueEnqueueOutcome {
+                    enqueued: false,
+                    losses: 0,
+                },
+                DeliveryOutcome::Canceled,
+                0,
+                1,
+                0,
+                0,
+            ),
+        ] {
+            let metrics = ServerMetrics::new();
+            let connection_stats = Arc::new(ConnectionDeliveryStats::default());
+
+            assert_eq!(
+                record_queue_outcome(&metrics, Some(&connection_stats), outcome),
+                expected,
+                "{context}"
+            );
+            assert_eq!(
+                metrics
+                    .websocket_deliveries_enqueued
+                    .load(Ordering::Relaxed),
+                enqueued,
+                "{context}: enqueued"
+            );
+            assert_eq!(
+                metrics
+                    .websocket_deliveries_canceled
+                    .load(Ordering::Relaxed),
+                canceled,
+                "{context}: canceled"
+            );
+            assert_eq!(
+                metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                losses,
+                "{context}: server losses"
+            );
+            assert_eq!(
+                connection_stats.sent_to_you.load(Ordering::Relaxed),
+                sent,
+                "{context}: connection sends"
+            );
+            assert_eq!(
+                connection_stats.dropped_for_you.load(Ordering::Relaxed),
+                losses,
+                "{context}: connection losses"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1900,6 +2220,86 @@ mod tests {
             );
             if expected_sent {
                 assert_eq!(sends[0].0, player, "{context}: sent to wrong player");
+                assert!(
+                    matches!(sends[0].1, ServerMessage::Pong),
+                    "{context}: sent unexpected message: {:?}",
+                    sends[0].1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_room_send_delegates_when_routing_snapshot_is_unknown() {
+        let coordinator = FallbackCoordinator::default();
+        let room_id = RoomId::from_u128(0x66666666666666666666666666666667);
+        let player_id = PlayerId::from_u128(0x66666666666666666666666666666668);
+
+        assert_eq!(
+            coordinator.routed_player_ids(&room_id).await.unwrap(),
+            None,
+            "the default routing snapshot must remain unknown"
+        );
+        assert!(
+            coordinator
+                .send_to_player_in_room(&player_id, &room_id, test_message())
+                .await
+                .unwrap(),
+            "the default room send must report delegated success"
+        );
+
+        let sends = coordinator.sends.lock().await;
+        assert_eq!(sends.len(), 1, "the default room send must delegate once");
+        assert_eq!(
+            sends[0].0, player_id,
+            "the delegate received the wrong player"
+        );
+        assert!(
+            matches!(sends[0].1, ServerMessage::Pong),
+            "the delegate received an unexpected message: {:?}",
+            sends[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn default_exact_membership_send_accepts_only_equal_sets() {
+        let room_id = RoomId::from_u128(0x66666666666666666666666666666669);
+        let player_id = PlayerId::from_u128(0x6666666666666666666666666666666a);
+        let peer_id = PlayerId::from_u128(0x6666666666666666666666666666666b);
+        let outsider_id = PlayerId::from_u128(0x6666666666666666666666666666666c);
+
+        for (context, expected_members, expected_sent) in [
+            (
+                "same members in different order",
+                vec![peer_id, player_id],
+                true,
+            ),
+            ("different member set", vec![player_id, outsider_id], false),
+        ] {
+            let coordinator = FallbackCoordinator {
+                routed_player_ids: Some(vec![player_id, peer_id]),
+                ..FallbackCoordinator::default()
+            };
+
+            let sent = coordinator
+                .send_to_player_in_room_if_members(
+                    &player_id,
+                    &room_id,
+                    &expected_members,
+                    test_message(),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: membership send failed: {err}"));
+
+            assert_eq!(sent, expected_sent, "{context}: unexpected return value");
+            let sends = coordinator.sends.lock().await;
+            assert_eq!(
+                sends.len(),
+                usize::from(expected_sent),
+                "{context}: unexpected direct-send side effects"
+            );
+            if expected_sent {
+                assert_eq!(sends[0].0, player_id, "{context}: sent to wrong player");
                 assert!(
                     matches!(sends[0].1, ServerMessage::Pong),
                     "{context}: sent unexpected message: {:?}",
@@ -2112,6 +2512,88 @@ mod tests {
             "the fallback must request a slow-consumer close for a full initial queue"
         );
         drop(blocked_rx);
+    }
+
+    #[tokio::test]
+    async fn default_initial_registration_distinguishes_zero_and_positive_losses() {
+        let room_id = RoomId::from_u128(0x33333333333333333333333333333334);
+        let coordinator = FallbackCoordinator::default();
+
+        let (sender, _receiver) = outbound_queue::channel(1, 4);
+        let sender = DeliverySender::classified(sender);
+        sender.set_protocol_version(3);
+        let room_sender = sender.next_generation();
+        let transition = Arc::new(ServerMessage::SpectatorJoined(Box::new(
+            SpectatorJoinedPayload {
+                room_id,
+                room_code: "LOSS01".to_string(),
+                spectator_id: test_player(),
+                game_name: "loss-test".to_string(),
+                current_players: Vec::new(),
+                current_spectators: Vec::new(),
+                lobby_state: LobbyState::Waiting,
+                reason: None,
+            },
+        )));
+        assert_eq!(
+            room_sender
+                .try_send(transition, Some(room_id))
+                .expect("establish the classified room scope"),
+            QueueEnqueueOutcome {
+                enqueued: true,
+                losses: 0,
+            }
+        );
+        assert_eq!(
+            room_sender
+                .try_send(
+                    game_data_message(Some(1), Some(1), Some(DeliveryClass::Reliable), None,),
+                    Some(room_id),
+                )
+                .expect("fill the one-slot data lane"),
+            QueueEnqueueOutcome {
+                enqueued: true,
+                losses: 0,
+            }
+        );
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let accounted = coordinator
+            .register_local_client_with_initial_message(
+                PlayerId::from_u128(0x44444444444444444444444444444445),
+                room_id,
+                ClientDeliveryHandle {
+                    sender: room_sender,
+                    close,
+                },
+                Box::new(|| {
+                    game_data_message(Some(2), Some(1), Some(DeliveryClass::Volatile), None)
+                }),
+            )
+            .await
+            .expect("a causally reported lossy omission is a valid outcome");
+        assert_eq!(accounted, DeliveryOutcome::AccountedDrop);
+
+        let (sender, _receiver) = outbound_queue::channel(1, 1);
+        let stale_sender = DeliverySender::classified(sender);
+        stale_sender.set_protocol_version(3);
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let canceled = coordinator
+            .register_local_client_with_initial_message(
+                PlayerId::from_u128(0x55555555555555555555555555555556),
+                room_id,
+                ClientDeliveryHandle {
+                    sender: stale_sender,
+                    close,
+                },
+                Box::new(test_message),
+            )
+            .await
+            .expect("a stale zero-loss scope is a valid cancellation");
+        assert_eq!(canceled, DeliveryOutcome::Canceled);
+        assert!(
+            coordinator.registrations.lock().await.is_empty(),
+            "neither an accounted drop nor a cancellation publishes the route"
+        );
     }
 
     /// (a) Fast path: an attempt against a queue with room is enqueued

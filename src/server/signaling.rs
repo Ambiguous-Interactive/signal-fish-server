@@ -51,6 +51,21 @@ pub(crate) fn canonical_signal_len(signal: &serde_json::Value) -> usize {
 }
 
 impl EnhancedGameServer {
+    /// Revalidate a signal target after the room publication gate. Production
+    /// coordinators provide the routed-member snapshot; lightweight
+    /// coordinators fall back to the connection's current room assignment.
+    pub(super) async fn signal_target_is_routed_after_gate(
+        &self,
+        routed_members: Option<&HashSet<PlayerId>>,
+        target: &PlayerId,
+        room_id: RoomId,
+    ) -> bool {
+        match routed_members {
+            Some(members) => members.contains(target),
+            None => self.get_client_room(target).await == Some(room_id),
+        }
+    }
+
     /// Relay an opaque WebRTC signal from `from` to `to`, enforcing the P2
     /// security invariants (payload size cap, same room, negotiated WebRTC,
     /// rate limit, v3 target).
@@ -230,10 +245,9 @@ impl EnhancedGameServer {
             .await;
             return;
         }
-        let target_is_routed = match &routed_members {
-            Some(members) => members.contains(&to),
-            None => self.get_client_room(&to).await == Some(from_room),
-        };
+        let target_is_routed = self
+            .signal_target_is_routed_after_gate(routed_members.as_ref(), &to, from_room)
+            .await;
         let target_incarnation_matches = self
             .connection_manager
             .current_relay_stamp_in_room(&to, &from_room)
@@ -354,10 +368,9 @@ impl EnhancedGameServer {
         let Some(lifecycle) = self.connection_manager.client_lifecycle(&player_id) else {
             return false;
         };
-        if lifecycle.player_id() != player_id
-            || !self
-                .connection_manager
-                .lifecycle_matches(&player_id, &lifecycle)
+        if !self
+            .connection_manager
+            .lifecycle_matches(&player_id, &lifecycle)
         {
             return false;
         }

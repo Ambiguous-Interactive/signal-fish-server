@@ -1139,6 +1139,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_coordinator_uses_unknown_routing_default() {
+        let coordinator = TestCoordinator::default();
+
+        assert_eq!(
+            coordinator
+                .routed_player_ids(&RoomId::new_v4())
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn register_client_enforces_ip_limits_and_releases_on_remove() {
         let manager = make_manager(1);
         let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();

@@ -27,7 +27,8 @@ use tokio::time::{timeout, Duration};
 
 use super::session_policy::{
     choose_session_plan, desired_topology_for, elect_host, ice_pregather_eligible, is_valid_pair,
-    ActiveSessionPlan, SessionMember, SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
+    membership_session_decision, ActiveSessionPlan, SessionMember, SessionPlanDecision,
+    RELAY_FLOOR, UPGRADE_LADDER,
 };
 
 const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
@@ -1131,6 +1132,80 @@ fn host_invalid_flags_absent_and_unpairable_hosts() {
     assert!(!mesh.host_invalid(&[]));
 }
 
+#[test]
+fn membership_decision_preserves_or_replaces_host_by_session_path() {
+    let incumbent = PlayerId::new_v4();
+    let departed = PlayerId::new_v4();
+    let early = PlayerId::new_v4();
+    let authority = PlayerId::new_v4();
+
+    let host_plan = |host| ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::WebRtc,
+        host: Some(host),
+    };
+    let mut early_member = v3_full(early, "Early");
+    early_member.joined_at = base_time();
+    let mut authority_member = v3_full(authority, "Authority");
+    authority_member.joined_at = base_time() + chrono::Duration::seconds(1);
+
+    let cases = vec![
+        (
+            "valid incumbent host remains sticky",
+            host_plan(incumbent),
+            vec![v3_full(incumbent, "Incumbent"), authority_member.clone()],
+            Some(incumbent),
+            false,
+        ),
+        (
+            "invalid host is replaced by capable authority",
+            host_plan(departed),
+            vec![early_member.clone(), authority_member.clone()],
+            Some(authority),
+            true,
+        ),
+        (
+            "incapable authority cannot displace capable fallback",
+            host_plan(departed),
+            vec![
+                early_member.clone(),
+                relay_only_member(authority, "Authority"),
+            ],
+            Some(early),
+            true,
+        ),
+        (
+            "non-host topology remains hostless",
+            ActiveSessionPlan {
+                topology: Topology::Mesh,
+                transport: Transport::WebRtc,
+                host: None,
+            },
+            vec![early_member, authority_member],
+            None,
+            false,
+        ),
+    ];
+
+    for (name, stored, members, expected_host, expected_replan) in cases {
+        let resolved = membership_session_decision(Some(stored), Some(authority), members);
+        let expected_update = expected_replan
+            .then(|| Some(host_plan(expected_host.expect("a replan elects a host"))));
+        assert_eq!(
+            resolved.decision.host, expected_host,
+            "{name}: published host identity"
+        );
+        assert_eq!(
+            resolved.active_plan_update, expected_update,
+            "{name}: persisted sticky-plan update"
+        );
+        assert_eq!(
+            resolved.is_replan, expected_replan,
+            "{name}: replan classification"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ice_servers gating.
 // ---------------------------------------------------------------------------
@@ -1331,6 +1406,84 @@ async fn unpublish_room_member(server: &EnhancedGameServer, player_id: &PlayerId
         .register_local_client(*player_id, None, delivery)
         .await
         .expect("fixture route removal succeeds");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn start_game_builder_gates_each_plan_by_that_exact_members_version() {
+    let server = create_server_with_session(mesh_config()).await;
+    let (v3_member, _v3_rx) = register_client(&server).await;
+    let (v2_member, _v2_rx) = register_client(&server).await;
+    server.set_client_protocol(&v3_member, v3_webrtc());
+
+    let room_id = RoomId::new_v4();
+    let finalized = finalized(
+        "mesh-game",
+        vec![
+            player_info(v3_member, "V3", false),
+            player_info(v2_member, "V2", false),
+        ],
+        None,
+    );
+    let publication = (server.start_game_publication_builder(room_id))(
+        &finalized,
+        Arc::new(ServerMessage::GameStarting {
+            peer_connections: Vec::new(),
+        }),
+    );
+
+    let message_counts: Vec<_> = publication
+        .recipient_messages
+        .iter()
+        .map(|batch| (batch.player_id, batch.messages.len()))
+        .collect();
+    assert_eq!(
+        message_counts,
+        vec![(v3_member, 2), (v2_member, 1)],
+        "only the exact v3 recipient gets GameStarting plus SessionPlan"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn start_game_builder_accumulates_turn_credentials_for_every_recipient() {
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let mut members = Vec::new();
+    for name in ["A", "B"] {
+        let (id, _rx) = register_client(&server).await;
+        server.set_client_protocol(&id, v3_webrtc());
+        members.push(player_info(id, name, false));
+    }
+
+    let room_id = RoomId::new_v4();
+    let finalized = finalized("mesh-game", members, None);
+    let before = selection_counters(&server);
+    let publication = (server.start_game_publication_builder(room_id))(
+        &finalized,
+        Arc::new(ServerMessage::GameStarting {
+            peer_connections: Vec::new(),
+        }),
+    );
+
+    assert_eq!(publication.recipient_messages.len(), 2);
+    assert_eq!(
+        selection_counters(&server),
+        before,
+        "metrics remain deferred until GameStarting commits"
+    );
+
+    (publication.after_game_starting)();
+    let after = selection_counters(&server);
+    assert_eq!(
+        after.turn_credentials_issued,
+        before.turn_credentials_issued + 2,
+        "the deferred hook accumulates one mint from every recipient"
+    );
+    assert_eq!(
+        after.session_plans_emitted,
+        before.session_plans_emitted + 1
+    );
 }
 
 #[tokio::test]

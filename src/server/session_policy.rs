@@ -217,9 +217,7 @@ pub(crate) fn membership_session_decision(
         .filter(|member| stored.supported_by(member))
         .cloned()
         .collect();
-    let electable_authority =
-        authority.filter(|id| electable.iter().any(|member| member.player_id == *id));
-    if let Some(host) = elect_host(electable_authority, &electable) {
+    if let Some(host) = elect_host(authority, &electable) {
         let updated = ActiveSessionPlan {
             host: Some(host),
             ..stored

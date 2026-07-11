@@ -396,6 +396,197 @@ async fn finalized_join_uses_delivered_baseline_when_refresh_fails() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn finalized_join_rejects_a_refresh_that_lost_the_joiner() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let mut fixture = setup_finalized_join_publication(&server).await;
+    let incumbent = fixture
+        .room
+        .players
+        .keys()
+        .copied()
+        .find(|player_id| *player_id != fixture.joiner)
+        .expect("fixture has one incumbent");
+    assert!(server
+        .database
+        .remove_player_from_room(&fixture.room.id, &fixture.joiner)
+        .await
+        .expect("remove joiner from refreshed snapshot")
+        .is_some());
+
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(
+                &fixture.room,
+                fixture.joiner,
+                fixture.joined_player.clone(),
+                guard,
+            )
+            .await,
+        "the delivered baseline remains authoritative when refresh loses the actor"
+    );
+
+    match recv(&mut fixture.joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].player_id, incumbent);
+        }
+        other => panic!("joiner expected its baseline SessionPlan, got {other:?}"),
+    }
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { player } if player.id == fixture.joiner
+    ));
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert!(server.connection_manager.has_client(&fixture.joiner));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn finalized_join_uses_a_valid_newer_membership_refresh() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let mut fixture = setup_finalized_join_publication(&server).await;
+    let incumbent = fixture
+        .room
+        .players
+        .keys()
+        .copied()
+        .find(|player_id| *player_id != fixture.joiner)
+        .expect("fixture has one incumbent");
+    assert!(server
+        .database
+        .remove_player_from_room(&fixture.room.id, &incumbent)
+        .await
+        .expect("remove stale incumbent")
+        .is_some());
+    server.connection_manager.clear_room_assignment(&incumbent);
+    server
+        .message_coordinator
+        .unregister_local_client(&incumbent)
+        .await
+        .expect("unroute stale incumbent");
+
+    let (replacement, mut replacement_rx) = register_client(&server).await;
+    server.set_client_protocol(&replacement, v3_webrtc());
+    assert!(server
+        .database
+        .add_player_to_room(&fixture.room.id, player_info(replacement, "replacement"),)
+        .await
+        .expect("add replacement incumbent"));
+    server
+        .connection_manager
+        .assign_client_to_room(&replacement, fixture.room.id)
+        .await;
+
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(
+                &fixture.room,
+                fixture.joiner,
+                fixture.joined_player.clone(),
+                guard,
+            )
+            .await
+    );
+
+    match recv(&mut fixture.joiner_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].player_id, replacement);
+        }
+        other => panic!("joiner expected refreshed SessionPlan, got {other:?}"),
+    }
+    assert!(matches!(
+        recv(&mut replacement_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { player } if player.id == fixture.joiner
+    ));
+    match recv(&mut replacement_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers[0].player_id, fixture.joiner);
+        }
+        other => panic!("replacement expected refreshed SessionPlan, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn finalized_join_counts_every_committed_turn_plan_once() {
+    let turn = TurnConfig {
+        enabled: true,
+        static_auth_secret: "super-secret".to_string(),
+        urls: vec![TURN_URL.to_string()],
+        stun_urls: vec![TURN_STUN_URL.to_string()],
+        credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
+    };
+    let server = create_test_server_with_session_and_turn(mesh_session_config(), turn).await;
+    let mut fixture = setup_finalized_join_publication(&server).await;
+    let late_before = server
+        .metrics
+        .session_plans_late_join
+        .load(Ordering::Relaxed);
+    let credentials_before = server
+        .metrics
+        .turn_credentials_issued
+        .load(Ordering::Relaxed);
+
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(
+                &fixture.room,
+                fixture.joiner,
+                fixture.joined_player.clone(),
+                guard,
+            )
+            .await
+    );
+
+    let actor_plan = recv(&mut fixture.joiner_rx).await;
+    assert!(
+        matches!(actor_plan.as_ref(), ServerMessage::SessionPlan(plan)
+        if plan.ice_servers.iter().any(|server| server.username.is_some()))
+    );
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { .. }
+    ));
+    let incumbent_plan = recv(&mut fixture.incumbent_rx).await;
+    assert!(
+        matches!(incumbent_plan.as_ref(), ServerMessage::SessionPlan(plan)
+        if plan.ice_servers.iter().any(|server| server.username.is_some()))
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_plans_late_join
+            .load(Ordering::Relaxed),
+        late_before + 1
+    );
+    assert_eq!(
+        server
+            .metrics
+            .turn_credentials_issued
+            .load(Ordering::Relaxed),
+        credentials_before + 2
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn finalized_v2_join_refreshes_v3_incumbents_without_counting_actor_plan() {
     let server = create_test_server_with_session(mesh_session_config()).await;
     let mut fixture = setup_finalized_join_publication(&server).await;
@@ -518,6 +709,10 @@ async fn finalized_join_transaction_failure_emits_terminal_boundary() {
     assert_eq!(disconnected.player_id, fixture.joiner);
     assert_eq!(disconnected.room_id, fixture.room.id);
     assert!(
+        !disconnected.was_authority,
+        "a failed non-authority join must not gain authority in its reconnect snapshot"
+    );
+    assert!(
         disconnected.player_info.is_some(),
         "pending cleanup/reconnect record retains the complete membership snapshot"
     );
@@ -526,6 +721,49 @@ async fn finalized_join_transaction_failure_emits_terminal_boundary() {
         terminated,
         Err(mpsc::error::TryRecvError::Disconnected)
     ));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn finalized_join_exhausts_a_zero_budget_routing_retry() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let fixture = setup_finalized_join_publication(&server).await;
+    let mut zero_budget_baseline = fixture.room.clone();
+    zero_budget_baseline.players.clear();
+
+    // Keep one routed id out of the database snapshot so every exact-membership
+    // commit reports RoutingChanged. The empty delivered baseline gives the
+    // publication one attempt and exercises the saturating zero boundary.
+    let (ghost, _ghost_rx) = register_client(&server).await;
+    server.set_client_protocol(&ghost, v3_webrtc());
+    server
+        .connection_manager
+        .assign_client_to_room(&ghost, fixture.room.id)
+        .await;
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+
+    let published = timeout(
+        Duration::from_secs(1),
+        server.publish_finalized_join_membership(
+            &zero_budget_baseline,
+            fixture.joiner,
+            fixture.joined_player,
+            guard,
+        ),
+    )
+    .await
+    .expect("exhausted routing retries must terminate instead of spinning");
+    assert!(published, "the lifecycle fallback still publishes");
+    timeout(Duration::from_secs(1), async {
+        while server.connection_manager.has_client(&fixture.joiner) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the failed actor is terminalized after retry exhaustion");
 }
 
 #[tokio::test]
@@ -895,6 +1133,57 @@ async fn signal_delivered_to_same_room_peer_preserving_payload() {
 
     // The sender never receives its own signal echoed back.
     assert_silent(&mut alice_rx).await;
+    assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn signal_from_a_replaced_connection_lifecycle_is_discarded() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room_id = server
+        .get_client_room(&alice)
+        .await
+        .expect("pair is room-routed");
+    let old_lifecycle = server
+        .connection_manager
+        .client_lifecycle(&alice)
+        .expect("sender has a lifecycle");
+    let old_guard = old_lifecycle.lock().await;
+    let lifecycle_refs_before_signal = Arc::strong_count(&old_lifecycle);
+    let signal_task = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            server
+                .handle_signal(&alice, bob, json!({ "Offer": "stale-lifecycle" }))
+                .await;
+        })
+    };
+    timeout(Duration::from_secs(1), async {
+        while Arc::strong_count(&old_lifecycle) <= lifecycle_refs_before_signal {
+            assert!(
+                !signal_task.is_finished(),
+                "signal handler exited before capturing the old lifecycle"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("signal handler must capture the old lifecycle before replacement");
+
+    let (replacement_tx, _replacement_rx) = mpsc::channel(16);
+    server
+        .connection_manager
+        .connect_test_client(alice, replacement_tx, next_addr())
+        .await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server
+        .connection_manager
+        .assign_client_to_room(&alice, room_id)
+        .await;
+    drop(old_guard);
+    signal_task.await.expect("stale signal task must not panic");
+
     assert_silent(&mut bob_rx).await;
 }
 
@@ -1437,6 +1726,31 @@ async fn signal_waiting_on_plan_gate_cannot_cross_target_incarnations() {
         Some(ErrorCode::SignalTargetNotFound)
     );
     assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn signal_target_fallback_requires_the_current_room_assignment() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx, bob, _bob_rx) = webrtc_pair_in_room(&server).await;
+    let signal_room = server
+        .get_client_room(&alice)
+        .await
+        .expect("pair is room-routed");
+
+    for (target_room, expected) in [(signal_room, true), (uuid::Uuid::new_v4(), false)] {
+        server
+            .connection_manager
+            .assign_client_to_room(&bob, target_room)
+            .await;
+        assert_eq!(
+            server
+                .signal_target_is_routed_after_gate(None, &bob, signal_room)
+                .await,
+            expected,
+            "fallback routing must compare the target's post-gate room"
+        );
+    }
 }
 
 #[tokio::test]
