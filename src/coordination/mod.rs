@@ -1567,6 +1567,35 @@ mod tests {
         assert_eq!(*order.lock().await, vec![1, 2]);
     }
 
+    #[tokio::test]
+    async fn dropping_last_room_guard_removes_idle_lane_registry_entry() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+
+        for suffix in 1..=3 {
+            let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5800 + suffix);
+            let guard = sequencer.lock(room_id).await;
+            assert_eq!(
+                sequencer
+                    .lanes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .len(),
+                1,
+                "the active room must own exactly one registry entry"
+            );
+
+            drop(guard);
+            assert!(
+                sequencer
+                    .lanes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_empty(),
+                "dropping the last room owner must remove its idle registry entry"
+            );
+        }
+    }
+
     /// Build one connection's delivery plumbing: a bounded queue plus the
     /// close signal/listener pair, exactly as the WebSocket layer wires it.
     fn delivery_handle(
