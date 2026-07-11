@@ -117,7 +117,31 @@ async fn missing_pong_closes_with_activity_timeout() {
 
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     loop {
-        let frame = tokio::time::timeout_at(deadline, ws.next())
+        let timeout_count = server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if timeout_count == 1 {
+            break;
+        }
+        assert_eq!(timeout_count, 0, "missed Pong was counted more than once");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "stale Pong incorrectly satisfied the server probe"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    // The timeout is now authoritative. Resume the client direction before
+    // reading the close so tungstenite's queued automatic Pong/close response
+    // cannot leave unread bytes in the proxy. Windows turns a socket teardown
+    // with unread bytes into WSAECONNRESET, which can mask an already-forwarded
+    // semantic close frame.
+    proxy.resume(Direction::ClientToServer);
+
+    let close_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let frame = tokio::time::timeout_at(close_deadline, ws.next())
             .await
             .expect("timed out waiting for missed-Pong close")
             .expect("connection ended without a close frame")
