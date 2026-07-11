@@ -30,8 +30,7 @@ use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{ClientMessage, PlayerId, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
-use test_helpers::{create_test_server, create_test_server_with_config};
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server, create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
 use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
@@ -48,23 +47,9 @@ type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 /// convergence). Generous: only a genuine wedge spends it.
 const EVENT_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 /// Connect a websocket client to `addr` — the server directly, or a
@@ -190,7 +175,8 @@ async fn rst_during_relay_heals_room_and_conserves() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
 
     let chaos = async {
@@ -277,6 +263,7 @@ async fn rst_during_relay_heals_room_and_conserves() {
             ],
         )
         .await;
+    running_server.shutdown().await;
 }
 
 /// A consumer drip-fed through a throttled link repeatedly fills the (small)
@@ -306,7 +293,8 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
     server_config.websocket_config.slow_consumer_timeout_ms = 5_000;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
     proxy.throttle(Direction::ServerToClient, Some(DRIP_BYTES_PER_SEC));
 
@@ -404,6 +392,7 @@ async fn drip_fed_consumer_backpressures_without_eviction() {
             &[expectation("Dripped", &[("Sender", total_sent)])],
         )
         .await;
+    running_server.shutdown().await;
 }
 
 /// Connect/relay/kill churn must leak nothing: after eight clients join
@@ -422,7 +411,8 @@ async fn reconnect_churn_leaks_nothing() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
@@ -539,6 +529,7 @@ async fn reconnect_churn_leaks_nothing() {
         .expect("reconnect-churn chaos test exceeded its deadline");
 
     ledger.assert_conformance(&metrics, &expectations).await;
+    running_server.shutdown().await;
 }
 
 /// Count this process's open file descriptors via `/proc/self/fd`. The

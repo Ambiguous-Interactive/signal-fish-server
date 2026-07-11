@@ -9,8 +9,8 @@ use signal_fish_server::websocket::create_router;
 use std::sync::Arc;
 use test_helpers::{
     create_test_server, create_test_server_with_config, test_protocol_config, test_server_config,
+    RunningTestServer,
 };
-use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{expect_no_server_message_within, next_server_message_within};
 
@@ -37,55 +37,38 @@ struct LegacyBinaryGameDataFrame {
 }
 
 /// Helper to create a test server and return its address
-async fn start_test_server() -> std::net::SocketAddr {
+async fn start_test_server() -> RunningTestServer {
     let game_server = create_test_server().await;
     start_server_with_instance(game_server).await
 }
 
-async fn start_test_server_with_config(server_config: ServerConfig) -> std::net::SocketAddr {
+async fn start_test_server_with_config(server_config: ServerConfig) -> RunningTestServer {
     start_test_server_with_config_and_protocol(server_config, test_protocol_config()).await
 }
 
 async fn start_test_server_with_config_and_protocol(
     server_config: ServerConfig,
     protocol_config: signal_fish_server::config::ProtocolConfig,
-) -> std::net::SocketAddr {
+) -> RunningTestServer {
     let game_server = create_test_server_with_config(server_config, protocol_config).await;
     start_server_with_instance(game_server).await
 }
 
-async fn start_server_with_instance(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+async fn start_server_with_instance(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
     // Initialize tracing for debugging
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     // Create enhanced protocol router
-    let enhanced_router = create_router("http://localhost:3000").with_state(game_server);
+    let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
 
     // Combine routers like in main.rs
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router) // New protocol under /v2
         .fallback(|| async { "Use /v2/ws for enhanced protocol" });
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above before the serve
-    // task spawns, so the kernel queues the client's connection until axum
-    // begins accepting — `connect_client` then connects under its own timeout.
-    // A fixed sleep here only added 2s of dead wall-clock to every consumer and
-    // could not actually guarantee readiness; the bound-listener handshake does.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 /// Wall-clock scaling for the timing-sensitive idle-timeout tests below.
@@ -265,7 +248,8 @@ async fn authenticate_for_message_pack(
 
 #[tokio::test]
 async fn test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advertised() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     let auth = ClientMessage::Authenticate {
@@ -328,6 +312,7 @@ async fn test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advert
         }
         other => panic!("expected ProtocolInfo after auth, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 async fn receive_binary_game_data_wire_frame(receiver: &mut WsReceiver) -> Vec<u8> {
@@ -374,7 +359,8 @@ async fn test_websocket_connection_limit_enforced() {
     let mut server_config = test_server_config();
     server_config.max_connections_per_ip = 1;
 
-    let addr = start_test_server_with_config(server_config).await;
+    let running_server = start_test_server_with_config(server_config).await;
+    let addr = running_server.addr();
 
     let (mut sender1, receiver1) = connect_client(addr, "/v2/ws").await;
 
@@ -406,11 +392,13 @@ async fn test_websocket_connection_limit_enforced() {
     // First connection should remain active; close it cleanly
     let _ = sender1.close().await;
     drop(receiver1);
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn test_health_check() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
 
     // Test health endpoint first
     let client = reqwest::Client::new();
@@ -422,6 +410,7 @@ async fn test_health_check() {
     assert_eq!(response.status(), 200);
     let text = response.text().await.unwrap();
     assert_eq!(text, "OK");
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -429,7 +418,8 @@ async fn test_websocket_connection() {
     // Add overall test timeout to prevent infinite hanging
     let test_timeout = tokio::time::Duration::from_secs(30);
     tokio::time::timeout(test_timeout, async {
-        let addr = start_test_server().await;
+        let running_server = start_test_server().await;
+        let addr = running_server.addr();
 
         // First test if we can connect to the health endpoint
         let client = reqwest::Client::new();
@@ -456,6 +446,7 @@ async fn test_websocket_connection() {
             }
             _ => panic!("Expected Pong, got {pong:?}"),
         }
+        running_server.shutdown().await;
     })
     .await
     .expect("Test timed out after 30 seconds");
@@ -463,7 +454,8 @@ async fn test_websocket_connection() {
 
 #[tokio::test]
 async fn test_room_creation_and_joining() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
 
     // Connect two clients
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
@@ -541,6 +533,7 @@ async fn test_room_creation_and_joining() {
         Ok(None) => panic!("Connection closed while waiting for PlayerJoined notification"),
         Err(_) => panic!("Timeout waiting for PlayerJoined notification for player 1"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -549,7 +542,8 @@ async fn test_game_data_broadcasting() {
     // law can be asserted once the broadcast has been observed.
     let game_server = create_test_server().await;
     let metrics = game_server.metrics();
-    let addr = start_server_with_instance(game_server).await;
+    let running_server = start_server_with_instance(game_server).await;
+    let addr = running_server.addr();
 
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
     let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
@@ -618,6 +612,7 @@ async fn test_game_data_broadcasting() {
     // The relayed payload has been observed end to end, so every delivery in
     // this test has resolved: the conservation counters must balance.
     websocket_test_helpers::assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -628,7 +623,8 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
         let game_server =
             create_test_server_with_config(test_server_config(), test_protocol_config()).await;
         let metrics = game_server.metrics();
-        let addr = start_server_with_instance(game_server).await;
+        let running_server = start_server_with_instance(game_server).await;
+        let addr = running_server.addr();
 
         let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
         let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
@@ -696,12 +692,14 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
         }
 
         websocket_test_helpers::assert_message_conservation(&metrics).await;
+        running_server.shutdown().await;
     }
 }
 
 #[tokio::test]
 async fn test_room_capacity_limit() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
 
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
     let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
@@ -752,11 +750,13 @@ async fn test_room_capacity_limit() {
         }
         _ => panic!("Expected RoomJoinFailed, got {response3:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn test_validation_errors() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Test invalid room code
@@ -778,6 +778,7 @@ async fn test_validation_errors() {
         }
         _ => panic!("Expected RoomJoinFailed for invalid room code, got {response:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -792,7 +793,9 @@ async fn test_e2e_custom_protocol_limits() {
         ..signal_fish_server::config::ProtocolConfig::default()
     };
 
-    let addr = start_test_server_with_config_and_protocol(server_config, protocol_config).await;
+    let running_server =
+        start_test_server_with_config_and_protocol(server_config, protocol_config).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Test 1: Game name exceeding custom limit should fail
@@ -896,6 +899,7 @@ async fn test_e2e_custom_protocol_limits() {
         }
         _ => panic!("Expected successful room join with valid parameters, got {response:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -943,7 +947,7 @@ async fn test_e2e_config_with_file_and_env() {
     assert_eq!(loaded_config.server.ping_timeout, 30); // Default value
 
     // Test that the loaded config affects server behavior
-    let addr = start_test_server_with_config_and_protocol(
+    let running_server = start_test_server_with_config_and_protocol(
         ServerConfig {
             default_max_players: loaded_config.server.default_max_players,
             ..ServerConfig::default()
@@ -951,6 +955,7 @@ async fn test_e2e_config_with_file_and_env() {
         loaded_config.protocol,
     )
     .await;
+    let addr = running_server.addr();
 
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
@@ -997,11 +1002,13 @@ async fn test_e2e_config_with_file_and_env() {
     // Clean up
     env::remove_var("SIGNAL_FISH_CONFIG_PATH");
     env::remove_var("SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH");
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn test_e2e_authority_protocol_enforcement() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
 
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
     let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
@@ -1217,11 +1224,13 @@ async fn test_e2e_authority_protocol_enforcement() {
         "player 2 after player 2 authority success",
     )
     .await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn test_simple_authority_release() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Join room as first player (should get authority)
@@ -1281,11 +1290,13 @@ async fn test_simple_authority_release() {
     .await;
 
     println!("Authority release test completed successfully");
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn test_two_player_authority_release() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
     let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
     let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
 
@@ -1383,11 +1394,13 @@ async fn test_two_player_authority_release() {
     )
     .await;
     println!("Two-player authority release test completed successfully");
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn test_e2e_authority_disabled_rooms() {
-    let addr = start_test_server().await;
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Create room without authority support
@@ -1443,6 +1456,7 @@ async fn test_e2e_authority_disabled_rooms() {
         Ok(None) => panic!("Connection closed while waiting for authority response"),
         Err(_) => panic!("Timeout waiting for authority response"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -1453,8 +1467,9 @@ async fn test_e2e_room_code_generation_with_custom_length() {
         ..Default::default()
     };
 
-    let addr =
+    let running_server =
         start_test_server_with_config_and_protocol(ServerConfig::default(), protocol_config).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Create room without specifying code (should auto-generate with custom length)
@@ -1485,6 +1500,7 @@ async fn test_e2e_room_code_generation_with_custom_length() {
         }
         _ => panic!("Expected successful room creation with auto-generated code, got {response:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -1506,8 +1522,9 @@ async fn test_e2e_fallback_to_defaults_on_invalid_config() {
     env::remove_var("SIGNAL_FISH_CONFIG_JSON");
 
     // Test that server still works with these defaults
-    let addr =
+    let running_server =
         start_test_server_with_config_and_protocol(ServerConfig::default(), config.protocol).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Should work with default 6-character room codes
@@ -1529,6 +1546,7 @@ async fn test_e2e_fallback_to_defaults_on_invalid_config() {
         }
         _ => panic!("Expected room join to work with default config, got {response:?}"),
     }
+    running_server.shutdown().await;
 }
 
 // ===========================================================================
@@ -1587,7 +1605,8 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
     let mult = idle_timeout_test_multiplier();
     let config = idle_timeout_server_config(2 * mult);
     let game_server = create_test_server_with_config(config, test_protocol_config()).await;
-    let addr = start_server_with_instance(game_server).await;
+    let running_server = start_server_with_instance(game_server).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Prove the connection works, then go silent.
@@ -1633,6 +1652,7 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
         idle_error_seen,
         "expected an Error frame with CONNECTION_IDLE_TIMEOUT before close, got frames: {frames:?}"
     );
+    running_server.shutdown().await;
 }
 
 /// A completely silent client is evicted by the maintenance reaper
@@ -1657,7 +1677,8 @@ async fn test_silent_client_is_reaped_with_activity_timeout() {
     tokio::spawn(async move {
         cleanup_server.cleanup_task().await;
     });
-    let addr = start_server_with_instance(game_server).await;
+    let running_server = start_server_with_instance(game_server).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Prove the connection works, then go silent.
@@ -1703,6 +1724,7 @@ async fn test_silent_client_is_reaped_with_activity_timeout() {
         activity_timeout_seen,
         "expected an Error frame with ACTIVITY_TIMEOUT before close, got frames: {frames:?}"
     );
+    running_server.shutdown().await;
 }
 
 /// A client that keeps sending frames (heartbeat pings) survives well past the
@@ -1710,7 +1732,8 @@ async fn test_silent_client_is_reaped_with_activity_timeout() {
 #[tokio::test]
 async fn test_active_client_survives_past_idle_timeout_window() {
     let mult = idle_timeout_test_multiplier();
-    let addr = start_test_server_with_config(idle_timeout_server_config(2 * mult)).await;
+    let running_server = start_test_server_with_config(idle_timeout_server_config(2 * mult)).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Heartbeat every 500ms for (2.5 * mult)s total — strictly longer than the
@@ -1749,6 +1772,7 @@ async fn test_active_client_survives_past_idle_timeout_window() {
         matches!(response, ServerMessage::RoomJoined(_)),
         "expected RoomJoined after surviving idle window, got {response:?}"
     );
+    running_server.shutdown().await;
 }
 
 /// `idle_timeout_secs = 0` disables idle enforcement entirely: a completely
@@ -1759,7 +1783,8 @@ async fn test_active_client_survives_past_idle_timeout_window() {
 /// only mechanism under test is the idle timeout.
 #[tokio::test]
 async fn test_idle_timeout_zero_disables_idle_enforcement() {
-    let addr = start_test_server_with_config(idle_timeout_server_config(0)).await;
+    let running_server = start_test_server_with_config(idle_timeout_server_config(0)).await;
+    let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 
     // Prove the connection works, then go silent.
@@ -1806,4 +1831,5 @@ async fn test_idle_timeout_zero_disables_idle_enforcement() {
         matches!(response, ServerMessage::Pong),
         "expected Pong after silent window, got {response:?}"
     );
+    running_server.shutdown().await;
 }

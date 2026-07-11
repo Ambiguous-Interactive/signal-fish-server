@@ -46,8 +46,9 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{create_test_server, create_test_server_with_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{
+    create_test_server, create_test_server_with_config, test_server_config, RunningTestServer,
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
 use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
@@ -71,23 +72,9 @@ const SERVER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
 // Shared infrastructure (mirrors tests/relay_chaos_e2e.rs).
 // ---------------------------------------------------------------------------
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 /// Connect a websocket client to `addr` — the server directly, or a
@@ -315,7 +302,8 @@ async fn rollback_profile_short() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
     let total_per_sender = rollback_total_per_sender();
 
@@ -407,6 +395,7 @@ async fn rollback_profile_short() {
         })
         .collect();
     ledger.assert_conformance(&metrics, &expectations).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +433,8 @@ async fn wifi_jitter_profile() {
     server_config.websocket_config.slow_consumer_timeout_ms = 5_000;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
     let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
@@ -520,6 +510,7 @@ async fn wifi_jitter_profile() {
             &[expectation("Jittery", &[("Sender", SEND_TICKS)])],
         )
         .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +545,8 @@ async fn backgrounded_tab_profile() {
     server_config.websocket_config.slow_consumer_timeout_ms = 5_000;
     let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let proxy = ChaosProxy::spawn(addr).await;
     let ledger = Arc::new(ConformanceAuditor::new(ReceiverProtocolMode::V2));
 
@@ -714,6 +706,7 @@ async fn backgrounded_tab_profile() {
             ],
         )
         .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +720,7 @@ const RECONNECT_APP_ID: &str = "scenario-reconnect-app";
 /// the `/v3/ws` alias, app auth enabled (mirrors
 /// `tests/reconnection_replay_e2e.rs`, the proven reconnect harness), and
 /// the in-process handle kept for `register_reconnect_token`.
-async fn start_reconnect_server() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config = test_server_config();
@@ -759,25 +752,13 @@ async fn start_reconnect_server() -> (std::net::SocketAddr, Arc<EnhancedGameServ
     .await
     .expect("reconnect scenario server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind reconnect test listener");
-    let addr = listener.local_addr().expect("read listener address");
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .with_state(game_server.clone());
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("reconnect test server serve loop");
-    });
-
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect_v3(addr: std::net::SocketAddr) -> WsStream {
@@ -931,7 +912,8 @@ async fn reconnect_under_fire() {
     /// Phase-B (post-reconnect) burst.
     const POST_RECONNECT_BURST: u64 = 100;
 
-    let (addr, game_server) = start_reconnect_server().await;
+    let (running_server, game_server) = start_reconnect_server().await;
+    let addr = running_server.addr();
     let metrics = game_server.metrics();
     let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V3);
 
@@ -1122,6 +1104,7 @@ async fn reconnect_under_fire() {
             ],
         )
         .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,7 +1125,8 @@ async fn lobby_churn_during_relay() {
 
     let server = create_test_server().await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
     let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V2);
 
     let scenario = async {
@@ -1277,4 +1261,5 @@ async fn lobby_churn_during_relay() {
         }],
     }));
     ledger.assert_conformance(&metrics, &expectations).await;
+    running_server.shutdown().await;
 }

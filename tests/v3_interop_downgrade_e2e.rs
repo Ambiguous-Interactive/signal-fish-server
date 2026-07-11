@@ -47,8 +47,7 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{await_ready_count, expect_session_plan_strict, ready, send};
 use websocket_test_helpers::{
@@ -112,7 +111,7 @@ fn host_session_config() -> SessionConfig {
 /// rather than receiving it over the wire, like `tests/v3_multipeer_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
@@ -137,9 +136,6 @@ async fn start_server_with_session(
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
@@ -147,19 +143,8 @@ async fn start_server_with_session(
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -436,7 +421,8 @@ async fn relay_one_game_data(from: &mut WsStream, to: &mut WsStream, from_id: Pl
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "interop-v2-into-mesh";
     let legacy_who = "legacy (v2)";
 
@@ -548,6 +534,7 @@ async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
     relay_one_game_data(&mut legacy, &mut peer_a, legacy_id, "peer_a").await;
     relay_one_game_data(&mut peer_b, &mut legacy, id_b, legacy_who).await;
     let _ = id_a;
+    running_server.shutdown().await;
 }
 
 // ===========================================================================
@@ -556,7 +543,8 @@ async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "interop-sticky-relay";
     let legacy_who = "legacy (v2)";
 
@@ -676,6 +664,7 @@ async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
     // The room still relays: GameData round-trips both ways over the floor.
     relay_one_game_data(&mut joiner, &mut peer_a, joiner_id, "peer_a").await;
     relay_one_game_data(&mut peer_a, &mut joiner, id_a, "joiner").await;
+    running_server.shutdown().await;
 }
 
 // ===========================================================================
@@ -685,7 +674,8 @@ async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
-    let (addr, server) = start_server_with_session(host_session_config()).await;
+    let (running_server, server) = start_server_with_session(host_session_config()).await;
+    let addr = running_server.addr();
     let game = "interop-host-downgrade";
 
     // Three v3+webrtc clients finalize a host+webrtc room; the creator (earliest
@@ -906,6 +896,7 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
     )
     .await;
     let _ = id_b;
+    running_server.shutdown().await;
 }
 
 // ===========================================================================
@@ -914,7 +905,8 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn v2_member_leaves_relay_floored_session_no_replan() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "interop-v2-leaves-relay";
     let legacy_who = "legacy (v2)";
 
@@ -1049,6 +1041,7 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
     // The remaining members keep relaying over the floor, both ways.
     relay_one_game_data(&mut peer_a, &mut peer_b, id_a, "peer_b").await;
     relay_one_game_data(&mut peer_b, &mut peer_a, id_b, "peer_a").await;
+    running_server.shutdown().await;
 }
 
 // ===========================================================================
@@ -1058,7 +1051,8 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn non_mesh_v3_member_floors_room_to_relay() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "interop-non-mesh-member";
 
     // Two mesh-capable v3 clients plus one v3 client that negotiated webrtc but
@@ -1153,4 +1147,5 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
         )
         .await;
     }
+    running_server.shutdown().await;
 }

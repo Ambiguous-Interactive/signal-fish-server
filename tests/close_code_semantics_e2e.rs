@@ -27,8 +27,7 @@ use signal_fish_server::protocol::{ClientMessage, RoomJoinedPayload, ServerMessa
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
 use std::sync::Arc;
-use test_helpers::create_test_server_with_config;
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 type WsStream =
@@ -38,21 +37,9 @@ type WsStream =
 /// per-test timeouts under test are all ≤5s.
 const CLOSE_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -142,12 +129,14 @@ async fn auth_timeout_closes_with_4001() {
     config.auth_enabled = true;
     config.websocket_config.auth_timeout_secs = 5;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let mut ws = connect(addr).await;
     let (code, reason) = read_close_frame(&mut ws, "auth timeout").await;
     assert_eq!(code, 4001, "auth timeout must close with 4001 ({reason})");
     assert_eq!(reason, "auth_timeout");
+    running_server.shutdown().await;
 }
 
 /// A slow consumer evicted by the delivery contract is closed with
@@ -160,7 +149,8 @@ async fn slow_consumer_eviction_closes_with_4002() {
     config.websocket_config.slow_consumer_timeout_ms = 300;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let metrics = server.metrics();
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let mut sender = connect(addr).await;
     let stalled = websocket_test_helpers::connect_with_small_recv_buffer(addr, 4_096).await;
@@ -199,6 +189,7 @@ async fn slow_consumer_eviction_closes_with_4002() {
     let (code, reason) = read_close_frame(&mut stalled_ws, "slow consumer").await;
     assert_eq!(code, 4002, "slow consumer must close with 4002 ({reason})");
     assert_eq!(reason, "slow_consumer");
+    running_server.shutdown().await;
 }
 
 /// A client the activity reaper evicts (`server.ping_timeout`) is closed with
@@ -213,7 +204,8 @@ async fn activity_reaper_eviction_closes_with_4003() {
     // starts it separately); this scenario is ABOUT the reaper, so start it.
     let reaper = server.clone();
     tokio::spawn(async move { reaper.cleanup_task().await });
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let mut ws = connect(addr).await;
     // Authenticate so the (5s-floor) auth deadline cannot race the 1s reaper.
@@ -226,6 +218,7 @@ async fn activity_reaper_eviction_closes_with_4003() {
         "reaper eviction must close with 4003 ({reason})"
     );
     assert_eq!(reason, "activity_timeout");
+    running_server.shutdown().await;
 }
 
 /// A connection idle past `websocket.idle_timeout_secs` is closed with
@@ -235,7 +228,8 @@ async fn idle_timeout_closes_with_4004() {
     let mut config = base_config();
     config.websocket_config.idle_timeout_secs = 1;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
-    let addr = start_server(server).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
 
     let mut ws = connect(addr).await;
     authenticate(&mut ws).await;
@@ -243,6 +237,7 @@ async fn idle_timeout_closes_with_4004() {
     let (code, reason) = read_close_frame(&mut ws, "idle timeout").await;
     assert_eq!(code, 4004, "idle timeout must close with 4004 ({reason})");
     assert_eq!(reason, "idle_timeout");
+    running_server.shutdown().await;
 }
 
 /// A shutdown drain sends the v3 `GoingAway` advisory, then closes with
@@ -257,7 +252,8 @@ async fn shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record
     let reconnection_manager = server
         .reconnection_manager()
         .expect("test config enables reconnection");
-    let addr = start_server(server.clone()).await;
+    let running_server = start_server(server.clone()).await;
+    let addr = running_server.addr();
 
     let mut ws = connect(addr).await;
     authenticate_v3(&mut ws).await;
@@ -305,6 +301,7 @@ async fn shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record
             .await,
         "shutdown drain-close must not leave a claimable reconnection record"
     );
+    running_server.shutdown().await;
 }
 
 /// Join a room over a whole `WsStream` (drains until `RoomJoined`).

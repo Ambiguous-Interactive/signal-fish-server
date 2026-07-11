@@ -40,8 +40,7 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{send, SERVER_MESSAGE_TIMEOUT};
 use websocket_test_helpers::{
@@ -72,7 +71,7 @@ fn app_entry() -> AppAuthEntry {
 /// Same shape as `tests/v3_signaling_e2e.rs::start_auth_server_with_config`.
 async fn start_server_with_config(
     mut server_config: ServerConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     server_config.auth_enabled = true;
@@ -96,9 +95,6 @@ async fn start_server_with_config(
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
@@ -106,23 +102,13 @@ async fn start_server_with_config(
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // The listener is already bound, so immediate connections are accepted by
-    // the kernel and served once the spawned task polls them (no startup sleep).
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 /// Boot a server with the default test config (16KB signal cap, generous 600
 /// signal budget).
-async fn start_server() -> std::net::SocketAddr {
+async fn start_server() -> RunningTestServer {
     start_server_with_config(test_server_config()).await.0
 }
 
@@ -338,7 +324,8 @@ async fn oversized_signal_is_rejected_and_not_relayed() {
     // Cap the serialized `signal` payload at 256 bytes.
     let mut server_config = test_server_config();
     server_config.max_signal_bytes = 256;
-    let (addr, _server) = start_server_with_config(server_config).await;
+    let (running_server, _server) = start_server_with_config(server_config).await;
+    let addr = running_server.addr();
 
     let (mut peer1, _peer1_id, mut peer2, peer2_id) = webrtc_pair(addr).await;
 
@@ -349,6 +336,7 @@ async fn oversized_signal_is_rejected_and_not_relayed() {
 
     expect_signal_error(&mut peer1, "sender", ErrorCode::SignalTooLarge).await;
     expect_no_relayed_signal(&mut peer2, "oversized target").await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -363,23 +351,27 @@ async fn signal_size_boundary_at_cap_relays_just_over_rejects() {
     {
         let mut server_config = test_server_config();
         server_config.max_signal_bytes = exact;
-        let (addr, _server) = start_server_with_config(server_config).await;
+        let (running_server, _server) = start_server_with_config(server_config).await;
+        let addr = running_server.addr();
         let (mut peer1, peer1_id, mut peer2, peer2_id) = webrtc_pair(addr).await;
 
         send_signal(&mut peer1, peer2_id, payload.clone()).await;
         expect_relayed_signal(&mut peer2, "at-cap target", peer1_id, &payload).await;
+        running_server.shutdown().await;
     }
 
     // (b) Cap == length - 1: the same payload is one byte over and is rejected.
     {
         let mut server_config = test_server_config();
         server_config.max_signal_bytes = exact - 1;
-        let (addr, _server) = start_server_with_config(server_config).await;
+        let (running_server, _server) = start_server_with_config(server_config).await;
+        let addr = running_server.addr();
         let (mut peer1, _peer1_id, mut peer2, peer2_id) = webrtc_pair(addr).await;
 
         send_signal(&mut peer1, peer2_id, payload.clone()).await;
         expect_signal_error(&mut peer1, "over-cap sender", ErrorCode::SignalTooLarge).await;
         expect_no_relayed_signal(&mut peer2, "over-cap target").await;
+        running_server.shutdown().await;
     }
 }
 
@@ -389,7 +381,8 @@ async fn signal_size_boundary_at_cap_relays_just_over_rejects() {
 
 #[tokio::test]
 async fn self_signal_is_rejected_and_not_echoed() {
-    let addr = start_server().await;
+    let running_server = start_server().await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3_webrtc(&mut peer1).await;
@@ -407,6 +400,7 @@ async fn self_signal_is_rejected_and_not_echoed() {
     )
     .await;
     expect_no_relayed_signal(&mut peer1, "self-signaller echo").await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +409,8 @@ async fn self_signal_is_rejected_and_not_echoed() {
 
 #[tokio::test]
 async fn signal_from_sender_not_in_a_room_is_rejected() {
-    let addr = start_server().await;
+    let running_server = start_server().await;
+    let addr = running_server.addr();
 
     // A v3+WebRTC target sitting in a room (so the target is a real, in-room id).
     let mut target = connect(addr).await;
@@ -430,6 +425,7 @@ async fn signal_from_sender_not_in_a_room_is_rejected() {
 
     expect_signal_error(&mut roomless, "roomless sender", ErrorCode::NotInRoom).await;
     expect_no_relayed_signal(&mut target, "target of roomless sender").await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +434,8 @@ async fn signal_from_sender_not_in_a_room_is_rejected() {
 
 #[tokio::test]
 async fn signal_to_unknown_target_is_rejected() {
-    let addr = start_server().await;
+    let running_server = start_server().await;
+    let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
     authenticate_v3_webrtc(&mut peer1).await;
@@ -449,6 +446,7 @@ async fn signal_to_unknown_target_is_rejected() {
     send_signal(&mut peer1, ghost, json!({ "Offer": "x" })).await;
 
     expect_signal_error(&mut peer1, "sender", ErrorCode::SignalTargetNotFound).await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +455,8 @@ async fn signal_to_unknown_target_is_rejected() {
 
 #[tokio::test]
 async fn cross_room_signal_is_rejected_and_not_relayed() {
-    let addr = start_server().await;
+    let running_server = start_server().await;
+    let addr = running_server.addr();
 
     // Peer A creates room A.
     let mut peer_a = connect(addr).await;
@@ -474,6 +473,7 @@ async fn cross_room_signal_is_rejected_and_not_relayed() {
 
     expect_signal_error(&mut peer_a, "cross-room sender", ErrorCode::CrossRoomSignal).await;
     expect_no_relayed_signal(&mut peer_b, "cross-room target").await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +484,8 @@ async fn cross_room_signal_is_rejected_and_not_relayed() {
 
 #[tokio::test]
 async fn signal_from_relay_only_v3_sender_is_rejected() {
-    let addr = start_server().await;
+    let running_server = start_server().await;
+    let addr = running_server.addr();
 
     // The relay-only v3 sender creates the room (so it IS in a room: this
     // isolates the transport gate from the NotInRoom gate).
@@ -506,6 +507,7 @@ async fn signal_from_relay_only_v3_sender_is_rejected() {
     )
     .await;
     expect_no_relayed_signal(&mut target, "target of relay-only sender").await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +516,8 @@ async fn signal_from_relay_only_v3_sender_is_rejected() {
 
 #[tokio::test]
 async fn signal_after_target_leaves_is_rejected() {
-    let addr = start_server().await;
+    let running_server = start_server().await;
+    let addr = running_server.addr();
 
     let (mut peer1, peer1_id, mut peer2, peer2_id) = webrtc_pair(addr).await;
 
@@ -547,6 +550,7 @@ async fn signal_after_target_leaves_is_rejected() {
     )
     .await;
     expect_no_relayed_signal(&mut peer2, "departed target").await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +564,8 @@ async fn signal_rate_limit_exhaustion_rejects_over_budget() {
     // a small per-connection signal budget via the rate-limit config.
     let mut server_config = test_server_config();
     server_config.rate_limit_config.max_signals = 2;
-    let (addr, _server) = start_server_with_config(server_config).await;
+    let (running_server, _server) = start_server_with_config(server_config).await;
+    let addr = running_server.addr();
 
     let (mut peer1, peer1_id, mut peer2, peer2_id) = webrtc_pair(addr).await;
 
@@ -582,6 +587,7 @@ async fn signal_rate_limit_exhaustion_rejects_over_budget() {
     )
     .await;
     expect_no_relayed_signal(&mut peer2, "over-budget target").await;
+    running_server.shutdown().await;
 }
 
 // Keep `expect_no_server_message_within` referenced even if every silence check

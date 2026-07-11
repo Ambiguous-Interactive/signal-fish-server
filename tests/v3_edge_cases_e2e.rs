@@ -38,8 +38,7 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{ready, send, start_game, SERVER_MESSAGE_TIMEOUT};
 use websocket_test_helpers::{next_matching_server_message_within, WsStream};
@@ -71,7 +70,7 @@ fn mesh_session_config() -> SessionConfig {
 /// Boot the production router around an auth-enabled in-memory server using the
 /// DEFAULT (relay-floor) `SessionConfig`. Validation / room-lifecycle tests that
 /// never finalize a non-relay session use this.
-async fn start_server() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+async fn start_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     start_server_with_session(SessionConfig::default()).await
 }
 
@@ -81,7 +80,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
 /// `tests/v3_signaling_e2e.rs` / `tests/v3_multipeer_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
@@ -106,9 +105,6 @@ async fn start_server_with_session(
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
@@ -116,16 +112,8 @@ async fn start_server_with_session(
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -244,7 +232,8 @@ async fn join_room(
 /// `GameStarting`.
 #[tokio::test(flavor = "multi_thread")]
 async fn solo_room_max_players_1_starts_via_explicit_start_game() {
-    let (addr, _server) = start_server().await;
+    let (running_server, _server) = start_server().await;
+    let addr = running_server.addr();
     let game = "edge-solo1";
 
     let mut solo = connect(addr).await;
@@ -322,6 +311,7 @@ async fn solo_room_max_players_1_starts_via_explicit_start_game() {
         },
     )
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +325,8 @@ async fn solo_room_max_players_1_starts_via_explicit_start_game() {
 async fn max_players_2_room_finalizes_when_both_ready() {
     // Mesh-preferring server so the finalized v3+webrtc room yields a mesh
     // SessionPlan rather than the default explicit relay-floor plan.
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "edge-boundary2";
 
     let mut peer_a = connect(addr).await;
@@ -453,6 +444,7 @@ async fn max_players_2_room_finalizes_when_both_ready() {
         )
         .await;
     }
+    running_server.shutdown().await;
 }
 
 /// A solo create that OMITS `max_players` defaults to the server's
@@ -463,7 +455,8 @@ async fn max_players_2_room_finalizes_when_both_ready() {
 /// finalizes the under-full room — `GameStarting` arrives.
 #[tokio::test(flavor = "multi_thread")]
 async fn solo_create_with_default_max_players_readies_and_starts_before_full() {
-    let (addr, _server) = start_server().await;
+    let (running_server, _server) = start_server().await;
+    let addr = running_server.addr();
     let game = "edge-default-cap";
 
     let mut creator = connect(addr).await;
@@ -533,6 +526,7 @@ async fn solo_create_with_default_max_players_readies_and_starts_before_full() {
         },
     )
     .await;
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -546,7 +540,8 @@ async fn solo_create_with_default_max_players_readies_and_starts_before_full() {
 /// (`src/config/defaults.rs:160-166`, `src/protocol/validation.rs:41-88`).
 #[tokio::test(flavor = "multi_thread")]
 async fn player_name_validation_accept_reject_matrix() {
-    let (addr, _server) = start_server().await;
+    let (running_server, _server) = start_server().await;
+    let addr = running_server.addr();
     let game = "edge-name";
 
     // Each case uses a FRESH connection + a distinct room so accepted names do
@@ -659,6 +654,7 @@ async fn player_name_validation_accept_reject_matrix() {
             "an internal space is allowed by default (allow_spaces=true), got {reason} ({error_code:?})"
         ),
     }
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +667,8 @@ async fn player_name_validation_accept_reject_matrix() {
 /// rejected with `INVALID_GAME_NAME`.
 #[tokio::test(flavor = "multi_thread")]
 async fn game_name_validation_accept_reject_matrix() {
-    let (addr, _server) = start_server().await;
+    let (running_server, _server) = start_server().await;
+    let addr = running_server.addr();
 
     async fn attempt(addr: std::net::SocketAddr, game: &str) -> JoinOutcome {
         let mut ws = connect(addr).await;
@@ -721,6 +718,7 @@ async fn game_name_validation_accept_reject_matrix() {
             "an in-bounds game name with allowed chars must be accepted, got {reason} ({error_code:?})"
         ),
     }
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -734,7 +732,8 @@ async fn game_name_validation_accept_reject_matrix() {
 /// `room_code_length = 4`.
 #[tokio::test(flavor = "multi_thread")]
 async fn room_code_case_insensitive_join_lands_in_same_room() {
-    let (addr, _server) = start_server().await;
+    let (running_server, _server) = start_server().await;
+    let addr = running_server.addr();
     let game = "edge-case-code";
 
     // Player A creates with an explicit LOWERCASE 4-char code; capacity 3 keeps
@@ -796,6 +795,7 @@ async fn room_code_case_insensitive_join_lands_in_same_room() {
         3,
         "all three case spellings resolved to one room with three members"
     );
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -810,7 +810,8 @@ async fn room_code_case_insensitive_join_lands_in_same_room() {
 /// "leave => fresh room" behavior.
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_room_after_leave_is_rejoined_not_recreated_immediately() {
-    let (addr, _server) = start_server().await;
+    let (running_server, _server) = start_server().await;
+    let addr = running_server.addr();
     let game = "edge-cleanup";
 
     let mut creator = connect(addr).await;
@@ -872,4 +873,5 @@ async fn empty_room_after_leave_is_rejoined_not_recreated_immediately() {
     // regress a lobby to Waiting), so the re-joiner's RoomJoined snapshot reports
     // the persisted `Lobby` state.
     assert_eq!(rejoined.lobby_state, LobbyState::Lobby);
+    running_server.shutdown().await;
 }

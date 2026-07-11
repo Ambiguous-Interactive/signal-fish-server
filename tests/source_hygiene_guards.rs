@@ -26,6 +26,10 @@
 //!    that later imports the package; `python3 -m pip` installs into the
 //!    interpreter that runs it. (`run-z3-proofs.sh` checked `python3 -c import`
 //!    but installed with bare `pip`.)
+//!
+//! 4. A detached in-process `axum::serve` task can outlive its integration
+//!    test, leaving upgraded WebSocket task graphs for LeakSanitizer to report.
+//!    Real-socket tests must use the shared scoped server fixture.
 
 #![cfg(test)]
 
@@ -95,7 +99,41 @@ fn integration_tests_do_not_hardcode_ws_endpoints() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard 2 — bootstrap functions must `return`, never `exit`
+// Guard 2 — in-process Axum servers must use the scoped fixture
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_tests_do_not_detach_axum_servers() {
+    let tests_dir = repo_root().join("tests");
+    let fixture = tests_dir.join("test_helpers.rs");
+    let own = Path::new(file!()).file_name();
+    let mut files = Vec::new();
+    collect_files(&tests_dir, "rs", &mut files);
+
+    let mut violations = Vec::new();
+    for file in files {
+        if file == fixture || file.file_name() == own {
+            continue;
+        }
+        for (index, line) in read_file(&file).lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains("axum::serve(") {
+                violations.push(format!("  {}:{}", file.display(), index + 1));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Integration tests must not call axum::serve directly; detached serve tasks retain \
+         WebSocket ownership graphs at process exit. Use test_helpers::RunningTestServer, whose \
+         Drop contract requires awaited shutdown:\n{}",
+        violations.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guard 3 — bootstrap functions must `return`, never `exit`
 // ---------------------------------------------------------------------------
 
 /// Scripts whose contract is "warn and continue on optional-step failure", so a
@@ -443,7 +481,7 @@ fn bootstrap_recoverable_functions_do_not_exit() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard 3 — install Python packages via the interpreter's own pip module
+// Guard 4 — install Python packages via the interpreter's own pip module
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -14703,11 +14703,9 @@ fn test_workflow_files_use_two_space_indentation() {
 
 /// Required jobs in ci-safety.yml: (job_key, display_name, description)
 ///
-/// These jobs are **staged (non-blocking)** — they use `continue-on-error: true`
-/// and are NOT listed in `REQUIRED_WORKFLOW_NAMES` or `REQUIRED_CHECK_NAMES`.
-/// They will be promoted to required checks once stability criteria are met
-/// (see PLAN.md Phase 3, Promotion Policy).
-const STAGED_SAFETY_JOBS: &[(&str, &str, &str)] = &[
+/// These jobs are not branch-protection required checks. Their workflow-level
+/// failure policy is pinned separately below.
+const SAFETY_JOBS: &[(&str, &str, &str)] = &[
     (
         "miri",
         "Miri",
@@ -14720,9 +14718,11 @@ const STAGED_SAFETY_JOBS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+const SAFETY_JOB_CONTINUE_ON_ERROR: &[(&str, bool)] = &[("miri", true), ("asan", false)];
+
 #[test]
 fn test_ci_safety_workflow_has_required_jobs() {
-    // Validates that the advanced safety workflow has all staged safety jobs
+    // Validates that the advanced safety workflow has all safety jobs
     // with correct job keys AND display names. Uses the shared helper
     // `validate_workflow_has_required_jobs` for consistency with ci.yml and
     // doc-validation.yml validation tests.
@@ -14737,67 +14737,40 @@ fn test_ci_safety_workflow_has_required_jobs() {
          See PLAN.md Phase 3 / Ticket G for details."
     );
 
-    validate_workflow_has_required_jobs(&workflow_path, STAGED_SAFETY_JOBS, "Advanced Safety");
+    validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
 }
 
 #[test]
-fn test_ci_safety_workflow_jobs_are_staged() {
-    // Validates that all advanced safety jobs use continue-on-error: true.
-    // This is critical because these checks run on nightly Rust and may
-    // break due to toolchain instability. They must not block merges until
-    // promoted to required status.
+fn test_ci_safety_workflow_failure_policy_is_explicit() {
+    // Miri is staged while ASan must propagate failures to the workflow.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_file(&workflow_path);
+    let documents = Yaml::load_from_str(&content).expect("ci-safety.yml must parse as YAML");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci-safety.yml must define a jobs mapping");
 
-    for (job_key, display_name, _description) in STAGED_SAFETY_JOBS {
-        // Find the job section and check for continue-on-error.
-        // A job key in YAML appears as a line starting with exactly 2 spaces
-        // followed by the key name and a colon (e.g., "  miri:").
-        let job_key_pattern = format!("\n  {job_key}:");
-        let job_start = content.find(&job_key_pattern).unwrap_or_else(|| {
-            panic!(
-                "Job '{job_key}' not found in ci-safety.yml.\n\
-                 Expected YAML key: '  {job_key}:'"
-            )
-        });
-
-        // Extract the job section: from this job key to the next top-level
-        // job key (a line matching "\n  <word>:") or end of file.
-        let after_key = &content[job_start + job_key_pattern.len()..];
-        let next_job_offset = after_key
-            .lines()
-            .skip(1) // skip the rest of the current key's line
-            .position(|line| {
-                // A top-level job key: exactly 2 leading spaces, then a word char
-                line.len() > 2
-                    && line.starts_with("  ")
-                    && !line.starts_with("   ")
-                    && line.as_bytes()[2] != b' '
-                    && line.as_bytes()[2] != b'#'
-            });
-
-        let job_text = match next_job_offset {
-            Some(pos) => {
-                // Calculate byte offset for the matched line
-                let mut byte_offset = 0;
-                for (i, line) in after_key.lines().skip(1).enumerate() {
-                    if i == pos {
-                        break;
-                    }
-                    byte_offset += line.len() + 1; // +1 for newline
-                }
-                &content[job_start..job_start + job_key_pattern.len() + byte_offset]
-            }
-            None => &content[job_start..],
-        };
-
+    for (job_key, expected_continue_on_error) in SAFETY_JOB_CONTINUE_ON_ERROR {
+        let job = jobs
+            .as_mapping_get(job_key)
+            .unwrap_or_else(|| panic!("Job '{job_key}' not found in ci-safety.yml"));
         assert!(
-            job_text.contains("continue-on-error: true"),
-            "Job '{job_key}' (\"{display_name}\") must have 'continue-on-error: true'.\n\
-             Advanced safety jobs are staged and must not block merges.\n\
-             See PLAN.md Phase 3, Promotion Policy for when to change this."
+            matches!(job, Yaml::Mapping(_)),
+            "Job '{job_key}' must be a YAML mapping"
+        );
+        let configured = match job.as_mapping_get("continue-on-error") {
+            Some(value) => value.as_bool().unwrap_or_else(|| {
+                panic!("Job '{job_key}' continue-on-error must be a YAML boolean")
+            }),
+            None => false,
+        };
+        assert_eq!(
+            configured, *expected_continue_on_error,
+            "Job '{job_key}' continue-on-error policy drifted: expected \
+             continue-on-error={expected_continue_on_error}"
         );
     }
 }
@@ -15197,8 +15170,8 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
 #[test]
 fn test_ci_safety_workflow_uploads_artifacts() {
     // Validates that both safety jobs upload their output as artifacts.
-    // Artifacts are critical for diagnosing safety findings even when
-    // the job passes (continue-on-error: true may mask real issues).
+    // Artifacts are critical for diagnosing safety findings, including Miri
+    // findings softened by its staged continue-on-error policy.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
@@ -15229,8 +15202,8 @@ fn test_ci_safety_workflow_uploads_artifacts() {
 #[test]
 fn test_ci_safety_jobs_not_in_required_check_names() {
     // Validates that ci-safety.yml jobs are NOT in the required check names.
-    // These are staged checks and must not be listed as branch-protection
-    // required checks until promoted. This test ensures the staging contract.
+    // Branch-protection configuration is independent of whether a job-level
+    // failure propagates to the workflow.
 
     let safety_workflow_name = "Advanced Safety";
 
@@ -15238,7 +15211,7 @@ fn test_ci_safety_jobs_not_in_required_check_names() {
         assert!(
             !check_name.starts_with(&format!("{safety_workflow_name} /")),
             "Found '{check_name}' in REQUIRED_CHECK_NAMES, but ci-safety.yml \
-             jobs are staged (non-blocking) and must NOT be required checks.\n\
+             jobs are not yet branch-protection required checks.\n\
              Remove from REQUIRED_CHECK_NAMES until promotion criteria are met.\n\
              See PLAN.md Phase 3, Promotion Policy."
         );

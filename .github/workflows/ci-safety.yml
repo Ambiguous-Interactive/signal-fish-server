@@ -12,11 +12,11 @@
 #
 # all-jobs-run-on-schedule
 #
-# Staged / Non-Required Status:
-#   Both jobs use continue-on-error: true and are NOT branch-protection required
-#   checks. They produce actionable diagnostics (uploaded as artifacts) but do
-#   not block merges until promoted. This lets us observe failure patterns and
-#   toolchain stability before gating PRs on these heavyweight analyses.
+# Failure Policy / Branch Protection:
+#   Miri remains staged with continue-on-error: true. AddressSanitizer failures
+#   propagate to the workflow so a memory-safety regression cannot look green.
+#   Neither job is currently a branch-protection required check; that repository
+#   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
 #   - miri: Interprets test code to detect undefined behavior (UB), uninitialized
@@ -56,11 +56,12 @@
 #   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
 #
 # Promotion Criteria:
-#   These staged checks should be promoted to required branch-protection checks when:
+#   Miri should become gating, and both jobs should become required
+#   branch-protection checks, when:
 #     - Failure rate < 2% over a 2-4 week observation window
 #     - No nightly toolchain incidents (breakage, unavailability) during that window
 #     - Median runtime stays within the timeout budget (45 min Miri, 30 min ASan)
-#   Until promotion, failures are informational and should be triaged weekly.
+#   Until promotion, Miri failures are informational and should be triaged weekly.
 
 name: Advanced Safety
 
@@ -110,7 +111,7 @@ jobs:
     # Miri interprets code rather than compiling it natively, which is
     # significantly slower — 10-50x depending on the test suite size.
     timeout-minutes: 45
-    # Staged: non-blocking until promoted to a required check
+    # Staged: non-blocking until promoted to a gating job.
     continue-on-error: true
     env:
       CARGO_TARGET_DIR: target/miri
@@ -209,8 +210,7 @@ jobs:
     name: AddressSanitizer
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Staged: non-blocking until promoted to a required check
-    continue-on-error: true
+    # Gating: sanitizer/test failures must fail this job and workflow.
     env:
       ASAN_OPTIONS: "detect_odr_violation=0"
       CARGO_TARGET_DIR: target/asan

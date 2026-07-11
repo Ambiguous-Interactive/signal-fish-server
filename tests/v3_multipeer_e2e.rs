@@ -55,8 +55,7 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{
     assert_full_mesh_glare_matrix, await_ready_count, expect_finalize_plan,
@@ -140,7 +139,7 @@ fn assert_static_then_default_stun_ice(ice_servers: &[IceServer]) {
 /// rather than receiving it over the wire, like `tests/v3_signaling_e2e.rs`).
 async fn start_server_with_session(
     session: SessionConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
@@ -165,9 +164,6 @@ async fn start_server_with_session(
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
@@ -175,19 +171,8 @@ async fn start_server_with_session(
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    (addr, game_server)
+    let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
+    (running_server, game_server)
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -454,7 +439,8 @@ async fn next_matching_v2_only<T>(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mesh_n3_full_glare_matrix_and_pairwise_signaling() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-mesh3";
 
     // Three v3+webrtc clients fill a 3-seat mesh room.
@@ -502,11 +488,13 @@ async fn mesh_n3_full_glare_matrix_and_pairwise_signaling() {
     for (from_idx, to_idx) in ordered_pairs(3) {
         relay_one_signal(&mut sockets, &ids, from_idx, to_idx).await;
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mesh_n4_glare_matrix() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-mesh4";
 
     let mut creator = connect(addr).await;
@@ -548,11 +536,13 @@ async fn mesh_n4_glare_matrix() {
 
     // One spot-check pair proves the pairing is live end to end.
     relay_one_signal(&mut sockets, &ids, 0, 1).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn host_n4_star_property() {
-    let (addr, _server) = start_server_with_session(host_session_config()).await;
+    let (running_server, _server) = start_server_with_session(host_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-host4";
 
     // First joiner (room creator; the room has no designated authority) wins
@@ -593,6 +583,7 @@ async fn host_n4_star_property() {
     // host -> client.
     relay_one_signal(&mut sockets, &ids, 1, 0).await;
     relay_one_signal(&mut sockets, &ids, 0, 2).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -600,7 +591,8 @@ async fn mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3() {
     // A mesh-preferring server, but one pure-v2 member floors the whole room
     // to relay: everyone receives GameStarting and NOBODY receives a
     // SessionPlan or NewPeer (Appendix K).
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-mixed3";
     let legacy_who = "legacy (v2)";
 
@@ -726,11 +718,13 @@ async fn mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3() {
     expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after relay floor").await;
     expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 client after relay floor")
         .await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn host_n4_failover_full_matrix() {
-    let (addr, _server) = start_server_with_session(host_session_config()).await;
+    let (running_server, _server) = start_server_with_session(host_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-failover4";
 
     let mut creator = connect(addr).await;
@@ -793,6 +787,7 @@ async fn host_n4_failover_full_matrix() {
         )
         .await;
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -806,7 +801,8 @@ async fn host_n4_cascade_failover() {
     // (`non_host_departure_heals_already_missing_host`); end-to-end, a
     // re-plan that re-elected without rewriting the stored host would also
     // pass this test, since the dead host stays absent either way.
-    let (addr, _server) = start_server_with_session(host_session_config()).await;
+    let (running_server, _server) = start_server_with_session(host_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-cascade4";
 
     let mut creator = connect(addr).await;
@@ -914,11 +910,13 @@ async fn host_n4_cascade_failover() {
     // host-3 -> client.
     relay_one_signal(&mut sockets, &wave2_ids, 1, 0).await;
     relay_one_signal(&mut sockets, &wave2_ids, 0, 1).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mesh_n3_seat_fill_late_join() {
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-seatfill3";
 
     let mut peer_a = connect(addr).await;
@@ -1059,11 +1057,13 @@ async fn mesh_n3_seat_fill_late_join() {
     let (from, signal) = expect_signal(&mut joiner, "joiner").await;
     assert_eq!(from, id_a);
     assert_eq!(signal, answer_to_joiner);
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mesh_n3_reconnect_full_flow() {
-    let (addr, server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-reconnect3";
 
     let mut peer_a = connect(addr).await;
@@ -1254,6 +1254,7 @@ async fn mesh_n3_reconnect_full_flow() {
     let (from, signal) = expect_signal(&mut reconnector, "reconnector").await;
     assert_eq!(from, id_a);
     assert_eq!(signal, answer);
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,7 +1337,8 @@ async fn mesh_n3_transport_status_fan_out_and_dedup() {
     // out nothing, and the next real transition (connected: false) fans out
     // again. No finalization needed — the fan-out is a room-membership
     // contract, not a session-plan one.
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-transport-status3";
 
     let mut peer_a = connect(addr).await;
@@ -1373,6 +1375,7 @@ async fn mesh_n3_transport_status_fan_out_and_dedup() {
     report_transport_status(&mut peer_a, Transport::WebRtc, false).await;
     expect_peer_transport_status(&mut peer_b, "peer_b", id_a, Transport::WebRtc, false).await;
     expect_peer_transport_status(&mut peer_c, "peer_c", id_a, Transport::WebRtc, false).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1380,7 +1383,8 @@ async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
     // In a mixed v2/v3 room a v3 member's TransportStatus change reaches the
     // OTHER v3 member as PeerTransportStatus, while the v2 member observes
     // strict silence (Appendix K) and stays fully functional afterwards.
-    let (addr, _server) = start_server_with_session(mesh_session_config()).await;
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
     let game = "multipeer-tstatus-mixed3";
     let legacy_who = "legacy (v2)";
 
@@ -1440,4 +1444,5 @@ async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
         matches!(message, ServerMessage::Pong).then_some(())
     })
     .await;
+    running_server.shutdown().await;
 }

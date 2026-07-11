@@ -15,8 +15,7 @@ use signal_fish_server::protocol::{
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
 use std::sync::Arc;
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{next_server_message_within, WsStream};
 
@@ -34,18 +33,18 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
-async fn start_auth_server() -> std::net::SocketAddr {
+async fn start_auth_server() -> RunningTestServer {
     start_server_with_auth_and_stats(true, 0).await
 }
 
-async fn start_auth_disabled_server() -> std::net::SocketAddr {
+async fn start_auth_disabled_server() -> RunningTestServer {
     start_server_with_auth_and_stats(false, 0).await
 }
 
 async fn start_server_with_auth_and_stats(
     auth_enabled: bool,
     delivery_stats_interval_secs: u64,
-) -> std::net::SocketAddr {
+) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
     server_config.auth_enabled = auth_enabled;
     server_config.websocket_config.delivery_stats_interval_secs = delivery_stats_interval_secs;
@@ -72,11 +71,8 @@ async fn start_server_with_auth_and_stats(
     start_server(game_server).await
 }
 
-async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
+async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
     use axum::routing::get;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
 
     // Mirror main.rs wiring: enhanced router nested under /v2, plus a top-level
     // /v3/ws alias sharing the same connection handler.
@@ -85,21 +81,9 @@ async fn start_server(game_server: Arc<EnhancedGameServer>) -> std::net::SocketA
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 async fn connect(addr: std::net::SocketAddr, path: &str) -> WsStream {
@@ -132,7 +116,8 @@ async fn authenticate(ws: &mut WsStream, auth: ClientMessage) -> ServerMessage {
 
 #[tokio::test]
 async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
     let auth = ClientMessage::Authenticate {
@@ -161,12 +146,14 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn delivery_advisories_wait_for_authenticated_protocol_info() {
     for auth_enabled in [true, false] {
-        let addr = start_server_with_auth_and_stats(auth_enabled, 1).await;
+        let running_server = start_server_with_auth_and_stats(auth_enabled, 1).await;
+        let addr = running_server.addr();
         let mut ws = connect(addr, "/v3/ws").await;
 
         let early_message =
@@ -194,12 +181,14 @@ async fn delivery_advisories_wait_for_authenticated_protocol_info() {
                 "auth_enabled={auth_enabled}: expected trailing counter snapshot, got {other:?}"
             ),
         }
+        running_server.shutdown().await;
     }
 }
 
 #[tokio::test]
 async fn auth_disabled_endpoint_default_starts_advisories_after_first_application_baseline() {
-    let addr = start_server_with_auth_and_stats(false, 1).await;
+    let running_server = start_server_with_auth_and_stats(false, 1).await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
     ws.send(Message::Text(
         serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
@@ -219,11 +208,13 @@ async fn auth_disabled_endpoint_default_starts_advisories_after_first_applicatio
         ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
         other => panic!("expected trailing counter snapshot, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn auth_disabled_binary_rejection_starts_endpoint_default_advisories() {
-    let addr = start_server_with_auth_and_stats(false, 1).await;
+    let running_server = start_server_with_auth_and_stats(false, 1).await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
     ws.send(Message::Binary(vec![1, 2, 3].into()))
         .await
@@ -246,6 +237,7 @@ async fn auth_disabled_binary_rejection_starts_endpoint_default_advisories() {
         ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
         other => panic!("expected trailing counter snapshot, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +260,8 @@ fn version_only_auth(protocol_version: Option<u16>) -> ClientMessage {
 
 #[tokio::test]
 async fn v3_client_negotiates_v3_on_default_server() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
     match authenticate(&mut ws, version_only_auth(Some(3))).await {
@@ -283,13 +276,15 @@ async fn v3_client_negotiates_v3_on_default_server() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn future_v4_client_is_clamped_to_v3() {
     // A stale v3-era (or future) client that still advertises 4/5 negotiates
     // down to the build ceiling (3) — v4+ is not a negotiated version.
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
     for asked in [Some(4), Some(5)] {
@@ -309,11 +304,13 @@ async fn future_v4_client_is_clamped_to_v3() {
         }
         ws = connect(addr, "/v2/ws").await;
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v2_client_stays_v2_on_default_server() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
     match authenticate(&mut ws, version_only_auth(Some(2))).await {
@@ -332,6 +329,7 @@ async fn v2_client_stays_v2_on_default_server() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
@@ -360,7 +358,8 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
     )
     .await
     .expect("server builds");
-    let addr = start_server(game_server).await;
+    let running_server = start_server(game_server).await;
+    let addr = running_server.addr();
 
     let mut ws = connect(addr, "/v2/ws").await;
     match authenticate(&mut ws, version_only_auth(Some(3))).await {
@@ -377,11 +376,13 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v2_client_omitting_fields_is_recorded_as_v2() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
     let auth = ClientMessage::Authenticate {
@@ -411,11 +412,13 @@ async fn v2_client_omitting_fields_is_recorded_as_v2() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     // Connect to the /v3/ws alias and omit protocol_version entirely.
     let mut ws = connect(addr, "/v3/ws").await;
 
@@ -443,11 +446,13 @@ async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     // Connect to /v3/ws but explicitly advertise v2: the explicit client value
     // must take precedence over the path default (3).
     let mut ws = connect(addr, "/v3/ws").await;
@@ -474,11 +479,13 @@ async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
-    let addr = start_auth_server().await;
+    let running_server = start_auth_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
     let auth = ClientMessage::Authenticate {
@@ -498,11 +505,13 @@ async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
-    let addr = start_auth_disabled_server().await;
+    let running_server = start_auth_disabled_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
 
     let auth = ClientMessage::Authenticate {
@@ -529,11 +538,13 @@ async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }
 
 #[tokio::test]
 async fn auth_disabled_v3_ws_respects_explicit_v2_without_version_fields() {
-    let addr = start_auth_disabled_server().await;
+    let running_server = start_auth_disabled_server().await;
+    let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
 
     let auth = ClientMessage::Authenticate {
@@ -555,4 +566,5 @@ async fn auth_disabled_v3_ws_respects_explicit_v2_without_version_fields() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
 }

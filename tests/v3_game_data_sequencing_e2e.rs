@@ -28,8 +28,7 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::create_router;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use test_helpers::{create_test_server_with_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{create_test_server_with_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     assert_message_conservation, next_matching_server_message_within, WsStream,
@@ -55,29 +54,15 @@ fn v3_protocol_config() -> ProtocolConfig {
 
 async fn start_test_server(
     server_config: ServerConfig,
-) -> (std::net::SocketAddr, Arc<EnhancedGameServer>) {
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let server = create_test_server_with_config(server_config, v3_protocol_config()).await;
-    let addr = start_server(server.clone()).await;
-    (addr, server)
+    let running_server = start_server(server.clone()).await;
+    (running_server, server)
 }
 
-async fn start_server(server: Arc<EnhancedGameServer>) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test listener");
-    let addr = listener.local_addr().expect("read listener address");
-
-    let router = create_router("http://localhost:3000").with_state(server);
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("test server serve loop");
-    });
-
-    addr
+async fn start_server(server: Arc<EnhancedGameServer>) -> RunningTestServer {
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    RunningTestServer::spawn(server, router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -255,7 +240,8 @@ fn assert_contiguous_seqs(frames: &[ReceivedGameData], first: u64, last: u64, wh
 /// order — so any server-side loss would be observable as a gap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn v3_burst_is_seq_stamped_contiguously_from_one() {
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender = connect(addr).await;
@@ -305,6 +291,7 @@ async fn v3_burst_is_seq_stamped_contiguously_from_one() {
     }
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// (b) Mixed room: the v3 recipient's raw JSON frame carries a `seq` key; the
@@ -312,7 +299,8 @@ async fn v3_burst_is_seq_stamped_contiguously_from_one() {
 /// not just a null — the pre-v3 wire is unchanged).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender = connect(addr).await;
@@ -378,11 +366,13 @@ async fn mixed_room_v2_recipient_raw_json_has_no_seq_key() {
     assert_eq!(v2_data.get("data"), v3_data.get("data"));
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invalid_delivery_class_does_not_consume_a_relay_sequence() {
-    let (addr, _server) = start_test_server(test_server_config()).await;
+    let (running_server, _server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let mut sender = connect(addr).await;
     let mut recipient = connect(addr).await;
     authenticate_v3(&mut sender).await;
@@ -429,6 +419,7 @@ async fn invalid_delivery_class_does_not_consume_a_relay_sequence() {
     .await;
     let frame = collect_game_data(&mut recipient, 1).await.remove(0);
     assert_eq!(frame.seq, Some(1));
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -437,7 +428,8 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
     config.websocket_config.enable_batching = true;
     config.websocket_config.batch_size = 8;
     config.websocket_config.batch_interval_ms = 250;
-    let (addr, server) = start_test_server(config).await;
+    let (running_server, server) = start_test_server(config).await;
+    let addr = running_server.addr();
     let mut sender = connect(addr).await;
     let mut recipient = connect(addr).await;
     authenticate_v3(&mut sender).await;
@@ -503,6 +495,7 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
     assert_eq!(class_metrics.attempted, 2);
     assert_eq!(class_metrics.delivered, 1);
     assert_eq!(class_metrics.superseded, 1);
+    running_server.shutdown().await;
 }
 
 /// Read raw text frames until the next GameData frame, returning the raw JSON
@@ -536,7 +529,8 @@ async fn next_raw_game_data(ws: &mut WsStream, context: &str) -> String {
 async fn interleaved_senders_have_independent_contiguous_seqs() {
     const PER_SENDER: u64 = 50;
 
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender_a = connect(addr).await;
@@ -603,6 +597,7 @@ async fn interleaved_senders_have_independent_contiguous_seqs() {
     assert_eq!(next_expected_b, PER_SENDER + 1, "all of B's frames arrived");
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// (d) The sender leaves and rejoins the room: its stamp counter RESTARTS at
@@ -612,7 +607,8 @@ async fn interleaved_senders_have_independent_contiguous_seqs() {
 async fn sender_leave_and_rejoin_restarts_seq_at_one() {
     const BEFORE_LEAVE: u64 = 3;
 
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender = connect(addr).await;
@@ -684,6 +680,7 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
     );
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// The incarnation epoch is a single monotonic per-connection counter and is
@@ -695,7 +692,8 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
 /// relatively, so a first-observed epoch above 1 is expected and harmless.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn epoch_carries_across_a_room_switch_not_reset_to_one() {
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender = connect(addr).await;
@@ -763,6 +761,7 @@ async fn epoch_carries_across_a_room_switch_not_reset_to_one() {
     );
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// (e) The end-to-end loss-detection story #131's reporter lacked: a slow
@@ -781,7 +780,8 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     let mut server_config = test_server_config();
     server_config.websocket_config.send_queue_capacity = 8;
     server_config.websocket_config.slow_consumer_timeout_ms = 300;
-    let (addr, server) = start_test_server(server_config).await;
+    let (running_server, server) = start_test_server(server_config).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender = connect(addr).await;
@@ -1004,6 +1004,7 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     );
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// Read text frames until the next server message of `type_name`, returning its
@@ -1041,7 +1042,8 @@ async fn next_message_value_of_type(
 /// `PlayerJoined.player.epoch` (seen by existing members).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     // Anchor A (v3) establishes the room; its first incarnation ⇒ epoch 1.
@@ -1157,6 +1159,7 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
     }
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }
 
 /// (g) A reconnecting SENDER's incarnation epoch BUMPS and survives across the
@@ -1168,7 +1171,8 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
 /// self-describing without correlating the control message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data() {
-    let (addr, server) = start_test_server(test_server_config()).await;
+    let (running_server, server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
     let metrics = server.metrics();
 
     let mut sender = connect(addr).await;
@@ -1285,4 +1289,5 @@ async fn reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data() {
     );
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
 }

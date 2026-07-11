@@ -31,8 +31,7 @@ use signal_fish_server::protocol::{
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
-use test_helpers::{test_protocol_config, test_server_config};
-use tokio::net::TcpListener;
+use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::{
     expect_no_server_message_within, next_matching_server_message_within, WsStream,
@@ -109,7 +108,7 @@ fn assert_static_then_default_stun_ice(ice_servers: &[IceServer]) {
     );
 }
 
-async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAddr {
+async fn start_server_with_session(session: SessionConfig) -> RunningTestServer {
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
@@ -134,29 +133,14 @@ async fn start_server_with_session(session: SessionConfig) -> std::net::SocketAd
     .await
     .expect("server builds");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
         .route("/v3/ws", get(websocket_handler_v3))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            combined_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // No startup sleep: the listener is already bound above, so connections
-    // issued immediately are accepted by the kernel and served once the
-    // spawned `axum::serve` task polls them.
-    addr
+    RunningTestServer::spawn(game_server, combined_router).await
 }
 
 async fn connect(addr: std::net::SocketAddr) -> WsStream {
@@ -331,7 +315,8 @@ async fn expect_player_left(ws: &mut WsStream, left: PlayerId, who: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn host_disconnect_reelects_host_and_reissues_session_plans() {
-    let addr = start_server_with_session(host_session_config()).await;
+    let running_server = start_server_with_session(host_session_config()).await;
+    let addr = running_server.addr();
 
     // Three v3 host-capable players fill a 3-seat room. The creator (earliest
     // joiner; the room has no authority) is the finalize-time host.
@@ -441,6 +426,7 @@ async fn host_disconnect_reelects_host_and_reissues_session_plans() {
     // Exactly one re-plan each: no further plan/pairing traffic.
     expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after failover").await;
     expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b after failover").await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -449,7 +435,8 @@ async fn relay_room_departure_then_v3_late_join_refreshes_explicit_floor_plan() 
     // mesh-preferring server => relay floor. B leaves; C(v3+webrtc) fills the
     // seat in the still-Finalized room. The running session stays relay, and
     // each v3 membership boundary carries an explicit floor plan.
-    let addr = start_server_with_session(mesh_session_config()).await;
+    let running_server = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3_full(&mut peer_a).await;
@@ -548,6 +535,7 @@ async fn relay_room_departure_then_v3_late_join_refreshes_explicit_floor_plan() 
     assert_relay_floor_plan(&joiner_floor, "joiner floor");
     expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after refresh").await;
     expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after plan").await;
+    running_server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -557,7 +545,8 @@ async fn mesh_late_join_refreshes_joiner_and_existing_member_plans() {
     // receives a tailored SessionPlan; the existing member receives a complete
     // refreshed plan after PlayerJoined. A mesh member
     // departure itself triggers no re-plan (sticky parameters unchanged).
-    let addr = start_server_with_session(mesh_session_config()).await;
+    let running_server = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
 
     let mut peer_a = connect(addr).await;
     authenticate_v3_full(&mut peer_a).await;
@@ -662,4 +651,5 @@ async fn mesh_late_join_refreshes_joiner_and_existing_member_plans() {
 
     expect_no_server_message_within(&mut joiner, SILENCE_WINDOW, "joiner after its plan").await;
     expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a after its refresh").await;
+    running_server.shutdown().await;
 }
