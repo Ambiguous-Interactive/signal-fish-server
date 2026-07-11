@@ -56,9 +56,10 @@ fn pong_rtt_for_probe(
     observation: Option<ObservedPong>,
     nonce: u64,
     write_started_at: Instant,
+    deadline_at: Instant,
 ) -> Option<Duration> {
     let pong = observation?;
-    (pong.nonce == nonce && pong.received_at >= write_started_at)
+    (pong.nonce == nonce && pong.received_at >= write_started_at && pong.received_at <= deadline_at)
         .then(|| pong.received_at.duration_since(write_started_at))
 }
 
@@ -656,7 +657,8 @@ pub(super) async fn handle_socket(
                     }
                 };
 
-                let deadline = tokio::time::sleep_until(write_timing.completed_at + pong_timeout);
+                let deadline_at = write_timing.completed_at + pong_timeout;
+                let deadline = tokio::time::sleep_until(deadline_at);
                 tokio::pin!(deadline);
                 loop {
                     tokio::select! {
@@ -669,9 +671,12 @@ pub(super) async fn handle_socket(
                                 return;
                             }
                             let observation = *pong_observations.borrow_and_update();
-                            if let Some(rtt) =
-                                pong_rtt_for_probe(observation, nonce, write_timing.started_at)
-                            {
+                            if let Some(rtt) = pong_rtt_for_probe(
+                                observation,
+                                nonce,
+                                write_timing.started_at,
+                                deadline_at,
+                            ) {
                                 server_for_ping
                                     .metrics()
                                     .record_websocket_ping_rtt(rtt)
@@ -680,6 +685,22 @@ pub(super) async fn handle_socket(
                             }
                         }
                         () = &mut deadline => {
+                            // `watch::Receiver::changed` and the timer can become
+                            // ready together. Give a Pong stamped on or before the
+                            // deadline one final observation before timing out.
+                            let observation = *pong_observations.borrow_and_update();
+                            if let Some(rtt) = pong_rtt_for_probe(
+                                observation,
+                                nonce,
+                                write_timing.started_at,
+                                deadline_at,
+                            ) {
+                                server_for_ping
+                                    .metrics()
+                                    .record_websocket_ping_rtt(rtt)
+                                    .await;
+                                break;
+                            }
                             let current_player_id = *effective_player_id_for_ping.read().await;
                             tracing::info!(
                                 %current_player_id,
@@ -1629,6 +1650,7 @@ mod tests {
     fn pong_probe_accepts_matching_observation_after_write_starts() {
         let write_started_at = Instant::now();
         let write_completed_at = write_started_at + Duration::from_millis(2);
+        let deadline_at = write_completed_at + Duration::from_millis(5);
 
         assert_eq!(
             pong_rtt_for_probe(
@@ -1638,6 +1660,7 @@ mod tests {
                 }),
                 1,
                 write_started_at,
+                deadline_at,
             ),
             None,
         );
@@ -1649,6 +1672,7 @@ mod tests {
                 }),
                 1,
                 write_started_at,
+                deadline_at,
             ),
             Some(Duration::ZERO),
         );
@@ -1660,6 +1684,7 @@ mod tests {
                 }),
                 1,
                 write_started_at,
+                deadline_at,
             ),
             Some(Duration::from_millis(1)),
         );
@@ -1675,6 +1700,31 @@ mod tests {
                 }),
                 1,
                 write_started_at,
+                deadline_at,
+            ),
+            None,
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: deadline_at,
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            Some(deadline_at.duration_since(write_started_at)),
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: deadline_at + Duration::from_nanos(1),
+                }),
+                1,
+                write_started_at,
+                deadline_at,
             ),
             None,
         );
