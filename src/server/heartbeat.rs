@@ -4,6 +4,13 @@ use std::sync::Arc;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
+    /// Refresh liveness from a transport-level WebSocket Pong without
+    /// generating an application-level `ServerMessage::Pong` response.
+    pub(crate) async fn record_transport_activity(&self, player_id: &PlayerId) {
+        self.record_client_activity(player_id);
+        self.maybe_update_last_seen(player_id).await;
+    }
+
     /// Handle ping with coordination.
     ///
     /// Records the in-memory ping timestamp (always) for disconnect detection and
@@ -153,5 +160,51 @@ mod tests {
             expired_after.is_empty(),
             "ping refresh should remove player from expired set"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn transport_pong_resets_timeout_without_application_pong() {
+        let server = create_test_server().await;
+        let (sender, mut receiver) = mpsc::channel(4);
+        let addr: SocketAddr = "127.0.0.1:45001".parse().unwrap();
+        let player_id = server
+            .connection_manager
+            .register_client(
+                sender,
+                crate::coordination::ConnectionCloseSignal::detached(),
+                addr,
+                server.instance_id,
+            )
+            .await
+            .expect("client registration");
+
+        advance(Duration::from_millis(25)).await;
+        assert_eq!(
+            server
+                .connection_manager
+                .collect_expired_clients(StdDuration::from_millis(5)),
+            vec![player_id],
+            "player should look expired before transport Pong"
+        );
+
+        server.record_transport_activity(&player_id).await;
+
+        assert!(
+            server
+                .connection_manager
+                .collect_expired_clients(StdDuration::from_millis(5))
+                .is_empty(),
+            "transport Pong must refresh activity-reaper state"
+        );
+        match receiver.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("transport activity test channel disconnected unexpectedly")
+            }
+            Ok(message) => {
+                panic!("transport Pong must not generate an application response, got {message:?}")
+            }
+        }
     }
 }

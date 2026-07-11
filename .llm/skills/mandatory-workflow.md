@@ -98,11 +98,28 @@ rustup component add clippy
 
 ---
 
-## Commit Format (User Executes, Not You)
+## Commit and Pull Request Policy
 
-**⛔ CRITICAL: YOU NEVER CREATE COMMITS. Provide these instructions to the user.**
+Do not create commits, push branches, or open pull requests unless the user has
+explicitly requested publication (for example, "open a PR" or "advance this to a
+green PR"). When publication is explicitly requested, the agent may perform the
+complete workflow after confirming the intended diff:
 
-Suggested commit message format for user:
+1. Stage only files that belong to the requested change; preserve unrelated user
+   changes.
+2. Create a terse, intentional commit.
+3. Push the current topic branch with local `git`.
+4. Create and inspect the pull request with an available GitHub or VS Code
+   connector.
+5. Monitor required checks and continue fixing in-scope failures until the PR is
+   green.
+
+GitHub CLI (`gh`) is an optional fallback, not a prerequisite. Its absence is not
+a blocker when the Git remote accepts pushes and an authenticated connector can
+create and inspect pull requests and checks. Use `gh` only when the connector
+cannot perform a required operation.
+
+Suggested commit message format:
 
 ```text
 
@@ -117,11 +134,11 @@ chore: update MSRV from 1.87.0 to 1.88.0
 
 ```
 
-**When changes are ready:**
+**When changes are ready and publication was not explicitly requested:**
 
 1. ✅ Verify all checks pass (fmt, clippy, test)
 2. ✅ Provide commit instructions to user
-3. ❌ NEVER execute `git commit` yourself
+3. ❌ Do not infer permission to commit or publish
 
 ---
 

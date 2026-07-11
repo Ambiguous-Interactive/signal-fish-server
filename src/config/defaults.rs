@@ -423,6 +423,16 @@ pub const fn default_idle_timeout_secs() -> u64 {
     300
 }
 
+/// Default cadence for server-initiated RFC 6455 Ping frames.
+pub const fn default_server_ping_interval_secs() -> u64 {
+    10
+}
+
+/// Default deadline for the matching RFC 6455 Pong frame.
+pub const fn default_pong_timeout_secs() -> u64 {
+    5
+}
+
 /// Default per-connection outbound queue capacity (messages).
 ///
 /// Sized to absorb realistic relay bursts (e.g. rollback-netcode input

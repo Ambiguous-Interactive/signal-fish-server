@@ -227,6 +227,8 @@ On startup the server looks for `config.json` in the working directory. See
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
+    "server_ping_interval_secs": 10,
+    "pong_timeout_secs": 5,
     "send_queue_capacity": 1024,
     "control_queue_capacity": 128,
     "slow_consumer_timeout_ms": 5000,
@@ -278,12 +280,14 @@ complete reference.
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`    | `true`    | Require auth token for metrics endpoints            |
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES`         | `security.max_signal_bytes`        | `16384`   | Max serialized size of a v3 `Signal` payload        |
-| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `10`      | Max concurrent connections from one IP              |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `24`      | Max concurrent connections from one IP              |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `true`    | Enable outbound message batching                    |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Post-auth idle timeout in seconds (`0` disables)    |
+| `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Server RFC 6455 Ping cadence (`0` disables)       |
+| `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS`       | `websocket.pong_timeout_secs`      | `5`       | Matching Pong deadline before close `4003`          |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY`     | `websocket.send_queue_capacity`    | `1024`    | Per-connection data queue capacity                  |
 | `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY`  | `websocket.control_queue_capacity` | `128`     | Per-connection v3 control queue capacity            |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000`  | Reliable capacity wait before close `4002`          |

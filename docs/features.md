@@ -692,7 +692,25 @@ Keep-alive mechanism to detect dead connections:
 
 ```
 
-Clients should send periodic `Ping` messages. Server disconnects clients that are silent for longer than `ping_timeout`.
+Clients should still send periodic application `Ping` messages. The server also
+probes the underlying WebSocket transport independently:
+
+```json
+
+{
+  "websocket": {
+    "server_ping_interval_secs": 10,
+    "pong_timeout_secs": 5
+  }
+}
+
+```
+
+The RFC 6455 Ping bypasses application queues. Compliant WebSocket stacks answer
+automatically; a missing matching Pong closes the socket with `4003
+activity_timeout`. Set `server_ping_interval_secs` to `0` to disable these
+server probes. Separately, the activity reaper disconnects clients that send no
+traffic for longer than `server.ping_timeout`.
 
 ## Idle Timeout
 

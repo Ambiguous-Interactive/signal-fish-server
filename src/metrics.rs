@@ -89,6 +89,9 @@ pub struct ServerMetrics {
     /// Connections force-closed because their outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`.
     pub websocket_slow_consumer_disconnects: AtomicU64,
+    /// Server-initiated protocol pings that did not receive their matching
+    /// Pong before `websocket.pong_timeout_secs`.
+    pub websocket_ping_timeouts: AtomicU64,
     /// Delivery attempts routed through the reliable server delivery and
     /// reservation paths: one per message per recipient, counted before the
     /// outcome is known. Together with
@@ -336,6 +339,8 @@ pub struct ConnectionMetrics {
     pub websocket_messages_dropped: u64,
     pub websocket_backpressure_events: u64,
     pub websocket_slow_consumer_disconnects: u64,
+    pub websocket_ping_timeouts: u64,
+    pub websocket_ping_rtt: OperationLatencyMetrics,
     pub websocket_delivery_attempts: u64,
     pub websocket_deliveries_enqueued: u64,
     pub websocket_deliveries_channel_closed: u64,
@@ -541,6 +546,7 @@ impl ServerMetrics {
             websocket_messages_dropped: AtomicU64::new(0),
             websocket_backpressure_events: AtomicU64::new(0),
             websocket_slow_consumer_disconnects: AtomicU64::new(0),
+            websocket_ping_timeouts: AtomicU64::new(0),
             websocket_delivery_attempts: AtomicU64::new(0),
             websocket_deliveries_enqueued: AtomicU64::new(0),
             websocket_deliveries_channel_closed: AtomicU64::new(0),
@@ -681,6 +687,15 @@ impl ServerMetrics {
     pub fn increment_websocket_slow_consumer_disconnects(&self) {
         self.websocket_slow_consumer_disconnects
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_websocket_ping_timeouts(&self) {
+        self.websocket_ping_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub async fn record_websocket_ping_rtt(&self, duration: Duration) {
+        self.record_response_time("websocket_ping_rtt", duration)
+            .await;
     }
 
     /// Record one delivery attempt entering the reliable delivery paths,
@@ -1326,6 +1341,9 @@ impl ServerMetrics {
             .unwrap_or_default();
         let room_join_latency = tracker.get_latency_metrics("room_join").unwrap_or_default();
         let query_latency = tracker.get_latency_metrics("query").unwrap_or_default();
+        let websocket_ping_rtt = tracker
+            .get_latency_metrics("websocket_ping_rtt")
+            .unwrap_or_default();
 
         let retry_attempts = self.retry_attempts.load(Ordering::Relaxed);
         let retry_successes = self.retry_successes.load(Ordering::Relaxed);
@@ -1354,6 +1372,8 @@ impl ServerMetrics {
                 websocket_slow_consumer_disconnects: self
                     .websocket_slow_consumer_disconnects
                     .load(Ordering::Relaxed),
+                websocket_ping_timeouts: self.websocket_ping_timeouts.load(Ordering::Relaxed),
+                websocket_ping_rtt,
                 websocket_delivery_attempts: self
                     .websocket_delivery_attempts
                     .load(Ordering::Relaxed),

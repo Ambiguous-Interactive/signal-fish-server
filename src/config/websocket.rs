@@ -3,7 +3,8 @@
 use super::defaults::{
     default_auth_timeout_secs, default_batch_interval_ms, default_batch_size,
     default_control_queue_capacity, default_delivery_stats_interval_secs, default_enable_batching,
-    default_idle_timeout_secs, default_max_sojourn_ms, default_send_queue_capacity,
+    default_idle_timeout_secs, default_max_sojourn_ms, default_pong_timeout_secs,
+    default_send_queue_capacity, default_server_ping_interval_secs,
     default_slow_consumer_timeout_ms,
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,16 @@ pub struct WebSocketConfig {
     /// [`auth_timeout_secs`](Self::auth_timeout_secs).
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// Cadence for server-initiated RFC 6455 Ping frames; `0` disables them.
+    ///
+    /// These transport probes bypass the application/control queues so a
+    /// backed-up relay cannot hide a half-open socket.
+    #[serde(default = "default_server_ping_interval_secs")]
+    pub server_ping_interval_secs: u64,
+    /// Time allowed for the matching RFC 6455 Pong after a server Ping is
+    /// written. A miss closes the connection with `4003 activity_timeout`.
+    #[serde(default = "default_pong_timeout_secs")]
+    pub pong_timeout_secs: u64,
     /// Per-connection outbound message queue capacity.
     ///
     /// Bounds how many undelivered server messages may queue for one
@@ -80,6 +91,8 @@ impl Default for WebSocketConfig {
             batch_interval_ms: default_batch_interval_ms(),
             auth_timeout_secs: default_auth_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
+            server_ping_interval_secs: default_server_ping_interval_secs(),
+            pong_timeout_secs: default_pong_timeout_secs(),
             send_queue_capacity: default_send_queue_capacity(),
             control_queue_capacity: default_control_queue_capacity(),
             slow_consumer_timeout_ms: default_slow_consumer_timeout_ms(),
@@ -108,6 +121,21 @@ impl WebSocketConfig {
             anyhow::bail!(
                 "websocket.auth_timeout_secs must not exceed 60 seconds (configured: {})",
                 self.auth_timeout_secs
+            );
+        }
+        if self.pong_timeout_secs == 0 {
+            anyhow::bail!("websocket.pong_timeout_secs must be greater than 0 (configured: 0)");
+        }
+        if self.server_ping_interval_secs > 3_600 {
+            anyhow::bail!(
+                "websocket.server_ping_interval_secs must not exceed 3600 (1 hour); configured: {}",
+                self.server_ping_interval_secs
+            );
+        }
+        if self.pong_timeout_secs > 3_600 {
+            anyhow::bail!(
+                "websocket.pong_timeout_secs must not exceed 3600 (1 hour); configured: {}",
+                self.pong_timeout_secs
             );
         }
         // When batching is enabled, `batch_interval_ms` is the flush
@@ -206,6 +234,30 @@ mod tests {
         }
 
         let cases = [
+            Case {
+                name: "server ping disabled",
+                mutate: |config| config.server_ping_interval_secs = 0,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "pong timeout cannot be zero",
+                mutate: |config| config.pong_timeout_secs = 0,
+                expect_ok: false,
+                expect_error_containing: "pong_timeout_secs must be greater than 0",
+            },
+            Case {
+                name: "server ping interval above ceiling",
+                mutate: |config| config.server_ping_interval_secs = 3_601,
+                expect_ok: false,
+                expect_error_containing: "server_ping_interval_secs must not exceed 3600",
+            },
+            Case {
+                name: "pong timeout above ceiling",
+                mutate: |config| config.pong_timeout_secs = 3_601,
+                expect_ok: false,
+                expect_error_containing: "pong_timeout_secs must not exceed 3600",
+            },
             Case {
                 name: "defaults are valid",
                 mutate: |_config| {},
