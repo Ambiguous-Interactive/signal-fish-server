@@ -37,7 +37,7 @@
 # Usage:
 #   bash scripts/run-mutants.sh --shard <k>/<N>       # run one shard (CI + local)
 #   bash scripts/run-mutants.sh --warm                # warm build + green-gate
-#   bash scripts/run-mutants.sh --shard 0/27 --print-cmd   # print, do not run
+#   bash scripts/run-mutants.sh --shard 0/32 --print-cmd   # print, do not run
 #
 # Env:
 #   MUTANTS_DRY_RUN   set to 1 for the same effect as --print-cmd
@@ -132,7 +132,7 @@ if [ "$MODE" = "warm" ]; then
 else
     # shard mode: validate the k/N form before doing anything expensive.
     if ! printf '%s' "$SHARD" | grep -Eq '^[0-9]+/[0-9]+$'; then
-        echo "ERROR: --shard must be <k>/<N> (e.g. 0/27), got: '${SHARD}'" >&2
+        echo "ERROR: --shard must be <k>/<N> (e.g. 0/32), got: '${SHARD}'" >&2
         exit 2
     fi
     # --in-place: build in ./target (warmed by rust-cache) so deps are reused, not
