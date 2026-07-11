@@ -47,12 +47,14 @@ struct ObservedPong {
     received_at: Instant,
 }
 
-fn pong_satisfies_probe(
+fn pong_rtt_for_probe(
     observation: Option<ObservedPong>,
     nonce: u64,
     written_at: Instant,
-) -> bool {
-    observation.is_some_and(|pong| pong.nonce == nonce && pong.received_at >= written_at)
+) -> Option<Duration> {
+    let pong = observation?;
+    (pong.nonce == nonce && pong.received_at >= written_at)
+        .then(|| pong.received_at.duration_since(written_at))
 }
 
 /// Enqueue a message on this connection's own outbound queue, honoring the
@@ -661,14 +663,12 @@ pub(super) async fn handle_socket(
                                 return;
                             }
                             let observation = *pong_observations.borrow_and_update();
-                            if pong_satisfies_probe(
-                                observation,
-                                nonce,
-                                written_at,
-                            ) {
+                            if let Some(rtt) =
+                                pong_rtt_for_probe(observation, nonce, written_at)
+                            {
                                 server_for_ping
                                     .metrics()
-                                    .record_websocket_ping_rtt(written_at.elapsed())
+                                    .record_websocket_ping_rtt(rtt)
                                     .await;
                                 break;
                             }
@@ -1616,33 +1616,53 @@ mod tests {
     }
 
     #[test]
-    fn pong_probe_rejects_matching_nonce_observed_before_write() {
+    fn pong_probe_uses_post_write_matching_observation_for_rtt() {
         let written_at = Instant::now();
 
-        assert!(!pong_satisfies_probe(
-            Some(ObservedPong {
-                nonce: 1,
-                received_at: written_at - Duration::from_millis(1),
-            }),
-            1,
-            written_at,
-        ));
-        assert!(pong_satisfies_probe(
-            Some(ObservedPong {
-                nonce: 1,
-                received_at: written_at,
-            }),
-            1,
-            written_at,
-        ));
-        assert!(!pong_satisfies_probe(
-            Some(ObservedPong {
-                nonce: 2,
-                received_at: written_at + Duration::from_millis(1),
-            }),
-            1,
-            written_at,
-        ));
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: written_at - Duration::from_millis(1),
+                }),
+                1,
+                written_at,
+            ),
+            None,
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: written_at,
+                }),
+                1,
+                written_at,
+            ),
+            Some(Duration::ZERO),
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: written_at + Duration::from_millis(1),
+                }),
+                1,
+                written_at,
+            ),
+            Some(Duration::from_millis(1)),
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 2,
+                    received_at: written_at + Duration::from_millis(1),
+                }),
+                1,
+                written_at,
+            ),
+            None,
+        );
     }
 
     #[test]
