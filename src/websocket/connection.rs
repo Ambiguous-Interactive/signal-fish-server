@@ -69,7 +69,9 @@ fn try_record_active_pong(
     nonce: u64,
     received_at: Instant,
 ) -> bool {
-    active_nonce.load(Ordering::Acquire) == nonce
+    let current_nonce = active_nonce.load(Ordering::Acquire);
+    current_nonce != 0
+        && current_nonce == nonce
         && observations
             .try_send(ObservedPong { nonce, received_at })
             .is_ok()
@@ -902,6 +904,8 @@ pub(super) async fn handle_socket(
                                         error = %err,
                                         "Failed to write WebSocket Ping"
                                     );
+                                    send_task_close_signal
+                                        .request_close(CloseReason::ActivityTimeout);
                                 }
                                 Err(_elapsed) => {
                                     active_ping_nonce_for_send.store(0, Ordering::Release);
@@ -1773,10 +1777,17 @@ mod tests {
 
     #[test]
     fn pong_probe_preserves_first_active_match() {
-        let active_nonce = AtomicU64::new(7);
+        let active_nonce = AtomicU64::new(0);
         let (observations, mut receiver) = mpsc::channel(1);
         let first_received_at = Instant::now();
 
+        assert!(!try_record_active_pong(
+            &observations,
+            &active_nonce,
+            0,
+            first_received_at,
+        ));
+        active_nonce.store(7, Ordering::Release);
         assert!(!try_record_active_pong(
             &observations,
             &active_nonce,

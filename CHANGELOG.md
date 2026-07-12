@@ -13,12 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection receives a transport-level Ping every 10 seconds and must return
   the matching Pong within 5 seconds or close with `4003 activity_timeout`.
   The probes bypass application delivery queues, require no client protocol
-  change, map stalled Ping socket writes to `4003 activity_timeout`, reject
-  guessed matching Pongs observed before the socket write begins, accept matching
-  Pongs through the exact deadline, preserve the first matching reply against
-  later unsolicited Pongs, record probe receipt before asynchronous activity
-  refresh, and publish timeout and round-trip latency metrics measured at Pong
-  receipt. Operators can set `websocket.server_ping_interval_secs` to `0` to
+  change, map failed or stalled Ping socket writes to `4003 activity_timeout`,
+  reject the idle nonce and guessed matching Pongs observed before the socket
+  write begins, accept matching Pongs through the exact deadline, preserve the
+  first matching reply against later unsolicited Pongs, record probe receipt
+  before asynchronous activity refresh, and publish timeout and round-trip
+  latency metrics measured at Pong receipt. Operators can set
+  `websocket.server_ping_interval_secs` to `0` to
   disable them. Timeout logs and counters are emitted only when activity timeout
   wins the connection close race. Documentation
   consistently distinguishes these WebSocket probes from application pings and
