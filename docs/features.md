@@ -712,6 +712,11 @@ activity_timeout`. Set `server_ping_interval_secs` to `0` to disable these
 server probes. Separately, the activity reaper disconnects clients that send no
 traffic for longer than `server.ping_timeout`.
 
+Prometheus reports missed matching-Pong deadlines with
+`signal_fish_websocket_ping_timeouts_total`. Successful probe latency uses the
+`signal_fish_websocket_ping_rtt_*` family, including
+`signal_fish_websocket_ping_rtt_samples_total` and millisecond summary gauges.
+
 ## Idle Timeout
 
 A separate, socket-level idle cap closes authenticated connections that go
