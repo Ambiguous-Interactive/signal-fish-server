@@ -672,7 +672,7 @@ surface and are never renumbered):
 | `4000` | `server_shutdown` | The server is shutting down after a graceful drain |
 | `4001` | `auth_timeout` | Never authenticated within `websocket.auth_timeout_secs` |
 | `4002` | `slow_consumer` | Delivery contract failed closed: reliable queue timeout, oldest outbound/write sojourn, or inability to preserve exact accountability/control priority |
-| `4003` | `activity_timeout` | Missed the server WebSocket Pong deadline or was evicted by the `server.ping_timeout` activity reaper |
+| `4003` | `activity_timeout` | The server WebSocket Ping write timed out, the matching Pong missed its deadline, or the `server.ping_timeout` activity reaper evicted the connection |
 | `4004` | `idle_timeout` | No inbound frame within `websocket.idle_timeout_secs` |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 

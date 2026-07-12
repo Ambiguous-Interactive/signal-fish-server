@@ -11,8 +11,8 @@
 //! - `4001 auth_timeout` — never authenticated within
 //!   `websocket.auth_timeout_secs`;
 //! - `4002 slow_consumer` — evicted by the delivery contract;
-//! - `4003 activity_timeout` — missed server Pong deadline or evicted by the
-//!   `server.ping_timeout` reaper;
+//! - `4003 activity_timeout` — server Ping write timed out, the matching Pong
+//!   missed its deadline, or the `server.ping_timeout` reaper evicted it;
 //! - `4004 idle_timeout` — no inbound frame within
 //!   `websocket.idle_timeout_secs`.
 //!
