@@ -136,8 +136,8 @@ async fn missing_pong_closes_with_activity_timeout() {
     let (running, server) = start_server(1, 1).await;
     let proxy = ChaosProxy::spawn(running.addr()).await;
     let mut ws = connect(proxy.addr()).await;
-    // The first server nonce is 1. A stale/unsolicited Pong sent before the
-    // corresponding Ping must not satisfy the later probe.
+    // An unsolicited guessed Pong sent before the random server probe must not
+    // satisfy that later probe.
     ws.send(Message::Pong(1_u64.to_be_bytes().to_vec().into()))
         .await
         .expect("send unsolicited pre-probe Pong");
@@ -151,9 +151,9 @@ async fn missing_pong_closes_with_activity_timeout() {
     loop {
         let frame = tokio::time::timeout(tokio::time::Duration::from_secs(1), ws.next())
             .await
-            .expect("timed out proving unsolicited Pong reached the server")
-            .expect("connection closed while proving unsolicited Pong ordering")
-            .expect("websocket read failed while proving unsolicited Pong ordering");
+            .expect("timed out proving guessed Pong reached the server")
+            .expect("connection closed while proving guessed Pong ordering")
+            .expect("websocket read failed while proving guessed Pong ordering");
         if let Message::Text(text) = frame {
             let message: ServerMessage =
                 serde_json::from_str(&text).expect("decode application Pong response");
@@ -176,7 +176,7 @@ async fn missing_pong_closes_with_activity_timeout() {
         assert_eq!(timeout_count, 0, "missed Pong was counted more than once");
         assert!(
             tokio::time::Instant::now() < deadline,
-            "stale Pong incorrectly satisfied the server probe"
+            "guessed Pong incorrectly satisfied the server probe"
         );
         tokio::task::yield_now().await;
     }

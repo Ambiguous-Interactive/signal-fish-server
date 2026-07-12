@@ -13,6 +13,7 @@ use crate::protocol::{
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
+use rand::RngExt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,6 +27,16 @@ use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn random_ping_nonce() -> u64 {
+    let mut rng = rand::rng();
+    loop {
+        let nonce = rng.random::<u64>();
+        if nonce != 0 {
+            return nonce;
+        }
+    }
+}
 
 #[repr(u32)]
 enum RegisteredConnectionCloseStep {
@@ -633,7 +644,6 @@ pub(super) async fn handle_socket(
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // Start probing after one full configured interval.
             ticker.tick().await;
-            let mut next_nonce = 1_u64;
             loop {
                 tokio::select! {
                     reason = ping_task_close.closed() => {
@@ -643,13 +653,12 @@ pub(super) async fn handle_socket(
                     _ = ticker.tick() => {}
                 }
 
-                let nonce = next_nonce;
-                next_nonce = next_nonce.checked_add(1).unwrap_or(1);
+                let nonce = random_ping_nonce();
                 // Discard unsolicited/stale Pongs before publishing this
                 // probe. The write task returns timestamps bracketing the send,
-                // so a predictable Pong observed before the write begins cannot
-                // satisfy the probe while a fast reply received before the send
-                // future returns remains valid.
+                // so even an exact Pong observed before the write begins cannot
+                // satisfy the unpredictable probe while a fast reply received
+                // before the send future returns remains valid.
                 loop {
                     match pong_observations.try_recv() {
                         Ok(stale) => {
@@ -1812,6 +1821,13 @@ mod tests {
         let observation = receiver.try_recv().expect("first matching Pong retained");
         assert_eq!(observation.nonce, 7);
         assert_eq!(observation.received_at, first_received_at);
+    }
+
+    #[test]
+    fn ping_probe_nonces_never_use_idle_sentinel() {
+        for _ in 0..1_024 {
+            assert_ne!(random_ping_nonce(), 0);
+        }
     }
 
     #[test]
