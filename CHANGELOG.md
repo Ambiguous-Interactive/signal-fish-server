@@ -22,9 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   latency metrics measured at Pong receipt. Operators can set
   `websocket.server_ping_interval_secs` to `0` to disable them. Timeout logs are
   emitted only when activity timeout wins the connection close race; the
-  ping-timeout counter increments only for a missed
-  Pong deadline that wins that race. Documentation
-  consistently distinguishes these WebSocket probes from application pings and
+  ping-timeout counter increments only for a missed Pong deadline that wins that
+  race, never for observation-channel shutdown. Documentation consistently
+  distinguishes these WebSocket probes from application pings and
   reflects the 24-connection default in examples and deployment guidance.
 
 - Added protocol-v3 delivery classes and exact gap accountability (P10.E2).

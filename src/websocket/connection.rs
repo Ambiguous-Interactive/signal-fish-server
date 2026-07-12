@@ -731,7 +731,14 @@ pub(super) async fn handle_socket(
                             // Receiving the observation and the timer can become
                             // ready together. Give a Pong stamped on or before the
                             // deadline one final observation before timing out.
-                            let observation = pong_observations.try_recv().ok();
+                            let observation = match pong_observations.try_recv() {
+                                Ok(observation) => Some(observation),
+                                Err(mpsc::error::TryRecvError::Empty) => None,
+                                Err(mpsc::error::TryRecvError::Disconnected) => {
+                                    active_ping_nonce_for_ping.store(0, Ordering::Release);
+                                    return;
+                                }
+                            };
                             if let Some(rtt) = pong_rtt_for_probe(
                                 observation,
                                 nonce,
