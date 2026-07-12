@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Document the single-instance deployment contract and prove its unsupported
+  multi-process failure modes with a nightly two-binary H5 experiment. Startup
+  logs now state that room/reconnect state is in-memory, room affinity is
+  required, and session handoff is unavailable. The scaling/deployment docs no
+  longer imply that generic sticky sessions provide horizontal safety. Added
+  ADR-0006 for the completed protocol-v3 delivery-reliability revision
+  (delivery classes, epoch, reconnect watermarks, drain, and WebSocket pings),
+  including the rejected/deferred feature cut list.
+
 - Add server-initiated RFC 6455 liveness probes (P10.E4). By default each
   connection receives a transport-level Ping every 10 seconds and must return
   the matching Pong within 5 seconds or close with `4003 activity_timeout`.

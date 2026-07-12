@@ -114,6 +114,13 @@ pub async fn run_server(
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "Starting enhanced Signal Fish server");
+    tracing::info!(
+        deployment_mode = "single_instance",
+        room_state = "in_memory",
+        room_affinity_required = true,
+        session_handoff = false,
+        "Deployment contract: one process owns each room; losing the process loses its rooms"
+    );
 
     axum::serve(
         listener,

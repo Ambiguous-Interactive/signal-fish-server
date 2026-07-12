@@ -588,7 +588,7 @@ signal-fish-server/
 │   ├── lib.rs                   # Library crate root
 │   ├── server.rs                # EnhancedGameServer core
 │   ├── broadcast.rs             # Zero-copy broadcast primitives
-│   ├── distributed.rs           # In-memory distributed locking
+│   ├── distributed.rs           # In-memory coordination extension seams
 │   ├── logging.rs               # tracing-subscriber initialization
 │   ├── metrics.rs               # Atomic counters + HDR histograms
 │   ├── rate_limit.rs            # In-memory rate limiter

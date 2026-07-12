@@ -44,7 +44,7 @@ success-output = "never"
 # (plus, in its nightly-only tests, real client processes) and floods it, so
 # it shares the group for exactly the same isolation reasons.
 [[profile.default.overrides]]
-filter = 'binary(v3_multiprocess_e2e) or binary(multiprocess_delivery_e2e)'
+filter = 'binary(v3_multiprocess_e2e) or binary(multiprocess_delivery_e2e) or binary(split_brain_two_instances_e2e)'
 test-group = 'process-spawning'
 threads-required = 4
 

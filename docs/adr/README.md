@@ -24,6 +24,7 @@ ADRs are immutable once accepted. If a decision needs to be changed, a new ADR s
 | [ADR-0003](0003-formal-verification-and-fuzzing.md) | Formal Verification and Fuzzing for the Protocol v3 Session Core | Accepted |
 | [ADR-0004](0004-native-reference-client.md) | Native Reference Client with a Real WebRTC Stack | Accepted |
 | [ADR-0005](0005-browser-reference-client.md) | Browser Reference Client on Real Headless Chromium | Accepted |
+| [ADR-0006](0006-protocol-v3-delivery-reliability.md) | Protocol v3 Delivery Reliability and Lifecycle Boundaries | Accepted |
 
 > Numbering note: the legacy `ADR-001` (3-digit) predates the current `ADR-0001` 4-digit scheme.
 > New ADRs use the 4-digit `ADR-NNNN` form; the legacy ID is preserved as-is to keep existing links stable.

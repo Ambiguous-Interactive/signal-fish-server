@@ -145,7 +145,9 @@ App-based authentication and per-app rate limiting.
 
 **Location:** `src/coordination/`
 
-Distributed coordination primitives for multi-instance deployments.
+In-memory coordination primitives and extension seams. The shipped
+implementations do not coordinate multiple server processes; see the
+[single-instance deployment contract](architecture/single-instance-deployment.md).
 
 - `room_coordinator.rs` - Room operation coordination
 - `dedup.rs` - Deduplication cache (LRU)
@@ -239,17 +241,18 @@ Recommended per instance:
 
 ### Multi-Instance Deployment
 
-For horizontal scaling:
-
-1. **Session affinity** - Route by game_name or room_code at load balancer
-2. **Room sharding** - Distribute rooms across instances
-3. **Coordination** - Use `RoomOperationCoordinator` for distributed locking
+Transparent multi-instance deployment is not supported. `RoomOperationCoordinator`
+and `DistributedLock` use in-memory implementations and cannot preserve a room
+across processes. Run one active process per routing domain, or use an external
+directory that assigns isolated room homes before WebSocket connection. See
+[Single-Instance Deployment](architecture/single-instance-deployment.md).
 
 ### Storage Options
 
 - **In-Memory** (default) - Fast, ephemeral, no external dependencies
-- **Redis** - Implement `GameDatabase` trait with Redis backend
-- **PostgreSQL** - Implement `GameDatabase` trait with PostgreSQL backend
+- Custom persistent backends would require a separately designed distributed
+  authority and routing protocol; implementing `GameDatabase` alone is not
+  sufficient for multi-instance safety.
 
 ## Security Architecture
 
