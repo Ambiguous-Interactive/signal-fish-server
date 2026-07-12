@@ -197,6 +197,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
+| `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Cadence for server-initiated RFC 6455 Ping frames (`0` disables; must be ≤ `3600`) |
+| `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS` | `websocket.pong_timeout_secs` | `5` | Seconds allowed for the matching Pong before close `4003 activity_timeout` (must be > `0` and ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection data queue capacity (must be ≥ 1); only reliable delivery waits when full |
 | `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY` | `websocket.control_queue_capacity` | `128` | Per-connection v3 priority control queue capacity (must be ≥ 2) |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds reliable delivery may wait for data-queue space before closing the recipient with `4002 slow_consumer` (must be > 0 and ≤ `600000`) |
@@ -306,6 +308,8 @@ Complete reference of all configuration options with environment variable overri
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
+    "server_ping_interval_secs": 10,
+    "pong_timeout_secs": 5,
     "send_queue_capacity": 1024,
     "control_queue_capacity": 128,
     "slow_consumer_timeout_ms": 5000,
@@ -331,6 +335,12 @@ Complete reference of all configuration options with environment variable overri
   that heartbeat (which `server.ping_timeout` already requires) are never
   affected by the 300s default. Keep this enabled in production — it reclaims
   zombie sockets that would otherwise hold file descriptors open indefinitely.
+- `server_ping_interval_secs` / `pong_timeout_secs` - The server sends an RFC
+  6455 Ping every 10 seconds by default and requires its matching Pong within 5
+  seconds. The probe is written directly by the socket layer, outside the
+  application data/control queues; a miss closes with `4003 activity_timeout`.
+  Set the interval to `0` to disable server probes. The Pong timeout must remain
+  greater than `0`; both fields are capped at 3600 seconds.
 - `send_queue_capacity` - Per-connection data queue capacity in messages
   (default: 1024; must be ≥ 1). Reliable messages wait for space and apply
   sender backpressure. V3 `latest` and `volatile` messages never wait: their

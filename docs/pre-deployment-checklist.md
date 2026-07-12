@@ -29,7 +29,7 @@ cargo run -- --print-config
   meaningful `app_id` / `app_name`.
 - [ ] CORS locked down — `security.cors_origins` set to your origin(s), **not**
   `*`.
-- [ ] `security.max_connections_per_ip` set to a sane ceiling (default `10`).
+- [ ] `security.max_connections_per_ip` set to a sane ceiling (default `24`).
 
 ## Secrets changed
 

@@ -101,9 +101,12 @@
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
+    "server_ping_interval_secs": 10,
+    "pong_timeout_secs": 5,
     "send_queue_capacity": 1024,
     "control_queue_capacity": 128,
     "slow_consumer_timeout_ms": 5000,
-    "max_sojourn_ms": 15000
+    "max_sojourn_ms": 15000,
+    "delivery_stats_interval_secs": 0
   }
 }

@@ -123,6 +123,18 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Connections force-closed because outbound delivery could not make accountable progress",
         snapshot.connections.websocket_slow_consumer_disconnects,
     );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_ping_timeouts_total",
+        "Server-initiated WebSocket pings that missed their matching Pong deadline",
+        snapshot.connections.websocket_ping_timeouts,
+    );
+    emit_latency_metrics(
+        &mut buf,
+        "signal_fish_websocket_ping_rtt",
+        "server-initiated WebSocket ping round-trip",
+        &snapshot.connections.websocket_ping_rtt,
+    );
     // Delivery conservation counters: together with the drop counter above,
     // enqueued + channel_closed + canceled <= attempts <=
     // enqueued + channel_closed + canceled + dropped at any quiescent point
@@ -713,6 +725,14 @@ mod tests {
         assert!(
             rendered.contains("signal_fish_websocket_messages_dropped_total 0"),
             "expected websocket drop counter line"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_ping_timeouts_total 0"),
+            "expected websocket ping timeout counter line"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_ping_rtt_samples_total 0"),
+            "expected websocket ping RTT histogram sample line"
         );
         assert!(
             rendered.contains("signal_fish_dashboard_cache_age_seconds"),

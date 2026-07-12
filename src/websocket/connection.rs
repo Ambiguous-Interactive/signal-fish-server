@@ -13,17 +13,30 @@ use crate::protocol::{
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
+use rand::RngExt;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError};
 use super::sending::send_immediate_server_message;
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
+
+const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn random_ping_nonce() -> u64 {
+    let mut rng = rand::rng();
+    loop {
+        let nonce = rng.random::<u64>();
+        if nonce != 0 {
+            return nonce;
+        }
+    }
+}
 
 #[repr(u32)]
 enum RegisteredConnectionCloseStep {
@@ -35,6 +48,47 @@ enum RegisteredConnectionCloseStep {
 
 pub(super) const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
     RegisteredConnectionCloseStep::Count as u32;
+
+struct ServerPingCommand {
+    nonce: u64,
+    write_timing: oneshot::Sender<PingWriteTiming>,
+}
+
+struct PingWriteTiming {
+    started_at: Instant,
+    completed_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct ObservedPong {
+    nonce: u64,
+    received_at: Instant,
+}
+
+fn pong_rtt_for_probe(
+    observation: Option<ObservedPong>,
+    nonce: u64,
+    write_started_at: Instant,
+    deadline_at: Instant,
+) -> Option<Duration> {
+    let pong = observation?;
+    (pong.nonce == nonce && pong.received_at >= write_started_at && pong.received_at <= deadline_at)
+        .then(|| pong.received_at.duration_since(write_started_at))
+}
+
+fn try_record_active_pong(
+    observations: &mpsc::Sender<ObservedPong>,
+    active_nonce: &AtomicU64,
+    nonce: u64,
+    received_at: Instant,
+) -> bool {
+    let current_nonce = active_nonce.load(Ordering::Acquire);
+    current_nonce != 0
+        && current_nonce == nonce
+        && observations
+            .try_send(ObservedPong { nonce, received_at })
+            .is_ok()
+}
 
 /// Enqueue a message on this connection's own outbound queue, honoring the
 /// server-wide no-silent-drop contract: backpressure while the queue is
@@ -425,7 +479,20 @@ pub(super) async fn handle_socket(
     let (close_signal, close_listener) = ConnectionCloseSignal::channel();
     let mut send_task_close = close_listener.clone();
     let stats_task_close = close_listener.clone();
+    let ping_task_close = close_listener.clone();
     let mut receive_task_close = close_listener;
+
+    // Socket-internal ping commands are deliberately separate from both
+    // application delivery lanes. At most one probe is outstanding, so one
+    // slot is sufficient and cannot accumulate stale probes.
+    let (ping_command_tx, mut ping_command_rx) = mpsc::channel::<ServerPingCommand>(1);
+    // The socket reader forwards only the first Pong matching the nonce that
+    // the writer has marked active. A bounded channel preserves that match
+    // without allowing unsolicited Pongs to grow memory or overwrite it.
+    let active_ping_nonce = Arc::new(AtomicU64::new(0));
+    let active_ping_nonce_for_send = Arc::clone(&active_ping_nonce);
+    let active_ping_nonce_for_receive = Arc::clone(&active_ping_nonce);
+    let (pong_observation_tx, pong_observation_rx) = mpsc::channel::<ObservedPong>(1);
 
     // Keep a clone of tx for sending auth responses
     let tx_clone = tx.clone();
@@ -562,6 +629,153 @@ pub(super) async fn handle_socket(
         return;
     };
 
+    let server_ping_interval_secs = server.config().websocket_config.server_ping_interval_secs;
+    if server_ping_interval_secs > 0 {
+        let pong_timeout = Duration::from_secs(server.config().websocket_config.pong_timeout_secs);
+        let ping_commands = ping_command_tx.clone();
+        let ping_close_signal = close_signal.clone();
+        let mut ping_task_close = ping_task_close;
+        let mut pong_observations = pong_observation_rx;
+        let active_ping_nonce_for_ping = Arc::clone(&active_ping_nonce);
+        let server_for_ping = server.clone();
+        let effective_player_id_for_ping = Arc::clone(&effective_player_id);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(server_ping_interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Start probing after one full configured interval.
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    reason = ping_task_close.closed() => {
+                        tracing::debug!(?reason, "Connection closing; ending WebSocket ping probes");
+                        break;
+                    }
+                    _ = ticker.tick() => {}
+                }
+
+                let nonce = random_ping_nonce();
+                // Discard unsolicited/stale Pongs before publishing this
+                // probe. The write task returns timestamps bracketing the send,
+                // so even an exact Pong observed before the write begins cannot
+                // satisfy the unpredictable probe while a fast reply received
+                // before the send future returns remains valid.
+                loop {
+                    match pong_observations.try_recv() {
+                        Ok(stale) => {
+                            tracing::debug!(
+                                stale_nonce = stale.nonce,
+                                "Discarding stale WebSocket Pong observation"
+                            );
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => return,
+                    }
+                }
+                let (write_timing_tx, write_timing_rx) = oneshot::channel();
+                let command = ServerPingCommand {
+                    nonce,
+                    write_timing: write_timing_tx,
+                };
+                tokio::select! {
+                    reason = ping_task_close.closed() => {
+                        tracing::debug!(?reason, "Connection closing before WebSocket Ping write");
+                        break;
+                    }
+                    result = ping_commands.send(command) => {
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                }
+                let write_timing = tokio::select! {
+                    reason = ping_task_close.closed() => {
+                        tracing::debug!(?reason, "Connection closing during WebSocket Ping write");
+                        break;
+                    }
+                    result = write_timing_rx => {
+                        let Ok(write_timing) = result else {
+                            break;
+                        };
+                        write_timing
+                    }
+                };
+
+                let deadline_at = write_timing.completed_at + pong_timeout;
+                let deadline = tokio::time::sleep_until(deadline_at);
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        reason = ping_task_close.closed() => {
+                            tracing::debug!(?reason, "Connection closing while awaiting WebSocket Pong");
+                            return;
+                        }
+                        observation = pong_observations.recv() => {
+                            let Some(observation) = observation else {
+                                return;
+                            };
+                            if let Some(rtt) = pong_rtt_for_probe(
+                                Some(observation),
+                                nonce,
+                                write_timing.started_at,
+                                deadline_at,
+                            ) {
+                                server_for_ping
+                                    .metrics()
+                                    .record_websocket_ping_rtt(rtt)
+                                    .await;
+                                active_ping_nonce_for_ping.store(0, Ordering::Release);
+                                break;
+                            }
+                        }
+                        () = &mut deadline => {
+                            // Receiving the observation and the timer can become
+                            // ready together. Give a Pong stamped on or before the
+                            // deadline one final observation before timing out.
+                            let observation = match pong_observations.try_recv() {
+                                Ok(observation) => Some(observation),
+                                Err(mpsc::error::TryRecvError::Empty) => None,
+                                Err(mpsc::error::TryRecvError::Disconnected) => {
+                                    active_ping_nonce_for_ping.store(0, Ordering::Release);
+                                    return;
+                                }
+                            };
+                            if let Some(rtt) = pong_rtt_for_probe(
+                                observation,
+                                nonce,
+                                write_timing.started_at,
+                                deadline_at,
+                            ) {
+                                server_for_ping
+                                    .metrics()
+                                    .record_websocket_ping_rtt(rtt)
+                                    .await;
+                                active_ping_nonce_for_ping.store(0, Ordering::Release);
+                                break;
+                            }
+                            active_ping_nonce_for_ping.store(0, Ordering::Release);
+                            if ping_close_signal.request_close(CloseReason::ActivityTimeout) {
+                                let current_player_id =
+                                    *effective_player_id_for_ping.read().await;
+                                tracing::info!(
+                                    %current_player_id,
+                                    timeout_secs = pong_timeout.as_secs(),
+                                    "WebSocket Pong timeout - closing connection"
+                                );
+                                server_for_ping
+                                    .metrics()
+                                    .increment_websocket_ping_timeouts();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        drop(ping_task_close);
+        drop(pong_observation_rx);
+    }
+
     // Periodic per-connection RelayStats emission (protocol v3, opt-in via
     // `websocket.delivery_stats_interval_secs`; default 0 = disabled, so no
     // task is spawned at all). The v3 gate is enforced at EMISSION on every
@@ -664,6 +878,7 @@ pub(super) async fn handle_socket(
         let batch_size = config.websocket_config.batch_size;
         let batch_interval_ms = config.websocket_config.batch_interval_ms;
         let max_sojourn = Duration::from_millis(config.websocket_config.max_sojourn_ms);
+        let ping_write_timeout = SERVER_PING_WRITE_TIMEOUT;
 
         let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
 
@@ -677,11 +892,62 @@ pub(super) async fn handle_socket(
         let close_request: Option<Option<CloseReason>> = tokio::select! {
             reason = send_task_close.closed() => Some(reason),
             () = async {
-                if batching_enabled {
-                    let batch_interval =
-                        Duration::from_millis(batch_interval_ms.max(1));
-                    loop {
-                        match rx.recv_batched(batch_size, batch_interval).await {
+                let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
+                loop {
+                    let received = tokio::select! {
+                        biased;
+                        command = ping_command_rx.recv() => {
+                            let Some(command) = command else {
+                                break;
+                            };
+                            let payload = command.nonce.to_be_bytes().to_vec().into();
+                            let write_started_at = Instant::now();
+                            active_ping_nonce_for_send.store(command.nonce, Ordering::Release);
+                            match tokio::time::timeout(
+                                ping_write_timeout,
+                                sender.send(Message::Ping(payload)),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    let _ = command.write_timing.send(PingWriteTiming {
+                                        started_at: write_started_at,
+                                        completed_at: Instant::now(),
+                                    });
+                                    continue;
+                                }
+                                Ok(Err(err)) => {
+                                    active_ping_nonce_for_send.store(0, Ordering::Release);
+                                    tracing::debug!(
+                                        error = %err,
+                                        "Failed to write WebSocket Ping"
+                                    );
+                                    send_task_close_signal
+                                        .request_close(CloseReason::ActivityTimeout);
+                                }
+                                Err(_elapsed) => {
+                                    active_ping_nonce_for_send.store(0, Ordering::Release);
+                                    if send_task_close_signal
+                                        .request_close(CloseReason::ActivityTimeout)
+                                    {
+                                        tracing::info!(
+                                            timeout_secs = ping_write_timeout.as_secs(),
+                                            "WebSocket Ping write timed out - closing connection"
+                                        );
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        received = async {
+                            if batching_enabled {
+                                rx.recv_batched(batch_size, batch_interval).await
+                            } else {
+                                rx.recv().await
+                            }
+                        } => received,
+                    };
+                    match received {
                             Ok(Some(message)) if message.is_control() => {
                                 let current_player_id =
                                     *effective_player_id_for_send.read().await;
@@ -737,58 +1003,6 @@ pub(super) async fn handle_socket(
                             }
                             Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
                         }
-                    }
-                } else {
-                    loop {
-                        match rx.recv().await {
-                            Ok(Some(message)) if message.is_control() => {
-                                let current_player_id = *effective_player_id_for_send.read().await;
-                                if send_queued(
-                                    &mut sender,
-                                    message,
-                                    None,
-                                    &rx,
-                                    &current_player_id,
-                                    &server_clone,
-                                    &send_task_close_signal,
-                                    max_sojourn,
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(Some(message)) => {
-                                batcher.queue(message);
-                                let current_player_id = *effective_player_id_for_send.read().await;
-                                if send_batch(
-                                    &mut sender,
-                                    &mut batcher,
-                                    &mut rx,
-                                    &current_player_id,
-                                    &server_clone,
-                                    &send_task_close_signal,
-                                    max_sojourn,
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(None) => break,
-                            Err(TryReceiveError::AccountabilityFailed) => {
-                                if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
-                                    server_clone
-                                        .metrics()
-                                        .increment_websocket_slow_consumer_disconnects();
-                                }
-                                break;
-                            }
-                            Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
-                        }
-                    }
                 }
             } => None,
         };
@@ -1402,10 +1616,20 @@ pub(super) async fn handle_socket(
                     tracing::info!(%active_player_id, "WebSocket connection closed");
                     break;
                 }
-                Message::Pong(_) => {
-                    // Handle pong as ping response
+                Message::Pong(payload) => {
+                    if let Ok(bytes) = <[u8; 8]>::try_from(payload.as_ref()) {
+                        let nonce = u64::from_be_bytes(bytes);
+                        try_record_active_pong(
+                            &pong_observation_tx,
+                            &active_ping_nonce_for_receive,
+                            nonce,
+                            Instant::now(),
+                        );
+                    }
+                    // Publish the probe observation before a potentially slow
+                    // activity refresh so deadline evaluation stays independent.
                     server_clone
-                        .handle_client_message(&active_player_id, ClientMessage::Ping)
+                        .record_transport_activity(&active_player_id)
                         .await;
                 }
                 _ => {
@@ -1483,6 +1707,134 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), listener.closed())
             .await
             .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+    }
+
+    #[test]
+    fn pong_probe_accepts_matching_observation_after_write_starts() {
+        let write_started_at = Instant::now();
+        let write_completed_at = write_started_at + Duration::from_millis(2);
+        let deadline_at = write_completed_at + Duration::from_millis(5);
+
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: write_started_at - Duration::from_millis(1),
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            None,
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: write_started_at,
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            Some(Duration::ZERO),
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: write_started_at + Duration::from_millis(1),
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            Some(Duration::from_millis(1)),
+        );
+        assert!(
+            write_started_at + Duration::from_millis(1) < write_completed_at,
+            "the regression case is a valid Pong observed before send completion",
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 2,
+                    received_at: write_started_at + Duration::from_millis(1),
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            None,
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: deadline_at,
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            Some(deadline_at.duration_since(write_started_at)),
+        );
+        assert_eq!(
+            pong_rtt_for_probe(
+                Some(ObservedPong {
+                    nonce: 1,
+                    received_at: deadline_at + Duration::from_nanos(1),
+                }),
+                1,
+                write_started_at,
+                deadline_at,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn pong_probe_preserves_first_active_match() {
+        let active_nonce = AtomicU64::new(0);
+        let (observations, mut receiver) = mpsc::channel(1);
+        let first_received_at = Instant::now();
+
+        assert!(!try_record_active_pong(
+            &observations,
+            &active_nonce,
+            0,
+            first_received_at,
+        ));
+        active_nonce.store(7, Ordering::Release);
+        assert!(!try_record_active_pong(
+            &observations,
+            &active_nonce,
+            8,
+            first_received_at,
+        ));
+        assert!(try_record_active_pong(
+            &observations,
+            &active_nonce,
+            7,
+            first_received_at,
+        ));
+        assert!(!try_record_active_pong(
+            &observations,
+            &active_nonce,
+            7,
+            first_received_at + Duration::from_millis(1),
+        ));
+
+        let observation = receiver.try_recv().expect("first matching Pong retained");
+        assert_eq!(observation.nonce, 7);
+        assert_eq!(observation.received_at, first_received_at);
+    }
+
+    #[test]
+    fn ping_probe_nonces_never_use_idle_sentinel() {
+        for _ in 0..1_024 {
+            assert_ne!(random_ping_nonce(), 0);
+        }
     }
 
     #[test]

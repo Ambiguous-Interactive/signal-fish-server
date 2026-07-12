@@ -65,8 +65,8 @@ retry_wait_time = 2
 # Timeout settings (in seconds)
 timeout = 20
 
-# User agent
-user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
+# Identify the automated client honestly for services with data-access policies.
+user_agent = "signal-fish-server-link-check/1.0 (+https://github.com/Ambiguous-Interactive/signal-fish-server; mailto:eli@theambiguous.co)"
 
 
 # Exclude specific file paths
@@ -102,9 +102,14 @@ include_verbatim = false
 #   lychee --config .lychee.toml \
 #     --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://$PWD/\$1" \
 #     <files...>
-# remap = [
-#     "https://example.com https://staging.example.com",
-# ]
+# crates.io rejects automated requests to its rendered crate page, while the
+# version badge can return upstream timeouts. Validate both package-specific URLs
+# through the canonical sparse-index record instead. CI repeats these command-line
+# remaps because its working-tree remap takes CLI precedence.
+remap = [
+    "https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server",
+    "https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server",
+]
 
 # Custom headers for specific domains (if needed)
 # [[custom]]

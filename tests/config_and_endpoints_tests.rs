@@ -501,6 +501,16 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("300"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS",
+        path: "websocket.server_ping_interval_secs",
+        default: Some("10"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS",
+        path: "websocket.pong_timeout_secs",
+        default: Some("5"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY",
         path: "websocket.send_queue_capacity",
         default: Some("1024"),
@@ -797,6 +807,8 @@ fn test_config_default_values() {
     assert_eq!(config.port, 3536);
     assert_eq!(config.server.default_max_players, 8);
     assert_eq!(config.server.ping_timeout, 30);
+    assert_eq!(config.websocket.server_ping_interval_secs, 10);
+    assert_eq!(config.websocket.pong_timeout_secs, 5);
     assert_eq!(config.server.room_cleanup_interval, 60);
     assert_eq!(config.server.drain_grace_secs, 30);
     assert_eq!(config.server.max_rooms_per_game, 1000);
