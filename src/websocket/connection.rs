@@ -25,6 +25,8 @@ use super::sending::send_immediate_server_message;
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
 
+const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
 #[repr(u32)]
 enum RegisteredConnectionCloseStep {
     FlushQueuedMessages,
@@ -860,7 +862,7 @@ pub(super) async fn handle_socket(
         let batch_size = config.websocket_config.batch_size;
         let batch_interval_ms = config.websocket_config.batch_interval_ms;
         let max_sojourn = Duration::from_millis(config.websocket_config.max_sojourn_ms);
-        let ping_write_timeout = Duration::from_secs(config.websocket_config.pong_timeout_secs);
+        let ping_write_timeout = SERVER_PING_WRITE_TIMEOUT;
 
         let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
 
