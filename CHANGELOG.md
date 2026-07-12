@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change, bound stalled Ping socket writes, reject guessed matching Pongs
   observed before the socket write begins, accept matching Pongs through the
   exact deadline, preserve the first matching reply against later unsolicited
-  Pongs, and publish timeout and round-trip latency metrics measured at Pong
-  receipt. Operators can set
+  Pongs, record probe receipt before asynchronous activity refresh, and publish
+  timeout and round-trip latency metrics measured at Pong receipt. Operators can
+  set
   `websocket.server_ping_interval_secs` to `0` to disable them. Documentation
   consistently distinguishes these WebSocket probes from application pings and
   reflects the 24-connection default in examples and deployment guidance.

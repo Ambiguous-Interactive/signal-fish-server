@@ -1601,8 +1601,8 @@ pub(super) async fn handle_socket(
                             Instant::now(),
                         );
                     }
-                    // A slow persistence refresh must not delay transport
-                    // acknowledgement past the Pong deadline.
+                    // Publish the probe observation before a potentially slow
+                    // activity refresh so deadline evaluation stays independent.
                     server_clone
                         .record_transport_activity(&active_player_id)
                         .await;
