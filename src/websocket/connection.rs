@@ -733,13 +733,14 @@ pub(super) async fn handle_socket(
                                 break;
                             }
                             active_ping_nonce_for_ping.store(0, Ordering::Release);
-                            let current_player_id = *effective_player_id_for_ping.read().await;
-                            tracing::info!(
-                                %current_player_id,
-                                timeout_secs = pong_timeout.as_secs(),
-                                "WebSocket Pong timeout - closing connection"
-                            );
                             if ping_close_signal.request_close(CloseReason::ActivityTimeout) {
+                                let current_player_id =
+                                    *effective_player_id_for_ping.read().await;
+                                tracing::info!(
+                                    %current_player_id,
+                                    timeout_secs = pong_timeout.as_secs(),
+                                    "WebSocket Pong timeout - closing connection"
+                                );
                                 server_for_ping
                                     .metrics()
                                     .increment_websocket_ping_timeouts();
@@ -904,12 +905,14 @@ pub(super) async fn handle_socket(
                                 }
                                 Err(_elapsed) => {
                                     active_ping_nonce_for_send.store(0, Ordering::Release);
-                                    tracing::info!(
-                                        timeout_secs = ping_write_timeout.as_secs(),
-                                        "WebSocket Ping write timed out - closing connection"
-                                    );
-                                    send_task_close_signal
-                                        .request_close(CloseReason::ActivityTimeout);
+                                    if send_task_close_signal
+                                        .request_close(CloseReason::ActivityTimeout)
+                                    {
+                                        tracing::info!(
+                                            timeout_secs = ping_write_timeout.as_secs(),
+                                            "WebSocket Ping write timed out - closing connection"
+                                        );
+                                    }
                                 }
                             }
                             break;
