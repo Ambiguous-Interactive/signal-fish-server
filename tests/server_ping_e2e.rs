@@ -66,17 +66,66 @@ async fn matching_pong_keeps_connection_alive_and_records_rtt() {
         .await
         .expect("send matching Pong");
 
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-    loop {
-        let snapshot = server.metrics().snapshot().await;
-        if snapshot.connections.websocket_ping_rtt.sample_count == 1 {
-            break;
+    let rtt_metric = async {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            let snapshot = server.metrics().snapshot().await;
+            if snapshot.connections.websocket_ping_rtt.sample_count >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "matching Pong never produced an RTT sample"
+            );
+            tokio::task::yield_now().await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "matching Pong never produced an RTT sample"
-        );
-        tokio::task::yield_now().await;
+    };
+    tokio::pin!(rtt_metric);
+
+    loop {
+        tokio::select! {
+            () = &mut rtt_metric => break,
+            frame = ws.next() => {
+                let frame = frame
+                    .expect("connection closed while waiting for RTT metric")
+                    .expect("websocket read failed while waiting for RTT metric");
+                if let Message::Ping(payload) = frame {
+                    ws.send(Message::Pong(payload))
+                        .await
+                        .expect("send matching Pong while waiting for RTT metric");
+                }
+            }
+        }
+    }
+
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::Ping)
+            .expect("serialize application Ping")
+            .into(),
+    ))
+    .await
+    .expect("send application Ping after RTT metric");
+    let liveness_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let frame = tokio::time::timeout_at(liveness_deadline, ws.next())
+            .await
+            .expect("timed out proving connection remained alive")
+            .expect("connection closed after matching Pong")
+            .expect("websocket read failed after matching Pong");
+        match frame {
+            Message::Ping(payload) => ws
+                .send(Message::Pong(payload))
+                .await
+                .expect("send matching Pong during liveness check"),
+            Message::Text(text) => {
+                let message: ServerMessage =
+                    serde_json::from_str(&text).expect("decode application Pong response");
+                if matches!(message, ServerMessage::Pong) {
+                    break;
+                }
+            }
+            _ => {}
+        }
     }
 
     running.shutdown().await;
