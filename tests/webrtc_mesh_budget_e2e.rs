@@ -1,11 +1,12 @@
-//! P10.H8 empirical 16-player native WebRTC mesh signal-budget experiment.
+//! P10.H8 empirical 16-player native WebRTC mesh signal-budget experiments.
 //!
-//! The model test proves the arithmetic. This nightly real-process experiment
-//! proves the implementation: 16 native clients form all 120 peer connections
-//! under the production 600-signal per-connection budget, open both channels
-//! on every edge, exchange an exact clean ledger, and keep the WebSocket relay
-//! floor live. It is ignored because building/running 16 real webrtc-rs stacks
-//! is intentionally outside the PR machine's cheap local test budget.
+//! The model test proves the arithmetic. These nightly real-process experiments
+//! prove both the complete clean mesh and a partial partition: one client with
+//! deterministic crippled ICE falls back to the WebSocket relay while the
+//! other 15 retain their exact 105-edge WebRTC submesh. Both stay under the
+//! production 600-signal per-connection budget and preserve exact relay-floor
+//! delivery. They are ignored because running 16 real webrtc-rs stacks is
+//! intentionally outside the PR machine's cheap local test budget.
 
 #![cfg(unix)]
 
@@ -36,6 +37,42 @@ const CLIENT_EXIT_DEADLINE: Duration = Duration::from_secs(30);
 const METRIC_QUIESCENCE_DEADLINE: Duration = Duration::from_secs(30);
 const CLIENT_MAX_RUNTIME_SECS: u64 = 540;
 const CHANNEL_LABELS: [&str; 2] = ["reliable", "unreliable"];
+
+#[derive(Clone, Copy, Debug)]
+enum MeshScenario {
+    Clean,
+    OneCrippled { ordinal: usize },
+}
+
+impl MeshScenario {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::OneCrippled { .. } => "one-crippled",
+        }
+    }
+
+    fn crippled_ordinal(self) -> Option<usize> {
+        match self {
+            Self::Clean => None,
+            Self::OneCrippled { ordinal } => Some(ordinal),
+        }
+    }
+
+    fn p2p_timeout_secs(self) -> u64 {
+        match self {
+            Self::Clean => 180,
+            Self::OneCrippled { .. } => 30,
+        }
+    }
+
+    fn run_for_secs(self) -> u64 {
+        match self {
+            Self::Clean => 240,
+            Self::OneCrippled { .. } => 90,
+        }
+    }
+}
 
 fn event_name(event: &Value) -> Option<&str> {
     event.get("event").and_then(Value::as_str)
@@ -84,6 +121,8 @@ fn client_args(
     name: &str,
     room_code: Option<&str>,
     success_release_file: &Path,
+    scenario: MeshScenario,
+    ordinal: usize,
 ) -> Vec<String> {
     let mut args = vec![
         "--server-url".to_string(),
@@ -100,14 +139,17 @@ fn client_args(
         "--supported-topologies".to_string(),
         "mesh".to_string(),
         "--p2p-timeout-secs".to_string(),
-        "180".to_string(),
+        scenario.p2p_timeout_secs().to_string(),
         "--run-for-secs".to_string(),
-        "240".to_string(),
+        scenario.run_for_secs().to_string(),
         "--max-runtime-secs".to_string(),
         CLIENT_MAX_RUNTIME_SECS.to_string(),
         "--success-release-file".to_string(),
         success_release_file.to_string_lossy().into_owned(),
     ];
+    if scenario.crippled_ordinal() == Some(ordinal) {
+        args.push("--cripple-ice".to_string());
+    }
     match room_code {
         Some(code) => args.extend(["--join-code".to_string(), code.to_string()]),
         None => args.push("--create-room".to_string()),
@@ -278,12 +320,28 @@ fn assert_exact_channel_ledger(
     );
 }
 
+fn expected_connected_peers<'a>(
+    player_id: &'a str,
+    all_ids: &BTreeSet<&'a str>,
+    crippled_id: Option<&'a str>,
+) -> BTreeSet<&'a str> {
+    if crippled_id == Some(player_id) {
+        return BTreeSet::new();
+    }
+    all_ids
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != player_id && Some(*candidate) != crippled_id)
+        .collect()
+}
+
 fn assert_client_barrier(
     client: &NativeClientProcess,
     player_id: &str,
     all_ids: &BTreeSet<&str>,
     names_by_id: &BTreeMap<&str, &str>,
     signal_budget: usize,
+    crippled_id: Option<&str>,
 ) -> usize {
     let who = &client.name;
     let window = success_window(&client.events, who);
@@ -292,15 +350,18 @@ fn assert_client_barrier(
         .copied()
         .filter(|candidate| *candidate != player_id)
         .collect();
+    let expected_connected_peers = expected_connected_peers(player_id, all_ids, crippled_id);
+    let expected_connected = !expected_connected_peers.is_empty();
 
     assert!(
         events_named(&client.events, "error").is_empty(),
-        "{who}: errors in successful mesh run: {:?}",
+        "{who}: errors before the successful mesh barrier: {:?}",
         client.error_messages()
     );
-    assert!(
-        events_named(&client.events, "fallback_engaged").is_empty(),
-        "{who}: clean full mesh must never engage fallback"
+    assert_eq!(
+        events_named(window, "fallback_engaged").len(),
+        usize::from(!expected_connected),
+        "{who}: fallback count must match its WebRTC connectivity"
     );
     let plan = single_event(window, "session_plan", who);
     assert_eq!(string_field(plan, "topology", who), "mesh");
@@ -334,38 +395,69 @@ fn assert_client_barrier(
     }
     assert_eq!(planned, expected_peers, "{who}: exact mesh plan peer set");
 
-    assert_exact_peer_events(window, "p2p_pair_connected", "peer", &expected_peers, who);
-    assert_exact_channel_ledger(window, "channel_open", &expected_peers, player_id, who);
+    assert_exact_peer_events(
+        window,
+        "p2p_pair_connected",
+        "peer",
+        &expected_connected_peers,
+        who,
+    );
     assert_exact_channel_ledger(
         window,
-        "channel_message_sent",
-        &expected_peers,
+        "channel_open",
+        &expected_connected_peers,
         player_id,
         who,
     );
-    assert_exact_channel_ledger(window, "channel_message", &expected_peers, player_id, who);
+    assert_exact_channel_ledger(
+        window,
+        "channel_message_sent",
+        &expected_connected_peers,
+        player_id,
+        who,
+    );
+    assert_exact_channel_ledger(
+        window,
+        "channel_message",
+        &expected_connected_peers,
+        player_id,
+        who,
+    );
 
     let status = single_event(window, "transport_status_sent", who);
     assert_eq!(string_field(status, "transport", who), "webrtc");
-    assert_eq!(status.get("connected").and_then(Value::as_bool), Some(true));
-    assert_exact_peer_events(
-        window,
-        "peer_transport_status",
-        "peer",
-        &expected_peers,
-        who,
+    assert_eq!(
+        status.get("connected").and_then(Value::as_bool),
+        Some(expected_connected),
+        "{who}: own transport status"
     );
+    let mut peer_status_counts = BTreeMap::<&str, usize>::new();
     for peer_status in events_named(window, "peer_transport_status") {
         assert_eq!(
             string_field(peer_status, "transport", who),
             "webrtc",
             "{who}: peer status transport"
         );
+        let peer = string_field(peer_status, "peer", who);
+        assert!(
+            expected_peers.contains(peer),
+            "{who}: stray peer status {peer}"
+        );
+        *peer_status_counts.entry(peer).or_default() += 1;
+        let expected_peer_connected = Some(peer) != crippled_id;
         assert_eq!(
             peer_status.get("connected").and_then(Value::as_bool),
-            Some(true),
-            "{who}: peer transport status must report connected: {peer_status}"
+            Some(expected_peer_connected),
+            "{who}: peer transport status for {peer}"
         );
+    }
+    assert_eq!(
+        peer_status_counts.keys().copied().collect::<BTreeSet<_>>(),
+        expected_peers,
+        "{who}: exact peer transport-status set"
+    );
+    for (peer, count) in peer_status_counts {
+        assert_eq!(count, 1, "{who}: duplicate transport status from {peer}");
     }
 
     single_event(window, "game_data_sent", who);
@@ -402,7 +494,7 @@ fn assert_client_barrier(
     signal_count
 }
 
-fn assert_clean_client_exit(client: &NativeClientProcess, status: &std::process::ExitStatus) {
+fn assert_client_exit(client: &NativeClientProcess, status: &std::process::ExitStatus) {
     assert!(
         status.success(),
         "{} exited {status};\n{}",
@@ -415,18 +507,11 @@ fn assert_clean_client_exit(client: &NativeClientProcess, status: &std::process:
         client.name,
         client.error_messages()
     );
-    assert!(
-        events_named(&client.events, "fallback_engaged").is_empty(),
-        "{}: clean full mesh must never engage fallback",
-        client.name
-    );
     let exit = single_event(&client.events, "exiting", &client.name);
     assert_eq!(exit.get("code").and_then(Value::as_i64), Some(0));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "nightly-only (verification-nightly.yml): spawns 16 real webrtc-rs clients"]
-async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
+async fn run_mesh_scenario(scenario: MeshScenario) {
     let total_started = tokio::time::Instant::now();
     let maximum_bounded_pre_release_wait =
         EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE;
@@ -440,6 +525,9 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         signal_budget, 600,
         "H8 is registered against the real default"
     );
+    if let Some(ordinal) = scenario.crippled_ordinal() {
+        assert!(ordinal < PLAYERS, "crippled ordinal must name a client");
+    }
 
     let mut server = spawn_server(mesh_server_config()).await;
     let workdir = tempfile::tempdir().expect("create native-client workdir");
@@ -447,7 +535,7 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     assert!(!success_release_file.exists());
     let mut creator = spawn_native_client(
         "c00",
-        &client_args(&server, "c00", None, &success_release_file),
+        &client_args(&server, "c00", None, &success_release_file, scenario, 0),
         workdir.path(),
     );
     let created = creator.await_event("room_created", EVENT_DEADLINE).await;
@@ -459,7 +547,14 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         let name = format!("c{ordinal:02}");
         clients.push(spawn_native_client(
             &name,
-            &client_args(&server, &name, Some(&room_code), &success_release_file),
+            &client_args(
+                &server,
+                &name,
+                Some(&room_code),
+                &success_release_file,
+                scenario,
+                ordinal,
+            ),
             workdir.path(),
         ));
     }
@@ -494,6 +589,9 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         .zip(&clients)
         .map(|(id, client)| (id.as_str(), client.name.as_str()))
         .collect();
+    let crippled_id = scenario
+        .crippled_ordinal()
+        .map(|ordinal| ids[ordinal].as_str());
 
     let mut per_client_signals = Vec::with_capacity(PLAYERS);
     for (client, id) in clients.iter().zip(&ids) {
@@ -503,6 +601,7 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
             &all_ids,
             &names_by_id,
             signal_budget,
+            crippled_id,
         ));
     }
     let total_signals: usize = per_client_signals.iter().sum();
@@ -513,16 +612,22 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
 
     let held_counters = scrape_delivery_counters(server.port).await;
     assert_eq!(
-        held_counters.backpressure_events, 0,
-        "clean mesh backpressure"
+        held_counters.backpressure_events,
+        0,
+        "{} mesh backpressure",
+        scenario.label()
     );
     assert_eq!(
-        held_counters.slow_consumer_disconnects, 0,
-        "clean mesh slow-consumer evictions"
+        held_counters.slow_consumer_disconnects,
+        0,
+        "{} mesh slow-consumer evictions",
+        scenario.label()
     );
     assert_eq!(
-        held_counters.dropped, 0,
-        "clean mesh messages dropped before coordinated teardown"
+        held_counters.dropped,
+        0,
+        "{} mesh messages dropped before coordinated teardown",
+        scenario.label()
     );
     assert_scraped_message_conservation(&held_counters);
     wait_for_exact_signal_ledger(
@@ -531,10 +636,24 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     )
     .await;
     let held_metrics = fetch_prometheus_text(server.port).await;
+    let expected_fallbacks = u64::from(scenario.crippled_ordinal().is_some());
+    assert_eq!(
+        sample_value(&held_metrics, "signal_fish_transport_p2p_established_total"),
+        u64::try_from(PLAYERS).expect("player count fits u64") - expected_fallbacks,
+        "{} mesh P2P-established client count",
+        scenario.label()
+    );
+    assert_eq!(
+        sample_value(&held_metrics, "signal_fish_transport_relay_fallback_total"),
+        expected_fallbacks,
+        "{} mesh relay-fallback client count",
+        scenario.label()
+    );
     assert_eq!(
         sample_value(&held_metrics, "signal_fish_websocket_ping_timeouts_total"),
         0,
-        "clean mesh must not lose clients to ping timeout"
+        "{} mesh must not lose clients to ping timeout",
+        scenario.label()
     );
 
     std::fs::write(&success_release_file, b"release")
@@ -549,27 +668,37 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     stop_tx.send(true).expect("stop RSS sampler");
     let peak_rss = rss_task.await.expect("RSS sampler task succeeds");
     for (client, status) in clients.iter().zip(&statuses) {
-        assert_clean_client_exit(client, status);
+        assert_client_exit(client, status);
     }
 
     wait_for_metrics_quiescence(server.port).await;
     let counters = scrape_delivery_counters(server.port).await;
-    assert_eq!(counters.backpressure_events, 0, "clean mesh backpressure");
     assert_eq!(
-        counters.slow_consumer_disconnects, 0,
-        "clean mesh slow-consumer evictions"
+        counters.backpressure_events,
+        0,
+        "{} mesh backpressure",
+        scenario.label()
+    );
+    assert_eq!(
+        counters.slow_consumer_disconnects,
+        0,
+        "{} mesh slow-consumer evictions",
+        scenario.label()
     );
     assert_scraped_message_conservation(&counters);
     let metrics = fetch_prometheus_text(server.port).await;
     assert_eq!(
         sample_value(&metrics, "signal_fish_websocket_ping_timeouts_total"),
         0,
-        "clean mesh must not lose clients to ping timeout"
+        "{} mesh must not lose clients to ping timeout",
+        scenario.label()
     );
 
+    let connected_players = PLAYERS - usize::from(scenario.crippled_ordinal().is_some());
+    let connected_pairs = connected_players * (connected_players - 1) / 2;
     println!(
-        "H8 mesh complete: players={PLAYERS} pairs={} total_signals={total_signals} signals_per_client={per_client_signals:?} signal_p50={signal_p50} signal_p99={signal_p99} all_clients_at_success_barrier={barrier_elapsed:?} total_elapsed={total_elapsed:?} coordinated_teardown_drops={} post_spawn_server_peak_rss_kib={} post_spawn_client_peak_rss_kib={:?}",
-        PLAYERS * (PLAYERS - 1) / 2,
+        "H8 mesh complete: scenario={} players={PLAYERS} connected_pairs={connected_pairs} total_signals={total_signals} signals_per_client={per_client_signals:?} signal_p50={signal_p50} signal_p99={signal_p99} all_clients_at_success_barrier={barrier_elapsed:?} total_elapsed={total_elapsed:?} coordinated_teardown_drops={} post_spawn_server_peak_rss_kib={} post_spawn_client_peak_rss_kib={:?}",
+        scenario.label(),
         counters
             .dropped
             .checked_sub(held_counters.dropped)
@@ -578,4 +707,38 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         &peak_rss[1..]
     );
     server.kill_and_wait().await;
+}
+
+#[test]
+fn connectivity_oracle_preserves_clean_and_partial_mesh_graphs() {
+    let all = BTreeSet::from(["a", "b", "c"]);
+    assert_eq!(
+        expected_connected_peers("b", &all, None),
+        BTreeSet::from(["a", "c"]),
+        "clean mesh connects every other peer"
+    );
+    assert_eq!(
+        expected_connected_peers("b", &all, Some("c")),
+        BTreeSet::from(["a"]),
+        "healthy peer excludes the crippled member"
+    );
+    assert!(
+        expected_connected_peers("c", &all, Some("c")).is_empty(),
+        "crippled member forms no WebRTC edges"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): spawns 16 real webrtc-rs clients"]
+async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
+    run_mesh_scenario(MeshScenario::Clean).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): spawns 16 real webrtc-rs clients"]
+async fn one_crippled_ice_client_falls_back_without_breaking_healthy_submesh() {
+    run_mesh_scenario(MeshScenario::OneCrippled {
+        ordinal: PLAYERS - 1,
+    })
+    .await;
 }

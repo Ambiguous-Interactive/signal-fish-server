@@ -23,7 +23,8 @@
 #     + REAL client processes with OS faults (SIGSTOP/SIGKILL); the two
 #     ignored child-process tests need the pre-built native reference client
 #     (SIGNAL_FISH_CLIENT_BIN), which is why they are nightly-only.
-#     The same job runs the H8 empirical 16-client WebRTC mesh budget proof.
+#     The same job runs the H8 empirical 16-client WebRTC clean-budget and
+#     crippled-ICE fallback proofs.
 #   - starved-runtime: clients/native/tests/starved_runtime_e2e.rs — the
 #     --runtime current / --tick-stall-ms conformance matrix pinning the
 #     documented "continuously drive your runtime" requirement.
@@ -289,7 +290,7 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test multiprocess_delivery_e2e --run-ignored all \
             --success-output final 2>&1 | tee multiprocess-output.txt
-      - name: Run 16-player WebRTC mesh budget experiment
+      - name: Run 16-player WebRTC mesh budget experiments
         shell: bash
         env:
           SIGNAL_FISH_CLIENT_BIN: ${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native
@@ -309,10 +310,10 @@ jobs:
             tail -n 60 multiprocess-output.txt 2>/dev/null || echo "no multiprocess output captured"
             echo '```'
             echo
-            echo "### H8 16-player WebRTC mesh budget"
+            echo "### H8 16-player WebRTC mesh budget and fallback"
             echo
             echo '```text'
-            tail -n 80 webrtc-mesh-budget-output.txt 2>/dev/null || echo "no WebRTC mesh budget output captured"
+            tail -n 160 webrtc-mesh-budget-output.txt 2>/dev/null || echo "no WebRTC mesh budget output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
