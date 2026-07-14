@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStdout;
 
 /// Locate the `signal-fish-reference-native` binary: `SIGNAL_FISH_CLIENT_BIN`
@@ -82,7 +82,7 @@ pub fn native_client_binary() -> PathBuf {
 pub struct NativeClientProcess {
     pub name: String,
     child: Option<tokio::process::Child>,
-    lines: Lines<BufReader<ChildStdout>>,
+    stdout: BufReader<ChildStdout>,
     pub events: Vec<Value>,
     stderr_path: PathBuf,
 }
@@ -116,7 +116,7 @@ pub fn spawn_native_client(name: &str, args: &[String], workdir: &Path) -> Nativ
     NativeClientProcess {
         name: name.to_string(),
         child: Some(child),
-        lines: BufReader::new(stdout).lines(),
+        stdout: BufReader::new(stdout),
         events: Vec::new(),
         stderr_path,
     }
@@ -189,8 +189,10 @@ impl NativeClientProcess {
         deadline: tokio::time::Instant,
         context: &str,
     ) -> Option<Value> {
-        let read = tokio::time::timeout_at(deadline, self.lines.next_line()).await;
-        let line = read
+        let mut bytes = Vec::new();
+        let read =
+            tokio::time::timeout_at(deadline, self.stdout.read_until(b'\n', &mut bytes)).await;
+        let bytes_read = read
             .unwrap_or_else(|_elapsed| {
                 panic!(
                     "client {}: timed out {context};\n{}",
@@ -204,15 +206,58 @@ impl NativeClientProcess {
                     self.name,
                     self.diagnostics()
                 )
-            })?;
-        let event: Value = serde_json::from_str(&line).unwrap_or_else(|error| {
-            panic!(
+            });
+        if bytes_read == 0 {
+            return None;
+        }
+        let terminated = bytes.ends_with(b"\n");
+        if terminated {
+            bytes.pop();
+            if bytes.ends_with(b"\r") {
+                bytes.pop();
+            }
+        }
+        let signaled_trailing_fragment = !terminated && self.child_exited_by_signal();
+        let line = match String::from_utf8(bytes) {
+            Ok(line) => line,
+            Err(error) if signaled_trailing_fragment => {
+                eprintln!(
+                    "client {}: ignoring trailing non-UTF-8 stdout fragment after signal: {error}",
+                    self.name
+                );
+                return None;
+            }
+            Err(error) => panic!(
+                "client {}: stdout line is not UTF-8 ({error});\n{}",
+                self.name,
+                self.diagnostics()
+            ),
+        };
+        let event: Value = match serde_json::from_str(&line) {
+            Ok(event) => event,
+            Err(_error) if signaled_trailing_fragment => {
+                eprintln!(
+                    "client {}: ignoring trailing partial JSONL after signal: {line}",
+                    self.name
+                );
+                return None;
+            }
+            Err(error) => panic!(
                 "client {}: stdout line is not a JSON event ({error}): {line}",
                 self.name
-            )
-        });
+            ),
+        };
         self.events.push(event.clone());
         Some(event)
+    }
+
+    fn child_exited_by_signal(&mut self) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+
+        self.child
+            .as_mut()
+            .and_then(|child| child.try_wait().ok().flatten())
+            .is_some_and(|status| status.signal().is_some())
     }
 
     /// Drain stdout to EOF, reap the child, and return its exact exit status.

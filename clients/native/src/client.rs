@@ -189,6 +189,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         webrtc_plan_seen: false,
         expected_peers: BTreeSet::new(),
         connected_pairs: BTreeSet::new(),
+        ice_gathering_complete: BTreeSet::new(),
         last_ice_servers: Vec::new(),
         transport_status: None,
         p2p_deadline: None,
@@ -593,6 +594,10 @@ struct Orchestrator<'a> {
     /// Peers whose pair fully connected (both channels open) at some point.
     /// Drives the `--exchange` obligations and the Appendix G resolution.
     connected_pairs: BTreeSet<PlayerId>,
+    /// Peers whose current connection generation emitted the terminal local
+    /// ICE gathering callback. Harness-held success uses this as the exact
+    /// outbound signal-ledger boundary.
+    ice_gathering_complete: BTreeSet<PlayerId>,
     /// ICE servers from the most recent plan (also used for compatible `NewPeer`).
     last_ice_servers: Vec<IceServer>,
     /// Last reported overall WebRTC state, retained to suppress duplicates.
@@ -1198,6 +1203,9 @@ impl Orchestrator<'_> {
                 )
                 .await?;
             }
+            EngineEvent::IceGatheringComplete { peer, .. } => {
+                self.ice_gathering_complete.insert(peer);
+            }
             EngineEvent::PcState { peer, state, .. } => {
                 emit(&Event::PcState {
                     peer,
@@ -1205,6 +1213,7 @@ impl Orchestrator<'_> {
                 });
                 if is_terminal_peer_connection_state(&state) {
                     self.connected_pairs.remove(&peer);
+                    self.ice_gathering_complete.remove(&peer);
                     self.sent_labels.remove(&peer);
                     self.received_labels.remove(&peer);
                     self.pending_signals.remove(&peer);
@@ -1259,6 +1268,9 @@ impl Orchestrator<'_> {
         }
         let newly_expected = self.expected_peers.insert(peer);
         let needs_connection = !self.engine.is_paired(peer);
+        if needs_connection {
+            self.ice_gathering_complete.remove(&peer);
+        }
         if (newly_expected || needs_connection) && !self.connected_pairs.contains(&peer) {
             self.p2p_deadline =
                 Some(Instant::now() + Duration::from_secs(self.cli.p2p_timeout_secs));
@@ -1289,6 +1301,7 @@ impl Orchestrator<'_> {
     async fn remove_pair_obligation(&mut self, peer: PlayerId) {
         self.expected_peers.remove(&peer);
         self.connected_pairs.remove(&peer);
+        self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.sent_labels.remove(&peer);
         self.received_labels.remove(&peer);
@@ -1574,6 +1587,13 @@ impl Orchestrator<'_> {
                 for peer in &self.expected_peers {
                     if !self.peer_status_from.contains(peer) {
                         unmet.push(format!("no PeerTransportStatus from {peer}"));
+                    }
+                }
+            }
+            if self.cli.success_release_file.is_some() {
+                for peer in &self.expected_peers {
+                    if !self.ice_gathering_complete.contains(peer) {
+                        unmet.push(format!("ICE gathering incomplete for {peer}"));
                     }
                 }
             }

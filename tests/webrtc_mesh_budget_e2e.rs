@@ -170,6 +170,26 @@ async fn wait_for_metrics_quiescence(port: u16) {
     }
 }
 
+async fn wait_for_exact_signal_ledger(port: u16, expected: u64) {
+    let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
+    loop {
+        let metrics = fetch_prometheus_text(port).await;
+        let relayed = sample_value(&metrics, "signal_fish_transport_signals_relayed_total");
+        if relayed == expected {
+            return;
+        }
+        assert!(
+            relayed < expected,
+            "server relayed {relayed} signals after every client reported ICE gathering complete, exceeding the exact client ledger {expected}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "server signal ledger did not reach {expected} within {EVENT_DEADLINE:?}; last value {relayed}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn assert_exact_peer_events(
     events: &[Value],
     event: &str,
@@ -499,12 +519,12 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         "clean mesh messages dropped before coordinated teardown"
     );
     assert_scraped_message_conservation(&held_counters);
-    let held_metrics = fetch_prometheus_text(server.port).await;
-    assert_eq!(
-        sample_value(&held_metrics, "signal_fish_transport_signals_relayed_total"),
+    wait_for_exact_signal_ledger(
+        server.port,
         u64::try_from(total_signals).expect("signal total fits u64"),
-        "server accepted signal count must equal client emission ledger"
-    );
+    )
+    .await;
+    let held_metrics = fetch_prometheus_text(server.port).await;
     assert_eq!(
         sample_value(&held_metrics, "signal_fish_websocket_ping_timeouts_total"),
         0,

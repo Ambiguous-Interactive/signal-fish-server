@@ -61,6 +61,9 @@ pub enum EngineEvent {
         generation: u64,
         candidate_json: String,
     },
+    /// This peer connection emitted the end-of-gathering marker after all
+    /// local candidates for its generation.
+    IceGatheringComplete { peer: PlayerId, generation: u64 },
     /// Peer-connection state transition (informational `pc_state` events).
     PcState {
         peer: PlayerId,
@@ -94,6 +97,7 @@ impl EngineEvent {
             Self::LocalCandidate {
                 peer, generation, ..
             }
+            | Self::IceGatheringComplete { peer, generation }
             | Self::PcState {
                 peer, generation, ..
             }
@@ -425,13 +429,16 @@ impl Engine {
         let events = self.events.clone();
         let crippled = self.crippled;
         pc.on_ice_candidate(Box::new(move |candidate| {
-            // `None` marks end-of-gathering; crippled mode drops everything.
+            // `None` marks end-of-gathering. Preserve that boundary even in
+            // crippled mode so a harness can prove its signal ledger is
+            // complete; crippled mode drops only the actual candidates.
+            let Some(candidate) = candidate else {
+                let _ = events.send(EngineEvent::IceGatheringComplete { peer, generation });
+                return Box::pin(async {});
+            };
             if crippled {
                 return Box::pin(async {});
             }
-            let Some(candidate) = candidate else {
-                return Box::pin(async {});
-            };
             match candidate
                 .to_json()
                 .map_err(anyhow::Error::from)
@@ -599,6 +606,10 @@ mod tests {
                 peer,
                 generation: stale_generation,
                 candidate_json: "{}".to_string(),
+            },
+            EngineEvent::IceGatheringComplete {
+                peer,
+                generation: stale_generation,
             },
             EngineEvent::PcState {
                 peer,
