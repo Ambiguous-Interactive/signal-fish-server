@@ -153,7 +153,9 @@ function Get-WorktreeChangedFiles {
     # discovery processes. `-z` makes paths literal and NUL-delimited; rename
     # records carry a second NUL-delimited source path, which is skipped because
     # policy evaluates the current destination.
-    $arguments = @("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--") + $Pathspecs
+    # Policy checks only need the current paths, so skip rename similarity
+    # detection. Git will report those changes as delete/add records instead.
+    $arguments = @("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--no-renames", "--") + $Pathspecs
     $records = (Invoke-Git -Arguments $arguments).Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
     $skipRenameSource = $false
     foreach ($record in $records) {
@@ -600,6 +602,11 @@ function Test-FastHookSource {
             $lineNumber++
             $trimmed = $line.TrimStart()
             if ($trimmed.StartsWith("#")) {
+                continue
+            }
+            if ($trimmed.IndexOf("cargo", [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                $trimmed.IndexOf("npm", [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                $trimmed.IndexOf("npx", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
                 continue
             }
             if ($trimmed -match $slowCommandPattern) {

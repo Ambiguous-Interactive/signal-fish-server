@@ -79,7 +79,11 @@ function Get-RevList {
         $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
         $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $remoteArg)
     } else {
-        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", "$RemoteSha..$LocalSha")
+        # A force-push after rebasing can place commits from another remote branch
+        # outside RemoteSha..LocalSha. Those commits are already present on the
+        # target remote, so only inspect commits the push would newly introduce.
+        $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
+        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $RemoteSha, $remoteArg)
     }
 
     if ($result.ExitCode -ne 0 -and $RemoteSha -ne $AllZeroSha) {
@@ -386,6 +390,11 @@ function Test-FastHookSource {
                 if ($trimmed.StartsWith("#")) {
                     continue
                 }
+                if ($trimmed.IndexOf("cargo", [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                    $trimmed.IndexOf("npm", [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                    $trimmed.IndexOf("npx", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                    continue
+                }
                 if ($trimmed -match $slowCommandPattern) {
                     [void]$violations.Add("${file}@${commit}:${lineNumber}: $trimmed")
                 }
@@ -548,6 +557,13 @@ function Test-CommandTextForDirectScript {
         [System.Collections.Generic.List[string]]$Violations
     )
 
+    # Most lines in multiline run blocks cannot reference a repository script.
+    # Avoid the quote-aware shell tokenization path unless its only supported
+    # path prefixes are present.
+    if (-not $CommandText.Contains("scripts/")) {
+        return
+    }
+
     $trimmed = Normalize-CommandText -Text ((Remove-UnquotedShellComment -Text $CommandText).Trim())
     if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
         return
@@ -601,6 +617,9 @@ function Test-WorkflowContentForDirectScripts {
     $lineNumber = 0
     foreach ($line in $Content -split "`r?`n") {
         $lineNumber++
+        if (-not $inRunBlock -and -not $line.Contains("run:")) {
+            continue
+        }
         $trimmed = $line.Trim()
         $indent = Get-Indent -Line $line
 
@@ -609,7 +628,9 @@ function Test-WorkflowContentForDirectScripts {
                 continue
             }
             if ($indent -gt $runBlockIndent) {
-                Test-CommandTextForDirectScript -CommandText $trimmed -File $File -LineNumber $lineNumber -Violations $Violations
+                if ($trimmed.Contains("scripts/")) {
+                    Test-CommandTextForDirectScript -CommandText $trimmed -File $File -LineNumber $lineNumber -Violations $Violations
+                }
                 continue
             }
             $inRunBlock = $false

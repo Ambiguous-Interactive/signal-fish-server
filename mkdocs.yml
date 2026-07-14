@@ -158,3 +158,4 @@ nav:
       - Scaling: architecture/scaling.md
       - Library Usage: library-usage.md
       - Development: development.md
+      - Release Runbook: releasing.md

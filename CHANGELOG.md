@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add canonical release identity across the annotated Git tag, crates.io,
+  GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
+  container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and
+  immutable `sha-*` tags from one verified digest, record that digest and source
+  revision in the Release notes, fail closed on identity drift, and support safe
+  retry completion plus tagged historical backfills.
 - Document the single-instance deployment contract and prove its unsupported
   multi-process failure modes with a nightly two-binary H5 experiment. Startup
   logs now state that room/reconnect state is in-memory, room affinity is
