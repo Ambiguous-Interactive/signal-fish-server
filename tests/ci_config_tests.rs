@@ -4096,7 +4096,7 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
         "release_tag:",
         "source_ref:",
         "source_revision:",
-        "ref: ${{ inputs.source_ref || inputs.release_tag || github.sha }}",
+        "ref: ${{ inputs.source_ref || inputs.release_tag || github.ref }}",
         "if [ -n \"$CALL_REVISION\" ]",
         "workflow_dispatch)",
         "refs/tags/",
@@ -4145,6 +4145,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "org.opencontainers.image.revision=",
                 "org.opencontainers.image.version=",
                 "Verify versioned tags, platforms, and source labels",
+                "tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\" \"$MAJOR_MINOR\")",
             ],
         ),
         (
